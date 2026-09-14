@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.2.4 -- the whole schema, as one extension script.
+-- percolate 0.2.5 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -4468,8 +4468,12 @@ begin
             -- run is unowned -- and assert_run_access correctly treats unowned
             -- as owned by nobody -- so a scheduled workflow that waits for
             -- approval could never be approved, by anyone.
+            -- REM-171: and the schedule's creator starts it, so an agent's schedule fires with the agent's
+            -- credential (workflow.keep_run_starter lets exactly this hand-over through).
             update workflow.runs
-               set owner_id = s.owner_id
+               set owner_id = s.owner_id,
+                   started_actor = s.created_actor,
+                   started_credential_id = s.created_credential_id
              where id = v_run_id and owner_id is null and s.owner_id is not null;
 
             update workflow.schedules
@@ -11166,6 +11170,12 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs users:admin';
     end if;
+    -- The ledger first, so the role says who gave it and on what basis (REM-171): an administrator's grant is an
+    -- operator's. The trigger on user_roles would otherwise record it as an installation step.
+    insert into rbac.grants (user_id, role, granted_by, basis)
+    select p_target_user_id, p_role, rbac.current_user_id(), 'operator'
+     where not exists (select 1 from rbac.grants g
+                        where g.user_id = p_target_user_id and g.role = p_role and g.revoked_at is null);
     insert into rbac.user_roles (user_id, role) values (p_target_user_id, p_role)
     on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
@@ -11938,6 +11948,16 @@ create policy tasks_via_run on workflow.tasks for select
 -- Reads go through views owned by api_viewer, NOT the table owner -- the
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
+-- WHO STARTED THE RUN, NOT ONLY WHOSE IT IS (REM-171). A person's agent starts runs with a narrowed credential,
+-- and execute_for minted only the owner's id, so every step of such a run ran as the person: a human-only
+-- capability passed, the credential's scopes did not narrow, and revoking the key did not stop the next step.
+-- The run keeps its starter from the verified claims and execute_for carries it into each step. Null on a run
+-- from before this, and on a system run: those keep the reach they always had. Added here, above runs_api,
+-- because the view publishes started_actor; set_run_owner (section e) fills both.
+alter table workflow.runs add column if not exists started_actor text
+    check (started_actor in ('person', 'agent', 'platform'));
+alter table workflow.runs add column if not exists started_credential_id uuid;
+
 create or replace view workflow.runs_api as
 -- The scope columns are APPENDED rather than slotted in beside owner_id, and
 -- the position is forced rather than chosen: `create or replace view` may only
@@ -11956,7 +11976,10 @@ create or replace view workflow.runs_api as
          -- (browser-ui.md §3). A run without a readable definition still gets a
          -- row: the left join yields null, which the screen renders as the id,
          -- rather than dropping the run from the list.
-         d.name
+         d.name,
+         -- appended, not slotted in (see above): whether a person, their agent or the
+         -- platform started the run (REM-171). The credential it carried is not published.
+         r.started_actor
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
@@ -12368,6 +12391,9 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    -- From the claims, never from the row: whatever an insert names is replaced.
+    new.started_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.started_credential_id := rbac.current_credential_id();
 
     if rbac.is_shared_org(new.org_id) and new.workflow_def_id is not null then
         select d.org_id into v_def_org
@@ -12387,6 +12413,23 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
+
+-- The starter does not change after the insert. The one hand-over is tick's: a scheduled run is started with no
+-- claims and then given to the schedule's owner, and the schedule's creator travels with it in that same update.
+create or replace function workflow.keep_run_starter() returns trigger as $$
+begin
+    if old.owner_id is null and new.owner_id is not null then
+        return new;
+    end if;
+    new.started_actor := old.started_actor;
+    new.started_credential_id := old.started_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_run_starter
+    before update on workflow.runs
+    for each row execute function workflow.keep_run_starter();
 
 -- Ownership from the JWT, never from an argument -- the third instance of the
 -- shape set_run_owner() and set_schedule_owner() already use, and a trigger
@@ -12791,14 +12834,27 @@ create or replace function workflow.execute_for(
     p_user uuid, p_statement text, p_write boolean, p_params jsonb)
 returns jsonb as $$
 declare
-    v_prev text := current_setting('request.jwt.claims', true);
-    v_out  jsonb;
+    v_prev   text := current_setting('request.jwt.claims', true);
+    v_out    jsonb;
+    v_run    workflow.runs;
+    v_claims jsonb;
 begin
     if p_user is null then
         raise exception 'execute_for was given nobody to run as';
     end if;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    -- The step runs as its run's starter, not only its owner (REM-171): an agent's run carries the agent and its
+    -- credential, so rbac.decide refuses a human-only capability, a scope the key lacks and a key revoked since
+    -- the run began. Only the run being executed, and only when it is p_user's, lends its starter.
+    select * into v_run from workflow.runs
+     where id = nullif(current_setting('workflow.current_run_id', true), '')::uuid and owner_id = p_user;
+    v_claims := jsonb_build_object('sub', p_user, 'role', 'authenticated');
+    if v_run.started_actor in ('agent', 'platform') then
+        v_claims := v_claims || jsonb_build_object('actor', v_run.started_actor);
+    end if;
+    if v_run.started_credential_id is not null then
+        v_claims := v_claims || jsonb_build_object('api_key_id', v_run.started_credential_id);
+    end if;
+    perform set_config('request.jwt.claims', v_claims::text, true);
     begin
         v_out := workflow.execute_as_viewer(p_statement, p_write, p_params);
     exception when others then
@@ -13023,6 +13079,11 @@ grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticat
 
 alter table workflow.schedules add column if not exists owner_id uuid references rbac.users(id);
 create index if not exists idx_schedules_owner on workflow.schedules (owner_id);
+-- Who created the schedule, which tick hands to every run it starts (REM-171): an agent's schedule fires as the
+-- agent, not as the person it works for.
+alter table workflow.schedules add column if not exists created_actor text
+    check (created_actor in ('person', 'agent', 'platform'));
+alter table workflow.schedules add column if not exists created_credential_id uuid;
 
 -- Ownership from the JWT, never from an argument -- the same rule, and the
 -- same trigger shape, as runs above. schedule_workflow() therefore has no
@@ -13032,9 +13093,24 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    new.created_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.created_credential_id := rbac.current_credential_id();
     return new;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The creator does not change after the insert, whoever updates the schedule later.
+create or replace function workflow.keep_schedule_creator() returns trigger as $$
+begin
+    new.created_actor := old.created_actor;
+    new.created_credential_id := old.created_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_schedule_creator
+    before update on workflow.schedules
+    for each row execute function workflow.keep_schedule_creator();
 
 create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
@@ -13115,7 +13191,9 @@ create or replace view workflow.schedules_api as
          last_run_id, fire_count, skip_count, last_error, last_error_at,
          created_at, updated_at,
          -- appended, not slotted in: see runs_api above
-         visibility
+         visibility,
+         -- who created the schedule, which every run it starts carries (REM-171)
+         created_actor
   from workflow.schedules;
 
 grant select on workflow.schedules to api_viewer;
@@ -28515,6 +28593,32 @@ create table if not exists rbac.grants (
 );
 create index if not exists grants_active on rbac.grants (user_id, role) where revoked_at is null;
 
+-- EVERY ROLE A PERSON HOLDS SAYS HOW IT WAS GIVEN (REM-171). grant_with_basis, grant_application_role and grant_role
+-- write the grant before the role; any other writer -- an installation step, bootstrap_admin, a fixture -- gets an
+-- 'installation' grant here. rbac.decide then counts a role only through an active grant, so a role row nobody
+-- recorded, and one whose grant was revoked, grant nothing.
+create or replace function rbac.record_role_grant() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if not exists (select 1 from rbac.grants g
+                    where g.user_id = new.user_id and g.role = new.role and g.revoked_at is null) then
+        insert into rbac.grants (user_id, role, granted_by, basis)
+        values (new.user_id, new.role, rbac.current_user_id(), 'installation');
+    end if;
+    return new;
+end;
+$$;
+revoke execute on function rbac.record_role_grant() from public;
+create or replace trigger trg_user_roles_record_grant after insert on rbac.user_roles
+    for each row execute function rbac.record_role_grant();
+
+-- Roles held before the ledger existed, recorded once. Idempotent: a role with an active grant is left alone.
+insert into rbac.grants (user_id, role, basis)
+select ur.user_id, ur.role, 'installation'
+  from rbac.user_roles ur
+ where not exists (select 1 from rbac.grants g
+                    where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
 -- An application (the writing hub) declares its own qualified capabilities.
 create table if not exists rbac.applications (
     name        text primary key,
@@ -28595,20 +28699,17 @@ begin
     if v_reason is null and not (v_kind.every_person or exists (
         select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
          where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
-           and (
-               -- Pre-ledger core roles keep their existing meaning. Once this
-               -- role has a ledger entry, only an active, matching grant counts.
-               not exists (select 1 from rbac.grants g where g.user_id = v_user and g.role = ur.role)
-               or exists (
-                   select 1 from rbac.grants g
-                    where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
-                      and (g.application = 'percolate'
-                           or g.application = rbac.request_claims()->>'application'
-                           or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
-                      and (g.org_id = rbac.shared_org_id()
-                           or (g.org_id::text = rbac.request_claims()->>'org_id'
-                               and g.org_id in (select rbac.current_org_ids())))
-               )
+           -- Only an active, matching grant counts (REM-171). Every role row has one: the writers record it, and
+           -- trg_user_roles_record_grant records the rest, so there is no pre-ledger role left to honour.
+           and exists (
+               select 1 from rbac.grants g
+                where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
+                  and (g.application = 'percolate'
+                       or g.application = rbac.request_claims()->>'application'
+                       or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
+                  and (g.org_id = rbac.shared_org_id()
+                       or (g.org_id::text = rbac.request_claims()->>'org_id'
+                           and g.org_id in (select rbac.current_org_ids())))
            )
     )) then
         v_reason := 'no_grant';

@@ -56,6 +56,32 @@ create table if not exists rbac.grants (
 );
 create index if not exists grants_active on rbac.grants (user_id, role) where revoked_at is null;
 
+-- EVERY ROLE A PERSON HOLDS SAYS HOW IT WAS GIVEN (REM-171). grant_with_basis, grant_application_role and grant_role
+-- write the grant before the role; any other writer -- an installation step, bootstrap_admin, a fixture -- gets an
+-- 'installation' grant here. rbac.decide then counts a role only through an active grant, so a role row nobody
+-- recorded, and one whose grant was revoked, grant nothing.
+create or replace function rbac.record_role_grant() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if not exists (select 1 from rbac.grants g
+                    where g.user_id = new.user_id and g.role = new.role and g.revoked_at is null) then
+        insert into rbac.grants (user_id, role, granted_by, basis)
+        values (new.user_id, new.role, rbac.current_user_id(), 'installation');
+    end if;
+    return new;
+end;
+$$;
+revoke execute on function rbac.record_role_grant() from public;
+create or replace trigger trg_user_roles_record_grant after insert on rbac.user_roles
+    for each row execute function rbac.record_role_grant();
+
+-- Roles held before the ledger existed, recorded once. Idempotent: a role with an active grant is left alone.
+insert into rbac.grants (user_id, role, basis)
+select ur.user_id, ur.role, 'installation'
+  from rbac.user_roles ur
+ where not exists (select 1 from rbac.grants g
+                    where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
 -- An application (the writing hub) declares its own qualified capabilities.
 create table if not exists rbac.applications (
     name        text primary key,
@@ -136,20 +162,17 @@ begin
     if v_reason is null and not (v_kind.every_person or exists (
         select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
          where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
-           and (
-               -- Pre-ledger core roles keep their existing meaning. Once this
-               -- role has a ledger entry, only an active, matching grant counts.
-               not exists (select 1 from rbac.grants g where g.user_id = v_user and g.role = ur.role)
-               or exists (
-                   select 1 from rbac.grants g
-                    where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
-                      and (g.application = 'percolate'
-                           or g.application = rbac.request_claims()->>'application'
-                           or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
-                      and (g.org_id = rbac.shared_org_id()
-                           or (g.org_id::text = rbac.request_claims()->>'org_id'
-                               and g.org_id in (select rbac.current_org_ids())))
-               )
+           -- Only an active, matching grant counts (REM-171). Every role row has one: the writers record it, and
+           -- trg_user_roles_record_grant records the rest, so there is no pre-ledger role left to honour.
+           and exists (
+               select 1 from rbac.grants g
+                where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
+                  and (g.application = 'percolate'
+                       or g.application = rbac.request_claims()->>'application'
+                       or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
+                  and (g.org_id = rbac.shared_org_id()
+                       or (g.org_id::text = rbac.request_claims()->>'org_id'
+                           and g.org_id in (select rbac.current_org_ids())))
            )
     )) then
         v_reason := 'no_grant';

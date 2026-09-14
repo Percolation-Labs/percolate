@@ -2023,6 +2023,12 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs users:admin';
     end if;
+    -- The ledger first, so the role says who gave it and on what basis (REM-171): an administrator's grant is an
+    -- operator's. The trigger on user_roles would otherwise record it as an installation step.
+    insert into rbac.grants (user_id, role, granted_by, basis)
+    select p_target_user_id, p_role, rbac.current_user_id(), 'operator'
+     where not exists (select 1 from rbac.grants g
+                        where g.user_id = p_target_user_id and g.role = p_role and g.revoked_at is null);
     insert into rbac.user_roles (user_id, role) values (p_target_user_id, p_role)
     on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)

@@ -1,3 +1,154 @@
+-- from specs/migrations/0.1.2--0.1.3.sql: the part of the 0.1.2 -> 0.1.3 hop
+-- that a replay cannot express.
+-- 0.1.2 -> 0.1.3: three words for finishing became one.
+--
+-- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else in
+-- percolate--0.1.2--0.1.3.sql is the schema re-applied, which converges because
+-- every statement in it can run twice. Rewriting rows cannot: the schema
+-- describes the shape a table should have, never the values already in it.
+--
+-- `workflow.tasks` said 'done', `workflow.runs` said 'completed' and
+-- `agentic.runs` said 'succeeded' -- one idea under three words, and because
+-- both status constraints are named the same thing, the wrong vocabulary read
+-- as right. 0.1.3 puts the words in one place (workflow.lifecycle_states) with
+-- a foreign key from every status column into it.
+--
+-- ORDER MATTERS AND IS THE WHOLE FILE:
+--
+--   1. Drop the old CHECKs. They still say 'completed'/'done', so the UPDATE
+--      below would violate the very constraint it exists to move past.
+--   2. Rewrite the rows.
+--   3. Let the replayed schema add the new CHECKs and the FKs into
+--      lifecycle_states. Adding that FK to a table still holding a 'completed'
+--      row fails, which would abort the upgrade rather than corrupt it -- loud,
+--      but a database nobody can upgrade is still a database nobody can
+--      upgrade.
+--
+-- Idempotent, like everything else here: the UPDATEs match nothing on a second
+-- run, and the drops are `if exists`.
+alter table workflow.runs  drop constraint if exists runs_status_check;
+alter table workflow.tasks drop constraint if exists tasks_status_check;
+
+update workflow.runs  set status = 'succeeded' where status = 'completed';
+update workflow.tasks set status = 'succeeded' where status = 'done';
+
+-- from specs/migrations/0.1.3--0.1.4.sql: the part of the 0.1.3 -> 0.1.4 hop
+-- that a replay cannot express.
+-- 0.1.3 -> 0.1.4: scope, and the one thing a replay cannot express.
+--
+-- Almost all of this upgrade IS the replay. `rbac.add_scope_columns()` adds the
+-- columns, backfills existing rows from their org, and makes the column NOT
+-- NULL, all in statements that converge on a second run -- so the migration
+-- that in another codebase would live here lives in that function instead, next
+-- to the ALTER TABLE it belongs to. That is deliberate and not a shortcut: a
+-- delta file is PREPENDED to the replayed schema, so at the moment it runs the
+-- `visibility` column does not exist yet on the database being upgraded and
+-- there would be nothing to backfill into.
+--
+-- What is left is a rename, and specifically a rename that reaches a VIEW.
+--
+-- `agentic.sessions.user_id` is `owner_id` in 0.1.4, because every other owned
+-- table in the collection spells it that way and `rbac.scope_predicate()` --
+-- the single home of the read expression every scoped policy is generated from
+-- -- names that column. One table spelling its owner differently would mean a
+-- second variant of a security predicate there is deliberately only one of.
+--
+-- The table half of that rename is guarded inside agentic/schema.sql and
+-- converges fine. The view half cannot be:
+--
+--     ERROR: cannot change name of view column "user_id" to "owner_id"
+--
+-- `create or replace view` may add columns at the end and may not rename or
+-- reorder the ones that are there. So the view has to be DROPPED before the
+-- replayed schema recreates it, and a drop is exactly the kind of statement
+-- `build-sql.py` will not accept in a schema file, because it is not something
+-- you want re-running on every install.
+--
+-- Found by `dev/upgrade-converges.sh`. Nothing else could have found it: a
+-- fresh install creates the view and never replaces one, so the entire test
+-- suite, the surface audit and the round-trip check all pass on a tree that
+-- cannot be upgraded onto. It is the fourth defect in this change that only
+-- that script sees -- the others were a column added mid-view, an ambiguous
+-- function overload, and an index built on a column that had not been renamed
+-- yet -- which is a strong argument for it running in CI rather than when
+-- somebody remembers.
+--
+-- Idempotent: `if exists`, and the replayed schema recreates the view,
+-- re-transfers it to api_viewer and re-grants it a few hundred lines later.
+drop view if exists agentic.sessions_api;
+
+-- ------------------------------------------------------------
+-- THE OLD POLICIES, AND WHY THIS HALF IS A SECURITY FIX RATHER THAN TIDYING.
+--
+-- Every scoped table's policy is now GENERATED and named `<table>_scoped`. The
+-- policies it replaces had different names -- `nodes_org_scoped`,
+-- `runs_owner_or_permitted`, `agents_are_shared_config` -- so the replayed
+-- schema creates the new one and leaves the old one exactly where it was.
+--
+-- MULTIPLE PERMISSIVE POLICIES ON ONE TABLE ARE OR'ED. A leftover
+-- `using (org_id is null or org_id in (select aiq.current_org_ids()))` does not
+-- sit there inertly next to the new predicate: it ADDS BACK every row the new
+-- one was written to withhold. On an upgraded database the whole change would
+-- have been a no-op in the permissive direction -- a null org would still
+-- mean "every tenant reads this", which is the conflation this release exists
+-- to end, and `agents_are_shared_config` would still be a literal `true`.
+--
+-- A fresh install has none of this and passes every check. This is the same
+-- shape as the `request_password_reset` grant that 0.1.3 "fixed" by deleting a
+-- line: correct for installs that never had the problem, unchanged for every
+-- database that did. `dev/upgrade-converges.sh` is the only thing in the
+-- repository that can see it, and it saw it.
+--
+-- Dropped rather than renamed, because the new policy is not a rename of the
+-- old one -- it is a different predicate over different columns.
+drop policy if exists nodes_org_scoped            on aiq.nodes;
+drop policy if exists soft_nodes_org_scoped       on aiq.soft_nodes;
+drop policy if exists lake_nodes_org_scoped       on aiq.lake_nodes;
+drop policy if exists channels_org_scoped         on content.channels;
+drop policy if exists resources_org_scoped        on content.resources;
+drop policy if exists datasets_org_scoped         on content.datasets;
+drop policy if exists runs_owner_or_permitted     on workflow.runs;
+drop policy if exists schedules_owner_or_permitted on workflow.schedules;
+drop policy if exists sessions_owner              on agentic.sessions;
+drop policy if exists runs_owner                  on agentic.runs;
+drop policy if exists agents_are_shared_config       on agentic.agents;
+drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
+drop policy if exists skills_are_shared_config       on agentic.skills;
+drop policy if exists plugins_are_shared_config      on agentic.plugins;
+-- trace-field's two are not listed: workflow.deposits and workflow.anchors ship
+-- in no released version (build-sql.py's NOT_SHIPPED), so no database being
+-- upgraded has them.
+
+-- ------------------------------------------------------------
+-- THE RETIRED FUNCTIONS. Same reasoning, lower stakes: nothing calls them once
+-- the policies above are gone, but leaving them is leaving a second answer to
+-- "which orgs is this caller in" -- one that reads the JWT array and never
+-- consults rbac.org_members. dev/tests/rbac/02 asserts no policy still names
+-- them; this is what makes that assertion true on an upgraded database rather
+-- than only on a fresh one.
+drop function if exists aiq.current_org_ids();
+drop function if exists content.may_access_org(uuid);
+
+-- ------------------------------------------------------------
+-- THE RENAME'S LEFTOVERS. `alter table ... rename column` carries the column's
+-- indexes and constraints along with it and does NOT rename them, so an
+-- upgraded database ends up with `sessions_user_id_created_at_idx` and
+-- `sessions_user_id_not_null` describing a column called owner_id. Harmless to
+-- query and wrong to read, and enough to make a fresh install and an upgraded
+-- one different databases -- which is the property this whole file exists to
+-- preserve.
+alter index if exists agentic.sessions_user_id_created_at_idx
+    rename to sessions_owner_id_created_at_idx;
+do $$
+begin
+    if exists (select 1 from pg_constraint
+                where conrelid = 'agentic.sessions'::regclass
+                  and conname = 'sessions_user_id_not_null') then
+        alter table agentic.sessions
+            rename constraint sessions_user_id_not_null to sessions_owner_id_not_null;
+    end if;
+end $$;
+
 -- from specs/migrations/0.1.6--0.2.0.sql: the part of the 0.1.6 -> 0.2.0 hop
 -- that a replay cannot express.
 -- 0.1.6 -> 0.2.0: the graph learns to forget on purpose.
@@ -79,7 +230,7 @@ drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
 -- ============================================================
--- percolate 0.2.4 -- the whole schema, as one extension script.
+-- percolate 0.2.5 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -4548,8 +4699,12 @@ begin
             -- run is unowned -- and assert_run_access correctly treats unowned
             -- as owned by nobody -- so a scheduled workflow that waits for
             -- approval could never be approved, by anyone.
+            -- REM-171: and the schedule's creator starts it, so an agent's schedule fires with the agent's
+            -- credential (workflow.keep_run_starter lets exactly this hand-over through).
             update workflow.runs
-               set owner_id = s.owner_id
+               set owner_id = s.owner_id,
+                   started_actor = s.created_actor,
+                   started_credential_id = s.created_credential_id
              where id = v_run_id and owner_id is null and s.owner_id is not null;
 
             update workflow.schedules
@@ -11246,6 +11401,12 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs users:admin';
     end if;
+    -- The ledger first, so the role says who gave it and on what basis (REM-171): an administrator's grant is an
+    -- operator's. The trigger on user_roles would otherwise record it as an installation step.
+    insert into rbac.grants (user_id, role, granted_by, basis)
+    select p_target_user_id, p_role, rbac.current_user_id(), 'operator'
+     where not exists (select 1 from rbac.grants g
+                        where g.user_id = p_target_user_id and g.role = p_role and g.revoked_at is null);
     insert into rbac.user_roles (user_id, role) values (p_target_user_id, p_role)
     on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
@@ -12018,6 +12179,16 @@ create policy tasks_via_run on workflow.tasks for select
 -- Reads go through views owned by api_viewer, NOT the table owner -- the
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
+-- WHO STARTED THE RUN, NOT ONLY WHOSE IT IS (REM-171). A person's agent starts runs with a narrowed credential,
+-- and execute_for minted only the owner's id, so every step of such a run ran as the person: a human-only
+-- capability passed, the credential's scopes did not narrow, and revoking the key did not stop the next step.
+-- The run keeps its starter from the verified claims and execute_for carries it into each step. Null on a run
+-- from before this, and on a system run: those keep the reach they always had. Added here, above runs_api,
+-- because the view publishes started_actor; set_run_owner (section e) fills both.
+alter table workflow.runs add column if not exists started_actor text
+    check (started_actor in ('person', 'agent', 'platform'));
+alter table workflow.runs add column if not exists started_credential_id uuid;
+
 create or replace view workflow.runs_api as
 -- The scope columns are APPENDED rather than slotted in beside owner_id, and
 -- the position is forced rather than chosen: `create or replace view` may only
@@ -12036,7 +12207,10 @@ create or replace view workflow.runs_api as
          -- (browser-ui.md §3). A run without a readable definition still gets a
          -- row: the left join yields null, which the screen renders as the id,
          -- rather than dropping the run from the list.
-         d.name
+         d.name,
+         -- appended, not slotted in (see above): whether a person, their agent or the
+         -- platform started the run (REM-171). The credential it carried is not published.
+         r.started_actor
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
@@ -12448,6 +12622,9 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    -- From the claims, never from the row: whatever an insert names is replaced.
+    new.started_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.started_credential_id := rbac.current_credential_id();
 
     if rbac.is_shared_org(new.org_id) and new.workflow_def_id is not null then
         select d.org_id into v_def_org
@@ -12467,6 +12644,23 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
+
+-- The starter does not change after the insert. The one hand-over is tick's: a scheduled run is started with no
+-- claims and then given to the schedule's owner, and the schedule's creator travels with it in that same update.
+create or replace function workflow.keep_run_starter() returns trigger as $$
+begin
+    if old.owner_id is null and new.owner_id is not null then
+        return new;
+    end if;
+    new.started_actor := old.started_actor;
+    new.started_credential_id := old.started_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_run_starter
+    before update on workflow.runs
+    for each row execute function workflow.keep_run_starter();
 
 -- Ownership from the JWT, never from an argument -- the third instance of the
 -- shape set_run_owner() and set_schedule_owner() already use, and a trigger
@@ -12871,14 +13065,27 @@ create or replace function workflow.execute_for(
     p_user uuid, p_statement text, p_write boolean, p_params jsonb)
 returns jsonb as $$
 declare
-    v_prev text := current_setting('request.jwt.claims', true);
-    v_out  jsonb;
+    v_prev   text := current_setting('request.jwt.claims', true);
+    v_out    jsonb;
+    v_run    workflow.runs;
+    v_claims jsonb;
 begin
     if p_user is null then
         raise exception 'execute_for was given nobody to run as';
     end if;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    -- The step runs as its run's starter, not only its owner (REM-171): an agent's run carries the agent and its
+    -- credential, so rbac.decide refuses a human-only capability, a scope the key lacks and a key revoked since
+    -- the run began. Only the run being executed, and only when it is p_user's, lends its starter.
+    select * into v_run from workflow.runs
+     where id = nullif(current_setting('workflow.current_run_id', true), '')::uuid and owner_id = p_user;
+    v_claims := jsonb_build_object('sub', p_user, 'role', 'authenticated');
+    if v_run.started_actor in ('agent', 'platform') then
+        v_claims := v_claims || jsonb_build_object('actor', v_run.started_actor);
+    end if;
+    if v_run.started_credential_id is not null then
+        v_claims := v_claims || jsonb_build_object('api_key_id', v_run.started_credential_id);
+    end if;
+    perform set_config('request.jwt.claims', v_claims::text, true);
     begin
         v_out := workflow.execute_as_viewer(p_statement, p_write, p_params);
     exception when others then
@@ -13103,6 +13310,11 @@ grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticat
 
 alter table workflow.schedules add column if not exists owner_id uuid references rbac.users(id);
 create index if not exists idx_schedules_owner on workflow.schedules (owner_id);
+-- Who created the schedule, which tick hands to every run it starts (REM-171): an agent's schedule fires as the
+-- agent, not as the person it works for.
+alter table workflow.schedules add column if not exists created_actor text
+    check (created_actor in ('person', 'agent', 'platform'));
+alter table workflow.schedules add column if not exists created_credential_id uuid;
 
 -- Ownership from the JWT, never from an argument -- the same rule, and the
 -- same trigger shape, as runs above. schedule_workflow() therefore has no
@@ -13112,9 +13324,24 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    new.created_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.created_credential_id := rbac.current_credential_id();
     return new;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The creator does not change after the insert, whoever updates the schedule later.
+create or replace function workflow.keep_schedule_creator() returns trigger as $$
+begin
+    new.created_actor := old.created_actor;
+    new.created_credential_id := old.created_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_schedule_creator
+    before update on workflow.schedules
+    for each row execute function workflow.keep_schedule_creator();
 
 create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
@@ -13195,7 +13422,9 @@ create or replace view workflow.schedules_api as
          last_run_id, fire_count, skip_count, last_error, last_error_at,
          created_at, updated_at,
          -- appended, not slotted in: see runs_api above
-         visibility
+         visibility,
+         -- who created the schedule, which every run it starts carries (REM-171)
+         created_actor
   from workflow.schedules;
 
 grant select on workflow.schedules to api_viewer;
@@ -28595,6 +28824,32 @@ create table if not exists rbac.grants (
 );
 create index if not exists grants_active on rbac.grants (user_id, role) where revoked_at is null;
 
+-- EVERY ROLE A PERSON HOLDS SAYS HOW IT WAS GIVEN (REM-171). grant_with_basis, grant_application_role and grant_role
+-- write the grant before the role; any other writer -- an installation step, bootstrap_admin, a fixture -- gets an
+-- 'installation' grant here. rbac.decide then counts a role only through an active grant, so a role row nobody
+-- recorded, and one whose grant was revoked, grant nothing.
+create or replace function rbac.record_role_grant() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if not exists (select 1 from rbac.grants g
+                    where g.user_id = new.user_id and g.role = new.role and g.revoked_at is null) then
+        insert into rbac.grants (user_id, role, granted_by, basis)
+        values (new.user_id, new.role, rbac.current_user_id(), 'installation');
+    end if;
+    return new;
+end;
+$$;
+revoke execute on function rbac.record_role_grant() from public;
+create or replace trigger trg_user_roles_record_grant after insert on rbac.user_roles
+    for each row execute function rbac.record_role_grant();
+
+-- Roles held before the ledger existed, recorded once. Idempotent: a role with an active grant is left alone.
+insert into rbac.grants (user_id, role, basis)
+select ur.user_id, ur.role, 'installation'
+  from rbac.user_roles ur
+ where not exists (select 1 from rbac.grants g
+                    where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
 -- An application (the writing hub) declares its own qualified capabilities.
 create table if not exists rbac.applications (
     name        text primary key,
@@ -28675,20 +28930,17 @@ begin
     if v_reason is null and not (v_kind.every_person or exists (
         select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
          where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
-           and (
-               -- Pre-ledger core roles keep their existing meaning. Once this
-               -- role has a ledger entry, only an active, matching grant counts.
-               not exists (select 1 from rbac.grants g where g.user_id = v_user and g.role = ur.role)
-               or exists (
-                   select 1 from rbac.grants g
-                    where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
-                      and (g.application = 'percolate'
-                           or g.application = rbac.request_claims()->>'application'
-                           or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
-                      and (g.org_id = rbac.shared_org_id()
-                           or (g.org_id::text = rbac.request_claims()->>'org_id'
-                               and g.org_id in (select rbac.current_org_ids())))
-               )
+           -- Only an active, matching grant counts (REM-171). Every role row has one: the writers record it, and
+           -- trg_user_roles_record_grant records the rest, so there is no pre-ledger role left to honour.
+           and exists (
+               select 1 from rbac.grants g
+                where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
+                  and (g.application = 'percolate'
+                       or g.application = rbac.request_claims()->>'application'
+                       or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
+                  and (g.org_id = rbac.shared_org_id()
+                       or (g.org_id::text = rbac.request_claims()->>'org_id'
+                           and g.org_id in (select rbac.current_org_ids())))
            )
     )) then
         v_reason := 'no_grant';
