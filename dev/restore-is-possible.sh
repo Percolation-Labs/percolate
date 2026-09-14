@@ -46,6 +46,18 @@ DB="${DB:-p8}"
 INTO="${INTO:-p8restore_check}"
 SU="${SUPERUSER:-p8}"
 
+# A DECLARED APPLICATION AND A ROLE THAT USES IT, so the restore has one to lose (REM-292). CI's database declares
+# no application, which is why this gate stayed green while production's backups dropped every role permission:
+# the kinds rbac.declare_application writes were not dumped, so role_permissions failed its foreign key on load.
+# Idempotent, and named so nobody mistakes it for real data.
+docker exec -i "$CONTAINER" psql -U "$SU" -d "$DB" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
+select rbac.declare_application('restore-check', '1', '[{"resource": "probe", "action": "read"}]');
+insert into rbac.roles (name, description) values ('restore-check-reader', 'restore gate fixture (REM-292)')
+    on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values ('restore-check-reader', 'restore-check.probe', 'read')
+    on conflict do nothing;
+SQL
+
 # Registered tables that actually hold rows in $DB -- the only ones whose
 # restore can be observed. A registered-but-empty table proves nothing here and
 # is backup-carries-the-data.sh's subject, not this one.
@@ -79,7 +91,14 @@ echo "==> $DB has rows in ${#TABLES[@]} registered table(s); dumping"
 
 # --data-only, and the schema comes from a real install rather than the dump:
 # that IS the documented procedure, for the reason in the header.
-docker exec "$CONTAINER" bash -c "pg_dump -U $SU -d $DB --data-only -f /tmp/restore-check.sql"
+#
+# --disable-triggers (REM-292), because a restore must put back the rows that were saved and nothing a trigger
+# adds while they load. trg_permission_kinds_grant_all grants every newly inserted kind to each grants_all role,
+# so loading the application kinds wrote role_permissions rows the dump was about to COPY, and the duplicate key
+# aborted the whole table; trg_record_role_grant on user_roles would mint grants the same way. The dump wraps
+# each COPY in DISABLE/ENABLE TRIGGER ALL, which the superuser restore below may run. Foreign keys are not
+# checked during the load either, so the check after it looks for the declared role permission explicitly.
+docker exec "$CONTAINER" bash -c "pg_dump -U $SU -d $DB --data-only --disable-triggers -f /tmp/restore-check.sql"
 
 docker exec -i "$CONTAINER" psql -U "$SU" -d postgres -q \
     -c "drop database if exists $INTO (force);" -c "create database $INTO;" >/dev/null 2>&1
@@ -168,6 +187,25 @@ if [ "$DUPKEY" -gt 0 ]; then
     echo "If the table above is not one of them, it is the eighth: give it the same"
     echo "column and add it to that array. If it IS one of them, its seed stopped"
     echo "being marked -- check that the seeding statement replays."
+    exit 1
+fi
+
+# A FOREIGN KEY THE DUMP DID NOT CARRY loses a whole table on load: COPY aborts on the first row whose parent is
+# missing, and psql moves on (REM-292, 0 of 4 role permissions on production). Like the duplicate key, a row-losing
+# class, so a failure rather than a note.
+FKEY=$(grep -ci "ERROR:.*violates foreign key constraint" "$LOG" || true)
+if [ "$FKEY" -gt 0 ]; then
+    echo "FAILED: $FKEY foreign key violation(s) in the load, and this class LOSES A WHOLE TABLE:"
+    grep -i -A1 "ERROR:.*violates foreign key constraint" "$LOG" | sed 's/^/    /' | head -8
+    echo ""
+    echo "A registered table's foreign key names rows the dump does not hold. Register the parent in"
+    echo "specs/contract/schema.sql, with a condition if the install ships some of its rows."
+    exit 1
+fi
+KEPT=$(docker exec "$CONTAINER" psql -U "$SU" -d "$INTO" -tAc \
+    "select count(*) from rbac.role_permissions where role = 'restore-check-reader' and resource = 'restore-check.probe'")
+if [ "${KEPT:-0}" -ne 1 ]; then
+    echo "FAILED: the declared application's role permission did not come back (found ${KEPT:-0})."
     exit 1
 fi
 

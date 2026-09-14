@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.2.5 -- the whole schema, as one extension script.
+-- percolate 0.2.6 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -31392,6 +31392,17 @@ declare
         'rbac.org_members',
         'rbac.orgs',
         'rbac.password_reset_tokens',
+        -- THE KINDS AN APPLICATION DECLARES (REM-292). The extension ships its own
+        -- kinds, and rbac.declare_application adds each application's -- hub.* on
+        -- production -- after install. Unregistered, a data-only dump carried
+        -- rbac.role_permissions and none of the application kinds its foreign key
+        -- names, so the whole role_permissions COPY failed on restore: measured on
+        -- production's first scheduled backup, 2026-09-14, 38 of 52 kinds and 0 of 4
+        -- role permissions came back, and every role lost its capabilities. Registered
+        -- with a condition on checked_by, which declare_application always writes as
+        -- 'application <name>', so the install's own kinds are not dumped and cannot
+        -- collide with the ones CREATE EXTENSION recreates.
+        'rbac.permission_kinds',
         'rbac.refresh_tokens',
         'rbac.role_permissions',
         'rbac.roles',
@@ -31429,6 +31440,7 @@ begin
                       and d.deptype = 'e') then
             perform pg_catalog.pg_extension_config_dump(
                 t, case when t = any(seeded_tables) then 'WHERE NOT shipped'
+                        when t = 'rbac.permission_kinds' then 'WHERE checked_by LIKE ''application %'''
                         else '' end);
         end if;
     end loop;
