@@ -29128,6 +29128,14 @@ create table if not exists research.argument_edges (
     foreign key (revision_id, target_claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
 
+-- SEARCH OVER CLAIMS AND SOURCES, SCOPED BY THE ROWS THEMSELVES (REM-152, specs/tables/schema.md §3). Lexical
+-- sources rather than entity projections: aiq.lexical runs as the caller, so claims_readable and
+-- sources_readable decide what a search returns, and a package write adds no aiq row -- nobody needs a
+-- write grant on aiq, on the first insert or any other. The registration adds a generated search_tsv
+-- column and its GIN index to each table; the projections stay the record, and the index is derived.
+select aiq.register_lexical_source('research_claims', 'research.claims', 'text');
+select aiq.register_lexical_source('research_sources', 'research.sources', 'title');
+
 -- An endorsement says what a person checked in an exact revision. It is not
 -- a finding that a claim is true, and a correction does not inherit it.
 create table if not exists research.endorsements (
@@ -29230,7 +29238,14 @@ $$;
 -- Claims, sources, citations and edges, projected from the revision's own
 -- document. Ids are derived from the revision and the local key, so a replay
 -- of the same document yields the same ids.
-create or replace function research.project(p_revision uuid, p_document jsonb) returns void
+--
+-- ONE DERIVATION, TWO MODES (REM-152). A write (p_fill false) inserts every row, so a duplicate key, a
+-- dangling citation or edge, or an unknown relation raises and the whole submit or revise rolls back. A
+-- repair (p_fill true, only from research.rebuild_projection) adds the rows that are missing and leaves the
+-- rest: the document was validated when it was written, and a delete-and-replay cannot run at all once
+-- engagement.comments anchors a claim, which it references without a cascade.
+drop function if exists research.project(uuid, jsonb);
+create or replace function research.project(p_revision uuid, p_document jsonb, p_fill boolean default false) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare c jsonb; s jsonb; e jsonb; src text;
 begin
@@ -29238,26 +29253,84 @@ begin
         if coalesce(s->>'id', '') = '' then
             raise check_violation using message = 'Every source needs an id';
         end if;
-        insert into research.sources (id, revision_id, source_key, title, url, origin, status, locator)
-        values (percolate.uuidv5(p_revision, 'source:' || (s->>'id')), p_revision, s->>'id',
-                coalesce(s->>'title', ''), coalesce(s->>'url', ''), coalesce(s->>'origin', ''),
-                coalesce(s->>'status', ''), coalesce(s->>'locator', ''));
+        if not p_fill or not exists (select 1 from research.sources
+                                      where revision_id = p_revision and source_key = s->>'id') then
+            insert into research.sources (id, revision_id, source_key, title, url, origin, status, locator)
+            values (percolate.uuidv5(p_revision, 'source:' || (s->>'id')), p_revision, s->>'id',
+                    coalesce(s->>'title', ''), coalesce(s->>'url', ''), coalesce(s->>'origin', ''),
+                    coalesce(s->>'status', ''), coalesce(s->>'locator', ''));
+        end if;
     end loop;
     for c in select value from jsonb_array_elements(coalesce(p_document->'claims', '[]'::jsonb)) loop
         if coalesce(c->>'id', '') = '' then
             raise check_violation using message = 'Every claim needs an id';
         end if;
-        insert into research.claims (id, revision_id, claim_key, kind, text, locator)
-        values (percolate.uuidv5(p_revision, 'claim:' || (c->>'id')), p_revision, c->>'id',
-                coalesce(c->>'kind', ''), coalesce(c->>'text', ''), coalesce(c->>'locator', ''));
+        if not p_fill or not exists (select 1 from research.claims
+                                      where revision_id = p_revision and claim_key = c->>'id') then
+            insert into research.claims (id, revision_id, claim_key, kind, text, locator)
+            values (percolate.uuidv5(p_revision, 'claim:' || (c->>'id')), p_revision, c->>'id',
+                    coalesce(c->>'kind', ''), coalesce(c->>'text', ''), coalesce(c->>'locator', ''));
+        end if;
         for src in select value from jsonb_array_elements_text(coalesce(c->'source_ids', '[]'::jsonb)) loop
-            insert into research.citations (revision_id, claim_key, source_key) values (p_revision, c->>'id', src);
+            if not p_fill or not exists (select 1 from research.citations
+                                          where revision_id = p_revision and claim_key = c->>'id' and source_key = src) then
+                insert into research.citations (revision_id, claim_key, source_key) values (p_revision, c->>'id', src);
+            end if;
         end loop;
     end loop;
     for e in select value from jsonb_array_elements(coalesce(p_document->'edges', '[]'::jsonb)) loop
-        insert into research.argument_edges (revision_id, source_claim_key, relation, target_claim_key)
-        values (p_revision, e->>'source', e->>'relation', e->>'target');
+        if not p_fill or not exists (select 1 from research.argument_edges
+                                      where revision_id = p_revision and source_claim_key = e->>'source'
+                                        and relation = e->>'relation' and target_claim_key = e->>'target') then
+            insert into research.argument_edges (revision_id, source_claim_key, relation, target_claim_key)
+            values (p_revision, e->>'source', e->>'relation', e->>'target');
+        end if;
     end loop;
+end;
+$$;
+
+-- REBUILD A REVISION'S PROJECTION FROM ITS OWN DOCUMENT (REM-152, schema.md §3: "Rebuilding projections never
+-- rewrites revisions"). Operator-only: nothing grants it to authenticated, and identity/closing.sql takes
+-- PUBLIC's EXECUTE away. It adds what is missing, with the ids the first projection gave them, then refuses a
+-- projection holding anything its document does not say -- a row that no rebuild can explain is corruption to
+-- look at, not something to delete quietly. The revision row itself is only read.
+create or replace function research.rebuild_projection(p_revision uuid) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    d      jsonb;
+    extras jsonb;
+begin
+    select document into d from research.revisions where id = p_revision for share;
+    if not found then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    perform research.project(p_revision, d, true);
+    select jsonb_strip_nulls(jsonb_build_object(
+        'claims', (select jsonb_agg(x.claim_key) from research.claims x where x.revision_id = p_revision
+                     and not exists (select 1 from jsonb_array_elements(coalesce(d->'claims', '[]')) j
+                                      where j->>'id' = x.claim_key)),
+        'sources', (select jsonb_agg(x.source_key) from research.sources x where x.revision_id = p_revision
+                      and not exists (select 1 from jsonb_array_elements(coalesce(d->'sources', '[]')) j
+                                       where j->>'id' = x.source_key)),
+        'citations', (select jsonb_agg(x.claim_key || '->' || x.source_key) from research.citations x
+                       where x.revision_id = p_revision
+                         and not exists (select 1 from jsonb_array_elements(coalesce(d->'claims', '[]')) j
+                                          where j->>'id' = x.claim_key
+                                            and coalesce(j->'source_ids', '[]') ? x.source_key)),
+        'edges', (select jsonb_agg(x.source_claim_key || ' ' || x.relation || ' ' || x.target_claim_key)
+                    from research.argument_edges x where x.revision_id = p_revision
+                     and not exists (select 1 from jsonb_array_elements(coalesce(d->'edges', '[]')) j
+                                      where j->>'source' = x.source_claim_key and j->>'relation' = x.relation
+                                        and j->>'target' = x.target_claim_key)))) into extras;
+    if extras <> '{}'::jsonb then
+        raise exception using errcode = 'data_corrupted',
+            message = 'The projection holds rows its revision''s document does not say', detail = extras::text;
+    end if;
+    return jsonb_build_object(
+        'claims', (select count(*) from research.claims where revision_id = p_revision),
+        'sources', (select count(*) from research.sources where revision_id = p_revision),
+        'citations', (select count(*) from research.citations where revision_id = p_revision),
+        'edges', (select count(*) from research.argument_edges where revision_id = p_revision));
 end;
 $$;
 
