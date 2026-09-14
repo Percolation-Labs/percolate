@@ -572,6 +572,19 @@
     },
     {
       "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "actor_kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "content",
+      "table": "resource_snapshots",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "value",
         "absence"
       ],

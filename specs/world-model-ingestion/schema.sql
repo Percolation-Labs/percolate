@@ -722,12 +722,19 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Same shape as aiq.check_drift: a non-empty result is a writer bug, not a
 -- routine merge.
 -- ------------------------------------------------------------
+-- PL/pgSQL, NOT SQL, and that is load order rather than style (REM-153). A file a research snapshot still pins
+-- is not an orphan, even after its resource has moved on to newer bytes, and content.resource_snapshots is
+-- defined by research-platform/schema.sql, which loads after this file. A SQL-language body is checked when it
+-- is created and would name a table that does not exist yet; a PL/pgSQL body is resolved when it runs.
 create or replace function content.check_drift()
 returns table(kind text, id uuid, detail text) as $$
-    -- a file no resource points at: the upload transaction died after storing
+begin
+    return query
+    -- a file no resource points at and no snapshot pins: the upload transaction died after storing
     select 'orphan_file'::text, f.id, f.bucket || '/' || f.object_key
     from content.files f
     where not exists (select 1 from content.resources r where r.file_id = f.id)
+      and not exists (select 1 from content.resource_snapshots s where s.file_id = f.id)
     union all
     -- a resource stuck pending: the ingestion workflow never finished
     select 'unchunked_resource'::text, r.id, coalesce(r.title, r.uri, '(untitled)')
@@ -739,7 +746,8 @@ returns table(kind text, id uuid, detail text) as $$
     from content.resources r
     where r.status = 'ready'
       and not exists (select 1 from content.resource_chunks c where c.resource_id = r.id);
-$$ language sql stable;
+end;
+$$ language plpgsql stable;
 
 -- ============================================================
 -- 7. Ingestion — how bytes become chunks, and who decides.

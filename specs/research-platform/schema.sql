@@ -605,6 +605,79 @@ create table if not exists research.argument_edges (
 select aiq.register_lexical_source('research_claims', 'research.claims', 'text');
 select aiq.register_lexical_source('research_sources', 'research.sources', 'title');
 
+-- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
+-- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
+-- later fetch change what an old revision appears to rely on. A snapshot records the resource, the exact
+-- retained file and its hash, and who captured it, together, taken from the resource row as it stood.
+--
+-- Readable exactly when its resource is (the policy below asks the resource, under the caller's own row
+-- security), rather than carrying copies of owner, org and visibility that could drift from the row they
+-- describe -- aiq.node_keys inherits from aiq.nodes for the same reason. The resource cannot be deleted while
+-- a snapshot pins it. The bytes go only through content.remove_snapshot_bytes, which leaves a tombstone that
+-- keeps the checksum: an endorsement never silently becomes an endorsement of replacement bytes.
+create table if not exists content.resource_snapshots (
+    id             uuid primary key default uuidv7(),
+    resource_id    uuid not null references content.resources(id),
+    file_id        uuid references content.files(id),
+    checksum       text not null,
+    size_bytes     bigint not null check (size_bytes >= 0),
+    content_type   text,
+    uri            text,
+    captured_by    uuid not null references rbac.users(id),
+    actor_kind     text not null check (actor_kind in ('person', 'agent', 'platform')),
+    credential_id  uuid references rbac.api_keys(id),
+    captured_at    timestamptz not null default now(),
+    removed_at     timestamptz,
+    removed_by     uuid references rbac.users(id),
+    removed_reason text,
+    constraint resource_snapshots_removal_says_why check ((removed_at is null) = (removed_reason is null)),
+    constraint resource_snapshots_bytes_until_removed check ((removed_at is null) = (file_id is not null))
+);
+create index if not exists idx_resource_snapshots_file on content.resource_snapshots (file_id);
+create index if not exists idx_resource_snapshots_resource on content.resource_snapshots (resource_id);
+
+-- A source may pin a capture. Null is the explicit "declared, not captured" state; a later capture is a new
+-- revision, never an update to this one (clients hold no update on projections).
+alter table research.sources add column if not exists snapshot_id uuid references content.resource_snapshots(id);
+
+-- Hosted evidence for an artifact: the exact capture its table, note or chart was drawn from. Keyed by the
+-- artifact's own id when the document names one, otherwise by its position (A1, A2, ...), which cannot move
+-- because a revision cannot.
+create table if not exists research.revision_files (
+    revision_id  uuid not null references research.revisions(id) on delete cascade,
+    artifact_key text not null,
+    snapshot_id  uuid not null references content.resource_snapshots(id),
+    purpose      text not null default '',
+    primary key (revision_id, artifact_key)
+);
+
+-- May the current caller pin this capture? It must exist, still hold its bytes, and belong to a resource the
+-- caller may read -- so nobody cites another tenant's private evidence into their own package.
+create or replace function research.snapshot_pinnable(p_snapshot uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select exists (select 1 from content.resource_snapshots s join content.resources r on r.id = s.resource_id
+                    where s.id = p_snapshot and s.removed_at is null
+                      and rbac.may_read(r.owner_id, r.org_id, r.visibility));
+$$;
+
+-- What a reader is told about a source's capture. The hash and dates only reach a caller who may read the
+-- resource; anybody else learns that a capture exists and is not theirs to see.
+create or replace function research.capture_state(p_snapshot uuid) returns jsonb
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select case
+        when p_snapshot is null then jsonb_build_object('status', 'unverified', 'reason', 'no capture is linked to this source')
+        when s.id is null then jsonb_build_object('status', 'unavailable', 'reason', 'the capture is not readable by this reader')
+        when s.removed_at is not null then jsonb_build_object('status', 'removed', 'checksum', s.checksum,
+                                                              'removed_at', s.removed_at, 'reason', s.removed_reason)
+        else jsonb_build_object('status', 'captured', 'checksum', s.checksum, 'captured_at', s.captured_at,
+                                'snapshot_id', s.id)
+    end
+      from (select 1) one
+      left join (select sn.id, sn.checksum, sn.captured_at, sn.removed_at, sn.removed_reason
+                   from content.resource_snapshots sn join content.resources r on r.id = sn.resource_id
+                  where sn.id = p_snapshot and rbac.may_read(r.owner_id, r.org_id, r.visibility)) s on true;
+$$;
+
 -- An endorsement says what a person checked in an exact revision. It is not
 -- a finding that a claim is true, and a correction does not inherit it.
 create table if not exists research.endorsements (
@@ -716,18 +789,25 @@ $$;
 drop function if exists research.project(uuid, jsonb);
 create or replace function research.project(p_revision uuid, p_document jsonb, p_fill boolean default false) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
-declare c jsonb; s jsonb; e jsonb; src text;
+declare c jsonb; s jsonb; e jsonb; src text; a record; k text;
 begin
     for s in select value from jsonb_array_elements(coalesce(p_document->'sources', '[]'::jsonb)) loop
         if coalesce(s->>'id', '') = '' then
             raise check_violation using message = 'Every source needs an id';
         end if;
+        -- A pin is checked when the revision is written, as its author (REM-153). A rebuild re-derives rows the
+        -- author was already allowed to write, with no author in the request to ask, so it does not re-check.
+        if not p_fill and nullif(s->>'snapshot_id', '') is not null
+           and not research.snapshot_pinnable((s->>'snapshot_id')::uuid) then
+            raise foreign_key_violation using message = 'A source can pin only a capture its author may read',
+                detail = s->>'id';
+        end if;
         if not p_fill or not exists (select 1 from research.sources
                                       where revision_id = p_revision and source_key = s->>'id') then
-            insert into research.sources (id, revision_id, source_key, title, url, origin, status, locator)
+            insert into research.sources (id, revision_id, source_key, title, url, origin, status, locator, snapshot_id)
             values (percolate.uuidv5(p_revision, 'source:' || (s->>'id')), p_revision, s->>'id',
                     coalesce(s->>'title', ''), coalesce(s->>'url', ''), coalesce(s->>'origin', ''),
-                    coalesce(s->>'status', ''), coalesce(s->>'locator', ''));
+                    coalesce(s->>'status', ''), coalesce(s->>'locator', ''), nullif(s->>'snapshot_id', '')::uuid);
         end if;
     end loop;
     for c in select value from jsonb_array_elements(coalesce(p_document->'claims', '[]'::jsonb)) loop
@@ -753,6 +833,20 @@ begin
                                         and relation = e->>'relation' and target_claim_key = e->>'target') then
             insert into research.argument_edges (revision_id, source_claim_key, relation, target_claim_key)
             values (p_revision, e->>'source', e->>'relation', e->>'target');
+        end if;
+    end loop;
+    for a in select value as art, ordinality as n
+               from jsonb_array_elements(coalesce(p_document->'artifacts', '[]'::jsonb)) with ordinality loop
+        continue when nullif(a.art->>'snapshot_id', '') is null;
+        if not p_fill and not research.snapshot_pinnable((a.art->>'snapshot_id')::uuid) then
+            raise foreign_key_violation using message = 'An artifact can pin only a capture its author may read',
+                detail = coalesce(a.art->>'id', 'A' || a.n);
+        end if;
+        k := coalesce(nullif(a.art->>'id', ''), 'A' || a.n);
+        if not p_fill or not exists (select 1 from research.revision_files
+                                      where revision_id = p_revision and artifact_key = k) then
+            insert into research.revision_files (revision_id, artifact_key, snapshot_id, purpose)
+            values (p_revision, k, (a.art->>'snapshot_id')::uuid, coalesce(a.art->>'kind', ''));
         end if;
     end loop;
 end;
@@ -800,6 +894,66 @@ begin
         'sources', (select count(*) from research.sources where revision_id = p_revision),
         'citations', (select count(*) from research.citations where revision_id = p_revision),
         'edges', (select count(*) from research.argument_edges where revision_id = p_revision));
+end;
+$$;
+
+-- CAPTURE A RESOURCE'S CURRENT BYTES (REM-153). The file and its hash come from the resource row, locked, at
+-- this moment -- never from the caller -- so a snapshot cannot pair a resource with bytes that were not its
+-- own. A resource with nothing stored is refused: a declared URL stays unverified until content storage
+-- holds its bytes.
+create or replace function content.capture_snapshot(p_resource uuid) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    r      content.resources;
+    f      content.files;
+    v_id   uuid;
+begin
+    select * into r from content.resources where id = p_resource for update;
+    if not found or not rbac.may_read(r.owner_id, r.org_id, r.visibility) then
+        raise no_data_found using message = 'Resource not found';
+    end if;
+    if r.file_id is null then
+        raise check_violation using message = 'This resource has no stored bytes to capture';
+    end if;
+    select * into f from content.files where id = r.file_id;
+    insert into content.resource_snapshots (resource_id, file_id, checksum, size_bytes, content_type, uri,
+                                            captured_by, actor_kind, credential_id)
+    values (r.id, f.id, f.checksum, f.size_bytes, f.content_type, r.uri,
+            v_user, rbac.current_actor(), rbac.current_credential_id())
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- Where a snapshot's bytes are, for a caller who may read its resource, and nothing once they are removed.
+-- The same one answer resolve_file gives, so a stranger cannot tell "not yours" from "not there".
+create or replace function content.resolve_snapshot(p_snapshot uuid)
+returns table(bucket text, object_key text, content_type text, size_bytes bigint, checksum text)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select f.bucket, f.object_key, s.content_type, s.size_bytes, s.checksum
+      from content.resource_snapshots s
+      join content.resources r on r.id = s.resource_id
+      join content.files f on f.id = s.file_id
+     where s.id = p_snapshot and s.removed_at is null
+       and rbac.may_read(r.owner_id, r.org_id, r.visibility);
+$$;
+
+-- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153, schema.md §4). Operator-only: nothing grants it. The
+-- snapshot stays as a tombstone with its checksum, who removed it and why, so every revision that pinned it
+-- says "removed" rather than pointing at nothing -- and the file row is then free for content storage to prune.
+create or replace function content.remove_snapshot_bytes(p_snapshot uuid, p_reason text) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if coalesce(btrim(p_reason), '') = '' then
+        raise check_violation using message = 'Removing pinned evidence needs a reason';
+    end if;
+    update content.resource_snapshots
+       set file_id = null, removed_at = now(), removed_by = rbac.current_user_id(), removed_reason = p_reason
+     where id = p_snapshot and removed_at is null;
+    if not found then
+        raise no_data_found using message = 'No capture with bytes to remove';
+    end if;
 end;
 $$;
 
@@ -1282,7 +1436,7 @@ begin
                        'id', s.source_key, 'title', s.title, 'url', s.url, 'origin', s.origin, 'status', s.status,
                        'cited_by', (select count(*) from research.citations ct
                                      where ct.revision_id = r.id and ct.source_key = s.source_key),
-                       'capture', jsonb_build_object('status', 'unknown', 'reason', 'no capture is linked to this source'))
+                       'capture', research.capture_state(s.snapshot_id))
                    order by s.source_key)
               from research.sources s where s.revision_id = r.id), '[]'::jsonb),
         'shared_origins', coalesce((
@@ -1464,6 +1618,17 @@ grant select on research.operations to authenticated;
 grant select on engagement.saves, engagement.follows, engagement.votes, engagement.valuations, engagement.comments,
                 engagement.comment_versions, engagement.comment_likes to authenticated;
 
+-- A snapshot is readable exactly when its resource is: the subquery runs under the caller's own row security on
+-- content.resources, so there is one tenancy fact and it lives on the resource (REM-153).
+alter table content.resource_snapshots enable row level security;
+drop policy if exists resource_snapshots_via_resource on content.resource_snapshots;
+create policy resource_snapshots_via_resource on content.resource_snapshots for select
+    using (exists (select 1 from content.resources r where r.id = resource_snapshots.resource_id));
+alter table research.revision_files enable row level security;
+drop policy if exists revision_files_readable on research.revision_files;
+create policy revision_files_readable on research.revision_files for select using (research.revision_readable(revision_id));
+grant select on content.resource_snapshots, research.revision_files to authenticated;
+
 grant execute on function
     rbac.request_claims(), rbac.current_credential_id(), rbac.current_actor(),
     rbac.decide(text, text), rbac.may(text, text), rbac.require(text, text),
@@ -1472,7 +1637,7 @@ grant execute on function
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
-    engagement.revision_signals(uuid)
+    engagement.revision_signals(uuid), content.resolve_snapshot(uuid)
 to authenticated;
 
 grant execute on function
@@ -1480,7 +1645,7 @@ grant execute on function
     rbac.reserve_usage(text, bigint, text, interval), rbac.consume_usage(text, text, bigint),
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
-    research.revise_working(text, jsonb, text),
+    research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
     research.endorse(uuid, text, text), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
