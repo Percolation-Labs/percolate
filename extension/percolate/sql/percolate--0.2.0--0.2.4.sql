@@ -29153,6 +29153,45 @@ create table if not exists research.endorsements (
 create unique index if not exists endorsements_one_active
     on research.endorsements (revision_id, endorser_id) where withdrawn_at is null;
 
+-- WHAT WAS CHECKED, AS KEYS AND NOT ONLY AS PROSE (REM-154, specs/tables/schema.md §5). A document-scoped
+-- endorsement may name no claim; a claim-scoped one names at least one, and research.endorse refuses it
+-- otherwise. The free text stays beside the keys: it says how, the keys say which.
+alter table research.endorsements add column if not exists kind text not null default 'document'
+    check (kind in ('document', 'claims'));
+
+-- Each checked claim, proved by composite keys to be a claim OF THE ENDORSED REVISION: the endorsement's
+-- (id, revision_id) and the claim's (revision_id, claim_key) share one revision_id column, so a link to a
+-- claim from any other revision cannot be written, by a definer or anybody else.
+create table if not exists research.endorsement_claims (
+    endorsement_id uuid not null,
+    revision_id    uuid not null,
+    claim_key      text not null,
+    primary key (endorsement_id, claim_key),
+    foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key)
+);
+-- The FK that reaches through the endorsement is dropped before the unique key it needs, and added after it,
+-- so the replayed upgrade can drop and re-add both.
+alter table research.endorsement_claims drop constraint if exists endorsement_claims_same_revision;
+alter table research.endorsements drop constraint if exists endorsements_id_revision_key;
+alter table research.endorsements add constraint endorsements_id_revision_key unique (id, revision_id);
+alter table research.endorsement_claims add constraint endorsement_claims_same_revision
+    foreign key (endorsement_id, revision_id) references research.endorsements (id, revision_id) on delete cascade;
+
+-- WITHDRAWAL IS ITS OWN EVENT (§5): who withdrew, why and when, appended once and never rewritten. The
+-- endorsement row keeps withdrawn_at and withdraw_reason in step, because the applications read them and
+-- endorsements_one_active is keyed on them; this table is the record, and a retry adds nothing to it.
+create table if not exists research.endorsement_withdrawals (
+    endorsement_id uuid primary key references research.endorsements(id) on delete cascade,
+    withdrawn_by   uuid not null references rbac.users(id),
+    reason         text not null,
+    withdrawn_at   timestamptz not null default now()
+);
+-- Withdrawals from before the event table, carried over once: only the endorser could ever withdraw, so the
+-- endorser is who withdrew. Replay-safe, and a no-op on a fresh install.
+insert into research.endorsement_withdrawals (endorsement_id, withdrawn_by, reason, withdrawn_at)
+select id, endorser_id, withdraw_reason, withdrawn_at from research.endorsements where withdrawn_at is not null
+on conflict (endorsement_id) do nothing;
+
 -- An exposure says one exact revision may be read by anybody who may read the
 -- work's public projection (authoring-and-publication.md §4, REM-185). A
 -- listed work no longer exposes every revision it has: an owner's private
@@ -29583,30 +29622,70 @@ language sql stable security definer set search_path = pg_catalog, public as $$
      order by u.updated_at desc, w.public_id;
 $$;
 
-create or replace function research.endorse(p_revision uuid, p_scope text, p_checked text) returns uuid
+-- A person says what they checked in one exact revision (§5). With no claim keys it is document-scoped, as
+-- before; with keys it is claim-scoped and names at least one, each a claim of that revision. research:endorse
+-- is human-only, so an agent's credential is refused here whatever it has been granted.
+drop function if exists research.endorse(uuid, text, text);
+create or replace function research.endorse(p_revision uuid, p_scope text, p_checked text,
+                                            p_claim_keys text[] default null) returns uuid
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('research', 'endorse'); v_id uuid;
 begin
     if not research.revision_readable(p_revision) then
         raise no_data_found using message = 'Revision not found';
     end if;
-    insert into research.endorsements (revision_id, endorser_id, scope, checked)
-    values (p_revision, v_user, p_scope, p_checked)
+    if p_claim_keys is not null and coalesce(cardinality(p_claim_keys), 0) = 0 then
+        raise check_violation using message = 'A claim-scoped endorsement names at least one checked claim';
+    end if;
+    insert into research.endorsements (revision_id, endorser_id, scope, checked, kind)
+    values (p_revision, v_user, p_scope, p_checked, case when p_claim_keys is null then 'document' else 'claims' end)
     returning id into v_id;
+    insert into research.endorsement_claims (endorsement_id, revision_id, claim_key)
+    select distinct v_id, p_revision, k from unnest(p_claim_keys) k;
     return v_id;
 end;
 $$;
 
+-- The endorser withdraws their own endorsement, once (§5). A retry converges on the first withdrawal -- its
+-- reason and time stand -- rather than failing or appending a second event for the same act.
 create or replace function research.withdraw_endorsement(p_endorsement uuid, p_reason text) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'endorse');
+    e      research.endorsements;
 begin
-    perform rbac.require('research', 'endorse');
-    update research.endorsements set withdrawn_at = now(), withdraw_reason = p_reason
-     where id = p_endorsement and endorser_id = rbac.current_user_id() and withdrawn_at is null;
+    select * into e from research.endorsements where id = p_endorsement and endorser_id = v_user for update;
     if not found then
-        raise no_data_found using message = 'Active endorsement not found';
+        raise no_data_found using message = 'Endorsement not found';
     end if;
+    if e.withdrawn_at is not null then
+        return;
+    end if;
+    update research.endorsements set withdrawn_at = now(), withdraw_reason = p_reason where id = e.id;
+    insert into research.endorsement_withdrawals (endorsement_id, withdrawn_by, reason, withdrawn_at)
+    values (e.id, v_user, p_reason, now());
 end;
+$$;
+
+-- WHAT A CORRECTION TOUCHES (§5): the endorsements of the revision this one corrects whose checked claims it
+-- removed or reworded. Listed, never transferred -- a corrected revision starts with no endorsements, and
+-- whoever endorsed the old claim decides whether to endorse the new one. Only claim-scoped endorsements can
+-- be affected by a claim; readable on the same terms as both revisions.
+create or replace function research.endorsements_affected_by(p_revision uuid)
+returns table(endorsement_id uuid, endorsed_revision text, claim_key text, change text)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select e.id, p.label, ec.claim_key,
+           case when c_new.claim_key is null then 'removed' else 'changed' end
+      from research.revisions r
+      join research.revisions p on p.id = r.predecessor_id
+      join research.endorsements e on e.revision_id = p.id
+      join research.endorsement_claims ec on ec.endorsement_id = e.id
+      join research.claims c_old on c_old.revision_id = p.id and c_old.claim_key = ec.claim_key
+      left join research.claims c_new on c_new.revision_id = r.id and c_new.claim_key = ec.claim_key
+     where r.id = p_revision
+       and research.revision_readable(r.id) and research.revision_readable(p.id)
+       and (c_new.claim_key is null or c_new.text is distinct from c_old.text or c_new.kind is distinct from c_old.kind)
+     order by e.created_at, ec.claim_key;
 $$;
 
 
@@ -29907,7 +29986,10 @@ begin
         'endorsements', coalesce((
             select jsonb_agg(jsonb_build_object(
                        'id', e.id, 'scope', e.scope, 'checked', e.checked, 'self', e.endorser_id = w.owner_id,
-                       'active', e.withdrawn_at is null, 'withdrawn_at', e.withdrawn_at, 'created_at', e.created_at)
+                       'active', e.withdrawn_at is null, 'withdrawn_at', e.withdrawn_at, 'created_at', e.created_at,
+                       'kind', e.kind,
+                       'claims', coalesce((select jsonb_agg(ec.claim_key order by ec.claim_key)
+                                             from research.endorsement_claims ec where ec.endorsement_id = e.id), '[]'::jsonb))
                    order by e.created_at)
               from research.endorsements e where e.revision_id = r.id), '[]'::jsonb),
         'corrections', jsonb_build_object(
@@ -30073,6 +30155,18 @@ grant select on rbac.grants, rbac.applications, rbac.scope_aliases, rbac.plans, 
                 rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
 grant select on research.works, research.revisions, research.heads, research.exposures, research.claims, research.sources,
                 research.citations, research.argument_edges, research.endorsements to authenticated;
+
+-- Checked claims are readable with their revision; a withdrawal event exactly when its endorsement is, asked
+-- under the caller's own row security on research.endorsements (REM-154).
+alter table research.endorsement_claims enable row level security;
+drop policy if exists endorsement_claims_readable on research.endorsement_claims;
+create policy endorsement_claims_readable on research.endorsement_claims for select
+    using (research.revision_readable(revision_id));
+alter table research.endorsement_withdrawals enable row level security;
+drop policy if exists endorsement_withdrawals_via_endorsement on research.endorsement_withdrawals;
+create policy endorsement_withdrawals_via_endorsement on research.endorsement_withdrawals for select
+    using (exists (select 1 from research.endorsements e where e.id = endorsement_withdrawals.endorsement_id));
+grant select on research.endorsement_claims, research.endorsement_withdrawals to authenticated;
 grant select on research.operations to authenticated;
 grant select on engagement.saves, engagement.follows, engagement.votes, engagement.valuations, engagement.comments,
                 engagement.comment_versions, engagement.comment_likes to authenticated;
@@ -30096,7 +30190,7 @@ grant execute on function
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
-    engagement.revision_signals(uuid), content.resolve_snapshot(uuid)
+    engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid)
 to authenticated;
 
 grant execute on function
@@ -30105,7 +30199,7 @@ grant execute on function
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
     research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
-    research.endorse(uuid, text, text), research.withdraw_endorsement(uuid, text),
+    research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
     engagement.add_comment(uuid, text, text), engagement.edit_comment(uuid, text, int),
@@ -30763,6 +30857,8 @@ declare
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
+        -- Checked claims and withdrawal events (REM-154).
+        'research.endorsement_claims', 'research.endorsement_withdrawals',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',
@@ -31375,6 +31471,8 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.works(id): which revision is current for each work'),
  ('research','exposures','natural',
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
+ ('research','endorsement_withdrawals','natural',
+  'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
  ('rbac','plan_assignments','natural',
   'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.
