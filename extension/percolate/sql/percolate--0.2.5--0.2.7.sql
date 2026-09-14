@@ -1,236 +1,5 @@
--- from specs/migrations/0.1.2--0.1.3.sql: the part of the 0.1.2 -> 0.1.3 hop
--- that a replay cannot express.
--- 0.1.2 -> 0.1.3: three words for finishing became one.
---
--- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else in
--- percolate--0.1.2--0.1.3.sql is the schema re-applied, which converges because
--- every statement in it can run twice. Rewriting rows cannot: the schema
--- describes the shape a table should have, never the values already in it.
---
--- `workflow.tasks` said 'done', `workflow.runs` said 'completed' and
--- `agentic.runs` said 'succeeded' -- one idea under three words, and because
--- both status constraints are named the same thing, the wrong vocabulary read
--- as right. 0.1.3 puts the words in one place (workflow.lifecycle_states) with
--- a foreign key from every status column into it.
---
--- ORDER MATTERS AND IS THE WHOLE FILE:
---
---   1. Drop the old CHECKs. They still say 'completed'/'done', so the UPDATE
---      below would violate the very constraint it exists to move past.
---   2. Rewrite the rows.
---   3. Let the replayed schema add the new CHECKs and the FKs into
---      lifecycle_states. Adding that FK to a table still holding a 'completed'
---      row fails, which would abort the upgrade rather than corrupt it -- loud,
---      but a database nobody can upgrade is still a database nobody can
---      upgrade.
---
--- Idempotent, like everything else here: the UPDATEs match nothing on a second
--- run, and the drops are `if exists`.
-alter table workflow.runs  drop constraint if exists runs_status_check;
-alter table workflow.tasks drop constraint if exists tasks_status_check;
-
-update workflow.runs  set status = 'succeeded' where status = 'completed';
-update workflow.tasks set status = 'succeeded' where status = 'done';
-
--- from specs/migrations/0.1.3--0.1.4.sql: the part of the 0.1.3 -> 0.1.4 hop
--- that a replay cannot express.
--- 0.1.3 -> 0.1.4: scope, and the one thing a replay cannot express.
---
--- Almost all of this upgrade IS the replay. `rbac.add_scope_columns()` adds the
--- columns, backfills existing rows from their org, and makes the column NOT
--- NULL, all in statements that converge on a second run -- so the migration
--- that in another codebase would live here lives in that function instead, next
--- to the ALTER TABLE it belongs to. That is deliberate and not a shortcut: a
--- delta file is PREPENDED to the replayed schema, so at the moment it runs the
--- `visibility` column does not exist yet on the database being upgraded and
--- there would be nothing to backfill into.
---
--- What is left is a rename, and specifically a rename that reaches a VIEW.
---
--- `agentic.sessions.user_id` is `owner_id` in 0.1.4, because every other owned
--- table in the collection spells it that way and `rbac.scope_predicate()` --
--- the single home of the read expression every scoped policy is generated from
--- -- names that column. One table spelling its owner differently would mean a
--- second variant of a security predicate there is deliberately only one of.
---
--- The table half of that rename is guarded inside agentic/schema.sql and
--- converges fine. The view half cannot be:
---
---     ERROR: cannot change name of view column "user_id" to "owner_id"
---
--- `create or replace view` may add columns at the end and may not rename or
--- reorder the ones that are there. So the view has to be DROPPED before the
--- replayed schema recreates it, and a drop is exactly the kind of statement
--- `build-sql.py` will not accept in a schema file, because it is not something
--- you want re-running on every install.
---
--- Found by `dev/upgrade-converges.sh`. Nothing else could have found it: a
--- fresh install creates the view and never replaces one, so the entire test
--- suite, the surface audit and the round-trip check all pass on a tree that
--- cannot be upgraded onto. It is the fourth defect in this change that only
--- that script sees -- the others were a column added mid-view, an ambiguous
--- function overload, and an index built on a column that had not been renamed
--- yet -- which is a strong argument for it running in CI rather than when
--- somebody remembers.
---
--- Idempotent: `if exists`, and the replayed schema recreates the view,
--- re-transfers it to api_viewer and re-grants it a few hundred lines later.
-drop view if exists agentic.sessions_api;
-
--- ------------------------------------------------------------
--- THE OLD POLICIES, AND WHY THIS HALF IS A SECURITY FIX RATHER THAN TIDYING.
---
--- Every scoped table's policy is now GENERATED and named `<table>_scoped`. The
--- policies it replaces had different names -- `nodes_org_scoped`,
--- `runs_owner_or_permitted`, `agents_are_shared_config` -- so the replayed
--- schema creates the new one and leaves the old one exactly where it was.
---
--- MULTIPLE PERMISSIVE POLICIES ON ONE TABLE ARE OR'ED. A leftover
--- `using (org_id is null or org_id in (select aiq.current_org_ids()))` does not
--- sit there inertly next to the new predicate: it ADDS BACK every row the new
--- one was written to withhold. On an upgraded database the whole change would
--- have been a no-op in the permissive direction -- a null org would still
--- mean "every tenant reads this", which is the conflation this release exists
--- to end, and `agents_are_shared_config` would still be a literal `true`.
---
--- A fresh install has none of this and passes every check. This is the same
--- shape as the `request_password_reset` grant that 0.1.3 "fixed" by deleting a
--- line: correct for installs that never had the problem, unchanged for every
--- database that did. `dev/upgrade-converges.sh` is the only thing in the
--- repository that can see it, and it saw it.
---
--- Dropped rather than renamed, because the new policy is not a rename of the
--- old one -- it is a different predicate over different columns.
-drop policy if exists nodes_org_scoped            on aiq.nodes;
-drop policy if exists soft_nodes_org_scoped       on aiq.soft_nodes;
-drop policy if exists lake_nodes_org_scoped       on aiq.lake_nodes;
-drop policy if exists channels_org_scoped         on content.channels;
-drop policy if exists resources_org_scoped        on content.resources;
-drop policy if exists datasets_org_scoped         on content.datasets;
-drop policy if exists runs_owner_or_permitted     on workflow.runs;
-drop policy if exists schedules_owner_or_permitted on workflow.schedules;
-drop policy if exists sessions_owner              on agentic.sessions;
-drop policy if exists runs_owner                  on agentic.runs;
-drop policy if exists agents_are_shared_config       on agentic.agents;
-drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
-drop policy if exists skills_are_shared_config       on agentic.skills;
-drop policy if exists plugins_are_shared_config      on agentic.plugins;
--- trace-field's two are not listed: workflow.deposits and workflow.anchors ship
--- in no released version (build-sql.py's NOT_SHIPPED), so no database being
--- upgraded has them.
-
--- ------------------------------------------------------------
--- THE RETIRED FUNCTIONS. Same reasoning, lower stakes: nothing calls them once
--- the policies above are gone, but leaving them is leaving a second answer to
--- "which orgs is this caller in" -- one that reads the JWT array and never
--- consults rbac.org_members. dev/tests/rbac/02 asserts no policy still names
--- them; this is what makes that assertion true on an upgraded database rather
--- than only on a fresh one.
-drop function if exists aiq.current_org_ids();
-drop function if exists content.may_access_org(uuid);
-
--- ------------------------------------------------------------
--- THE RENAME'S LEFTOVERS. `alter table ... rename column` carries the column's
--- indexes and constraints along with it and does NOT rename them, so an
--- upgraded database ends up with `sessions_user_id_created_at_idx` and
--- `sessions_user_id_not_null` describing a column called owner_id. Harmless to
--- query and wrong to read, and enough to make a fresh install and an upgraded
--- one different databases -- which is the property this whole file exists to
--- preserve.
-alter index if exists agentic.sessions_user_id_created_at_idx
-    rename to sessions_owner_id_created_at_idx;
-do $$
-begin
-    if exists (select 1 from pg_constraint
-                where conrelid = 'agentic.sessions'::regclass
-                  and conname = 'sessions_user_id_not_null') then
-        alter table agentic.sessions
-            rename constraint sessions_user_id_not_null to sessions_owner_id_not_null;
-    end if;
-end $$;
-
--- from specs/migrations/0.1.6--0.2.0.sql: the part of the 0.1.6 -> 0.2.0 hop
--- that a replay cannot express.
--- 0.1.6 -> 0.2.0: the graph learns to forget on purpose.
---
--- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else is the
--- schema re-applied, which converges because every statement in it runs twice.
--- `create table if not exists` cannot narrow a column that already exists: an
--- existing database's `aiq.edges.valid_from` is nullable with no default and
--- full of nulls, and nothing in the replayed schema will change that.
---
--- WHY IT HAS TO CHANGE. `aiq.edges` has been bitemporal since it was written --
--- `valid_from` and `valid_to` are both in the original CREATE -- and neither
--- was ever populated. Across 9,502 edges in the dogfood instance the retraction
--- rate was exactly 0.00% and every single `valid_from` was null. The pair was
--- decorative.
---
--- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
--- running the model in its known-broken state: an append-only knowledge graph
--- has no depression term, and retraction is the balance condition the capacity
--- result depends on. §14 turns it into a test -- if the retraction rate is
--- zero, the condition is violated -- and ours was zero for the most banal
--- possible reason, which is that the derivation DELETEd what it could no longer
--- derive. A graph that forgets by deletion does not forget slowly; it forgets
--- completely, leaving nothing to audit and nothing downstream able to tell
--- that a relationship was once asserted.
---
--- ORDER MATTERS:
---
---   1. Backfill from `created_at`. It is when the row was first written, which
---      is exactly when the edge was first asserted, and it is already correct
---      for every historical row. Using now() here instead produces edges
---      asserted after they were retracted -- measured, on the first attempt.
---   2. Then the default, so every future writer dates itself.
---   3. Then NOT NULL, which can only be added once no nulls remain.
---
--- Idempotent: the UPDATE matches nothing on a second run, and both ALTERs are
--- no-ops once applied.
---
--- NO `set role` HERE, and the omission is deliberate rather than an oversight.
--- This file is PREPENDED to the upgrade script, which loads as app_owner and
--- refuses to load as a superuser at all. A `set role app_owner; ... reset role;`
--- pair looks harmless and is not: `reset role` drops the session back to the
--- superuser it started as, and every statement in the 10,000 lines that follow
--- then runs as one -- which the schema's own guard catches and refuses, having
--- been written for exactly that mistake. Neither existing migration sets a
--- role; this one inherits the caller's, like they do.
-
-update aiq.edges set valid_from = created_at where valid_from is null;
-alter table aiq.edges alter column valid_from set default now();
-alter table aiq.edges alter column valid_from set not null;
-
--- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
--- if not exists` cannot add a column to a table that already exists, and an
--- upgraded database would carry the schema without them.
---
--- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
--- an upgrade creates it fresh from the replayed schema, with the full column
--- list. A database that already had it would need a DROP, since a view cannot
--- be widened by `create or replace`.
-alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
-alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
-alter table aiq.edges add column if not exists last_recalled_at timestamptz;
-
--- content.resolve_file AND workflow.v_artifacts, both reshaped in 0.2.0
--- (2d54769): resolve_file gained a trailing `checksum` column, and a changed
--- return type cannot be `create or replace`d; v_artifacts changed its query
--- shape and now reads resolve_file. The drops are needed only by a database
--- still carrying the 0.1.x shapes, so they live HERE and not in the replayed
--- body -- where they were until the first bump past 0.2.0 replayed them onto
--- a database whose v_artifacts already depends on resolve_file, and
--- `cannot drop function content.resolve_file(uuid) because other objects
--- depend on it` stopped the upgrade. dev/upgrade-converges.sh FROM=self is the
--- gate that refuses the next one.
---
--- The view first: on a 0.1.x database nothing depends on either, and on any
--- database where the view already reads the function this order is the one
--- that works. The body recreates both, owned and granted as it says.
-drop view if exists workflow.v_artifacts;
-drop function if exists content.resolve_file(uuid);
-
 -- ============================================================
--- percolate 0.2.6 -- the whole schema, as one extension script.
+-- percolate 0.2.7 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -28814,9 +28583,14 @@ select aiq.register_schema_example('lake', 'lake-aggregate', 'p8ql',
 -- human_only: an agent or a platform job is refused even with a grant.
 -- every_person: any active person holds it without a role (reading and
 -- writing their own research); roles still decide everything else.
+-- delegable: a human_only kind a person may hand to one of their own
+-- credentials, in one org, through rbac.delegate. A live delegation is the only
+-- thing that lets an agent past human_only, and it never stands in for the
+-- person's grant (agents-and-workflows.md, "Delegated publication").
 
 alter table rbac.permission_kinds add column if not exists human_only boolean not null default false;
 alter table rbac.permission_kinds add column if not exists every_person boolean not null default false;
+alter table rbac.permission_kinds add column if not exists delegable boolean not null default false;
 
 insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person) values
     ('research',   'select',   'function research.get_package',          false, true),
@@ -28831,6 +28605,13 @@ on conflict (resource, action) do update
     set checked_by = excluded.checked_by,
         human_only = excluded.human_only,
         every_person = excluded.every_person;
+-- Publishing is the one core kind a person may delegate. Endorsing, commenting and moderating are not.
+update rbac.permission_kinds set delegable = true
+ where resource = 'research' and action = 'publish' and not delegable;
+-- Only something a person must do needs delegating; delegable on any other kind would be a grant by another name.
+alter table rbac.permission_kinds drop constraint if exists permission_kinds_delegable_is_human_only;
+alter table rbac.permission_kinds add constraint permission_kinds_delegable_is_human_only
+    check (not delegable or human_only);
 
 -- The ledger behind user_roles: who granted a role, on what basis, and how it
 -- ended. user_roles stays the effective set every existing policy reads;
@@ -28877,6 +28658,26 @@ select ur.user_id, ur.role, 'installation'
   from rbac.user_roles ur
  where not exists (select 1 from rbac.grants g
                     where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
+-- A DELEGATION: one person hands one delegable capability to one of their own credentials, in one org. The row is
+-- the record of who gave it, to which credential, when, and how it ended. rbac.delegate writes it,
+-- rbac.revoke_delegation ends it, and rbac.decision reads it. Revoking the credential ends every use of it.
+create table if not exists rbac.delegations (
+    id            uuid primary key default uuidv7(),
+    credential_id uuid not null references rbac.api_keys(id) on delete cascade,
+    user_id       uuid not null references rbac.users(id) on delete cascade,
+    resource      text not null,
+    action        text not null,
+    org_id        uuid not null references rbac.orgs(id) on delete cascade,
+    created_at    timestamptz not null default now(),
+    revoked_at    timestamptz,
+    revoke_reason text,
+    constraint delegations_revocation_says_why check ((revoked_at is null) = (revoke_reason is null)),
+    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
+);
+create unique index if not exists delegations_one_live on rbac.delegations (credential_id, resource, action, org_id)
+    where revoked_at is null;
+select rbac.adopt_shared_org('rbac.delegations');
 
 -- An application (the writing hub) declares its own qualified capabilities.
 create table if not exists rbac.applications (
@@ -28938,21 +28739,32 @@ revoke execute on function rbac.grant_application_applies(text, text) from publi
 -- THE decision. Every protected operation below asks it, and the access
 -- snapshot reports it, so the two cannot disagree. Order of refusal:
 -- unknown capability, anonymous, inactive, human-only, credential, grant.
-create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
+--
+-- p_org is the one org a delegation may be held in: rbac.decide passes the org its claims are narrowed to, and
+-- rbac.decide_in_org passes the org it decides in. A live delegation of this kind to this credential in that org
+-- lets the agent past human_only and stands for the scope; the credential must still be live, and the person's
+-- grant is still asked below. Internal: rbac.decide and rbac.decide_in_org are its only callers.
+create or replace function rbac.decision(p_resource text, p_action text, p_org uuid) returns jsonb
+language plpgsql stable set search_path = pg_catalog, public as $$
 declare
-    v_user   uuid := rbac.current_user_id();
-    v_key    uuid := rbac.current_credential_id();
-    v_kind   rbac.permission_kinds;
-    v_scopes text[];
-    v_reason text;
+    v_user      uuid := rbac.current_user_id();
+    v_key       uuid := rbac.current_credential_id();
+    v_kind      rbac.permission_kinds;
+    v_delegated boolean;
+    v_scopes    text[];
+    v_reason    text;
 begin
     select * into v_kind from rbac.permission_kinds where resource = p_resource and action = p_action;
+    v_delegated := coalesce(v_kind.delegable, false) and v_key is not null and p_org is not null
+        and rbac.current_actor() = 'agent' and exists (
+            select 1 from rbac.delegations d
+             where d.credential_id = v_key and d.user_id = v_user and d.resource = p_resource
+               and d.action = p_action and d.org_id = p_org and d.revoked_at is null);
     v_reason := case
-        when not found then 'unknown_capability'
+        when v_kind.resource is null then 'unknown_capability'
         when v_user is null then 'anonymous'
         when not exists (select 1 from rbac.users where id = v_user and status = 'active') then 'inactive'
-        when v_kind.human_only and rbac.current_actor() <> 'person' then 'human_only'
+        when v_kind.human_only and rbac.current_actor() <> 'person' and not v_delegated then 'human_only'
         when rbac.request_claims() ? 'api_key_id' and v_key is null then 'credential_invalid'
         when rbac.current_actor() = 'agent' and v_key is null then 'credential_required'
     end;
@@ -28961,7 +28773,7 @@ begin
          where id = v_key and user_id = v_user and revoked_at is null;
         if not found then
             v_reason := 'credential_revoked';
-        elsif not (p_resource || ':' || p_action = any (v_scopes)
+        elsif not (v_delegated or p_resource || ':' || p_action = any (v_scopes)
                    or exists (select 1 from rbac.scope_aliases a
                                where a.scope = any (v_scopes) and a.resource = p_resource and a.action = p_action)) then
             v_reason := 'scope_missing';
@@ -28985,6 +28797,18 @@ begin
     end if;
     return jsonb_build_object('resource', p_resource, 'action', p_action,
                               'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
+end;
+$$;
+revoke execute on function rbac.decision(text, text, uuid) from public;
+
+create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v_org text := rbac.request_claims()->>'org_id';
+begin
+    return rbac.decision(p_resource, p_action,
+        case when v_org ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  and rbac.current_user_id() is not null then v_org::uuid end);
 end;
 $$;
 
@@ -29011,11 +28835,12 @@ $$;
 -- alone: one shared-org hub.publication:publish grant would open every publication (REM-249), so an application
 -- had to add its own org-only query beside every such call. This asks decide's person, credential and scope checks
 -- unchanged, then counts only an active grant held in p_org, and only for a member of p_org. A capability every
--- person holds is not a grant, and passes for any member. rbac.decide itself does not change.
+-- person holds is not a grant, and passes for any member. rbac.decide itself does not change. A delegation counts
+-- here only when it is held in p_org, whatever org the claims name.
 create or replace function rbac.decide_in_org(p_resource text, p_action text, p_org uuid) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$
 declare
-    v        jsonb := rbac.decide(p_resource, p_action);
+    v        jsonb := rbac.decision(p_resource, p_action, p_org);
     v_user   uuid := rbac.current_user_id();
     v_every  boolean;
     v_reason text;
@@ -29046,6 +28871,59 @@ $$;
 create or replace function rbac.may_in_org(p_resource text, p_action text, p_org uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
     select (rbac.decide_in_org(p_resource, p_action, p_org)->>'allowed')::boolean;
+$$;
+
+-- A PERSON HANDS ONE HUMAN-ONLY CAPABILITY TO ONE OF THEIR OWN CREDENTIALS, IN ONE ORG. Only a person, never the
+-- agent it is for. The kind must be delegable, the credential the caller's own and live, and the caller allowed
+-- the capability in that org now, so a delegation never reaches further than the grant behind it; rbac.decision
+-- asks that grant again on every use. Returns the live delegation; asking again returns the same one.
+create or replace function rbac.delegate(p_credential uuid, p_resource text, p_action text, p_org uuid) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user     uuid := rbac.current_user_id();
+    v_decision jsonb;
+    v_id       uuid;
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person delegates', hint = 'human_only';
+    end if;
+    if not exists (select 1 from rbac.permission_kinds
+                    where resource = p_resource and action = p_action and delegable) then
+        raise insufficient_privilege using message = 'This capability cannot be delegated', hint = 'not_delegable';
+    end if;
+    if not exists (select 1 from rbac.api_keys where id = p_credential and user_id = v_user and revoked_at is null) then
+        raise no_data_found using message = 'Credential not found';
+    end if;
+    v_decision := rbac.decide_in_org(p_resource, p_action, p_org);
+    if not (v_decision->>'allowed')::boolean then
+        raise insufficient_privilege using message = 'A delegation needs the capability in that org',
+                                           hint = v_decision->>'reason';
+    end if;
+    insert into rbac.delegations (credential_id, user_id, resource, action, org_id)
+    values (p_credential, v_user, p_resource, p_action, p_org)
+    on conflict (credential_id, resource, action, org_id) where revoked_at is null do nothing
+    returning id into v_id;
+    return coalesce(v_id, (select id from rbac.delegations
+                            where credential_id = p_credential and resource = p_resource and action = p_action
+                              and org_id = p_org and revoked_at is null));
+end;
+$$;
+
+-- A person ends a delegation they gave, with a reason. The credential keeps everything else it may do. True when a
+-- live delegation ended; somebody else's is not found.
+create or replace function rbac.revoke_delegation(p_delegation uuid, p_reason text) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person revokes a delegation', hint = 'human_only';
+    end if;
+    if coalesce(p_reason, '') = '' then
+        raise invalid_parameter_value using message = 'A revocation says why';
+    end if;
+    update rbac.delegations set revoked_at = now(), revoke_reason = p_reason
+     where id = p_delegation and user_id = rbac.current_user_id() and revoked_at is null;
+    return found;
+end;
 $$;
 
 create or replace function rbac.grant_with_basis(
@@ -29108,13 +28986,15 @@ begin
     insert into rbac.applications (name, version) values (p_name, p_version)
     on conflict (name) do update set version = excluded.version, declared_at = now();
     for c in select value from jsonb_array_elements(coalesce(p_capabilities, '[]'::jsonb)) loop
-        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person)
+        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person, delegable)
         values (p_name || '.' || (c->>'resource'), c->>'action', 'application ' || p_name,
-                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false))
+                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false),
+                coalesce((c->>'delegable')::boolean, false))
         on conflict (resource, action) do update
             set checked_by = excluded.checked_by,
                 human_only = excluded.human_only,
-                every_person = excluded.every_person;
+                every_person = excluded.every_person,
+                delegable = excluded.delegable;
     end loop;
 end;
 $$;
@@ -29652,9 +29532,12 @@ create table if not exists research.publication_exposures (
     publication text not null check (publication ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
     org_id      uuid not null references rbac.orgs(id) on delete cascade,
     exposed_by  uuid references rbac.users(id),
+    exposed_via uuid references rbac.api_keys(id) on delete set null,
     exposed_at  timestamptz not null default now(),
     primary key (revision_id, publication)
 );
+-- exposed_via: the credential that acted, when an agent published through a delegation; null when the person did.
+alter table research.publication_exposures add column if not exists exposed_via uuid references rbac.api_keys(id) on delete set null;
 create index if not exists publication_exposures_by_work on research.publication_exposures (work_id);
 -- Every org_id column defaults to the shared org (specs/identity/spec.md). The functions below always name the
 -- publication's org, and rbac.decide_in_org refuses the shared org, so the default is never what a row holds.
@@ -30141,8 +30024,8 @@ begin
     if v_rev is null then
         raise no_data_found using message = 'Research revision not found';
     end if;
-    insert into research.publication_exposures (revision_id, work_id, publication, org_id, exposed_by)
-    values (v_rev, w.id, p_publication, p_org, v_user)
+    insert into research.publication_exposures (revision_id, work_id, publication, org_id, exposed_by, exposed_via)
+    values (v_rev, w.id, p_publication, p_org, v_user, rbac.current_credential_id())
     on conflict (revision_id, publication) do nothing;
     select * into v_row from research.publication_exposures where revision_id = v_rev and publication = p_publication;
     if v_row.org_id <> p_org then
@@ -30645,6 +30528,11 @@ drop policy if exists grants_self_or_admin on rbac.grants;
 create policy grants_self_or_admin on rbac.grants for select
     using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
 
+alter table rbac.delegations enable row level security;
+drop policy if exists delegations_self_or_admin on rbac.delegations;
+create policy delegations_self_or_admin on rbac.delegations for select
+    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
+
 alter table rbac.plan_assignments enable row level security;
 drop policy if exists plan_assignments_self on rbac.plan_assignments;
 create policy plan_assignments_self on rbac.plan_assignments for select using (user_id = rbac.current_user_id());
@@ -30806,7 +30694,7 @@ create policy comment_likes_self on engagement.comment_likes for select
 -- Signed-in callers only. No definer here is granted to web_anon (rbac/04);
 -- an anonymous reader reaches listed research through an application.
 grant usage on schema research, engagement to authenticated;
-grant select on rbac.grants, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
+grant select on rbac.grants, rbac.delegations, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
                 rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
 grant select on research.works, research.revisions, research.heads, research.exposures, research.publication_exposures,
                 research.claims, research.sources,

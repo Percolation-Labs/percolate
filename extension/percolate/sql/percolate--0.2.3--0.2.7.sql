@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.2.6 -- the whole schema, as one extension script.
+-- percolate 0.2.7 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -28583,9 +28583,14 @@ select aiq.register_schema_example('lake', 'lake-aggregate', 'p8ql',
 -- human_only: an agent or a platform job is refused even with a grant.
 -- every_person: any active person holds it without a role (reading and
 -- writing their own research); roles still decide everything else.
+-- delegable: a human_only kind a person may hand to one of their own
+-- credentials, in one org, through rbac.delegate. A live delegation is the only
+-- thing that lets an agent past human_only, and it never stands in for the
+-- person's grant (agents-and-workflows.md, "Delegated publication").
 
 alter table rbac.permission_kinds add column if not exists human_only boolean not null default false;
 alter table rbac.permission_kinds add column if not exists every_person boolean not null default false;
+alter table rbac.permission_kinds add column if not exists delegable boolean not null default false;
 
 insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person) values
     ('research',   'select',   'function research.get_package',          false, true),
@@ -28600,6 +28605,13 @@ on conflict (resource, action) do update
     set checked_by = excluded.checked_by,
         human_only = excluded.human_only,
         every_person = excluded.every_person;
+-- Publishing is the one core kind a person may delegate. Endorsing, commenting and moderating are not.
+update rbac.permission_kinds set delegable = true
+ where resource = 'research' and action = 'publish' and not delegable;
+-- Only something a person must do needs delegating; delegable on any other kind would be a grant by another name.
+alter table rbac.permission_kinds drop constraint if exists permission_kinds_delegable_is_human_only;
+alter table rbac.permission_kinds add constraint permission_kinds_delegable_is_human_only
+    check (not delegable or human_only);
 
 -- The ledger behind user_roles: who granted a role, on what basis, and how it
 -- ended. user_roles stays the effective set every existing policy reads;
@@ -28646,6 +28658,26 @@ select ur.user_id, ur.role, 'installation'
   from rbac.user_roles ur
  where not exists (select 1 from rbac.grants g
                     where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
+-- A DELEGATION: one person hands one delegable capability to one of their own credentials, in one org. The row is
+-- the record of who gave it, to which credential, when, and how it ended. rbac.delegate writes it,
+-- rbac.revoke_delegation ends it, and rbac.decision reads it. Revoking the credential ends every use of it.
+create table if not exists rbac.delegations (
+    id            uuid primary key default uuidv7(),
+    credential_id uuid not null references rbac.api_keys(id) on delete cascade,
+    user_id       uuid not null references rbac.users(id) on delete cascade,
+    resource      text not null,
+    action        text not null,
+    org_id        uuid not null references rbac.orgs(id) on delete cascade,
+    created_at    timestamptz not null default now(),
+    revoked_at    timestamptz,
+    revoke_reason text,
+    constraint delegations_revocation_says_why check ((revoked_at is null) = (revoke_reason is null)),
+    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
+);
+create unique index if not exists delegations_one_live on rbac.delegations (credential_id, resource, action, org_id)
+    where revoked_at is null;
+select rbac.adopt_shared_org('rbac.delegations');
 
 -- An application (the writing hub) declares its own qualified capabilities.
 create table if not exists rbac.applications (
@@ -28707,21 +28739,32 @@ revoke execute on function rbac.grant_application_applies(text, text) from publi
 -- THE decision. Every protected operation below asks it, and the access
 -- snapshot reports it, so the two cannot disagree. Order of refusal:
 -- unknown capability, anonymous, inactive, human-only, credential, grant.
-create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
+--
+-- p_org is the one org a delegation may be held in: rbac.decide passes the org its claims are narrowed to, and
+-- rbac.decide_in_org passes the org it decides in. A live delegation of this kind to this credential in that org
+-- lets the agent past human_only and stands for the scope; the credential must still be live, and the person's
+-- grant is still asked below. Internal: rbac.decide and rbac.decide_in_org are its only callers.
+create or replace function rbac.decision(p_resource text, p_action text, p_org uuid) returns jsonb
+language plpgsql stable set search_path = pg_catalog, public as $$
 declare
-    v_user   uuid := rbac.current_user_id();
-    v_key    uuid := rbac.current_credential_id();
-    v_kind   rbac.permission_kinds;
-    v_scopes text[];
-    v_reason text;
+    v_user      uuid := rbac.current_user_id();
+    v_key       uuid := rbac.current_credential_id();
+    v_kind      rbac.permission_kinds;
+    v_delegated boolean;
+    v_scopes    text[];
+    v_reason    text;
 begin
     select * into v_kind from rbac.permission_kinds where resource = p_resource and action = p_action;
+    v_delegated := coalesce(v_kind.delegable, false) and v_key is not null and p_org is not null
+        and rbac.current_actor() = 'agent' and exists (
+            select 1 from rbac.delegations d
+             where d.credential_id = v_key and d.user_id = v_user and d.resource = p_resource
+               and d.action = p_action and d.org_id = p_org and d.revoked_at is null);
     v_reason := case
-        when not found then 'unknown_capability'
+        when v_kind.resource is null then 'unknown_capability'
         when v_user is null then 'anonymous'
         when not exists (select 1 from rbac.users where id = v_user and status = 'active') then 'inactive'
-        when v_kind.human_only and rbac.current_actor() <> 'person' then 'human_only'
+        when v_kind.human_only and rbac.current_actor() <> 'person' and not v_delegated then 'human_only'
         when rbac.request_claims() ? 'api_key_id' and v_key is null then 'credential_invalid'
         when rbac.current_actor() = 'agent' and v_key is null then 'credential_required'
     end;
@@ -28730,7 +28773,7 @@ begin
          where id = v_key and user_id = v_user and revoked_at is null;
         if not found then
             v_reason := 'credential_revoked';
-        elsif not (p_resource || ':' || p_action = any (v_scopes)
+        elsif not (v_delegated or p_resource || ':' || p_action = any (v_scopes)
                    or exists (select 1 from rbac.scope_aliases a
                                where a.scope = any (v_scopes) and a.resource = p_resource and a.action = p_action)) then
             v_reason := 'scope_missing';
@@ -28754,6 +28797,18 @@ begin
     end if;
     return jsonb_build_object('resource', p_resource, 'action', p_action,
                               'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
+end;
+$$;
+revoke execute on function rbac.decision(text, text, uuid) from public;
+
+create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v_org text := rbac.request_claims()->>'org_id';
+begin
+    return rbac.decision(p_resource, p_action,
+        case when v_org ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  and rbac.current_user_id() is not null then v_org::uuid end);
 end;
 $$;
 
@@ -28780,11 +28835,12 @@ $$;
 -- alone: one shared-org hub.publication:publish grant would open every publication (REM-249), so an application
 -- had to add its own org-only query beside every such call. This asks decide's person, credential and scope checks
 -- unchanged, then counts only an active grant held in p_org, and only for a member of p_org. A capability every
--- person holds is not a grant, and passes for any member. rbac.decide itself does not change.
+-- person holds is not a grant, and passes for any member. rbac.decide itself does not change. A delegation counts
+-- here only when it is held in p_org, whatever org the claims name.
 create or replace function rbac.decide_in_org(p_resource text, p_action text, p_org uuid) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$
 declare
-    v        jsonb := rbac.decide(p_resource, p_action);
+    v        jsonb := rbac.decision(p_resource, p_action, p_org);
     v_user   uuid := rbac.current_user_id();
     v_every  boolean;
     v_reason text;
@@ -28815,6 +28871,59 @@ $$;
 create or replace function rbac.may_in_org(p_resource text, p_action text, p_org uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
     select (rbac.decide_in_org(p_resource, p_action, p_org)->>'allowed')::boolean;
+$$;
+
+-- A PERSON HANDS ONE HUMAN-ONLY CAPABILITY TO ONE OF THEIR OWN CREDENTIALS, IN ONE ORG. Only a person, never the
+-- agent it is for. The kind must be delegable, the credential the caller's own and live, and the caller allowed
+-- the capability in that org now, so a delegation never reaches further than the grant behind it; rbac.decision
+-- asks that grant again on every use. Returns the live delegation; asking again returns the same one.
+create or replace function rbac.delegate(p_credential uuid, p_resource text, p_action text, p_org uuid) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user     uuid := rbac.current_user_id();
+    v_decision jsonb;
+    v_id       uuid;
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person delegates', hint = 'human_only';
+    end if;
+    if not exists (select 1 from rbac.permission_kinds
+                    where resource = p_resource and action = p_action and delegable) then
+        raise insufficient_privilege using message = 'This capability cannot be delegated', hint = 'not_delegable';
+    end if;
+    if not exists (select 1 from rbac.api_keys where id = p_credential and user_id = v_user and revoked_at is null) then
+        raise no_data_found using message = 'Credential not found';
+    end if;
+    v_decision := rbac.decide_in_org(p_resource, p_action, p_org);
+    if not (v_decision->>'allowed')::boolean then
+        raise insufficient_privilege using message = 'A delegation needs the capability in that org',
+                                           hint = v_decision->>'reason';
+    end if;
+    insert into rbac.delegations (credential_id, user_id, resource, action, org_id)
+    values (p_credential, v_user, p_resource, p_action, p_org)
+    on conflict (credential_id, resource, action, org_id) where revoked_at is null do nothing
+    returning id into v_id;
+    return coalesce(v_id, (select id from rbac.delegations
+                            where credential_id = p_credential and resource = p_resource and action = p_action
+                              and org_id = p_org and revoked_at is null));
+end;
+$$;
+
+-- A person ends a delegation they gave, with a reason. The credential keeps everything else it may do. True when a
+-- live delegation ended; somebody else's is not found.
+create or replace function rbac.revoke_delegation(p_delegation uuid, p_reason text) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person revokes a delegation', hint = 'human_only';
+    end if;
+    if coalesce(p_reason, '') = '' then
+        raise invalid_parameter_value using message = 'A revocation says why';
+    end if;
+    update rbac.delegations set revoked_at = now(), revoke_reason = p_reason
+     where id = p_delegation and user_id = rbac.current_user_id() and revoked_at is null;
+    return found;
+end;
 $$;
 
 create or replace function rbac.grant_with_basis(
@@ -28877,13 +28986,15 @@ begin
     insert into rbac.applications (name, version) values (p_name, p_version)
     on conflict (name) do update set version = excluded.version, declared_at = now();
     for c in select value from jsonb_array_elements(coalesce(p_capabilities, '[]'::jsonb)) loop
-        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person)
+        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person, delegable)
         values (p_name || '.' || (c->>'resource'), c->>'action', 'application ' || p_name,
-                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false))
+                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false),
+                coalesce((c->>'delegable')::boolean, false))
         on conflict (resource, action) do update
             set checked_by = excluded.checked_by,
                 human_only = excluded.human_only,
-                every_person = excluded.every_person;
+                every_person = excluded.every_person,
+                delegable = excluded.delegable;
     end loop;
 end;
 $$;
@@ -29421,9 +29532,12 @@ create table if not exists research.publication_exposures (
     publication text not null check (publication ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
     org_id      uuid not null references rbac.orgs(id) on delete cascade,
     exposed_by  uuid references rbac.users(id),
+    exposed_via uuid references rbac.api_keys(id) on delete set null,
     exposed_at  timestamptz not null default now(),
     primary key (revision_id, publication)
 );
+-- exposed_via: the credential that acted, when an agent published through a delegation; null when the person did.
+alter table research.publication_exposures add column if not exists exposed_via uuid references rbac.api_keys(id) on delete set null;
 create index if not exists publication_exposures_by_work on research.publication_exposures (work_id);
 -- Every org_id column defaults to the shared org (specs/identity/spec.md). The functions below always name the
 -- publication's org, and rbac.decide_in_org refuses the shared org, so the default is never what a row holds.
@@ -29910,8 +30024,8 @@ begin
     if v_rev is null then
         raise no_data_found using message = 'Research revision not found';
     end if;
-    insert into research.publication_exposures (revision_id, work_id, publication, org_id, exposed_by)
-    values (v_rev, w.id, p_publication, p_org, v_user)
+    insert into research.publication_exposures (revision_id, work_id, publication, org_id, exposed_by, exposed_via)
+    values (v_rev, w.id, p_publication, p_org, v_user, rbac.current_credential_id())
     on conflict (revision_id, publication) do nothing;
     select * into v_row from research.publication_exposures where revision_id = v_rev and publication = p_publication;
     if v_row.org_id <> p_org then
@@ -30414,6 +30528,11 @@ drop policy if exists grants_self_or_admin on rbac.grants;
 create policy grants_self_or_admin on rbac.grants for select
     using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
 
+alter table rbac.delegations enable row level security;
+drop policy if exists delegations_self_or_admin on rbac.delegations;
+create policy delegations_self_or_admin on rbac.delegations for select
+    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
+
 alter table rbac.plan_assignments enable row level security;
 drop policy if exists plan_assignments_self on rbac.plan_assignments;
 create policy plan_assignments_self on rbac.plan_assignments for select using (user_id = rbac.current_user_id());
@@ -30575,7 +30694,7 @@ create policy comment_likes_self on engagement.comment_likes for select
 -- Signed-in callers only. No definer here is granted to web_anon (rbac/04);
 -- an anonymous reader reaches listed research through an application.
 grant usage on schema research, engagement to authenticated;
-grant select on rbac.grants, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
+grant select on rbac.grants, rbac.delegations, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
                 rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
 grant select on research.works, research.revisions, research.heads, research.exposures, research.publication_exposures,
                 research.claims, research.sources,
