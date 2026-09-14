@@ -380,12 +380,33 @@ begin
     if p_amount is null or p_amount < 0 or coalesce(p_operation_id, '') = '' then
         raise invalid_parameter_value using message = 'A reservation needs an amount and an operation id';
     end if;
+    if p_ttl is null or p_ttl <= interval '0' then
+        raise invalid_parameter_value using message = 'A reservation needs a positive time to live';
+    end if;
     perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
     select * into held from rbac.usage_ledger
      where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
     if found then
-        return jsonb_build_object('reserved', held.state <> 'released', 'operation_id', p_operation_id,
-                                  'state', held.state, 'retry', true);
+        -- A retry keeps the operation's one row. Settled or returned, it holds nothing and must not run again.
+        if held.state in ('consumed', 'released') then
+            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true, 'reason', held.state);
+        end if;
+        if held.expires_at > now() then
+            return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true);
+        end if;
+        -- Expired (REM-189): limit_state no longer counts it, so its capacity may have gone to another
+        -- operation. Reacquire the recorded amount under this lock only if it is still there.
+        s := rbac.limit_state(v_user, p_kind);
+        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
+           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < held.amount) then
+            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true, 'reason', 'expired', 'limit', s);
+        end if;
+        update rbac.usage_ledger set expires_at = now() + p_ttl where id = held.id;
+        return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', 'reserved',
+                                  'retry', true, 'reacquired', true, 'limit', rbac.limit_state(v_user, p_kind));
     end if;
     s := rbac.limit_state(v_user, p_kind);
     if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean) then
@@ -403,16 +424,32 @@ $$;
 
 create or replace function rbac.consume_usage(p_kind text, p_operation_id text, p_actual bigint default null)
 returns jsonb language plpgsql volatile security definer set search_path = pg_catalog, public as $$
-declare v_user uuid := rbac.current_user_id(); row rbac.usage_ledger;
+declare v_user uuid := rbac.current_user_id(); row rbac.usage_ledger; s jsonb; v_amount bigint;
 begin
-    update rbac.usage_ledger set state = 'consumed', amount = coalesce(p_actual, amount)
-     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id and state = 'reserved'
-    returning * into row;
-    if not found then
-        select * into row from rbac.usage_ledger
-         where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
+    if v_user is not null then
+        perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
     end if;
-    return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount);
+    select * into row from rbac.usage_ledger
+     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
+    -- Settled or returned already: a settlement retry answers with the receipt it has.
+    if not found or row.state <> 'reserved' then
+        return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                                  'consumed', coalesce(row.state = 'consumed', false), 'retry', found);
+    end if;
+    v_amount := coalesce(p_actual, row.amount);
+    -- An expired reservation's capacity may have gone to another operation (REM-189): settle it only if
+    -- the amount is still there, so a late settlement cannot spend a budget twice.
+    if row.expires_at is null or row.expires_at <= now() then
+        s := rbac.limit_state(v_user, p_kind);
+        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
+           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < v_amount) then
+            return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                                      'consumed', false, 'reason', 'expired', 'limit', s);
+        end if;
+    end if;
+    update rbac.usage_ledger set state = 'consumed', amount = v_amount where id = row.id returning * into row;
+    return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                              'consumed', true);
 end;
 $$;
 
