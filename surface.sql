@@ -649,6 +649,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','function','rbac.current_actor','','architecture.md §2: person, agent or platform, from the trusted claims'),
 ('research-platform','function','rbac.current_credential_id','','architecture.md §2: the credential a call came through'),
 ('research-platform','function','rbac.decide','text,text','architecture.md §2: the one access decision, with its reason code'),
+('research-platform','function','rbac.decide_in_org','text,text,uuid','user-rbac spec: the decision in exactly one org, where a shared-org grant does not count (REM-255)'),
+('research-platform','function','rbac.may_in_org','text,text,uuid','user-rbac spec: the one-org decision as a boolean (REM-255)'),
 ('research-platform','function','rbac.grant_with_basis','uuid,text,text,text,text,uuid','architecture.md §2: a grant records granter, basis and evidence'),
 ('research-platform','function','rbac.has_quota_remaining','uuid,text','architecture.md §3: the runtime''s existing quota check, now defined'),
 ('research-platform','function','rbac.limit_state','uuid,text','architecture.md §3: unset, unlimited, finite or exhausted, for the caller only'),
