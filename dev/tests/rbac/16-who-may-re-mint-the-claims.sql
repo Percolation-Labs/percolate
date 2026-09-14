@@ -24,13 +24,13 @@
 -- writes and why, and the catalog is held to the list in both directions.
 --
 -- WHAT THE ANSWER IS TODAY, and it is the reason this gate is not also a fix.
--- `workflow.runs` carries `owner_id` and no claim set (integration-rbac.sql
--- :387 sets it from rbac.current_user_id()). So a narrowing does not survive
--- as far as execute_for to be dropped: it is already gone at start_workflow.
--- Whether a run SHOULD carry the claim set it was started with is a design
--- question that belongs in the spec, and REM-40 owns it. This file records the
--- current answer so that the fourth function cannot quietly give a different
--- one.
+-- `workflow.runs` carries `owner_id`, and since REM-171 the starter's actor and
+-- credential (`started_actor`, `started_credential_id`, set from the verified
+-- claims by set_run_owner), which execute_for mints back into every step -- so
+-- an agent's run keeps the agent's human-only refusals, scopes and revocation.
+-- It still carries no `orgs`, so an org narrowing is gone at start_workflow.
+-- This file records the current answer so that the fourth function cannot
+-- quietly give a different one.
 --
 -- Reads the catalog and rbac only; stages no spec file.
 \set ON_ERROR_STOP on
@@ -39,10 +39,11 @@ begin;
 
 create temp table t16_declared (fn text, writes text, why text) on commit drop;
 insert into t16_declared values
-('workflow.execute_for(uuid,text,boolean,jsonb)', 'sub, role',
- 'the run''s owner, for a step''s statement. Drops orgs: a run stores owner_id '
- 'and not the claim set it was started with, so there is no narrowing here to '
- 'carry. If runs ever carry claims (REM-40), this is the first line to change.'),
+('workflow.execute_for(uuid,text,boolean,jsonb)', 'sub, role, actor, api_key_id',
+ 'the run''s owner, for a step''s statement, with the actor and credential that '
+ 'started the run (REM-171), so rbac.decide narrows each step as it narrowed the '
+ 'starter. Drops orgs: a run stores owner_id and its starter, not the org '
+ 'narrowing of the claims it was started with.'),
 ('content.lake_resolve(uuid,text,text[])', 'sub',
  'the lake task''s owner, resolving dataset names as that person. Same reason '
  'as execute_for, one layer out: the scope comes from lake_task_scope(task), '

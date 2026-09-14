@@ -978,6 +978,10 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 
 ('workflow.runs_api', 'parent_task_id',   'internal', 'engine linkage; the parent/child relation is served by run_meta'),
 ('workflow.runs_api', 'cancel_requested', 'internal', 'engine flag; cancellation is an action, not a field to poll'),
+-- The key a run or schedule was started with (REM-171). execute_for narrows every step by it; the owner reads
+-- started_actor and created_actor, and an org member reading a shared run has no use for the owner's key id.
+('workflow.runs_api',      'started_credential_id', 'internal', 'the credential the run was started with; execute_for narrows each step by it, and a reader of a shared run has no use for the owner''s key id'),
+('workflow.schedules_api', 'created_credential_id', 'internal', 'the credential the schedule was created with, which tick hands to each run; the same argument as runs_api.started_credential_id'),
 
 -- tasks_api is the state a caller may see; everything else is the state machine.
 ('workflow.tasks_api', 'pending_deps',          'internal', 'scheduler bookkeeping'),

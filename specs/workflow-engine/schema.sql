@@ -3885,8 +3885,12 @@ begin
             -- run is unowned -- and assert_run_access correctly treats unowned
             -- as owned by nobody -- so a scheduled workflow that waits for
             -- approval could never be approved, by anyone.
+            -- REM-171: and the schedule's creator starts it, so an agent's schedule fires with the agent's
+            -- credential (workflow.keep_run_starter lets exactly this hand-over through).
             update workflow.runs
-               set owner_id = s.owner_id
+               set owner_id = s.owner_id,
+                   started_actor = s.created_actor,
+                   started_credential_id = s.created_credential_id
              where id = v_run_id and owner_id is null and s.owner_id is not null;
 
             update workflow.schedules

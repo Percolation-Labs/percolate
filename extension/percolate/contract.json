@@ -841,6 +841,19 @@
     },
     {
       "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "started_actor",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "running",
         "succeeded",
         "failed",
@@ -883,6 +896,19 @@
       "schema": "workflow",
       "table": "runs",
       "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "created_actor",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "workflow",
+      "table": "schedules",
+      "vocabulary": null
     },
     {
       "admits": [
@@ -993,7 +1019,7 @@
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.2.4",
+  "extension": "0.2.5",
   "types": [
     {
       "consumed_by": [

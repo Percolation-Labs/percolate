@@ -77,6 +77,16 @@ create policy tasks_via_run on workflow.tasks for select
 -- Reads go through views owned by api_viewer, NOT the table owner -- the
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
+-- WHO STARTED THE RUN, NOT ONLY WHOSE IT IS (REM-171). A person's agent starts runs with a narrowed credential,
+-- and execute_for minted only the owner's id, so every step of such a run ran as the person: a human-only
+-- capability passed, the credential's scopes did not narrow, and revoking the key did not stop the next step.
+-- The run keeps its starter from the verified claims and execute_for carries it into each step. Null on a run
+-- from before this, and on a system run: those keep the reach they always had. Added here, above runs_api,
+-- because the view publishes started_actor; set_run_owner (section e) fills both.
+alter table workflow.runs add column if not exists started_actor text
+    check (started_actor in ('person', 'agent', 'platform'));
+alter table workflow.runs add column if not exists started_credential_id uuid;
+
 create or replace view workflow.runs_api as
 -- The scope columns are APPENDED rather than slotted in beside owner_id, and
 -- the position is forced rather than chosen: `create or replace view` may only
@@ -95,7 +105,10 @@ create or replace view workflow.runs_api as
          -- (browser-ui.md §3). A run without a readable definition still gets a
          -- row: the left join yields null, which the screen renders as the id,
          -- rather than dropping the run from the list.
-         d.name
+         d.name,
+         -- appended, not slotted in (see above): whether a person, their agent or the
+         -- platform started the run (REM-171). The credential it carried is not published.
+         r.started_actor
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
@@ -507,6 +520,9 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    -- From the claims, never from the row: whatever an insert names is replaced.
+    new.started_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.started_credential_id := rbac.current_credential_id();
 
     if rbac.is_shared_org(new.org_id) and new.workflow_def_id is not null then
         select d.org_id into v_def_org
@@ -526,6 +542,23 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
+
+-- The starter does not change after the insert. The one hand-over is tick's: a scheduled run is started with no
+-- claims and then given to the schedule's owner, and the schedule's creator travels with it in that same update.
+create or replace function workflow.keep_run_starter() returns trigger as $$
+begin
+    if old.owner_id is null and new.owner_id is not null then
+        return new;
+    end if;
+    new.started_actor := old.started_actor;
+    new.started_credential_id := old.started_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_run_starter
+    before update on workflow.runs
+    for each row execute function workflow.keep_run_starter();
 
 -- Ownership from the JWT, never from an argument -- the third instance of the
 -- shape set_run_owner() and set_schedule_owner() already use, and a trigger
@@ -930,14 +963,27 @@ create or replace function workflow.execute_for(
     p_user uuid, p_statement text, p_write boolean, p_params jsonb)
 returns jsonb as $$
 declare
-    v_prev text := current_setting('request.jwt.claims', true);
-    v_out  jsonb;
+    v_prev   text := current_setting('request.jwt.claims', true);
+    v_out    jsonb;
+    v_run    workflow.runs;
+    v_claims jsonb;
 begin
     if p_user is null then
         raise exception 'execute_for was given nobody to run as';
     end if;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    -- The step runs as its run's starter, not only its owner (REM-171): an agent's run carries the agent and its
+    -- credential, so rbac.decide refuses a human-only capability, a scope the key lacks and a key revoked since
+    -- the run began. Only the run being executed, and only when it is p_user's, lends its starter.
+    select * into v_run from workflow.runs
+     where id = nullif(current_setting('workflow.current_run_id', true), '')::uuid and owner_id = p_user;
+    v_claims := jsonb_build_object('sub', p_user, 'role', 'authenticated');
+    if v_run.started_actor in ('agent', 'platform') then
+        v_claims := v_claims || jsonb_build_object('actor', v_run.started_actor);
+    end if;
+    if v_run.started_credential_id is not null then
+        v_claims := v_claims || jsonb_build_object('api_key_id', v_run.started_credential_id);
+    end if;
+    perform set_config('request.jwt.claims', v_claims::text, true);
     begin
         v_out := workflow.execute_as_viewer(p_statement, p_write, p_params);
     exception when others then
@@ -1162,6 +1208,11 @@ grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticat
 
 alter table workflow.schedules add column if not exists owner_id uuid references rbac.users(id);
 create index if not exists idx_schedules_owner on workflow.schedules (owner_id);
+-- Who created the schedule, which tick hands to every run it starts (REM-171): an agent's schedule fires as the
+-- agent, not as the person it works for.
+alter table workflow.schedules add column if not exists created_actor text
+    check (created_actor in ('person', 'agent', 'platform'));
+alter table workflow.schedules add column if not exists created_credential_id uuid;
 
 -- Ownership from the JWT, never from an argument -- the same rule, and the
 -- same trigger shape, as runs above. schedule_workflow() therefore has no
@@ -1171,9 +1222,24 @@ begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+    new.created_actor := case when rbac.current_user_id() is not null then rbac.current_actor() end;
+    new.created_credential_id := rbac.current_credential_id();
     return new;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The creator does not change after the insert, whoever updates the schedule later.
+create or replace function workflow.keep_schedule_creator() returns trigger as $$
+begin
+    new.created_actor := old.created_actor;
+    new.created_credential_id := old.created_credential_id;
+    return new;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+create or replace trigger trg_keep_schedule_creator
+    before update on workflow.schedules
+    for each row execute function workflow.keep_schedule_creator();
 
 create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
@@ -1254,7 +1320,9 @@ create or replace view workflow.schedules_api as
          last_run_id, fire_count, skip_count, last_error, last_error_at,
          created_at, updated_at,
          -- appended, not slotted in: see runs_api above
-         visibility
+         visibility,
+         -- who created the schedule, which every run it starts carries (REM-171)
+         created_actor
   from workflow.schedules;
 
 grant select on workflow.schedules to api_viewer;
