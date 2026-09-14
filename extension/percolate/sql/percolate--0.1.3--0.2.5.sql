@@ -30043,6 +30043,16 @@ begin
         perform rbac.require('research', 'list');
     end if;
     if h.content_hash = v_hash then
+        -- LISTING AN UNCHANGED HEAD IS STILL A LISTING (REM-269). The owner's private working revision (or the head
+        -- of an unlisted work) keeps its exact text when the listing authority lists it. Returning here, before the
+        -- listing below, left that revision private while every reader kept the older one, so a correction could be
+        -- listed only by changing its text. No revision is created, and a replay adds no second exposure.
+        if v_listed and (w.visibility <> 'public'
+                         or not exists (select 1 from research.exposures e where e.revision_id = h.id)) then
+            update research.works set visibility = 'public', listed_at = coalesce(listed_at, now()) where id = w.id;
+            insert into research.exposures (revision_id, work_id, exposed_by) values (h.id, w.id, v_user)
+                on conflict (revision_id) do nothing;
+        end if;
         return research.receipt(h.id, false);
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,

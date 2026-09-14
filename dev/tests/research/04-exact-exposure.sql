@@ -168,6 +168,51 @@ end $$;
 reset role;
 
 
+-- 3b. Listing the owner's private working revision exactly as saved exposes it
+--     (REM-269): an unchanged head used to return before the listing, so the
+--     correction stayed private. It makes no new revision, and a replay adds no
+--     second exposure.
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000e0001"}';
+set local role authenticated;
+do $$
+declare
+    v_saved constant jsonb := '{"schema_version": "0.1", "title": "A correction listed as saved", "claims": [], "sources": [], "edges": [], "visibility": "listed"}';
+    r jsonb;
+begin
+    perform research.submit_package('{"schema_version": "0.1", "title": "The first public text", "claims": [], "sources": [], "edges": [], "visibility": "listed"}',
+                                    null, 'rp-exposure-identical');
+    r := research.revise_working('rp-exposure-identical', v_saved, 'draft-1');
+    assert r->>'revision' = 'draft-2' and not (r->>'exposed')::boolean, 'the correction starts as a private working revision';
+    r := research.revise_package('rp-exposure-identical', v_saved, 'draft-2');
+    assert r->>'revision' = 'draft-2', 'listing it unchanged names the same revision: ' || r::text;
+    assert not (r->>'created')::boolean, 'and creates none';
+    assert (r->>'exposed')::boolean and r->>'visibility' = 'listed', 'it is exposed and the work is listed: ' || r::text;
+    r := research.revise_package('rp-exposure-identical', v_saved, 'draft-2');
+    assert (r->>'exposed')::boolean and not (r->>'created')::boolean, 'a replay is the same exposed revision';
+end $$;
+reset role;
+
+do $$
+begin
+    assert (select count(*) from research.exposures e join research.revisions r on r.id = e.revision_id
+              join research.works w on w.id = r.work_id where w.public_id = 'rp-exposure-identical' and r.label = 'draft-2') = 1,
+        'a replayed listing adds no second exposure';
+end $$;
+
+set local request.jwt.claims = '{}';
+set local role authenticated;
+do $$
+begin
+    assert research.get_package('rp-exposure-identical')->>'revision' = 'draft-2', 'anybody now reads the listed correction';
+    assert research.get_package('rp-exposure-identical', 'draft-1')->>'title' = 'The first public text',
+        'and the earlier public revision still resolves';
+    assert research.trust((research.get_package('rp-exposure-identical', 'draft-1')->'receipt'->>'revision_id')::uuid)
+               ->'corrections'->'superseded_by' = '["draft-2"]'::jsonb,
+        'history names the correction that was listed unchanged';
+end $$;
+reset role;
+
+
 -- 4. Unlisting hides every exposed revision.
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000e0001"}';
 set local role authenticated;
