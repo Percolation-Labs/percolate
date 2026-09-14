@@ -45,6 +45,7 @@ silently.
 | 0.1.10 | `v0.1.10` | `3612268` | yes |
 | 0.1.11 | `v0.1.11` | `4d583e8` | yes |
 | 0.1.12 | `v0.1.12` | `c8e6878` | yes |
+| 0.1.13 | `v0.1.13` | `5e34fdb` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
