@@ -28591,6 +28591,7 @@ insert into rbac.permission_kinds (resource, action, checked_by, human_only, eve
     ('research',   'select',   'function research.get_package',          false, true),
     ('research',   'insert',   'function research.submit_package',       false, true),
     ('research',   'list',     'function research.submit_package',       false, false),
+    ('research',   'publish',  'function research.expose_for_publication', true, false),
     ('research',   'endorse',  'function research.endorse',              true,  true),
     ('engagement', 'select',   'policy saves_self',                      false, true),
     ('engagement', 'insert',   'function engagement.add_comment',        true,  true),
@@ -29406,6 +29407,28 @@ create table if not exists research.exposures (
 );
 create index if not exists exposures_by_work on research.exposures (work_id);
 
+-- A publication exposure says one exact revision may be read by anybody because
+-- its owner added it to one publication, in an org where they hold
+-- research:publish (authoring-and-publication.md §5, REM-252). It lists
+-- nothing: the work stays out of the marketplace, and its head and every other
+-- revision stay the owner's. It is kept apart from research.exposures so that
+-- listing and unlisting never touch it, and withdrawing it never touches them.
+-- The application keeps the entry (slug, author, decision); core keeps only
+-- that this revision is readable for that publication.
+create table if not exists research.publication_exposures (
+    revision_id uuid not null references research.revisions(id) on delete cascade,
+    work_id     uuid not null references research.works(id) on delete cascade,
+    publication text not null check (publication ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
+    org_id      uuid not null references rbac.orgs(id) on delete cascade,
+    exposed_by  uuid references rbac.users(id),
+    exposed_at  timestamptz not null default now(),
+    primary key (revision_id, publication)
+);
+create index if not exists publication_exposures_by_work on research.publication_exposures (work_id);
+-- Every org_id column defaults to the shared org (specs/identity/spec.md). The functions below always name the
+-- publication's org, and rbac.decide_in_org refuses the shared org, so the default is never what a row holds.
+select rbac.adopt_shared_org('research.publication_exposures');
+
 -- Before exposures existed, every revision of a public work was readable, so an
 -- upgrade exposes exactly those and changes nothing anybody could read. Only
 -- for a public work with no exposure at all: this file is replayed on every
@@ -29436,13 +29459,18 @@ language sql stable security definer set search_path = pg_catalog, public as $$
 $$;
 
 -- A revision is readable in full, or when its work is readable and this exact
--- revision was exposed. Every nested read -- claims, sources, citations, edges,
--- endorsements, comments, votes -- asks this, so it narrows with it.
+-- revision was exposed, or when its owner added this exact revision to a
+-- publication (REM-252), which needs no public work. Every nested read --
+-- claims, sources, citations, edges, endorsements, comments, votes -- asks
+-- this, so it narrows with it. visible_head and the listing do not: a
+-- publication exposure is reached by its exact revision, never found as a head.
 create or replace function research.revision_readable(p_revision uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
     select coalesce((select research.work_readable_in_full(r.work_id)
                             or (research.readable(r.work_id)
                                 and exists (select 1 from research.exposures e where e.revision_id = r.id))
+                            or ((rbac.current_user_id() is null or rbac.may('research', 'select'))
+                                and exists (select 1 from research.publication_exposures pe where pe.revision_id = r.id))
                        from research.revisions r where r.id = p_revision), false);
 $$;
 
@@ -29836,6 +29864,77 @@ begin
         insert into research.exposures (revision_id, work_id, exposed_by) values (v_rev, w.id, v_user);
     end if;
     return research.receipt(v_rev, true);
+end;
+$$;
+
+-- Add an exact revision of your own work to a publication (authoring-and-
+-- publication.md §5, REM-252). A person's own decision: an agent or a token is
+-- refused, and so is anybody without research:publish granted in the
+-- publication's org, where a grant held in the shared org does not count
+-- (rbac.decide_in_org, REM-255). The work need not be listed and is not listed
+-- by this. Somebody else's package is not found. Adding the same revision to
+-- the same publication again changes nothing; naming another org for it is a
+-- conflict.
+create or replace function research.expose_for_publication(p_public_id text, p_revision text, p_publication text,
+                                                            p_org uuid)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_decision jsonb := rbac.decide_in_org('research', 'publish', p_org);
+    v_user     uuid := rbac.current_user_id();
+    w          research.works;
+    v_rev      uuid;
+    v_row      research.publication_exposures;
+begin
+    if not coalesce((v_decision->>'allowed')::boolean, false) then
+        raise insufficient_privilege using message = 'Adding work to this publication needs research:publish in its org',
+                                           hint = coalesce(v_decision->>'reason', 'no_grant');
+    end if;
+    if coalesce(p_publication, '') !~ '^[a-z0-9][a-z0-9-]{0,62}$' then
+        raise invalid_parameter_value using message = 'A publication is named by a lower-case slug';
+    end if;
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    select r.id into v_rev from research.revisions r where r.work_id = w.id and r.label = p_revision;
+    if v_rev is null then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    insert into research.publication_exposures (revision_id, work_id, publication, org_id, exposed_by)
+    values (v_rev, w.id, p_publication, p_org, v_user)
+    on conflict (revision_id, publication) do nothing;
+    select * into v_row from research.publication_exposures where revision_id = v_rev and publication = p_publication;
+    if v_row.org_id <> p_org then
+        raise unique_violation using message = 'This revision is already in that publication under another org';
+    end if;
+    return jsonb_build_object('package_id', w.public_id, 'revision', p_revision, 'publication', p_publication,
+                              'org_id', v_row.org_id, 'exposed_at', v_row.exposed_at);
+end;
+$$;
+
+-- Take an exact revision of your own work out of a publication. Only the owner,
+-- as a person. No publish grant is needed, so losing one never traps work in a
+-- publication. True when something was removed; a listing is untouched.
+create or replace function research.withdraw_publication_exposure(p_public_id text, p_revision text,
+                                                                   p_publication text)
+returns boolean language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user  uuid := rbac.require('research', 'select');
+    w       research.works;
+    v_count int;
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person takes work out of a publication', hint = 'human_only';
+    end if;
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    delete from research.publication_exposures pe
+     using research.revisions r
+     where pe.revision_id = r.id and r.work_id = w.id and r.label = p_revision and pe.publication = p_publication;
+    get diagnostics v_count = row_count;
+    return v_count > 0;
 end;
 $$;
 
@@ -30288,7 +30387,7 @@ begin
                             where p.id = r.predecessor_id and research.revision_readable(p.id)),
             'superseded_by', coalesce((select jsonb_agg(s.label order by s.number) from research.revisions s
                                         where s.work_id = w.id and s.number > r.number
-                                          and (v_full or exists (select 1 from research.exposures e where e.revision_id = s.id))),
+                                          and (v_full or research.revision_readable(s.id))),
                                       '[]'::jsonb)),
         'engagement', engagement.revision_signals(r.id),
         'interpretations', jsonb_build_object('status', 'unavailable', 'reason', 'no analysis provider is configured'));
@@ -30322,6 +30421,13 @@ select rbac.add_scope_policy('research.works');
 drop policy if exists works_access on research.works;
 create policy works_access on research.works as restrictive for select
     using (rbac.current_user_id() is null or rbac.may('research', 'select'));
+-- A work with a revision in a publication is visible as a row, so that exact revision can be read joined to its work
+-- (REM-252). Only the row: its head stays hidden (heads_readable) and visible_head never returns a publication's
+-- revision, so the work is still absent from every listing. The subquery is under publication_exposures' own row
+-- security, which asks the definer research.revision_readable, so this cannot recurse into works.
+drop policy if exists works_in_a_publication on research.works;
+create policy works_in_a_publication on research.works for select
+    using (exists (select 1 from research.publication_exposures pe where pe.work_id = works.id));
 -- The same guard rbac.add_scope_columns() attaches: 'org' visibility needs a
 -- real org, whichever definer writes the row (rbac/02).
 create or replace trigger trg_works_visibility before insert or update on research.works
@@ -30390,6 +30496,11 @@ alter table research.exposures enable row level security;
 drop policy if exists exposures_readable on research.exposures;
 create policy exposures_readable on research.exposures for select using (research.readable(work_id));
 
+alter table research.publication_exposures enable row level security;
+drop policy if exists publication_exposures_readable on research.publication_exposures;
+create policy publication_exposures_readable on research.publication_exposures for select
+    using (research.revision_readable(revision_id));
+
 alter table research.operations enable row level security;
 drop policy if exists operations_owner on research.operations;
 create policy operations_owner on research.operations for select
@@ -30456,7 +30567,8 @@ create policy comment_likes_self on engagement.comment_likes for select
 grant usage on schema research, engagement to authenticated;
 grant select on rbac.grants, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
                 rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
-grant select on research.works, research.revisions, research.heads, research.exposures, research.claims, research.sources,
+grant select on research.works, research.revisions, research.heads, research.exposures, research.publication_exposures,
+                research.claims, research.sources,
                 research.citations, research.argument_edges, research.endorsements to authenticated;
 
 -- Checked claims are readable with their revision; a withdrawal event exactly when its endorsement is, asked
@@ -30503,6 +30615,7 @@ grant execute on function
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
     research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
+    research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     content.register_evidence(text, text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
@@ -30578,8 +30691,9 @@ end;
 $$;
 
 -- A role an application may hand out carries only application-qualified
--- capabilities (hub.*) or the two platform ones an application decides:
--- listing research and moderating comments. Anything else -- users:admin, a
+-- capabilities (hub.*) or the three platform ones an application decides:
+-- listing research, adding it to a publication (REM-252) and moderating
+-- comments. Anything else -- users:admin, a
 -- grants_all role -- is refused, so the provisioner cannot mint an administrator.
 create or replace function rbac.grant_application_role(p_user uuid, p_role text, p_resource text, p_action text,
                                                        p_basis text, p_evidence text, p_application text, p_org uuid)
@@ -30593,12 +30707,12 @@ begin
     if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
         raise invalid_parameter_value using message = 'A role name is a lower-case word';
     end if;
-    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('engagement', 'moderate'))) then
-        raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list or engagement:moderate';
+    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'))) then
+        raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list, research:publish or engagement:moderate';
     end if;
     if exists (select 1 from rbac.roles where name = p_role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = p_role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('engagement', 'moderate')))) then
+                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
         raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
     end if;
     perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
@@ -31160,6 +31274,8 @@ declare
         'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
+        -- Publication exposures (REM-252): which exact revisions their owners added to a publication.
+        'research.publication_exposures',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).

@@ -509,6 +509,8 @@ declare
         'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
+        -- Publication exposures (REM-252): which exact revisions their owners added to a publication.
+        'research.publication_exposures',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).
