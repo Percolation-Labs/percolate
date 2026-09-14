@@ -1,5 +1,5 @@
 comment = 'Percolate parsers: the query dialect and YAML workflow compiler'
-default_version = '0.2.3'
+default_version = '0.2.4'
 module_pathname = '$libdir/percolate_parser'
 relocatable = false
 # Superuser-installed, because it carries C-language functions. It creates no
