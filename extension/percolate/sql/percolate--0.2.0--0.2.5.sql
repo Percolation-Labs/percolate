@@ -28664,6 +28664,18 @@ language sql stable set search_path = pg_catalog, public as $$
     end;
 $$;
 
+-- WHICH APPLICATION'S GRANTS COUNT FOR A CAPABILITY: a platform grant, the calling application's own, or the
+-- application a qualified capability names (hub.publication -> hub). One copy, because rbac.decide and
+-- rbac.decide_in_org both ask it, and two copies of an authorization rule are how they come to disagree.
+-- Internal: nothing but those two calls it.
+create or replace function rbac.grant_application_applies(p_application text, p_resource text) returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select p_application = 'percolate'
+        or p_application = rbac.request_claims()->>'application'
+        or (position('.' in p_resource) > 0 and p_application = split_part(p_resource, '.', 1));
+$$;
+revoke execute on function rbac.grant_application_applies(text, text) from public;
+
 -- THE decision. Every protected operation below asks it, and the access
 -- snapshot reports it, so the two cannot disagree. Order of refusal:
 -- unknown capability, anonymous, inactive, human-only, credential, grant.
@@ -28704,9 +28716,7 @@ begin
            and exists (
                select 1 from rbac.grants g
                 where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
-                  and (g.application = 'percolate'
-                       or g.application = rbac.request_claims()->>'application'
-                       or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
+                  and rbac.grant_application_applies(g.application, p_resource)
                   and (g.org_id = rbac.shared_org_id()
                        or (g.org_id::text = rbac.request_claims()->>'org_id'
                            and g.org_id in (select rbac.current_org_ids())))
@@ -28735,6 +28745,48 @@ begin
     end if;
     return rbac.current_user_id();
 end;
+$$;
+
+-- A DECISION IN EXACTLY ONE ORG (REM-255). rbac.decide counts a grant held in the shared org inside any org's
+-- scope. That is right for what it answers, "may this caller do this", and wrong for a question about one org
+-- alone: one shared-org hub.publication:publish grant would open every publication (REM-249), so an application
+-- had to add its own org-only query beside every such call. This asks decide's person, credential and scope checks
+-- unchanged, then counts only an active grant held in p_org, and only for a member of p_org. A capability every
+-- person holds is not a grant, and passes for any member. rbac.decide itself does not change.
+create or replace function rbac.decide_in_org(p_resource text, p_action text, p_org uuid) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v        jsonb := rbac.decide(p_resource, p_action);
+    v_user   uuid := rbac.current_user_id();
+    v_every  boolean;
+    v_reason text;
+begin
+    -- Refused before the grant question (unknown, anonymous, inactive, human-only, credential): that answer stands.
+    if v->>'reason' not in ('allowed', 'no_grant') then
+        return v || jsonb_build_object('org_id', p_org);
+    end if;
+    select every_person into v_every from rbac.permission_kinds where resource = p_resource and action = p_action;
+    v_reason := case
+        when p_org is null or rbac.is_shared_org(p_org) then 'org_required'
+        when p_org not in (select rbac.current_org_ids()) then 'not_a_member'
+        when v_every then null
+        when exists (
+            select 1 from rbac.user_roles ur
+              join rbac.role_permissions rp on rp.role = ur.role
+              join rbac.grants g on g.user_id = ur.user_id and g.role = ur.role
+             where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
+               and g.revoked_at is null and g.org_id = p_org
+               and rbac.grant_application_applies(g.application, p_resource)) then null
+        else 'no_grant'
+    end;
+    return jsonb_build_object('resource', p_resource, 'action', p_action, 'org_id', p_org,
+                              'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
+end;
+$$;
+
+create or replace function rbac.may_in_org(p_resource text, p_action text, p_org uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select (rbac.decide_in_org(p_resource, p_action, p_org)->>'allowed')::boolean;
 $$;
 
 create or replace function rbac.grant_with_basis(
@@ -30409,6 +30461,7 @@ grant select on content.resource_snapshots, research.revision_files to authentic
 grant execute on function
     rbac.request_claims(), rbac.current_credential_id(), rbac.current_actor(),
     rbac.decide(text, text), rbac.may(text, text), rbac.require(text, text),
+    rbac.decide_in_org(text, text, uuid), rbac.may_in_org(text, text, uuid),
     rbac.plan_of(uuid), rbac.limit_state(uuid, text), rbac.has_quota_remaining(uuid, text),
     rbac.access_snapshot(text),
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
