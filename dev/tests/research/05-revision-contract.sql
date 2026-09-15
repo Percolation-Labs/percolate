@@ -141,4 +141,29 @@ begin
 end $$;
 reset role;
 
+-- 4. Written history stays written (REM-151). The owner, as a caller, can neither change nor remove a revision or
+--    the claims projected from it, nor truncate the table. Moved here from specs/tables/tests/test_research.py,
+--    which needed a DSN nothing set, so it never ran (REM-282).
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000151a1"}';
+set local role authenticated;
+do $$
+declare
+    h uuid := (select revision_id from research.heads where work_id = (select id from research.works where public_id = 'rp-rc-one'));
+    statement text;
+begin
+    assert h is not null, 'the owner reads their own head';
+    foreach statement in array array[
+        format('update research.revisions set document = document where id = %L', h),
+        format('delete from research.revisions where id = %L', h),
+        format('update research.claims set text = text where revision_id = %L', h),
+        'truncate research.revisions cascade'] loop
+        begin
+            execute statement;
+            raise exception 'history was rewritten: %', statement;
+        exception when insufficient_privilege then null;
+        end;
+    end loop;
+end $$;
+reset role;
+
 rollback;
