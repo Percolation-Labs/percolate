@@ -216,6 +216,8 @@ insert into t14_declared (fn, mechanism, why) values
  'null for a revision the caller may not read'),
 ('engagement.set_saved(uuid,boolean)', 'rbac.require',
  'engagement:insert is human-only, on research the caller may read'),
+('engagement.my_saves()', 'rbac.require',
+ 'engagement:select; only the caller''s own saves, a work''s public id, and research.readable for whether they may read it now'),
 ('engagement.set_following(uuid,boolean)', 'rbac.require',
  'engagement:insert is human-only; the row is the caller''s'),
 ('engagement.set_useful(uuid,boolean)', 'rbac.require',

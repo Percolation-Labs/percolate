@@ -1740,6 +1740,23 @@ begin
 end;
 $$;
 
+-- EVERY WORK A PERSON SAVED, READABLE OR NOT (REM-307). Library keeps a saved work listed, marked unavailable, after
+-- its reader loses access to it (REM-196). A join through research.works cannot: works_access hides the row, and with
+-- it the id. This returns only the caller's own saves and only a work's public id, with whether they may read it now.
+-- set_saved refuses an unreadable work, so an id is on this list only if its reader could read it when they saved it.
+-- engagement:select, like the saves_self policy on the table it reads, so a person's own agent reads it too.
+create or replace function engagement.my_saves() returns table (public_id text, saved_at timestamptz, readable boolean)
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare v_user uuid := rbac.require('engagement', 'select');
+begin
+    return query
+    select w.public_id, s.created_at, research.readable(s.work_id)
+      from engagement.saves s join research.works w on w.id = s.work_id
+     where s.user_id = v_user
+     order by s.created_at desc, w.public_id;
+end;
+$$;
+
 create or replace function engagement.set_following(p_org uuid, p_following boolean) returns boolean
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('engagement', 'insert');
@@ -2184,7 +2201,7 @@ grant execute on function
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     content.register_evidence(text, text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
-    engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
+    engagement.set_saved(uuid, boolean), engagement.my_saves(), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
     engagement.add_comment(uuid, text, text), engagement.edit_comment(uuid, text, int),
     engagement.withdraw_comment(uuid, text), engagement.moderate_comment(uuid, text),

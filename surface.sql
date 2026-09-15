@@ -640,6 +640,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','function','engagement.revision_signals','uuid','architecture.md §5: counts only for a revision the caller can read'),
 ('research-platform','function','engagement.set_following','uuid,boolean','architecture.md §5: a follow targets a core org'),
 ('research-platform','function','engagement.set_like','uuid,boolean','architecture.md §5: one active like, never your own comment'),
+('research-platform','function','engagement.my_saves','','architecture.md §5: every work a person saved, marked readable or not (REM-307)'),
 ('research-platform','function','engagement.set_saved','uuid,boolean','architecture.md §5: saved research follows the work across clients'),
 ('research-platform','function','engagement.set_useful','uuid,boolean','architecture.md §5: one active useful vote per revision, never on your own research'),
 ('research-platform','function','engagement.set_valuation','uuid,bigint,text','architecture.md §5: a private, nonbinding value estimate'),
