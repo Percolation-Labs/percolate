@@ -1,85 +1,5 @@
--- from specs/migrations/0.1.6--0.2.0.sql: the part of the 0.1.6 -> 0.2.0 hop
--- that a replay cannot express.
--- 0.1.6 -> 0.2.0: the graph learns to forget on purpose.
---
--- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else is the
--- schema re-applied, which converges because every statement in it runs twice.
--- `create table if not exists` cannot narrow a column that already exists: an
--- existing database's `aiq.edges.valid_from` is nullable with no default and
--- full of nulls, and nothing in the replayed schema will change that.
---
--- WHY IT HAS TO CHANGE. `aiq.edges` has been bitemporal since it was written --
--- `valid_from` and `valid_to` are both in the original CREATE -- and neither
--- was ever populated. Across 9,502 edges in the dogfood instance the retraction
--- rate was exactly 0.00% and every single `valid_from` was null. The pair was
--- decorative.
---
--- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
--- running the model in its known-broken state: an append-only knowledge graph
--- has no depression term, and retraction is the balance condition the capacity
--- result depends on. §14 turns it into a test -- if the retraction rate is
--- zero, the condition is violated -- and ours was zero for the most banal
--- possible reason, which is that the derivation DELETEd what it could no longer
--- derive. A graph that forgets by deletion does not forget slowly; it forgets
--- completely, leaving nothing to audit and nothing downstream able to tell
--- that a relationship was once asserted.
---
--- ORDER MATTERS:
---
---   1. Backfill from `created_at`. It is when the row was first written, which
---      is exactly when the edge was first asserted, and it is already correct
---      for every historical row. Using now() here instead produces edges
---      asserted after they were retracted -- measured, on the first attempt.
---   2. Then the default, so every future writer dates itself.
---   3. Then NOT NULL, which can only be added once no nulls remain.
---
--- Idempotent: the UPDATE matches nothing on a second run, and both ALTERs are
--- no-ops once applied.
---
--- NO `set role` HERE, and the omission is deliberate rather than an oversight.
--- This file is PREPENDED to the upgrade script, which loads as app_owner and
--- refuses to load as a superuser at all. A `set role app_owner; ... reset role;`
--- pair looks harmless and is not: `reset role` drops the session back to the
--- superuser it started as, and every statement in the 10,000 lines that follow
--- then runs as one -- which the schema's own guard catches and refuses, having
--- been written for exactly that mistake. Neither existing migration sets a
--- role; this one inherits the caller's, like they do.
-
-update aiq.edges set valid_from = created_at where valid_from is null;
-alter table aiq.edges alter column valid_from set default now();
-alter table aiq.edges alter column valid_from set not null;
-
--- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
--- if not exists` cannot add a column to a table that already exists, and an
--- upgraded database would carry the schema without them.
---
--- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
--- an upgrade creates it fresh from the replayed schema, with the full column
--- list. A database that already had it would need a DROP, since a view cannot
--- be widened by `create or replace`.
-alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
-alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
-alter table aiq.edges add column if not exists last_recalled_at timestamptz;
-
--- content.resolve_file AND workflow.v_artifacts, both reshaped in 0.2.0
--- (2d54769): resolve_file gained a trailing `checksum` column, and a changed
--- return type cannot be `create or replace`d; v_artifacts changed its query
--- shape and now reads resolve_file. The drops are needed only by a database
--- still carrying the 0.1.x shapes, so they live HERE and not in the replayed
--- body -- where they were until the first bump past 0.2.0 replayed them onto
--- a database whose v_artifacts already depends on resolve_file, and
--- `cannot drop function content.resolve_file(uuid) because other objects
--- depend on it` stopped the upgrade. dev/upgrade-converges.sh FROM=self is the
--- gate that refuses the next one.
---
--- The view first: on a 0.1.x database nothing depends on either, and on any
--- database where the view already reads the function this order is the one
--- that works. The body recreates both, owned and granted as it says.
-drop view if exists workflow.v_artifacts;
-drop function if exists content.resolve_file(uuid);
-
 -- ============================================================
--- percolate 0.2.9 -- the whole schema, as one extension script.
+-- percolate 0.2.10 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -30152,6 +30072,50 @@ begin
 end;
 $$;
 
+-- MOVE A PUBLICATION'S PIN FROM ONE REVISION TO ANOTHER (REM-423). Publishing a
+-- correction is two acts on the exposure table: the new revision becomes
+-- readable and the old one stops being. The second act alone is
+-- research.withdraw_publication_exposure, which is a person's and needs no
+-- grant, so that losing a grant never traps work in a publication. Inside a
+-- move that rule refuses the wrong thing: the work is not leaving the
+-- publication, and the caller is exercising research:publish, which they
+-- passed to put the new revision there. An agent publishing through a
+-- delegation could therefore add an entry and never correct it.
+--
+-- So a move is one call, authorised exactly as the add is, and it can do
+-- nothing a caller could not already do: it exposes p_to_revision under the
+-- same org decision, and removes p_from_revision of THE SAME WORK in THE SAME
+-- publication. It cannot retire a revision of another work, and it is not a
+-- withdrawal: taking work out of a publication is still the person's alone.
+create or replace function research.move_publication_exposure(p_public_id text, p_from_revision text,
+                                                              p_to_revision text, p_publication text, p_org uuid)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user   uuid;
+    w        research.works;
+    v_from   uuid;
+    v_added  jsonb;
+    v_count  int := 0;
+begin
+    -- The add decides the authority; a move that cannot add is refused before anything is removed.
+    v_added := research.expose_for_publication(p_public_id, p_to_revision, p_publication, p_org);
+    v_user := rbac.current_user_id();
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    if p_from_revision is not null and p_from_revision <> p_to_revision then
+        select r.id into v_from from research.revisions r where r.work_id = w.id and r.label = p_from_revision;
+        if v_from is not null then
+            delete from research.publication_exposures pe
+             where pe.revision_id = v_from and pe.publication = p_publication and pe.work_id = w.id;
+            get diagnostics v_count = row_count;
+        end if;
+    end if;
+    return v_added || jsonb_build_object('moved_from', p_from_revision, 'retired', v_count > 0);
+end;
+$$;
+
 -- A private working revision (authoring-and-publication.md §4, REM-185). The
 -- owner appends from the head they last read, whether or not the work is
 -- listed, and a stale head conflicts exactly as revise_package's does. It
@@ -30853,6 +30817,7 @@ grant execute on function
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
     research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
+    research.move_publication_exposure(text, text, text, text, uuid),
     content.register_evidence(text, text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.my_saves(), engagement.set_following(uuid, boolean),

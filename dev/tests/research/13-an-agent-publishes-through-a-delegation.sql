@@ -9,7 +9,8 @@
 --   5. the grant is still asked: revoking it refuses the agent though the delegation is live;
 --   6. revoking the delegation refuses the agent again and leaves the credential's other scopes working;
 --   7. revoking the credential refuses it, and withdrawal stays the person's;
---   8. delegable is only for human-only kinds.
+--   8. delegable is only for human-only kinds;
+--   9. a delegated agent MOVES its own entry's pin, though it may not withdraw (REM-423).
 --
 -- One transaction, rolled back. Claims are set as the superuser between blocks.
 
@@ -219,6 +220,47 @@ begin
 end $$;
 set local request.jwt.claims = '';
 
+
+-- 9. A delegated agent moves the pin from one revision to another, though withdrawal stays the person's
+-- (REM-423). Publishing a correction is a move, not a withdrawal: the work never leaves the publication.
+update rbac.api_keys set revoked_at = null where id = '00000000-0000-4000-8000-000000d0c001';
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d0a001"}';
+set local role authenticated;
+select research.revise_package('rp-delegation-one', jsonb_build_object('title', 'A correction'), 'draft-1');
+reset role;
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d0a001", "api_key_id": "00000000-0000-4000-8000-000000d0c001"}';
+set local role authenticated;
+do $$
+declare v_moved jsonb;
+begin
+    v_moved := research.move_publication_exposure('rp-delegation-one', 'draft-1', 'draft-2',
+                                                  'delegation-blog', '00000000-0000-4000-8000-000000d0f001');
+    assert (v_moved->>'retired')::boolean, 'the move left the old revision exposed';
+    assert (v_moved->>'revision') = 'draft-2', 'the move did not expose the new revision';
+end $$;
+do $$
+begin
+    assert exists (select 1 from research.publication_exposures pe join research.revisions r on r.id = pe.revision_id
+                    where r.label = 'draft-2' and pe.publication = 'delegation-blog'),
+        'the new revision is readable in the publication';
+    assert not exists (select 1 from research.publication_exposures pe join research.revisions r on r.id = pe.revision_id
+                        where r.label = 'draft-1' and pe.publication = 'delegation-blog'),
+        'the revision moved off is no longer exposed';
+end $$;
+-- A move is not a way to withdraw: taking work out of a publication is still refused to an agent.
+do $$
+declare v_hint text;
+begin
+    begin
+        perform research.withdraw_publication_exposure('rp-delegation-one', 'draft-2', 'delegation-blog');
+        assert false, 'a move made withdrawal reachable by an agent';
+    exception when insufficient_privilege then
+        get stacked diagnostics v_hint = pg_exception_hint;
+        assert v_hint = 'human_only', 'withdrawal stays human_only, not ' || v_hint;
+    end;
+end $$;
+reset role;
+set local request.jwt.claims = '';
 
 -- 8. delegable is only for human-only kinds.
 do $$
