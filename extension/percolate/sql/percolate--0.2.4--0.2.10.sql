@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.2.9 -- the whole schema, as one extension script.
+-- percolate 0.2.10 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -30072,6 +30072,50 @@ begin
 end;
 $$;
 
+-- MOVE A PUBLICATION'S PIN FROM ONE REVISION TO ANOTHER (REM-423). Publishing a
+-- correction is two acts on the exposure table: the new revision becomes
+-- readable and the old one stops being. The second act alone is
+-- research.withdraw_publication_exposure, which is a person's and needs no
+-- grant, so that losing a grant never traps work in a publication. Inside a
+-- move that rule refuses the wrong thing: the work is not leaving the
+-- publication, and the caller is exercising research:publish, which they
+-- passed to put the new revision there. An agent publishing through a
+-- delegation could therefore add an entry and never correct it.
+--
+-- So a move is one call, authorised exactly as the add is, and it can do
+-- nothing a caller could not already do: it exposes p_to_revision under the
+-- same org decision, and removes p_from_revision of THE SAME WORK in THE SAME
+-- publication. It cannot retire a revision of another work, and it is not a
+-- withdrawal: taking work out of a publication is still the person's alone.
+create or replace function research.move_publication_exposure(p_public_id text, p_from_revision text,
+                                                              p_to_revision text, p_publication text, p_org uuid)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user   uuid;
+    w        research.works;
+    v_from   uuid;
+    v_added  jsonb;
+    v_count  int := 0;
+begin
+    -- The add decides the authority; a move that cannot add is refused before anything is removed.
+    v_added := research.expose_for_publication(p_public_id, p_to_revision, p_publication, p_org);
+    v_user := rbac.current_user_id();
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    if p_from_revision is not null and p_from_revision <> p_to_revision then
+        select r.id into v_from from research.revisions r where r.work_id = w.id and r.label = p_from_revision;
+        if v_from is not null then
+            delete from research.publication_exposures pe
+             where pe.revision_id = v_from and pe.publication = p_publication and pe.work_id = w.id;
+            get diagnostics v_count = row_count;
+        end if;
+    end if;
+    return v_added || jsonb_build_object('moved_from', p_from_revision, 'retired', v_count > 0);
+end;
+$$;
+
 -- A private working revision (authoring-and-publication.md §4, REM-185). The
 -- owner appends from the head they last read, whether or not the work is
 -- listed, and a stale head conflicts exactly as revise_package's does. It
@@ -30773,6 +30817,7 @@ grant execute on function
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
     research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
+    research.move_publication_exposure(text, text, text, text, uuid),
     content.register_evidence(text, text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.my_saves(), engagement.set_following(uuid, boolean),
