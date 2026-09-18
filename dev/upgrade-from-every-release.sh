@@ -32,7 +32,7 @@ TAGS=$(git tag --list 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
 PREV=$(echo "$TAGS" | tail -1)
 EXT=/usr/share/postgresql/19/extension
 
-cleanup() { docker rm -f "$C" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f -v "$C" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 # The newest published image: its parser is what an upgrader has, and every

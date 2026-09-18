@@ -32,7 +32,7 @@ UP="extension/percolate_parser/sql/percolate_parser--$PREV--$V.sql"
 [ -f "$UP" ] || { echo "FAILED: $UP is missing -- run python3 extension/percolate_parser/write-upgrades.py"; exit 1; }
 EXT=/usr/share/postgresql/19/extension
 
-cleanup() { docker rm -f "$C" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f -v "$C" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 docker run -d --name "$C" -e POSTGRES_USER=p8 -e POSTGRES_PASSWORD=p8 \

@@ -120,7 +120,7 @@ fi
 # own build dependency must not continue as though it had.
 "$PY" extension/percolate/build-sql.py >/dev/null
 
-docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 # POSTGRES_DB is the TEST database, not `postgres`: the image bootstraps into
 # POSTGRES_DB, and pg_cron refuses `create extension` in any database other than
 # the one cron.database_name names, so the two settings have to agree or the
