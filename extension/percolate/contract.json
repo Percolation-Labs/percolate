@@ -585,6 +585,20 @@
     },
     {
       "admits": [
+        "supports",
+        "challenges",
+        "qualifies",
+        "asks"
+      ],
+      "column": "stance",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "engagement",
+      "table": "comments",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "value",
         "absence"
       ],
