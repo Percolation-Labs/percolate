@@ -28690,6 +28690,7 @@ insert into rbac.permission_kinds (resource, action, checked_by, human_only, eve
     ('research',   'endorse',  'function research.endorse',              true,  true),
     ('engagement', 'select',   'policy saves_self',                      false, true),
     ('engagement', 'insert',   'function engagement.add_comment',        true,  true),
+    ('engagement', 'discuss',  'function engagement.discuss',            true,  true),
     ('engagement', 'moderate', 'function engagement.moderate_comment',   true,  false)
 on conflict (resource, action) do update
     set checked_by = excluded.checked_by,
@@ -30575,6 +30576,41 @@ create table if not exists engagement.comment_likes (
 );
 create unique index if not exists comment_likes_one_active on engagement.comment_likes (comment_id, user_id) where withdrawn_at is null;
 
+-- Discussions (REM-507). A comment is a post in a thread: it may answer another
+-- post (parent_id), take a stance toward what it answers or the claim it sits on,
+-- and be about a resource instead of a revision. One table rather than a second
+-- one for discussions, so versions, likes, withdrawal and moderation hold for
+-- every post unchanged. A reply stays on its parent's target and claim, which
+-- engagement.discuss enforces: there is no direct write path.
+-- The stance words are research.argument_edges' own, a deliberate narrowing of that vocabulary: a
+-- question is a post with no stance.
+alter table engagement.comments alter column revision_id drop not null;
+alter table engagement.comments add column if not exists resource_id uuid references content.resources(id) on delete cascade;
+alter table engagement.comments add column if not exists parent_id uuid references engagement.comments(id);
+alter table engagement.comments add column if not exists stance text;
+alter table engagement.comments drop constraint if exists comments_one_target;
+alter table engagement.comments add constraint comments_one_target check ((revision_id is null) <> (resource_id is null));
+alter table engagement.comments drop constraint if exists comments_stance_known;
+alter table engagement.comments add constraint comments_stance_known
+    check (stance is null or stance in ('supports', 'challenges', 'qualifies'));
+alter table engagement.comments drop constraint if exists comments_claim_needs_revision;
+alter table engagement.comments add constraint comments_claim_needs_revision check (claim_key is null or revision_id is not null);
+create index if not exists comments_by_revision on engagement.comments (revision_id, created_at) where revision_id is not null;
+create index if not exists comments_by_resource on engagement.comments (resource_id, created_at) where resource_id is not null;
+create index if not exists comments_by_parent on engagement.comments (parent_id) where parent_id is not null;
+
+-- Whether the caller may read what a post is about: the revision rule, or the
+-- one read rule content.resources carries (rbac.may_read). Definer, so the
+-- answer is the same from a policy and from inside another definer function.
+create or replace function engagement.target_readable(p_revision uuid, p_resource uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select case
+        when p_revision is not null then research.revision_readable(p_revision)
+        when p_resource is not null then coalesce((select rbac.may_read(r.owner_id, r.org_id, r.visibility)
+                                                     from content.resources r where r.id = p_resource), false)
+        else false end;
+$$;
+
 create or replace function engagement.set_saved(p_work uuid, p_saved boolean) returns boolean
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('engagement', 'insert');
@@ -30679,6 +30715,46 @@ begin
 end;
 $$;
 
+-- A post in a discussion (REM-507): a root on a revision, one of its claims, or a
+-- resource, or a reply to a post the caller can read. engagement:discuss is its own
+-- human-only kind so it can be granted apart from likes and saves; REM-509 moves
+-- who holds it to reputation.
+create or replace function engagement.discuss(
+    p_body text, p_revision uuid default null, p_resource uuid default null,
+    p_parent uuid default null, p_claim_key text default null, p_stance text default null) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_user uuid := rbac.require('engagement', 'discuss'); p engagement.comments; v_id uuid;
+begin
+    if p_parent is not null then
+        select * into p from engagement.comments where id = p_parent and withdrawn_at is null;
+        if not found or not engagement.target_readable(p.revision_id, p.resource_id) then
+            raise no_data_found using message = 'Comment not found';
+        end if;
+        if (p_revision is not null and p_revision is distinct from p.revision_id)
+           or (p_resource is not null and p_resource is distinct from p.resource_id)
+           or (p_claim_key is not null and p_claim_key is distinct from p.claim_key) then
+            raise check_violation using message = 'A reply stays on the revision, resource and claim of the post it answers';
+        end if;
+        p_revision := p.revision_id; p_resource := p.resource_id; p_claim_key := p.claim_key;
+    end if;
+    if (p_revision is null) = (p_resource is null) then
+        raise invalid_parameter_value using message = 'A discussion is about one revision or one resource';
+    end if;
+    if not engagement.target_readable(p_revision, p_resource) then
+        raise no_data_found using message = case when p_revision is null then 'Resource not found' else 'Revision not found' end;
+    end if;
+    if p_claim_key is not null
+       and not exists (select 1 from research.claims where revision_id = p_revision and claim_key = p_claim_key) then
+        raise foreign_key_violation using message = 'That claim is not in this revision';
+    end if;
+    insert into engagement.comments (revision_id, resource_id, parent_id, claim_key, stance, author_id, body)
+    values (p_revision, p_resource, p_parent, p_claim_key, p_stance, v_user, p_body)
+    returning id into v_id;
+    insert into engagement.comment_versions (comment_id, version, body) values (v_id, 1, p_body);
+    return v_id;
+end;
+$$;
+
 create or replace function engagement.edit_comment(p_comment uuid, p_body text, p_expected_version int) returns int
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('engagement', 'insert'); v_version int;
@@ -30726,7 +30802,7 @@ language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('engagement', 'insert'); c engagement.comments;
 begin
     select * into c from engagement.comments where id = p_comment and withdrawn_at is null;
-    if not found or not research.revision_readable(c.revision_id) then
+    if not found or not engagement.target_readable(c.revision_id, c.resource_id) then
         raise no_data_found using message = 'Comment not found';
     end if;
     if p_liked and c.author_id = v_user then
@@ -31160,7 +31236,7 @@ create policy valuations_self on engagement.valuations for select
 alter table engagement.comments enable row level security;
 drop policy if exists comments_readable on engagement.comments;
 create policy comments_readable on engagement.comments for select
-    using (research.revision_readable(revision_id) and (withdrawn_at is null or author_id = rbac.current_user_id()));
+    using (engagement.target_readable(revision_id, resource_id) and (withdrawn_at is null or author_id = rbac.current_user_id()));
 
 alter table engagement.comment_versions enable row level security;
 drop policy if exists comment_versions_author on engagement.comment_versions;
@@ -31251,7 +31327,8 @@ grant execute on function
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
     engagement.add_comment(uuid, text, text), engagement.edit_comment(uuid, text, int),
     engagement.withdraw_comment(uuid, text), engagement.moderate_comment(uuid, text),
-    engagement.set_like(uuid, boolean)
+    engagement.set_like(uuid, boolean),
+    engagement.discuss(text, uuid, uuid, uuid, text, text), engagement.target_readable(uuid, uuid)
 to authenticated;
 
 

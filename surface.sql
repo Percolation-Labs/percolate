@@ -635,6 +635,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','function','rbac.grant_role','uuid,text','spec.md §4: role assignment, gated on users/admin -- the escalation guard dev/tests/rbac/07 pins'),
 -- The research platform (specs/research-platform/schema.sql).
 ('research-platform','function','engagement.add_comment','uuid,text,text','architecture.md §5: a person comments on an exact revision, optionally one of its claims'),
+('research-platform','function','engagement.discuss','text,uuid,uuid,uuid,text,text','architecture.md §5: a person posts in a thread on a revision, a claim or a resource, with a stance (REM-507)'),
+('research-platform','function','engagement.target_readable','uuid,uuid','architecture.md §5: a post is readable exactly when its revision or resource is (REM-507)'),
 ('research-platform','function','engagement.edit_comment','uuid,text,integer','architecture.md §5: an edit from the version last read keeps every version'),
 ('research-platform','function','engagement.moderate_comment','uuid,text','architecture.md §5: moderation is its own capability, with actor and reason'),
 ('research-platform','function','engagement.revision_signals','uuid','architecture.md §5: counts only for a revision the caller can read'),
