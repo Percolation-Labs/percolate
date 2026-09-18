@@ -515,6 +515,8 @@ declare
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).
         'research.endorsement_claims', 'research.endorsement_withdrawals',
+        -- Trust history and the record of erasures (REM-464).
+        'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

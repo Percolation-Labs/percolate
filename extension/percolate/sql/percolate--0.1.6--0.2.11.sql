@@ -79,7 +79,7 @@ drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
 -- ============================================================
--- percolate 0.2.10 -- the whole schema, as one extension script.
+-- percolate 0.2.11 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -29400,6 +29400,11 @@ alter table research.revisions add constraint revisions_predecessor_same_work
 alter table research.works add column if not exists parent_work_id uuid references research.works(id);
 alter table research.revisions add column if not exists base_revision_id uuid references research.revisions(id);
 
+-- WHY THE REVISION WAS MADE, beside who made it (REM-464). Optional, and given by the writer: "corrected S2's
+-- date" is what a reader comparing two revisions wants, and until now it lived only in whatever the client put in
+-- the document. Written once with the revision; research.refuse_rewrite keeps it there.
+alter table research.revisions add column if not exists reason text check (reason is null or length(reason) between 1 and 500);
+
 create table if not exists research.heads (
     work_id     uuid primary key references research.works(id) on delete cascade,
     revision_id uuid not null references research.revisions(id),
@@ -29629,6 +29634,59 @@ create table if not exists research.publication_exposures (
 -- exposed_via: the credential that acted, when an agent published through a delegation; null when the person did.
 alter table research.publication_exposures add column if not exists exposed_via uuid references rbac.api_keys(id) on delete set null;
 create index if not exists publication_exposures_by_work on research.publication_exposures (work_id);
+
+-- WHAT A TRUST READ AS OF A PAST DATE NEEDS, AND THE TWO TABLES THAT OVERWRITE IT (REM-464). works.visibility is
+-- rewritten by every listing and unlisting, and a withdrawn publication exposure is deleted, so "was this revision
+-- public on the 3rd, and in which publication" had no answer. Each change is appended below by a trigger on the
+-- table that changes (section 6), not by each definer, so a writer added later records it too: the shape
+-- aiq.edge_retractions settled (REM-65).
+--
+-- A work that predates this table gets one row. A listed work gets its listed_at, which survives every relisting
+-- and is cleared by unlisting, so the work has been public since then without a break. An unlisted work gets the
+-- upgrade itself, because nothing records whether it was ever listed before. Before a work's first row its
+-- visibility is unknown, and research.trust_state says so rather than guessing. The column is changed_to, not
+-- visibility: a `visibility` column is what rbac/02 reads as a row scope, and this row's scope is its work's.
+create table if not exists research.visibility_changes (
+    id         bigint generated always as identity primary key,
+    work_id    uuid not null references research.works(id) on delete cascade,
+    changed_to text not null,
+    changed_by uuid references rbac.users(id),
+    changed_at timestamptz not null default now()
+);
+create index if not exists visibility_changes_by_work on research.visibility_changes (work_id, changed_at);
+insert into research.visibility_changes (work_id, changed_to, changed_at)
+select w.id, w.visibility, case when w.visibility = 'public' then coalesce(w.listed_at, now()) else now() end
+  from research.works w
+ where not exists (select 1 from research.visibility_changes v where v.work_id = w.id);
+
+-- A publication exposure that stopped: the row as it stood, and who ended it and when. The exposure was readable
+-- from exposed_at until withdrawn_at, and re-adding the same revision later is a new exposure with its own start.
+create table if not exists research.publication_withdrawals (
+    id           bigint generated always as identity primary key,
+    revision_id  uuid not null references research.revisions(id) on delete cascade,
+    work_id      uuid not null references research.works(id) on delete cascade,
+    publication  text not null,
+    exposed_by   uuid references rbac.users(id),
+    exposed_at   timestamptz not null,
+    withdrawn_by uuid references rbac.users(id),
+    withdrawn_at timestamptz not null default now()
+);
+create index if not exists publication_withdrawals_by_work on research.publication_withdrawals (work_id);
+
+-- ERASURE IS THE ONE WAY HISTORY LEAVES (specs/tables/schema.md §3: "a documented privileged lifecycle"). The row
+-- outlives the work it names, so it holds no foreign key: what was erased, by whom and why stays when the erased
+-- rows do not. `xact` is the transaction that erased it, and it is what research.refuse_rewrite asks, so the
+-- permission is exactly as wide as research.erase_work's one statement and ends with it. Nobody is granted this
+-- table: it is written by the operator's function and read by the operator.
+create table if not exists research.erasures (
+    id         bigint generated always as identity primary key,
+    work_id    uuid not null,
+    public_id  text not null,
+    reason     text not null check (length(btrim(reason)) > 0),
+    erased_by  text not null default session_user,
+    erased_at  timestamptz not null default now(),
+    xact       xid8 not null default pg_current_xact_id()
+);
 -- Every org_id column defaults to the shared org (specs/identity/spec.md). The functions below always name the
 -- publication's org, and rbac.decide_in_org refuses the shared org, so the default is never what a row holds.
 select rbac.adopt_shared_org('research.publication_exposures');
@@ -29700,7 +29758,7 @@ language sql stable security definer set search_path = pg_catalog, public as $$
         'hash_format_version', r.hash_format_version,
         'visibility', case when w.visibility = 'public' then 'listed' else 'private' end,
         'exposed', exists (select 1 from research.exposures e where e.revision_id = r.id),
-        'created', p_created, 'created_at', r.created_at)
+        'created', p_created, 'created_at', r.created_at, 'reason', r.reason)
       from research.revisions r join research.works w on w.id = r.work_id
      where r.id = p_revision
        and research.revision_readable(r.id);
@@ -30027,7 +30085,11 @@ $$;
 -- Append from the head the caller last read. A stale head is PT409 (HTTP 409
 -- through PostgREST) with the current label as detail; an unchanged document
 -- is a no-op. Somebody else's package is not found, not forbidden.
-create or replace function research.revise_package(p_public_id text, p_document jsonb, p_expected_revision text)
+-- p_reason (REM-464) is new and last, so a caller passing three arguments is unchanged. The three-argument
+-- function is dropped first, or a three-argument call would match both and be refused as ambiguous.
+drop function if exists research.revise_package(text, jsonb, text);
+create or replace function research.revise_package(p_public_id text, p_document jsonb, p_expected_revision text,
+                                                   p_reason text default null)
 returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
     v_user   uuid := rbac.require('research', 'insert');
@@ -30063,10 +30125,10 @@ begin
         return research.receipt(h.id, false);
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
-                                    predecessor_id, actor_id, actor_kind, credential_id, run_id)
+                                    predecessor_id, actor_id, actor_kind, credential_id, run_id, reason)
     values (w.id, h.number + 1, 'draft-' || (h.number + 1), '0.1', p_document, v_hash,
             h.id, v_user, rbac.current_actor(), rbac.current_credential_id(),
-            nullif(current_setting('workflow.current_run_id', true), '')::uuid)
+            nullif(current_setting('workflow.current_run_id', true), '')::uuid, nullif(btrim(p_reason), ''))
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     update research.heads set revision_id = v_rev, updated_at = now() where work_id = w.id;
@@ -30202,7 +30264,9 @@ $$;
 -- exposes nothing and leaves the work's listing alone, so it needs no listing
 -- authority: anybody else keeps reading the revision that was exposed. Listing
 -- a correction, or unlisting, is still revise_package.
-create or replace function research.revise_working(p_public_id text, p_document jsonb, p_expected_revision text)
+drop function if exists research.revise_working(text, jsonb, text);
+create or replace function research.revise_working(p_public_id text, p_document jsonb, p_expected_revision text,
+                                                   p_reason text default null)
 returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
     v_user   uuid := rbac.require('research', 'insert');
@@ -30226,10 +30290,10 @@ begin
         return research.receipt(h.id, false);
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
-                                    predecessor_id, actor_id, actor_kind, credential_id, run_id)
+                                    predecessor_id, actor_id, actor_kind, credential_id, run_id, reason)
     values (w.id, h.number + 1, 'draft-' || (h.number + 1), '0.1', p_document, v_hash,
             h.id, v_user, rbac.current_actor(), rbac.current_credential_id(),
-            nullif(current_setting('workflow.current_run_id', true), '')::uuid)
+            nullif(current_setting('workflow.current_run_id', true), '')::uuid, nullif(btrim(p_reason), ''))
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     update research.heads set revision_id = v_rev, updated_at = now() where work_id = w.id;
@@ -30669,6 +30733,73 @@ begin
 end;
 $$;
 
+-- WHAT STOOD ON A DATE (REM-464). research.trust reads one revision as it is now; this reads a work as it was at
+-- p_at: its visibility, the revision its owner had as head, the revision anybody else was shown, the publications
+-- that carried a revision, and the endorsements that stood and had not been withdrawn. Every part is derived
+-- from rows that are never rewritten -- created_at, exposed_at, the withdrawal events and visibility_changes -- so
+-- the same question asked next year gets the same answer.
+--
+-- It shows only what the caller may read NOW. A past state is not a way into a revision a caller cannot open
+-- today, so a revision they cannot read is left out, and the head is shown only to a caller with full access, as
+-- visible_head does. Visibility before the first recorded change is 'unknown', with recorded_since saying when
+-- the record starts: a work upgraded from before REM-464 has no history before the upgrade, and a guess would
+-- be read as a fact.
+create or replace function research.trust_state(p_public_id text, p_at timestamptz default now()) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    w        research.works;
+    v_full   boolean;
+    v_vis    text;
+    v_since  timestamptz;
+    v_head   research.revisions;
+    v_shown  research.revisions;
+begin
+    select * into w from research.works where public_id = p_public_id;
+    if not found or not exists (select 1 from research.revisions r
+                                 where r.work_id = w.id and research.revision_readable(r.id)) then
+        return null;
+    end if;
+    v_full := research.work_readable_in_full(w.id);
+    select min(changed_at) into v_since from research.visibility_changes where work_id = w.id;
+    select changed_to into v_vis from research.visibility_changes
+     where work_id = w.id and changed_at <= p_at order by changed_at desc, id desc limit 1;
+    if v_full then
+        select * into v_head from research.revisions
+         where work_id = w.id and created_at <= p_at order by number desc limit 1;
+    end if;
+    if v_vis = 'public' then
+        select r.* into v_shown from research.exposures e join research.revisions r on r.id = e.revision_id
+         where e.work_id = w.id and e.exposed_at <= p_at and research.revision_readable(r.id)
+         order by r.number desc limit 1;
+    end if;
+    return jsonb_build_object(
+        'package_id', w.public_id,
+        'at', p_at,
+        'recorded_since', v_since,
+        'visibility', case when v_vis is null then 'unknown' when v_vis = 'public' then 'listed' else 'private' end,
+        'head', v_head.label,
+        'shown', v_shown.label,
+        'publications', coalesce((
+            select jsonb_agg(jsonb_build_object('publication', p.publication, 'revision', r.label,
+                                                'exposed_at', p.exposed_at) order by p.publication, r.number)
+              from (select revision_id, publication, exposed_at from research.publication_exposures
+                     where work_id = w.id and exposed_at <= p_at
+                    union all
+                    select revision_id, publication, exposed_at from research.publication_withdrawals
+                     where work_id = w.id and exposed_at <= p_at and withdrawn_at > p_at) p
+              join research.revisions r on r.id = p.revision_id
+             where research.revision_readable(r.id)), '[]'::jsonb),
+        'endorsements', coalesce((
+            select jsonb_agg(jsonb_build_object('id', e.id, 'revision', r.label, 'kind', e.kind, 'scope', e.scope,
+                                                'self', e.endorser_id = w.owner_id, 'created_at', e.created_at)
+                             order by e.created_at, e.id)
+              from research.endorsements e join research.revisions r on r.id = e.revision_id
+             where r.work_id = w.id and e.created_at <= p_at
+               and (e.withdrawn_at is null or e.withdrawn_at > p_at)
+               and research.revision_readable(r.id)), '[]'::jsonb));
+end;
+$$;
+
 
 -- ------------------------------------------------------------
 -- 6. Row security and grants
@@ -30760,6 +30891,117 @@ end;
 $$;
 create or replace trigger trg_revisions_row before insert on research.revisions
     for each row execute function research.enforce_revision_row();
+
+-- HISTORY CANNOT BE REWRITTEN (REM-464, specs/tables/schema.md §3). The grants were the whole rule: a caller holds
+-- SELECT and nothing else. But every writer here is a SECURITY DEFINER running as the owner, and the owner holds
+-- UPDATE and DELETE, so the next definer written by somebody who has not read this file could change what an
+-- endorsement was of, and deleting a work took every revision with it by cascade. This refuses both from anybody,
+-- the owner included. It is the trigger workflow.refuse_field_mutation is for deposits, applied to trust history.
+--
+-- Three changes a history row may take, each once and each toward a recorded end:
+--   * an endorsement is withdrawn: withdrawn_at and withdraw_reason, from null, nothing else;
+--   * a capture loses its bytes: content.remove_snapshot_bytes's tombstone, from a capture that had them;
+--   * a revision loses its workflow run when old runs are pruned: run_id to null, the foreign key's set null.
+-- A delete passes only inside research.erase_work's transaction. An operator can still disable the trigger, which
+-- §3 says: this stops a definer's mistake and a cascade, not the database's owner acting on purpose.
+create or replace function research.refuse_rewrite() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    o jsonb;
+    n jsonb;
+begin
+    if tg_op = 'DELETE' and exists (select 1 from research.erasures where xact = pg_current_xact_id()) then
+        return old;
+    end if;
+    if tg_op = 'UPDATE' then
+        o := to_jsonb(old);
+        n := to_jsonb(new);
+        if tg_table_name = 'endorsements' and o->'withdrawn_at' = 'null' and n->'withdrawn_at' <> 'null'
+           and n - 'withdrawn_at' - 'withdraw_reason' = o - 'withdrawn_at' - 'withdraw_reason' then
+            return new;
+        elsif tg_table_name = 'resource_snapshots' and o->'removed_at' = 'null' and n->'removed_at' <> 'null'
+           and n - 'file_id' - 'removed_at' - 'removed_by' - 'removed_reason'
+             = o - 'file_id' - 'removed_at' - 'removed_by' - 'removed_reason' then
+            return new;
+        elsif tg_table_name = 'revisions' and n->'run_id' = 'null' and n - 'run_id' = o - 'run_id' then
+            return new;
+        end if;
+    end if;
+    raise exception using errcode = 'restrict_violation',
+        message = format('%s.%s is history, and a %s would rewrite it', tg_table_schema, tg_table_name, lower(tg_op)),
+        hint = 'A correction is a new revision; an endorsement is withdrawn; a capture''s bytes are removed; '
+               'a work is erased only by research.erase_work.';
+end;
+$$;
+
+do $$
+declare t text;
+begin
+    foreach t in array array['research.revisions', 'research.claims', 'research.sources', 'research.citations',
+                             'research.argument_edges', 'research.revision_files', 'research.endorsements',
+                             'research.endorsement_claims', 'research.endorsement_withdrawals', 'research.exposures',
+                             'research.visibility_changes', 'research.publication_withdrawals',
+                             'content.resource_snapshots'] loop
+        execute format('create or replace trigger trg_refuse_rewrite before update or delete on %s '
+                       'for each row execute function research.refuse_rewrite()', t);
+        execute format('create or replace trigger trg_refuse_truncate before truncate on %s '
+                       'for each statement execute function research.refuse_rewrite()', t);
+    end loop;
+end $$;
+
+-- The two overwrites a trust read as of a date needs undone, recorded where they happen (section 3).
+create or replace function research.record_visibility_change() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    insert into research.visibility_changes (work_id, changed_to, changed_by)
+    values (new.id, new.visibility, rbac.current_user_id());
+    return null;
+end;
+$$;
+create or replace trigger trg_works_record_visibility after insert on research.works
+    for each row execute function research.record_visibility_change();
+create or replace trigger trg_works_record_visibility_change after update of visibility on research.works
+    for each row when (old.visibility is distinct from new.visibility)
+    execute function research.record_visibility_change();
+
+-- An erasure removes the exposure with its revision, and records nothing: the revision it would name is going too.
+create or replace function research.record_publication_withdrawal() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    if not exists (select 1 from research.erasures where xact = pg_current_xact_id()) then
+        insert into research.publication_withdrawals (revision_id, work_id, publication, exposed_by, exposed_at, withdrawn_by)
+        values (old.revision_id, old.work_id, old.publication, old.exposed_by, old.exposed_at, rbac.current_user_id());
+    end if;
+    return null;
+end;
+$$;
+create or replace trigger trg_publication_exposures_record_withdrawal after delete on research.publication_exposures
+    for each row execute function research.record_publication_withdrawal();
+
+-- ERASE A WORK AND ITS HISTORY (§3's privileged lifecycle). Operator-only: nothing grants it, so it runs as whoever
+-- owns the database's objects, from psql. The erasure row is written first and survives: what was erased, why and
+-- by whom. Everything that names the work goes with it by the existing cascades, which the guard lets through for
+-- this transaction alone.
+create or replace function research.erase_work(p_public_id text, p_reason text) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    w research.works;
+    v_revisions int;
+begin
+    if coalesce(btrim(p_reason), '') = '' then
+        raise check_violation using message = 'Erasing a work needs a reason';
+    end if;
+    select * into w from research.works where public_id = p_public_id for update;
+    if not found then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    select count(*) into v_revisions from research.revisions where work_id = w.id;
+    insert into research.erasures (work_id, public_id, reason) values (w.id, w.public_id, p_reason);
+    delete from research.works where id = w.id;
+    return jsonb_build_object('package_id', w.public_id, 'work_id', w.id, 'revisions', v_revisions);
+end;
+$$;
+revoke all on function research.erase_work(text, text) from public;
 
 alter table research.revisions enable row level security;
 drop policy if exists revisions_readable on research.revisions;
@@ -30862,6 +31104,19 @@ drop policy if exists endorsement_withdrawals_via_endorsement on research.endors
 create policy endorsement_withdrawals_via_endorsement on research.endorsement_withdrawals for select
     using (exists (select 1 from research.endorsements e where e.id = endorsement_withdrawals.endorsement_id));
 grant select on research.endorsement_claims, research.endorsement_withdrawals to authenticated;
+
+-- The history a trust read as of a date is built from (REM-464), on the terms of the rows it records: a work's
+-- visibility as its exposures are, and a withdrawn publication exposure as its revision is. Erasures are the
+-- operator's, so the table has row security and no grant.
+alter table research.visibility_changes enable row level security;
+drop policy if exists visibility_changes_readable on research.visibility_changes;
+create policy visibility_changes_readable on research.visibility_changes for select using (research.readable(work_id));
+alter table research.publication_withdrawals enable row level security;
+drop policy if exists publication_withdrawals_readable on research.publication_withdrawals;
+create policy publication_withdrawals_readable on research.publication_withdrawals for select
+    using (research.revision_readable(revision_id));
+alter table research.erasures enable row level security;
+grant select on research.visibility_changes, research.publication_withdrawals to authenticated;
 grant select on research.operations to authenticated;
 grant select on engagement.saves, engagement.follows, engagement.votes, engagement.valuations, engagement.comments,
                 engagement.comment_versions, engagement.comment_likes to authenticated;
@@ -30887,6 +31142,7 @@ grant execute on function
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
+    research.trust_state(text, timestamptz),
     engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid)
 to authenticated;
 
@@ -30894,8 +31150,8 @@ grant execute on function
     rbac.grant_with_basis(uuid, text, text, text, text, uuid), rbac.revoke_grant(uuid, text),
     rbac.reserve_usage(text, bigint, text, interval), rbac.consume_usage(text, text, bigint),
     rbac.release_usage(text, text),
-    research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
-    research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
+    research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text, text),
+    research.revise_working(text, jsonb, text, text), content.capture_snapshot(uuid),
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     research.move_publication_exposure(text, text, text, text, uuid),
     content.register_evidence(text, text, text, text, bigint, text, text),
@@ -31605,6 +31861,8 @@ declare
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).
         'research.endorsement_claims', 'research.endorsement_withdrawals',
+        -- Trust history and the record of erasures (REM-464).
+        'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',
