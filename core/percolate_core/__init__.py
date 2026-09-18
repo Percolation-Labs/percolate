@@ -10,4 +10,4 @@ grants: every interaction is a SECURITY DEFINER function call.
     percolate_core.agentic   the Agent Runtime                         [agent]
 """
 
-__version__ = "0.1.14"
+__version__ = "0.2.0"
