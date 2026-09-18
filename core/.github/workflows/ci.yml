@@ -91,6 +91,9 @@ jobs:
 
       - name: Browser file uploads preserve authentication
         run: python -m unittest discover -s tests -p test_content_cors.py
+      # REM-309: an article image is identified by its bytes and read through a revision.
+      - name: Article images are checked by their bytes and read through a revision
+        run: python -m unittest discover -s tests -p test_research_images.py
 
       # The half of the lake's boundary that needs no database or bucket: what
       # authored SQL may say, and what a sealed DuckDB connection may touch.

@@ -12,6 +12,17 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
+## Unreleased, after 0.1.13
+
+### A writer puts an image in an article
+
+- **`POST /research-images` keeps an image a writer uploads** (REM-309). The bytes decide the type, not the
+  header: PNG, JPEG or WebP, at most 2 MB, at least 600 x 400; SVG is refused because it can carry script. A
+  refused image answers 422 with `saved: false` and the reason, and stores nothing. It registers through
+  `content.register_research_image`: `research:insert` and the `evidence_bytes` budget, as `/evidence`.
+- **`GET /research-images/{snapshot_id}` serves it to anybody who may read some revision that shows it**, signed out included, through `research.resolve_image`. Inline, `nosniff`, a sandboxing CSP, and the bytes
+  are identified again before they leave. Needs p8-subsystems 0.2.11 with both functions.
+
 ## Unreleased, after 0.1.12
 
 **Not published.** Changes on `main` since `v0.1.12`. Nothing here is in
