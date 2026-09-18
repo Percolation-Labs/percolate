@@ -122,12 +122,14 @@ begin
     alter table research.citations disable trigger trg_refuse_rewrite;
     alter table research.argument_edges disable trigger trg_refuse_rewrite;
     alter table research.claims disable trigger trg_refuse_rewrite;
+    alter table claims.expresses disable trigger trg_refuse_rewrite;   -- a claim's link goes with its occurrence (REM-473)
     delete from research.citations where revision_id = rev and claim_key = 'C3';
     delete from research.argument_edges where revision_id = rev and relation = 'limits';
     delete from research.claims where revision_id = rev and claim_key = 'C2';   -- takes its citations and edges with it
     alter table research.citations enable trigger trg_refuse_rewrite;
     alter table research.argument_edges enable trigger trg_refuse_rewrite;
     alter table research.claims enable trigger trg_refuse_rewrite;
+    alter table claims.expresses enable trigger trg_refuse_rewrite;
 
     counts := research.rebuild_projection(rev);
     assert counts = '{"claims": 3, "sources": 3, "citations": 3, "edges": 6}', 'the rebuild restores everything: ' || counts;

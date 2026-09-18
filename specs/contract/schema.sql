@@ -517,6 +517,8 @@ declare
         'research.endorsement_claims', 'research.endorsement_withdrawals',
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
+        -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
+        'claims.claims', 'claims.expresses', 'claims.tx',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

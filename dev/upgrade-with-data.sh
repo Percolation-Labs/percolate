@@ -105,6 +105,13 @@ with u as (select id from rbac.users where email = 'upgrade@ci'),
             select r1.work_id, 2, 'r2', '0.1', '{}'::jsonb, 'ci-hash-2', r1.id, w.owner_id, 'person'
               from r1 join w on w.id = r1.work_id returning id, work_id)
 insert into research.heads (work_id, revision_id) select work_id, id from r2;
+-- ITS CLAIMS, projected before claims had an identity (REM-473). The upgrade links each occurrence, oldest revision
+-- first, so C1 in r2 expresses the claim C1 in r1 minted.
+insert into research.claims (id, revision_id, claim_key, kind, text)
+select gen_random_uuid(), v.id, k.key, 'Inference', k.text
+  from research.revisions v join research.works w on w.id = v.work_id and w.public_id = 'ci-public-work'
+  join (values ('r1', 'C1', 'A claim made before identity.'), ('r2', 'C1', 'A claim made before identity.'),
+               ('r2', 'C2', 'A claim added in the second revision.')) k(label, key, text) on k.label = v.label;
 SQL
 
 for f in "percolate--$V.sql" "percolate--$PREV--$V.sql"; do
@@ -257,6 +264,15 @@ do \$\$ begin
     then raise exception 'the backfill no longer reaches an ordinary role'; end if;
   perform rbac.grant_application_role((select id from rbac.users where email = 'upgrade@ci'), 'ci-lister',
                                       'research', 'list', 'operator', 'upgrade gate', 'hub', null);
+
+  -- EVERY OCCURRENCE EXPRESSES ONE CLAIM, CARRIED ACROSS REVISIONS (REM-473).
+  if exists (select 1 from research.claims o
+              where (select count(*) from claims.expresses e
+                      where e.revision_id = o.revision_id and e.claim_key = o.claim_key and e.part = 1) <> 1)
+    then raise exception 'the upgrade left an occurrence without exactly one claim (REM-473)'; end if;
+  if (select count(distinct e.claim_id) from claims.expresses e join research.revisions v on v.id = e.revision_id
+        join research.works w on w.id = v.work_id where w.public_id = 'ci-public-work' and e.claim_key = 'C1') <> 1
+    then raise exception 'the upgrade minted a second claim for an unchanged C1 instead of carrying r1''s forward (REM-473)'; end if;
 
   -- A PUBLIC WORK KEEPS EVERY REVISION IT EXPOSED (REM-185).
   if (select count(*) from research.exposures e join research.works w on w.id = e.work_id

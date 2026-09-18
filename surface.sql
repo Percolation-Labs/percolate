@@ -718,6 +718,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','table','research.argument_edges',null,'architecture.md §4'),
 ('research-platform','table','research.citations',null,'architecture.md §4'),
 ('research-platform','table','research.claims',null,'architecture.md §4'),
+('claims','table','claims.claims',null,'specs/claims/graph.md §3 and §9: a claim, readable when an occurrence the caller may read expresses it (REM-473)'),
+('claims','table','claims.expresses',null,'specs/claims/graph.md §5 and §9: which claim each occurrence expresses, readable with its revision (REM-473)'),
 ('research-platform','table','research.endorsements',null,'architecture.md §6'),
 ('research-platform','table','research.endorsement_claims',null,'specs/tables/schema.md §5: the exact claims an endorsement checked, readable with the revision (REM-154)'),
 ('research-platform','table','research.endorsement_withdrawals',null,'specs/tables/schema.md §5: each withdrawal as its own event, readable with the endorsement (REM-154)'),

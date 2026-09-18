@@ -385,6 +385,57 @@
     },
     {
       "admits": [
+        "unchanged",
+        "reworded",
+        "new"
+      ],
+      "column": "method",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "expresses",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "assert",
+        "retract"
+      ],
+      "column": "op",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "expresses",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "proposed",
+        "confirmed",
+        "disputed"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "expresses",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "actor_kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "tx",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "file_upload",
         "http_pull",
         "ftp_pull",

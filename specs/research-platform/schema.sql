@@ -1204,6 +1204,8 @@ begin
             values (p_revision, k, (a.art->>'snapshot_id')::uuid, coalesce(a.art->>'kind', ''));
         end if;
     end loop;
+    -- Each occurrence expresses a claim (REM-473, specs/claims/schema.sql). A repair links only what is unlinked.
+    perform claims.link_revision(p_revision);
 end;
 $$;
 
