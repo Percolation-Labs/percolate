@@ -29400,6 +29400,13 @@ alter table research.revisions add constraint revisions_predecessor_same_work
 -- trg_revisions_row proves a base belongs to the parent.
 alter table research.works add column if not exists parent_work_id uuid references research.works(id);
 alter table research.revisions add column if not exists base_revision_id uuid references research.revisions(id);
+-- LOOKUPS THAT HAD NO INDEX, measured (specs/research-platform/scale.md §2). "My packages" reads works by owner, and erasure's
+-- cascade checks each deleted work and revision for children through these references: without an index
+-- each check was a scan of the whole table, so erasing one work cost a scan per revision.
+create index if not exists works_by_owner on research.works (owner_id);
+create index if not exists works_by_parent on research.works (parent_work_id) where parent_work_id is not null;
+create index if not exists revisions_by_base on research.revisions (base_revision_id) where base_revision_id is not null;
+create index if not exists revisions_by_predecessor on research.revisions (predecessor_id) where predecessor_id is not null;
 
 -- WHY THE REVISION WAS MADE, beside who made it (REM-464). Optional, and given by the writer: "corrected S2's
 -- date" is what a reader comparing two revisions wants, and until now it lived only in whatever the client put in
@@ -29411,6 +29418,7 @@ create table if not exists research.heads (
     revision_id uuid not null references research.revisions(id),
     updated_at  timestamptz not null default now()
 );
+create index if not exists heads_by_revision on research.heads (revision_id);
 
 create table if not exists research.operations (
     owner_id    uuid not null references rbac.users(id) on delete cascade,
@@ -29421,6 +29429,7 @@ create table if not exists research.operations (
     created_at  timestamptz not null default now(),
     primary key (owner_id, key)
 );
+create index if not exists operations_by_work on research.operations (work_id);
 
 create table if not exists research.claims (
     id          uuid primary key,
@@ -29443,6 +29452,8 @@ create table if not exists research.sources (
     locator     text not null,
     unique (revision_id, source_key)
 );
+-- Sources citing one origin, across packages (REM-219), without reading every source (specs/research-platform/scale.md §2).
+create index if not exists sources_by_origin on research.sources (origin) where origin <> '';
 
 create table if not exists research.citations (
     revision_id uuid not null,
@@ -29562,6 +29573,9 @@ create table if not exists research.endorsements (
 );
 create unique index if not exists endorsements_one_active
     on research.endorsements (revision_id, endorser_id) where withdrawn_at is null;
+-- A revision's endorsements, withdrawn ones included: trust reads them all, and a partial index answers
+-- only queries that imply its predicate, so trust scanned the table (specs/research-platform/scale.md §2).
+create index if not exists endorsements_by_revision on research.endorsements (revision_id);
 
 -- WHAT WAS CHECKED, AS KEYS AND NOT ONLY AS PROSE (REM-154, specs/tables/schema.md §5). A document-scoped
 -- endorsement may name no claim; a claim-scoped one names at least one, and research.endorse refuses it
@@ -29579,6 +29593,8 @@ create table if not exists research.endorsement_claims (
     primary key (endorsement_id, claim_key),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key)
 );
+-- Erasing a claim checks this reference; without the index each deleted claim scanned the table.
+create index if not exists endorsement_claims_by_claim on research.endorsement_claims (revision_id, claim_key);
 -- The FK that reaches through the endorsement is dropped before the unique key it needs, and added after it,
 -- so the replayed upgrade can drop and re-add both.
 alter table research.endorsement_claims drop constraint if exists endorsement_claims_same_revision;
@@ -29616,6 +29632,8 @@ create table if not exists research.exposures (
     exposed_at  timestamptz not null default now()
 );
 create index if not exists exposures_by_work on research.exposures (work_id);
+-- The listing walks exposures newest first (research.list_listed).
+create index if not exists exposures_newest on research.exposures (exposed_at desc, revision_id);
 
 -- A publication exposure says one exact revision may be read by anybody because
 -- its owner added it to one publication, in an org where they hold
@@ -30424,6 +30442,44 @@ language sql stable security definer set search_path = pg_catalog, public as $$
      order by u.updated_at desc, w.public_id;
 $$;
 
+-- A PAGE OF THE LISTING, READ AS A PAGE (REM-500, specs/research-platform/scale.md §2). list_packages visits
+-- every work, asks visible_head of each, sorts them all and returns everything, so a caller's LIMIT saves
+-- nothing: 21.7 s for the first 20 at 960 K claims. This walks exposures newest first through
+-- exposures_newest and stops at the page, so it costs the same at any size (319 pages at 960 K). The
+-- next page passes the last row's exposed_at. Readability is asked of each row, as list_packages does.
+create or replace function research.list_listed(p_before timestamptz default null, p_limit int default 20)
+returns setof jsonb language sql stable security definer set search_path = pg_catalog, public as $$
+    select jsonb_build_object('id', w.public_id, 'title', r.document->>'title', 'summary', r.document->>'summary',
+                              'revision', r.label, 'exposed_at', e.exposed_at)
+      from research.exposures e
+      join research.revisions r on r.id = e.revision_id
+      join research.works w on w.id = e.work_id
+     where (p_before is null or e.exposed_at < p_before) and research.readable(w.id)
+     order by e.exposed_at desc, e.revision_id
+     limit least(greatest(p_limit, 1), 100)
+$$;
+
+-- CLAIM SEARCH THAT ASKS THE INDEX FIRST (REM-500, scale.md §2). Under row security the planner must run
+-- claims_readable on every claim before `@@`, because ts_match_vq is not leakproof, so a search as the
+-- caller reads the whole table (7 minutes at 960 K claims). As the definer, the GIN index answers first,
+-- and readability is asked of each candidate, so the answer holds no claim the caller could not read.
+-- p_candidates bounds the work for a term that matches millions; a common term still costs what its
+-- matches cost (scale.md §3), which is the open part.
+create or replace function research.search_claims(p_query text, p_limit int default 20, p_candidates int default 2000)
+returns table (claim_id uuid, revision_id uuid, claim_key text, text text, score real)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    with q as (select plainto_tsquery('simple', p_query) as q),
+    candidates as (
+        select c.id, c.revision_id, c.claim_key, c.text, c.search_tsv
+          from research.claims c, q where c.search_tsv @@ q.q
+         limit least(greatest(p_candidates, 1), 10000))
+    select k.id, k.revision_id, k.claim_key, k.text, ts_rank(k.search_tsv, q.q)::real
+      from candidates k, q
+     where research.revision_readable(k.revision_id)
+     order by 5 desc
+     limit least(greatest(p_limit, 1), 100)
+$$;
+
 -- A person says what they checked in one exact revision (§5). With no claim keys it is document-scoped, as
 -- before; with keys it is claim-scoped and names at least one, each a claim of that revision. research:endorse
 -- is human-only, so an agent's credential is refused here whatever it has been granted.
@@ -30506,6 +30562,7 @@ create table if not exists engagement.saves (
     created_at timestamptz not null default now(),
     primary key (user_id, work_id)
 );
+create index if not exists saves_by_work on engagement.saves (work_id);
 
 create table if not exists engagement.follows (
     user_id    uuid not null references rbac.users(id) on delete cascade,
@@ -30533,6 +30590,9 @@ create table if not exists engagement.votes (
     withdrawn_at timestamptz
 );
 create unique index if not exists votes_one_active on engagement.votes (user_id, revision_id) where withdrawn_at is null;
+-- A revision's votes: revision_signals counts them, and erasure deletes them, withdrawn ones too, which a
+-- partial index cannot serve (specs/research-platform/scale.md §2).
+create index if not exists votes_by_revision on engagement.votes (revision_id);
 
 create table if not exists engagement.valuations (
     id           uuid primary key default uuidv7(),
@@ -30542,6 +30602,7 @@ create table if not exists engagement.valuations (
     currency     text not null check (currency ~ '^[A-Z]{3}$'),
     created_at   timestamptz not null default now()
 );
+create index if not exists valuations_by_revision on engagement.valuations (revision_id);
 
 create table if not exists engagement.comments (
     id              uuid primary key default uuidv7(),
@@ -31307,6 +31368,7 @@ grant execute on function
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
+    research.list_listed(timestamptz, int), research.search_claims(text, int, int),
     research.trust_state(text, timestamptz),
     engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid),
     research.resolve_image(uuid)
