@@ -31074,9 +31074,12 @@ drop policy if exists works_readable on research.works;
 select rbac.add_scope_policy('research.works');
 -- Visibility is necessary but cannot override a revoked key or inactive owner.
 -- A restrictive policy intersects with the generated tenancy policy above.
+-- ONCE PER QUERY, NOT PER ROW (REM-528). Both calls depend only on the caller's transaction-scoped claims, so as
+-- subselects Postgres evaluates each once, as an InitPlan. Written bare they ran on every row a query touched, and
+-- an anonymous Edition read paid for them on every private work too (percolate-application review/load/2026-09-18).
 drop policy if exists works_access on research.works;
 create policy works_access on research.works as restrictive for select
-    using (rbac.current_user_id() is null or rbac.may('research', 'select'));
+    using ((select rbac.current_user_id()) is null or (select rbac.may('research', 'select')));
 -- A work with a revision in a publication is visible as a row, so that exact revision can be read joined to its work
 -- (REM-252). Only the row: its head stays hidden (heads_readable) and visible_head never returns a publication's
 -- revision, so the work is still absent from every listing. The subquery is under publication_exposures' own row
