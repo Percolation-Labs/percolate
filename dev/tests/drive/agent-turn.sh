@@ -195,7 +195,7 @@ have_ns=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$AGENT" 2>/dev/null |
 PROVIDER_KEY_SUPPLIED=false
 if [ "$have_dsn" != "$want_dsn" ] || [ "$have_ns" != "$want_ns" ] || \
    [ "$(docker inspect -f '{{.State.Running}}' "$AGENT" 2>/dev/null || echo false)" != "true" ]; then
-    docker rm -f "$AGENT" >/dev/null 2>&1 || true
+    docker rm -f -v "$AGENT" >/dev/null 2>&1 || true
     docker run -d --name "$AGENT" --network "container:$CONTAINER" \
         -e P8_DSN="$want_dsn" -e P8_JWT_SECRET="$SECRET" \
         "$IMAGE" agent serve >/dev/null

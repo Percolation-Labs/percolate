@@ -41,7 +41,7 @@ if [ -z "$PREV" ]; then
 fi
 echo "==> upgrading a real $PREV database, with data, to $V"
 
-cleanup() { docker rm -f "$UPGC" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f -v "$UPGC" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 
