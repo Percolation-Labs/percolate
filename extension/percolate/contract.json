@@ -587,8 +587,7 @@
       "admits": [
         "supports",
         "challenges",
-        "qualifies",
-        "asks"
+        "qualifies"
       ],
       "column": "stance",
       "enforced_by": "check",

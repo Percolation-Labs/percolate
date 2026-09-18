@@ -109,7 +109,7 @@ set local role authenticated;
 do $$
 declare reply uuid := current_setting('discuss.reply')::uuid; deeper uuid;
 begin
-    deeper := engagement.discuss('Which edition?', p_parent => reply, p_stance => 'asks');
+    deeper := engagement.discuss('Which edition?', p_parent => reply);
     assert (select parent_id = reply and claim_key = 'C1' from engagement.comments where id = deeper), 'a reply to a reply is threaded';
     -- Existing verbs hold for posts: edit keeps versions, likes work, withdrawal hides.
     assert engagement.edit_comment(deeper, 'Which edition of the source?', 1) = 2, 'a post is edited like a comment';
@@ -142,7 +142,7 @@ set local role authenticated;
 do $$
 declare post uuid;
 begin
-    post := engagement.discuss('Is this the preprint or the paper?', p_resource => '00000000-0000-4000-8000-000000d15cd1', p_stance => 'asks');
+    post := engagement.discuss('Is this the preprint or the paper?', p_resource => '00000000-0000-4000-8000-000000d15cd1');
     assert (select resource_id is not null and revision_id is null from engagement.comments where id = post), 'a post can be about a resource';
     begin
         perform engagement.discuss('Peeking.', p_resource => '00000000-0000-4000-8000-000000d15cd2');

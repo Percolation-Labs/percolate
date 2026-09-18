@@ -30493,7 +30493,8 @@ create unique index if not exists comment_likes_one_active on engagement.comment
 -- one for discussions, so versions, likes, withdrawal and moderation hold for
 -- every post unchanged. A reply stays on its parent's target and claim, which
 -- engagement.discuss enforces: there is no direct write path.
--- The stance words are research.argument_edges' own, plus `asks` for a question.
+-- The stance words are research.argument_edges' own, a deliberate narrowing of that vocabulary: a
+-- question is a post with no stance.
 alter table engagement.comments alter column revision_id drop not null;
 alter table engagement.comments add column if not exists resource_id uuid references content.resources(id) on delete cascade;
 alter table engagement.comments add column if not exists parent_id uuid references engagement.comments(id);
@@ -30502,7 +30503,7 @@ alter table engagement.comments drop constraint if exists comments_one_target;
 alter table engagement.comments add constraint comments_one_target check ((revision_id is null) <> (resource_id is null));
 alter table engagement.comments drop constraint if exists comments_stance_known;
 alter table engagement.comments add constraint comments_stance_known
-    check (stance is null or stance in ('supports', 'challenges', 'qualifies', 'asks'));
+    check (stance is null or stance in ('supports', 'challenges', 'qualifies'));
 alter table engagement.comments drop constraint if exists comments_claim_needs_revision;
 alter table engagement.comments add constraint comments_claim_needs_revision check (claim_key is null or revision_id is not null);
 create index if not exists comments_by_revision on engagement.comments (revision_id, created_at) where revision_id is not null;
