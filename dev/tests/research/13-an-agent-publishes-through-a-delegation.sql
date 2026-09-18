@@ -8,9 +8,9 @@
 --   4. the exposure records the person as author and the credential that acted;
 --   5. the grant is still asked: revoking it refuses the agent though the delegation is live;
 --   6. revoking the delegation refuses the agent again and leaves the credential's other scopes working;
---   7. revoking the credential refuses it, and withdrawal stays the person's;
+--   7. revoking the credential refuses it, publishing and withdrawing alike;
 --   8. delegable is only for human-only kinds;
---   9. a delegated agent MOVES its own entry's pin, though it may not withdraw (REM-423).
+--   9. a delegated agent MOVES its own entry's pin (REM-423), and withdraws it (REM-532).
 --
 -- One transaction, rolled back. Claims are set as the superuser between blocks.
 
@@ -193,26 +193,30 @@ end $$;
 set local request.jwt.claims = '';
 
 
--- 7. A delegation on a revoked credential opens nothing, and withdrawal stays the person's.
+-- 7. A delegation on a revoked credential opens nothing: it neither publishes nor withdraws (REM-532).
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d0a001"}';
 set local role authenticated;
 select rbac.delegate('00000000-0000-4000-8000-000000d0c001', 'research', 'publish', '00000000-0000-4000-8000-000000d0f001');
 reset role;
+update rbac.api_keys set revoked_at = now() where id = '00000000-0000-4000-8000-000000d0c001';
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d0a001", "api_key_id": "00000000-0000-4000-8000-000000d0c001"}';
 set local role authenticated;
 do $$
-declare v_hint text;
 begin
     begin
         perform research.withdraw_publication_exposure('rp-delegation-one', 'draft-1', 'delegation-blog');
-        assert false, 'an agent withdrew work from a publication';
+        assert false, 'an agent on a revoked credential withdrew work from a publication';
     exception when insufficient_privilege then
-        get stacked diagnostics v_hint = pg_exception_hint;
-        assert v_hint = 'human_only', 'withdrawal by an agent is refused as human_only, not ' || v_hint;
+        null;
     end;
 end $$;
 reset role;
-update rbac.api_keys set revoked_at = now() where id = '00000000-0000-4000-8000-000000d0c001';
+do $$
+begin
+    assert exists (select 1 from research.publication_exposures pe join research.revisions r on r.id = pe.revision_id
+                    where r.label = 'draft-1' and pe.publication = 'delegation-blog'),
+        'a refused withdrawal removed the exposure';
+end $$;
 do $$
 begin
     assert (rbac.decide_in_org('research', 'publish', '00000000-0000-4000-8000-000000d0f001')->>'reason') = 'credential_revoked',
@@ -221,8 +225,8 @@ end $$;
 set local request.jwt.claims = '';
 
 
--- 9. A delegated agent moves the pin from one revision to another, though withdrawal stays the person's
--- (REM-423). Publishing a correction is a move, not a withdrawal: the work never leaves the publication.
+-- 9. A delegated agent moves the pin from one revision to another (REM-423), then withdraws it (REM-532):
+-- what a delegation may put in a publication it may take out, under the same decision.
 update rbac.api_keys set revoked_at = null where id = '00000000-0000-4000-8000-000000d0c001';
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d0a001"}';
 set local role authenticated;
@@ -247,17 +251,15 @@ begin
                         where r.label = 'draft-1' and pe.publication = 'delegation-blog'),
         'the revision moved off is no longer exposed';
 end $$;
--- A move is not a way to withdraw: taking work out of a publication is still refused to an agent.
 do $$
-declare v_hint text;
 begin
-    begin
-        perform research.withdraw_publication_exposure('rp-delegation-one', 'draft-2', 'delegation-blog');
-        assert false, 'a move made withdrawal reachable by an agent';
-    exception when insufficient_privilege then
-        get stacked diagnostics v_hint = pg_exception_hint;
-        assert v_hint = 'human_only', 'withdrawal stays human_only, not ' || v_hint;
-    end;
+    assert research.withdraw_publication_exposure('rp-delegation-one', 'draft-2', 'delegation-blog'),
+        'a delegated agent could not withdraw what it published';
+    assert not research.withdraw_publication_exposure('rp-delegation-one', 'draft-2', 'delegation-blog'),
+        'a second withdrawal removed something';
+    assert not exists (select 1 from research.publication_exposures pe join research.revisions r on r.id = pe.revision_id
+                        where r.label = 'draft-2' and pe.publication = 'delegation-blog'),
+        'the withdrawn revision is still exposed';
 end $$;
 reset role;
 set local request.jwt.claims = '';

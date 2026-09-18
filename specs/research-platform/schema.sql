@@ -1645,23 +1645,39 @@ begin
 end;
 $$;
 
--- Take an exact revision of your own work out of a publication. Only the owner,
--- as a person. No publish grant is needed, so losing one never traps work in a
--- publication. True when something was removed; a listing is untouched.
+-- Take an exact revision of your own work out of a publication. The owner, as a
+-- person, needs no publish grant, so losing one never traps work in a
+-- publication. An agent may take out what it may put in (REM-532): the same
+-- research:publish decision expose_for_publication takes, in the org the
+-- exposure was made in, so a delegation that publishes can also unpublish and a
+-- revoked or narrowed one can do neither. True when something was removed; a
+-- listing is untouched.
 create or replace function research.withdraw_publication_exposure(p_public_id text, p_revision text,
                                                                    p_publication text)
 returns boolean language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
-    v_user  uuid := rbac.require('research', 'select');
-    w       research.works;
-    v_count int;
+    v_user     uuid := rbac.require('research', 'select');
+    w          research.works;
+    v_org      uuid;
+    v_decision jsonb;
+    v_count    int;
 begin
-    if rbac.current_actor() <> 'person' then
-        raise insufficient_privilege using message = 'Only a person takes work out of a publication', hint = 'human_only';
-    end if;
     select * into w from research.works where public_id = p_public_id;
     if not found or w.owner_id is distinct from v_user then
         raise no_data_found using message = 'Research package not found';
+    end if;
+    if rbac.current_actor() <> 'person' then
+        select pe.org_id into v_org
+          from research.publication_exposures pe join research.revisions r on r.id = pe.revision_id
+         where r.work_id = w.id and r.label = p_revision and pe.publication = p_publication;
+        if v_org is null then
+            return false;
+        end if;
+        v_decision := rbac.decide_in_org('research', 'publish', v_org);
+        if not coalesce((v_decision->>'allowed')::boolean, false) then
+            raise insufficient_privilege using message = 'Taking work out of this publication needs research:publish in its org',
+                                               hint = coalesce(v_decision->>'reason', 'no_grant');
+        end if;
     end if;
     delete from research.publication_exposures pe
      using research.revisions r
@@ -1684,8 +1700,8 @@ $$;
 -- So a move is one call, authorised exactly as the add is, and it can do
 -- nothing a caller could not already do: it exposes p_to_revision under the
 -- same org decision, and removes p_from_revision of THE SAME WORK in THE SAME
--- publication. It cannot retire a revision of another work, and it is not a
--- withdrawal: taking work out of a publication is still the person's alone.
+-- publication. It cannot retire a revision of another work. Since REM-532 a
+-- withdrawal takes the same decision for an agent, so the two now agree.
 create or replace function research.move_publication_exposure(p_public_id text, p_from_revision text,
                                                               p_to_revision text, p_publication text, p_org uuid)
 returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$

@@ -217,7 +217,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('research.expose_for_publication(text,text,text,uuid)', 'rbac.decide_in_org',
  'research:publish granted in the publication''s own org, human-only, and only the owner''s work; anybody else''s is not found'),
 ('research.withdraw_publication_exposure(text,text,text)', 'rbac.require',
- 'only the owner, as a person; no publish grant is needed, so losing one never traps work in a publication'),
+ 'only the owner; a person needs no publish grant, so losing one never traps work, and an agent needs research:publish in the exposure''s org (REM-532)'),
 ('research.endorse(uuid,text,text,text[])', 'rbac.require',
  'research:endorse is human-only, on a revision the caller may read; the checked claims are keyed to that revision'),
 ('research.endorsements_affected_by(uuid)', 'research.revision_readable',
