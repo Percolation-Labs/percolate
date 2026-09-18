@@ -54,7 +54,6 @@ do $$
 declare rev uuid := (research.get_package('rp-discuss-one')->'receipt'->>'revision_id')::uuid; root uuid;
 begin
     root := engagement.discuss('I doubt the first claim.', p_revision => rev, p_claim_key => 'C1', p_stance => 'challenges');
-    perform set_config('discuss.root', root::text, true);
     assert (select stance = 'challenges' and claim_key = 'C1' and parent_id is null
               from engagement.comments where id = root), 'a root keeps its claim and stance';
     begin
@@ -79,6 +78,8 @@ begin
     end;
 end $$;
 reset role;
+-- Ids cross blocks as transaction-local settings, set as the superuser (authenticated may not call set_config).
+select set_config('discuss.root', (select id::text from engagement.comments where body = 'I doubt the first claim.'), true);
 
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d15c01"}';
 set local role authenticated;
@@ -86,7 +87,6 @@ do $$
 declare root uuid := current_setting('discuss.root')::uuid; reply uuid; rev uuid;
 begin
     reply := engagement.discuss('The source says so on page one.', p_parent => root, p_stance => 'supports');
-    perform set_config('discuss.reply', reply::text, true);
     select revision_id into rev from engagement.comments where id = root;
     assert (select revision_id = rev and claim_key = 'C1' and parent_id = root
               from engagement.comments where id = reply), 'a reply inherits its parent''s revision and claim';
@@ -102,6 +102,7 @@ begin
     end;
 end $$;
 reset role;
+select set_config('discuss.reply', (select id::text from engagement.comments where body = 'The source says so on page one.'), true);
 
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-000000d15c02"}';
 set local role authenticated;
