@@ -115,9 +115,10 @@ begin
         'the owner reads the links of their own revision';
     assert exists (select 1 from claims.claims where id = (select v::uuid from seen where k = 'c1')),
         'and the claims they express';
+    -- A transaction shows its id, time and actor kind behind a readable row, and nothing else (REM-475).
     begin
-        perform count(*) from claims.tx;
-        raise exception 'authenticated read claims.tx';
+        perform reason from claims.tx;
+        raise exception 'authenticated read a transaction''s reason';
     exception when insufficient_privilege then null;
     end;
 end $$;

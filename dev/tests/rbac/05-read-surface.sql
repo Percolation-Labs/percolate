@@ -96,8 +96,9 @@ begin
      where c.relkind = 'r'
        and n.nspname in (select percolate.extension_schemas())
        and not exists (select 1 from pg_policy p where p.polrelid = c.oid)
-       and (has_table_privilege('authenticated', c.oid, 'select')
-            or has_table_privilege('web_anon', c.oid, 'select'))
+       -- Any column: a table readable through a column grant alone is readable (REM-475).
+       and (has_any_column_privilege('authenticated', c.oid, 'select')
+            or has_any_column_privilege('web_anon', c.oid, 'select'))
        and n.nspname || '.' || c.relname <> all (v_shared)
        -- Embedding spaces are created dynamically by register_embedding_space,
        -- so they cannot be listed by name. They hold (chunk_id, vector) and no
@@ -181,8 +182,10 @@ begin
        and n.nspname in (select percolate.extension_schemas())
        and exists (select 1 from pg_policy p
                     where p.polrelid = c.oid and p.polcmd in ('r','*'))
-       and not has_table_privilege('authenticated', c.oid, 'select')
-       and not has_table_privilege('web_anon', c.oid, 'select')
+       -- ANY COLUMN, not the table: a policy is reachable through a column grant too, and claims.tx is read
+       -- that way, three columns of it (REM-475). has_table_privilege is false for a column grant.
+       and not has_any_column_privilege('authenticated', c.oid, 'select')
+       and not has_any_column_privilege('web_anon', c.oid, 'select')
        and c.oid not in (select tbl from reachable_via_view)
        and n.nspname || '.' || c.relname <> all (v_no_reader_by_design);
 

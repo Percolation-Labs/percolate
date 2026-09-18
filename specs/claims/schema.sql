@@ -8,7 +8,9 @@
 --
 -- Relations between claims (REM-474) are assertions in one vocabulary, claims.predicates (graph.md §6).
 --
--- WHAT IS NOT HERE YET. The read functions and their access tests (REM-475),
+-- The graph is read through §12's functions (REM-475), each security invoker and each as of a date.
+--
+-- WHAT IS NOT HERE YET. The reads over questions and origins (answers, evidence, question_evidence: REM-476, REM-477),
 -- frames and questions (REM-476), cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
 -- answer to a reworded claim (REM-483). A claim with no occurrence left after an erasure is REM-481's.
 
@@ -147,8 +149,8 @@ end $$;
 
 -- ------------------------------------------------------------
 -- 6. Access (graph.md §9): an expresses row is readable with its revision, and a claim when a readable occurrence
---    expresses it. A transaction is not granted to authenticated: the read functions (REM-475) show an assertion's
---    actor kind, never the rest of its transaction.
+--    expresses it. A transaction's id, time and actor kind are readable behind a row the caller may read (§12 below);
+--    the rest of it is not granted.
 -- ------------------------------------------------------------
 alter table claims.expresses enable row level security;
 drop policy if exists expresses_readable on claims.expresses;
@@ -417,7 +419,189 @@ grant execute on function claims.assert_relation(text, text, text, uuid, uuid, t
                           claims.restate_relation(bigint, text, boolean, text) to authenticated;
 
 -- ------------------------------------------------------------
--- 11. The backfill: every revision projected before this existed gets its links, oldest first within each work, so
+-- 11. Who asserted, and when, behind a row the caller may read (graph.md §9). An actor sees their own transactions;
+--     anybody else sees a transaction's id, time and actor kind when a link or relation they may read names it, and
+--     never its actor, credential or reason.
+-- ------------------------------------------------------------
+drop policy if exists tx_readable on claims.tx;
+create policy tx_readable on claims.tx for select using (
+    actor_id = rbac.current_user_id()
+    or exists (select 1 from claims.expresses e where e.tx = tx.id)
+    or exists (select 1 from claims.relations r where r.tx = tx.id));
+grant select (id, at, actor_kind) on claims.tx to authenticated;
+
+-- ------------------------------------------------------------
+-- 12. Reading the graph (graph.md §10). Every function is security invoker, so row security decides what it
+--     returns, and takes p_at: a row counts when its transaction was at or before p_at, and the latest such row for
+--     one statement is that statement's state then. A derived reading is returned as a path of asserted relations,
+--     never as a relation of its own.
+-- ------------------------------------------------------------
+
+-- The relations touching one claim, as they stood at p_at: the latest row per statement, retractions dropped.
+create or replace function claims.relations_at(p_claim uuid, p_at timestamptz default now())
+returns table (id bigint, src uuid, predicate text, dst uuid, status text, evidence uuid, evidence2 uuid,
+               keys jsonb, at timestamptz, actor_kind text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select c.id, c.src, c.predicate, c.dst, c.status, c.evidence, c.evidence2, c.keys, c.at, c.actor_kind
+      from (select distinct on (r.src, r.predicate, r.dst, r.evidence, r.evidence2, r.keys)
+                   r.id, r.src, r.predicate, r.dst, r.status, r.op, r.evidence, r.evidence2, r.keys,
+                   t.at, t.actor_kind
+              from claims.relations r join claims.tx t on t.id = r.tx
+             where (r.src = p_claim or r.dst = p_claim) and t.at <= p_at
+             order by r.src, r.predicate, r.dst, r.evidence, r.evidence2, r.keys, r.id desc) c
+     where c.op = 'assert';
+$$;
+
+-- The claims joined to p_id by confirmed same_as the caller may read, p_id included (graph.md §5, §6: identity is
+-- transitive over confirmed assertions only, and a proposed edge never extends a set).
+create or replace function claims.identity_set(p_id uuid, p_at timestamptz default now()) returns setof uuid
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with recursive ids(claim, path) as (
+        select p_id, array[p_id]
+        union all
+        select case when r.src = i.claim then r.dst else r.src end,
+               i.path || case when r.src = i.claim then r.dst else r.src end
+          from ids i cross join lateral claims.relations_at(i.claim, p_at) r
+         where r.predicate = 'same_as' and r.status = 'confirmed'
+           and not (case when r.src = i.claim then r.dst else r.src end) = any (i.path)
+           and cardinality(i.path) < 64)
+    select distinct claim from ids;
+$$;
+
+-- A claim: the occurrences that expressed it at p_at, and its identity set over the confirmed same_as the caller
+-- may read (graph.md §5). Null when the caller may read no occurrence of it, so a private claim is not observable.
+create or replace function claims.claim(p_id uuid, p_at timestamptz default now()) returns jsonb
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with occ as (
+        select distinct on (e.revision_id, e.claim_key, e.part)
+               e.revision_id, e.claim_key, e.part, e.claim_id, e.method, e.status, e.op, t.at
+          from claims.expresses e join claims.tx t on t.id = e.tx
+         where e.revision_id in (select x.revision_id from claims.expresses x where x.claim_id = p_id)
+           and t.at <= p_at
+         order by e.revision_id, e.claim_key, e.part, e.id desc),
+    mine as (
+        select o.*, c.text, v.label, v.number, w.public_id
+          from occ o join research.claims c on (c.revision_id, c.claim_key) = (o.revision_id, o.claim_key)
+          join research.revisions v on v.id = o.revision_id join research.works w on w.id = v.work_id
+         where o.claim_id = p_id and o.op = 'assert')
+    select case when exists (select 1 from mine) then jsonb_build_object(
+        'id', p_id,
+        'occurrences', (select jsonb_agg(jsonb_build_object(
+                            'package_id', m.public_id, 'revision_id', m.revision_id, 'revision', m.label,
+                            'claim_key', m.claim_key, 'part', m.part, 'text', m.text, 'method', m.method,
+                            'status', m.status, 'at', m.at) order by m.at, m.public_id, m.number)
+                          from mine m),
+        'identity_set', (select jsonb_agg(i order by i) from claims.identity_set(p_id, p_at) i),
+        'question', null)
+    end;
+$$;
+
+-- Typed paths out of and into a claim, up to p_depth hops (at most 4), each hop the asserted relation it walked.
+create or replace function claims.neighbourhood(p_id uuid, p_predicates text[] default null, p_depth int default 1,
+                                                p_at timestamptz default now())
+returns table (depth int, relation_id bigint, src uuid, predicate text, dst uuid, status text, evidence uuid,
+               actor_kind text, at timestamptz, path uuid[])
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with recursive hop(depth, relation_id, src, predicate, dst, status, evidence, actor_kind, at, here, path) as (
+        select 1, r.id, r.src, r.predicate, r.dst, r.status, r.evidence, r.actor_kind, r.at,
+               case when r.src = p_id then r.dst else r.src end,
+               array[p_id, case when r.src = p_id then r.dst else r.src end]
+          from claims.relations_at(p_id, p_at) r
+         where p_predicates is null or r.predicate = any (p_predicates)
+        union all
+        select h.depth + 1, r.id, r.src, r.predicate, r.dst, r.status, r.evidence, r.actor_kind, r.at,
+               case when r.src = h.here then r.dst else r.src end,
+               h.path || case when r.src = h.here then r.dst else r.src end
+          from hop h cross join lateral claims.relations_at(h.here, p_at) r
+         where h.depth < least(greatest(p_depth, 1), 4)
+           and (p_predicates is null or r.predicate = any (p_predicates))
+           and not (case when r.src = h.here then r.dst else r.src end) = any (h.path))
+    select depth, relation_id, src, predicate, dst, status, evidence, actor_kind, at, path from hop;
+$$;
+
+-- What a claim rests on (graph.md §6): every claim it depends on through confirmed supports and motivates, with the
+-- path from the claim back to it. Derived, and returned as a path, never as a relation.
+create or replace function claims.rests_on(p_id uuid, p_at timestamptz default now())
+returns table (claim uuid, depth int, path uuid[], relations bigint[])
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with recursive rests(claim, depth, path, relations) as (
+        select p_id, 0, array[p_id], array[]::bigint[]
+        union all
+        select r.src, s.depth + 1, s.path || r.src, s.relations || r.id
+          from rests s cross join lateral claims.relations_at(s.claim, p_at) r
+         where r.dst = s.claim and r.predicate in ('supports', 'motivates') and r.status = 'confirmed'
+           and not r.src = any (s.path) and s.depth < 12)
+    select claim, depth, path, relations from rests where depth > 0;
+$$;
+
+-- What challenges a claim through what it rests on (graph.md §6): C is challenged through Y when C rests on Y and a
+-- confirmed challenges or contradicts is aimed at Y. A challenge aimed at C itself is not one of these. Shown as "a
+-- claim this depends on is disputed", with the path; never as "this claim is disputed".
+create or replace function claims.challenged_through(p_id uuid, p_at timestamptz default now())
+returns table (rests_on uuid, challenger uuid, predicate text, relation_id bigint, path uuid[], relations bigint[])
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select s.claim, r.src, r.predicate, r.id, s.path, s.relations
+      from claims.rests_on(p_id, p_at) s cross join lateral claims.relations_at(s.claim, p_at) r
+     where r.dst = s.claim and r.predicate in ('challenges', 'contradicts') and r.status = 'confirmed'
+       and s.claim <> p_id;
+$$;
+
+-- Every statement about a claim, oldest first: each link from an occurrence, and each row of each relation that
+-- names it, with when it was made and by what kind of actor.
+create or replace function claims.history(p_id uuid)
+returns table (at timestamptz, actor_kind text, record text, row_id bigint, predicate text, other uuid, status text,
+               op text, revision_id uuid, claim_key text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select t.at, t.actor_kind, 'expresses', e.id, 'expresses', null::uuid, e.status, e.op, e.revision_id, e.claim_key
+      from claims.expresses e join claims.tx t on t.id = e.tx where e.claim_id = p_id
+    union all
+    select t.at, t.actor_kind, 'relation', r.id, r.predicate, case when r.src = p_id then r.dst else r.src end,
+           r.status, r.op, r.evidence, case when r.src = p_id then r.keys->>'src' else r.keys->>'dst' end
+      from claims.relations r join claims.tx t on t.id = r.tx where r.src = p_id or r.dst = p_id
+    order by 1, 3, 4;
+$$;
+
+-- What an edit did to the argument, claim by claim (graph.md §10): claims added, dropped, carried unchanged or
+-- reworded (with whether the rewording is confirmed), and relations gained and lost between the two revisions.
+create or replace function claims.revision_diff(p_from uuid, p_to uuid)
+returns table (change text, claim uuid, from_key text, to_key text, status text, predicate text, other uuid)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with f as (select distinct on (e.claim_key) e.claim_key, e.claim_id, e.op from claims.expresses e
+                where e.revision_id = p_from and e.part = 1 order by e.claim_key, e.id desc),
+         t as (select distinct on (e.claim_key) e.claim_key, e.claim_id, e.method, e.status, e.op from claims.expresses e
+                where e.revision_id = p_to and e.part = 1 order by e.claim_key, e.id desc),
+         fr as (select distinct on (r.src, r.predicate, r.dst, r.keys) r.src, r.predicate, r.dst, r.op
+                  from claims.relations r where r.evidence = p_from and r.evidence2 is null
+                 order by r.src, r.predicate, r.dst, r.keys, r.id desc),
+         tr as (select distinct on (r.src, r.predicate, r.dst, r.keys) r.src, r.predicate, r.dst, r.op
+                  from claims.relations r where r.evidence = p_to and r.evidence2 is null
+                 order by r.src, r.predicate, r.dst, r.keys, r.id desc)
+    select case when f.claim_id is null then 'added'
+                when t.method = 'unchanged' then 'carried'
+                else 'reworded' end,
+           t.claim_id, f.claim_key, t.claim_key, t.status, null::text, null::uuid
+      from t left join f on f.claim_id = t.claim_id and f.op = 'assert' where t.op = 'assert'
+    union all
+    select 'dropped', f.claim_id, f.claim_key, null::text, null::text, null::text, null::uuid
+      from f where f.op = 'assert' and not exists (select 1 from t where t.claim_id = f.claim_id and t.op = 'assert')
+    union all
+    select 'relation gained', tr.src, null::text, null::text, null::text, tr.predicate, tr.dst
+      from tr where tr.op = 'assert'
+       and not exists (select 1 from fr where (fr.src, fr.predicate, fr.dst) = (tr.src, tr.predicate, tr.dst) and fr.op = 'assert')
+    union all
+    select 'relation lost', fr.src, null::text, null::text, null::text, fr.predicate, fr.dst
+      from fr where fr.op = 'assert'
+       and not exists (select 1 from tr where (tr.src, tr.predicate, tr.dst) = (fr.src, fr.predicate, fr.dst) and tr.op = 'assert');
+$$;
+
+grant execute on function claims.relations_at(uuid, timestamptz), claims.claim(uuid, timestamptz),
+                          claims.identity_set(uuid, timestamptz),
+                          claims.neighbourhood(uuid, text[], int, timestamptz), claims.rests_on(uuid, timestamptz),
+                          claims.challenged_through(uuid, timestamptz), claims.history(uuid),
+                          claims.revision_diff(uuid, uuid) to authenticated;
+
+-- ------------------------------------------------------------
+-- 13. The backfill: every revision projected before this existed gets its links, oldest first within each work, so
 --     each predecessor is linked before its successor asks it, and then its edges as relations. On a fresh install,
 --     and on every replay after the first, it finds nothing and writes nothing.
 -- ------------------------------------------------------------
