@@ -58,8 +58,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A RUN ON MAIN IS NEVER CANCELLED BY THE NEXT ONE. A push's `changes` job diffs
+# against `github.event.before`, the push immediately before it, and nothing
+# else. With one group for main and cancel-in-progress, a code push followed
+# within minutes by a markdown push had its run cancelled, and the surviving run
+# saw only markdown, so parser and database stood down and main went green over a
+# schema nobody had checked. Measured 2026-09-18: 00e798a (extension 0.2.11) was
+# cancelled by 14ac107 (one .md file), and the database job had not run on main
+# since REM-423. So on main each commit is its own group. A PR keeps one group
+# per branch: its newest head supersedes, and its diff is against the base.
 concurrency:
-  group: check-${{ github.ref }}
+  group: check-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
