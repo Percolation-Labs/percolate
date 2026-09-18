@@ -83,7 +83,10 @@ declare
         -- scope aliases (research-platform/schema.sql §1-2): installation
         -- vocabulary with no tenant column, readable so a caller can see what
         -- a plan allows. Who holds which plan is plan_assignments, which is policied.
-        'rbac.plans', 'rbac.resource_kinds', 'rbac.plan_limits', 'rbac.applications', 'rbac.scope_aliases'
+        'rbac.plans', 'rbac.resource_kinds', 'rbac.plan_limits', 'rbac.applications', 'rbac.scope_aliases',
+        -- The claims vocabulary (claims/schema.sql §7, REM-474): one row per predicate, the extension's and
+        -- identical for every tenant, readable so a caller knows what a relation's name means.
+        'claims.predicates'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, E'\n       ' order by 1)

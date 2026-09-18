@@ -29977,6 +29977,7 @@ begin
     end loop;
     -- Each occurrence expresses a claim (REM-473, specs/claims/schema.sql). A repair links only what is unlinked.
     perform claims.link_revision(p_revision);
+    perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
 end;
 $$;
 
@@ -31701,7 +31702,9 @@ end $$;
 -- occurrence is now a claim: an id minted once with uuidv7(), never computed from text, and carried from one revision
 -- of a work to the next by an `expresses` assertion the platform makes when it projects the revision.
 --
--- WHAT IS NOT HERE YET. Relations between claims (REM-474), the read functions and their access tests (REM-475),
+-- Relations between claims (REM-474) are assertions in one vocabulary, claims.predicates (graph.md §6).
+--
+-- WHAT IS NOT HERE YET. The read functions and their access tests (REM-475),
 -- frames and questions (REM-476), cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
 -- answer to a reworded claim (REM-483). A claim with no occurrence left after an erasure is REM-481's.
 
@@ -31858,9 +31861,261 @@ grant usage on schema claims to authenticated;
 grant select on claims.claims, claims.expresses to authenticated;
 
 -- ------------------------------------------------------------
--- 7. The backfill: every revision projected before this existed gets its links, oldest first within each work, so
---    each predecessor is linked before its successor asks it. On a fresh install, and on every replay after the
---    first, it finds nothing and writes nothing.
+-- 7. The vocabulary (graph.md §6). One row per predicate: what it relates, what kind of statement it is, and the
+--    two properties a derived reading may rely on. It is the extension's, replayed on every upgrade.
+-- ------------------------------------------------------------
+create table if not exists claims.predicates (
+    name         text primary key check (name ~ '^[a-z_]+$'),
+    kind         text not null check (kind in ('identity', 'framing', 'inferential', 'comparative', 'evidence', 'outcome')),
+    subject_kind text not null check (subject_kind in ('claim', 'occurrence', 'question')),
+    object_kind  text not null check (object_kind in ('claim', 'question', 'origin', 'entity', 'value')),
+    is_transitive boolean not null,
+    is_symmetric  boolean not null,
+    requires     text not null
+);
+insert into claims.predicates (name, kind, subject_kind, object_kind, is_transitive, is_symmetric, requires) values
+ ('expresses',            'identity',    'occurrence', 'claim',    false, false, 'platform or owner; written by claims.link_revision'),
+ ('same_as',              'identity',    'claim',      'claim',    true,  true,  'evidence on both sides (REM-478)'),
+ ('supersedes',           'identity',    'claim',      'claim',    true,  false, 'the owner of both'),
+ ('answers',              'framing',     'claim',      'question', false, false, 'a frame (REM-476)'),
+ ('refines',              'framing',     'question',   'question', true,  false, 'a narrower slot value (REM-476)'),
+ ('supports',             'inferential', 'claim',      'claim',    false, false, 'nothing beyond the writer''s assertion'),
+ ('challenges',           'inferential', 'claim',      'claim',    false, false, 'nothing beyond the writer''s assertion'),
+ ('qualifies',            'inferential', 'claim',      'claim',    false, false, 'both read'),
+ ('limits',               'inferential', 'claim',      'claim',    false, false, 'both read'),
+ ('motivates',            'inferential', 'claim',      'claim',    false, false, 'nothing'),
+ ('compares_with',        'inferential', 'claim',      'claim',    false, true,  'nothing'),
+ ('agrees',               'comparative', 'claim',      'claim',    false, true,  'same question; spans from both (REM-476)'),
+ ('contradicts',          'comparative', 'claim',      'claim',    false, true,  'same question; every frame slot same or overlaps; spans from both (REM-476)'),
+ ('different_scope',      'comparative', 'claim',      'claim',    false, true,  'the slot that differs, named (REM-476)'),
+ ('same_source_opposite', 'comparative', 'claim',      'claim',    false, true,  'a shared origin; a span from each (REM-477)'),
+ ('cites',                'evidence',    'occurrence', 'origin',   false, false, 'a source in the revision (REM-477)'),
+ ('mentions',             'evidence',    'occurrence', 'entity',   false, false, 'a locator'),
+ ('resolved_as',          'outcome',     'claim',      'value',    false, false, 'graph.md §12, an event (REM-480)'),
+ ('consensus_as',         'outcome',     'claim',      'value',    false, false, 'graph.md §12; independent origins counted (REM-496)')
+on conflict (name) do update set kind = excluded.kind, subject_kind = excluded.subject_kind,
+    object_kind = excluded.object_kind, is_transitive = excluded.is_transitive, is_symmetric = excluded.is_symmetric,
+    requires = excluded.requires;
+
+-- The document's words for the six in-package relations, mapped onto the vocabulary's.
+create or replace function claims.predicate_of_edge(p_relation text) returns text
+language sql immutable parallel safe set search_path = pg_catalog as $$
+    select case p_relation when 'compares with' then 'compares_with' else p_relation end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8. Relations: claim -> claim, one row per statement, never updated (graph.md §3, §11).
+-- ------------------------------------------------------------
+-- The evidence is one revision, or two for a relation between works; `keys` names the occurrences in it
+-- ({"src": "C1", "dst": "C2"}), and `spans` quotes them where a predicate needs quotes. The row with the highest id
+-- for one (src, predicate, dst, evidence) is current: a status change or a retraction is a later row, so the
+-- history of a relation is its rows. Two assertions of one relation from two revisions are two statements, each
+-- readable with its own evidence (graph.md §9).
+create table if not exists claims.relations (
+    id          bigint generated always as identity primary key,
+    src         uuid not null references claims.claims(id),
+    predicate   text not null references claims.predicates(name),
+    dst         uuid not null references claims.claims(id),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    op          text not null default 'assert' check (op in ('assert', 'retract')),
+    evidence    uuid not null references research.revisions(id) on delete cascade,
+    evidence2   uuid references research.revisions(id) on delete cascade,
+    keys        jsonb not null default '{}'::jsonb check (jsonb_typeof(keys) = 'object'),
+    spans       jsonb check (spans is null or jsonb_typeof(spans) = 'object'),
+    tx          bigint not null references claims.tx(id),
+    check (src <> dst),
+    check (evidence2 is null or evidence2 <> evidence)
+);
+create index if not exists relations_src on claims.relations (src, predicate, dst, id desc);
+create index if not exists relations_dst on claims.relations (dst, predicate);
+create index if not exists relations_evidence on claims.relations (evidence);
+create index if not exists relations_evidence2 on claims.relations (evidence2) where evidence2 is not null;
+
+-- A revision's argument edges, asserted as relations between the claims its occurrences express (REM-474). The
+-- writer made them in their document, so the platform records them confirmed, in the revision's own transaction.
+-- Only an edge with no relation yet is asserted, so a rebuild and a replay write nothing.
+create or replace function claims.project_edges(p_revision uuid) returns int
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    t bigint;
+    e record;
+    n int := 0;
+begin
+    for e in select a.source_claim_key, a.target_claim_key, claims.predicate_of_edge(a.relation) as predicate,
+                    xs.claim_id as src, xd.claim_id as dst
+               from research.argument_edges a
+               join lateral (select x.claim_id from claims.expresses x
+                              where x.revision_id = a.revision_id and x.claim_key = a.source_claim_key and x.part = 1
+                              order by x.id desc limit 1) xs on true
+               join lateral (select x.claim_id from claims.expresses x
+                              where x.revision_id = a.revision_id and x.claim_key = a.target_claim_key and x.part = 1
+                              order by x.id desc limit 1) xd on true
+              where a.revision_id = p_revision
+                and not exists (select 1 from claims.relations r
+                                 where r.evidence = p_revision and r.evidence2 is null
+                                   and r.keys = jsonb_build_object('src', a.source_claim_key, 'dst', a.target_claim_key)
+                                   and r.predicate = claims.predicate_of_edge(a.relation))
+              order by a.source_claim_key, a.relation, a.target_claim_key loop
+        continue when e.src = e.dst;   -- two keys of one revision expressing one claim relate nothing
+        if t is null then
+            select x.tx into t from claims.expresses x where x.revision_id = p_revision order by x.id desc limit 1;
+        end if;
+        insert into claims.relations (src, predicate, dst, status, evidence, keys, tx)
+        values (e.src, e.predicate, e.dst, 'confirmed', p_revision,
+                jsonb_build_object('src', e.source_claim_key, 'dst', e.target_claim_key), t);
+        n := n + 1;
+    end loop;
+    return n;
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 9. Writing a relation (graph.md §11). Every write opens its own transaction record, and nothing is updated.
+-- ------------------------------------------------------------
+-- The caller owns the work of `p_evidence` -- the asserting side -- and may read `p_evidence2`. Each claim is
+-- expressed by the occurrence `p_keys` names in one of them. An agent's assertion lands `proposed`, and an agent
+-- asking for `confirmed` is refused, never downgraded. The vocabulary row decides the rest: a predicate that relates
+-- anything but two claims is written elsewhere, and one whose requirement needs a record that does not exist yet
+-- (a question, an origin entity, a cross-work identity) is refused naming the card that builds it.
+create or replace function claims.assert_relation(p_src_key text, p_predicate text, p_dst_key text,
+                                                  p_evidence uuid, p_evidence2 uuid default null,
+                                                  p_status text default null, p_spans jsonb default null,
+                                                  p_reason text default null) returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user  uuid := rbac.require('research', 'insert');
+    v_actor text := rbac.current_actor();
+    v_pred  claims.predicates;
+    v_src   uuid;
+    v_dst   uuid;
+    v_status text := coalesce(p_status, case when rbac.current_actor() = 'person' then 'confirmed' else 'proposed' end);
+    t       bigint;
+    v_id    bigint;
+begin
+    select * into v_pred from claims.predicates where name = p_predicate;
+    if not found then
+        raise check_violation using message = 'Unknown predicate', detail = p_predicate;
+    end if;
+    if v_pred.subject_kind <> 'claim' or v_pred.object_kind <> 'claim' then
+        raise check_violation using message = 'This predicate does not relate two claims', detail = p_predicate;
+    end if;
+    if v_pred.kind = 'comparative' then
+        raise feature_not_supported using message = 'A comparative relation needs the question both claims answer',
+            detail = p_predicate, hint = 'REM-476 builds questions; REM-479 moves comparisons into core';
+    elsif p_predicate = 'same_as' then
+        raise feature_not_supported using message = 'same_as between claims is REM-478', detail = p_predicate;
+    end if;
+    if v_status not in ('proposed', 'confirmed', 'disputed') then
+        raise check_violation using message = 'Unknown status', detail = v_status;
+    end if;
+    if v_status = 'confirmed' and v_actor <> 'person' then
+        raise insufficient_privilege using message = 'Only a person confirms a relation; an agent proposes it',
+            hint = 'human_only';
+    end if;
+    if not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                    where v.id = p_evidence and w.owner_id = v_user) then
+        raise insufficient_privilege using message = 'A relation is asserted from a revision of your own work',
+            hint = 'no_grant';
+    end if;
+    if p_evidence2 is not null and not research.revision_readable(p_evidence2) then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    select x.claim_id into v_src from claims.expresses x
+     where x.revision_id = p_evidence and x.claim_key = p_src_key and x.part = 1 order by x.id desc limit 1;
+    select x.claim_id into v_dst from claims.expresses x
+     where x.revision_id = coalesce(p_evidence2, p_evidence) and x.claim_key = p_dst_key and x.part = 1
+     order by x.id desc limit 1;
+    if v_src is null or v_dst is null then
+        raise foreign_key_violation using message = 'Each claim must be an occurrence in its evidence revision',
+            detail = coalesce(p_src_key, '') || ' ' || coalesce(p_dst_key, '');
+    end if;
+    if p_predicate = 'supersedes' and not exists (
+           select 1 from claims.expresses x join research.revisions v on v.id = x.revision_id
+             join research.works w on w.id = v.work_id
+            where x.claim_id = v_dst and w.owner_id = v_user) then
+        raise insufficient_privilege using message = 'Only the owner of both claims says one supersedes the other',
+            hint = 'no_grant';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, v_actor, rbac.current_credential_id(), p_evidence, coalesce(nullif(p_reason, ''), 'asserted'))
+    returning id into t;
+    insert into claims.relations (src, predicate, dst, status, evidence, evidence2, keys, spans, tx)
+    values (v_src, p_predicate, v_dst, v_status, p_evidence, p_evidence2,
+            jsonb_build_object('src', p_src_key, 'dst', p_dst_key), p_spans, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- A later statement about a relation already asserted: a new status, or its retraction. The caller owns the
+-- asserting side's work, and the same rule on `confirmed` holds. The earlier rows stay.
+create or replace function claims.restate_relation(p_relation bigint, p_status text default null,
+                                                   p_retract boolean default false, p_reason text default null)
+returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user  uuid := rbac.require('research', 'insert');
+    v_actor text := rbac.current_actor();
+    r       claims.relations;
+    cur     claims.relations;
+    t       bigint;
+    v_id    bigint;
+begin
+    select * into r from claims.relations where id = p_relation;
+    if not found or not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                                 where v.id = r.evidence and w.owner_id = v_user) then
+        raise no_data_found using message = 'Relation not found';
+    end if;
+    select * into cur from claims.relations c
+     where c.src = r.src and c.predicate = r.predicate and c.dst = r.dst and c.evidence = r.evidence
+       and c.evidence2 is not distinct from r.evidence2 and c.keys = r.keys
+     order by c.id desc limit 1;
+    if cur.op = 'retract' then
+        raise check_violation using message = 'This relation was retracted; assert it again instead';
+    end if;
+    if coalesce(p_status, cur.status) not in ('proposed', 'confirmed', 'disputed') then
+        raise check_violation using message = 'Unknown status', detail = p_status;
+    end if;
+    if not p_retract and coalesce(p_status, cur.status) = 'confirmed' and v_actor <> 'person' then
+        raise insufficient_privilege using message = 'Only a person confirms a relation; an agent proposes it',
+            hint = 'human_only';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, v_actor, rbac.current_credential_id(), r.evidence,
+            coalesce(nullif(p_reason, ''), case when p_retract then 'retracted' else 'restated' end))
+    returning id into t;
+    insert into claims.relations (src, predicate, dst, status, op, evidence, evidence2, keys, spans, tx)
+    values (cur.src, cur.predicate, cur.dst, coalesce(p_status, cur.status),
+            case when p_retract then 'retract' else 'assert' end, cur.evidence, cur.evidence2, cur.keys, cur.spans, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 10. History and access for relations, as for the links: nothing is rewritten, and a relation is readable when
+--     the caller may read every revision in its evidence (graph.md §9).
+-- ------------------------------------------------------------
+do $$
+begin
+    execute 'create or replace trigger trg_refuse_rewrite before update or delete on claims.relations '
+            'for each row execute function research.refuse_rewrite()';
+    execute 'create or replace trigger trg_refuse_truncate before truncate on claims.relations '
+            'for each statement execute function research.refuse_rewrite()';
+end $$;
+alter table claims.relations enable row level security;
+drop policy if exists relations_readable on claims.relations;
+create policy relations_readable on claims.relations for select
+    using (research.revision_readable(evidence) and (evidence2 is null or research.revision_readable(evidence2)));
+grant select on claims.relations, claims.predicates to authenticated;
+revoke all on function claims.link_revision(uuid), claims.project_edges(uuid) from public;
+grant execute on function claims.assert_relation(text, text, text, uuid, uuid, text, jsonb, text),
+                          claims.restate_relation(bigint, text, boolean, text) to authenticated;
+
+-- ------------------------------------------------------------
+-- 11. The backfill: every revision projected before this existed gets its links, oldest first within each work, so
+--     each predecessor is linked before its successor asks it, and then its edges as relations. On a fresh install,
+--     and on every replay after the first, it finds nothing and writes nothing.
 -- ------------------------------------------------------------
 do $$
 declare v uuid;
@@ -31873,6 +32128,15 @@ begin
                                                   and e.part = 1))
               order by r.work_id, r.number loop
         perform claims.link_revision(v);
+    end loop;
+end $$;
+do $$
+declare v uuid;
+begin
+    for v in select distinct a.revision_id from research.argument_edges a
+              where not exists (select 1 from claims.relations r where r.evidence = a.revision_id and r.evidence2 is null)
+    loop
+        perform claims.project_edges(v);
     end loop;
 end $$;
 
@@ -32402,7 +32666,7 @@ declare
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
-        'claims.claims', 'claims.expresses', 'claims.tx',
+        'claims.claims', 'claims.expresses', 'claims.relations', 'claims.tx',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

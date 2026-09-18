@@ -423,6 +423,104 @@
     },
     {
       "admits": [
+        "identity",
+        "framing",
+        "inferential",
+        "comparative",
+        "evidence",
+        "outcome"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "predicates",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "claim",
+        "question",
+        "origin",
+        "entity",
+        "value"
+      ],
+      "column": "object_kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "predicates",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "claim",
+        "occurrence",
+        "question"
+      ],
+      "column": "subject_kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "predicates",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "assert",
+        "retract"
+      ],
+      "column": "op",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "relations",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "agrees",
+        "answers",
+        "challenges",
+        "cites",
+        "compares_with",
+        "consensus_as",
+        "contradicts",
+        "different_scope",
+        "expresses",
+        "limits",
+        "mentions",
+        "motivates",
+        "qualifies",
+        "refines",
+        "resolved_as",
+        "same_as",
+        "same_source_opposite",
+        "supersedes",
+        "supports"
+      ],
+      "column": "predicate",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "relations",
+      "vocabulary": "claims.predicates"
+    },
+    {
+      "admits": [
+        "proposed",
+        "confirmed",
+        "disputed"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "relations",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "person",
         "agent",
         "platform"

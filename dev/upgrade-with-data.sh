@@ -112,6 +112,11 @@ select gen_random_uuid(), v.id, k.key, 'Inference', k.text
   from research.revisions v join research.works w on w.id = v.work_id and w.public_id = 'ci-public-work'
   join (values ('r1', 'C1', 'A claim made before identity.'), ('r2', 'C1', 'A claim made before identity.'),
                ('r2', 'C2', 'A claim added in the second revision.')) k(label, key, text) on k.label = v.label;
+-- AND AN ARGUMENT EDGE, which the upgrade asserts as a relation between the two claims (REM-474).
+insert into research.argument_edges (revision_id, source_claim_key, relation, target_claim_key)
+select v.id, 'C1', 'supports', 'C2'
+  from research.revisions v join research.works w on w.id = v.work_id and w.public_id = 'ci-public-work'
+ where v.label = 'r2';
 SQL
 
 for f in "percolate--$V.sql" "percolate--$PREV--$V.sql"; do
@@ -273,6 +278,12 @@ do \$\$ begin
   if (select count(distinct e.claim_id) from claims.expresses e join research.revisions v on v.id = e.revision_id
         join research.works w on w.id = v.work_id where w.public_id = 'ci-public-work' and e.claim_key = 'C1') <> 1
     then raise exception 'the upgrade minted a second claim for an unchanged C1 instead of carrying r1''s forward (REM-473)'; end if;
+
+  if not exists (select 1 from claims.relations r join research.revisions v on v.id = r.evidence
+                  join research.works w on w.id = v.work_id
+                 where w.public_id = 'ci-public-work' and r.predicate = 'supports' and r.status = 'confirmed'
+                   and r.keys = jsonb_build_object('src', 'C1', 'dst', 'C2'))
+    then raise exception 'the upgrade did not assert a projected argument edge as a relation (REM-474)'; end if;
 
   -- A PUBLIC WORK KEEPS EVERY REVISION IT EXPOSED (REM-185).
   if (select count(*) from research.exposures e join research.works w on w.id = e.work_id
