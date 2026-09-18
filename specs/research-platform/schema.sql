@@ -862,6 +862,9 @@ create table if not exists research.revision_files (
     primary key (revision_id, artifact_key)
 );
 
+-- research.resolve_image finds the revisions that pin an image by its snapshot (REM-309).
+create index if not exists idx_revision_files_snapshot on research.revision_files (snapshot_id);
+
 -- May the current caller pin this capture? It must exist, still hold its bytes, and belong to a resource the
 -- caller may read -- so nobody cites another tenant's private evidence into their own package.
 create or replace function research.snapshot_pinnable(p_snapshot uuid) returns boolean
@@ -1359,6 +1362,92 @@ begin
     returning id into v_res;
     return v_res;
 end;
+$$;
+
+-- AN IMAGE A WRITER PUTS IN AN ARTICLE (REM-309, percolate-application artifacts-and-thumbnails.md §4). The same
+-- gap register_evidence closed, for bytes the person sends rather than a page the Content Server fetched: no
+-- person holds resources:create (REM-193), so an uploaded picture could never be stored. research:insert, the
+-- evidence_bytes budget and the research_evidence channel, for the same reasons given there. The Content Server
+-- checks the bytes themselves (magic number, 600 x 400 at least) because only it has them; this refuses every
+-- type the spec does not name and anything over 2 MB, so a second caller of this function cannot skip the rule.
+-- The copy is private to its uploader; readers reach it only through a revision that pins it (resolve_image).
+create or replace function content.register_research_image(
+    p_checksum     text,
+    p_bucket       text,
+    p_object_key   text,
+    p_size_bytes   bigint,
+    p_content_type text,
+    p_title        text default null
+) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user    uuid := rbac.require('research', 'insert');
+    v_key     text;
+    v_budget  jsonb;
+    v_channel uuid;
+    v_file    uuid;
+    v_res     uuid;
+begin
+    if p_content_type is null or p_content_type not in ('image/png', 'image/jpeg', 'image/webp') then
+        raise check_violation using message = 'An article image is a PNG, JPEG or WebP file';
+    end if;
+    if p_size_bytes is null or p_size_bytes <= 0 or p_size_bytes > 2097152 then
+        raise check_violation using message = 'An article image is at most 2 MB';
+    end if;
+    if coalesce(p_checksum, '') = '' or coalesce(p_bucket, '') = '' or coalesce(p_object_key, '') = '' then
+        raise invalid_parameter_value using message = 'An uploaded image needs its stored object and hash';
+    end if;
+
+    v_key := v_user::text || ':' || p_checksum || ':image';
+    v_budget := rbac.reserve_usage('evidence_bytes', p_size_bytes, 'image:' || v_key);
+    if coalesce((v_budget->>'reserved')::boolean, false) then
+        perform rbac.consume_usage('evidence_bytes', 'image:' || v_key);
+    elsif v_budget->>'state' is distinct from 'consumed' then
+        raise insufficient_privilege
+            using message = 'Your allowance for keeping evidence and images is used up for now',
+                  hint = 'needs evidence_bytes',
+                  detail = coalesce(v_budget->'limit', '{}'::jsonb)::text;
+    end if;
+
+    select id into v_channel from content.channels
+     where name = 'research_evidence' and org_id = rbac.shared_org_id();
+    if v_channel is null then
+        raise no_data_found using message = 'The research_evidence channel is missing from this installation';
+    end if;
+
+    insert into content.files (checksum, bucket, object_key, size_bytes, content_type)
+    values (p_checksum, p_bucket, p_object_key, p_size_bytes, p_content_type)
+    on conflict (checksum) do update set checksum = excluded.checksum
+    returning id into v_file;
+
+    insert into content.resources (channel_id, file_id, external_id, uri, title, status, org_id, owner_id,
+                                   visibility, metadata)
+    values (v_channel, v_file, v_key, null, p_title, 'stored', rbac.shared_org_id(), v_user, 'private',
+            jsonb_build_object('saved_as', 'research image', 'content_type', p_content_type))
+    on conflict (channel_id, external_id) do update set updated_at = now()
+    returning id into v_res;
+    return v_res;
+end;
+$$;
+
+-- WHERE AN ARTICLE IMAGE'S BYTES ARE, for anybody who may read some revision that pins it as an image.
+-- resolve_snapshot asks whether the caller may read the RESOURCE, which is private to its uploader, so a reader of
+-- a published article would be refused its own pictures. The access question here is the revision's
+-- (data-model.md, hosted artifacts). Keyed by the snapshot alone, so one stored image has one address whichever
+-- revision or work shows it, and the article's document can carry that address. Only purpose 'image' and only
+-- image types: a table's pinned evidence page is never served through this path. One answer for "not yours" and
+-- "not there", as resolve_snapshot gives.
+create or replace function research.resolve_image(p_snapshot uuid)
+returns table(bucket text, object_key text, content_type text, size_bytes bigint, checksum text)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select f.bucket, f.object_key, s.content_type, s.size_bytes, s.checksum
+      from content.resource_snapshots s
+      join content.files f on f.id = s.file_id
+     where s.id = p_snapshot and s.removed_at is null
+       and s.content_type in ('image/png', 'image/jpeg', 'image/webp')
+       and exists (select 1 from research.revision_files rf
+                    where rf.snapshot_id = p_snapshot and rf.purpose = 'image'
+                      and research.revision_readable(rf.revision_id));
 $$;
 
 -- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153, schema.md §4). Operator-only: nothing grants it. The
@@ -2489,7 +2578,8 @@ grant execute on function
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
     research.trust_state(text, timestamptz),
-    engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid)
+    engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid),
+    research.resolve_image(uuid)
 to authenticated;
 
 grant execute on function
@@ -2501,6 +2591,7 @@ grant execute on function
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     research.move_publication_exposure(text, text, text, text, uuid),
     content.register_evidence(text, text, text, text, bigint, text, text),
+    content.register_research_image(text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.my_saves(), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),

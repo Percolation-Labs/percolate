@@ -692,6 +692,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','function','content.capture_snapshot','uuid','specs/tables/schema.md §4: capture a readable resource''s current bytes and hash, taken from the locked resource row (REM-153)'),
 ('research-platform','function','content.register_evidence','text,text,text,text,bigint,text,text','specs/tables/schema.md §4: a public page''s fetched bytes kept as the caller''s private evidence under research:insert and the evidence_bytes budget, with no ingestion (REM-239, REM-242)'),
 ('research-platform','function','content.resolve_snapshot','uuid','specs/tables/schema.md §4: pinned bytes resolved through the resource''s own read rule, nothing once removed (REM-153)'),
+('research-platform','function','content.register_research_image','text,text,text,bigint,text,text','specs/tables/schema.md §4: an article image''s uploaded bytes kept as the caller''s private resource under research:insert and the evidence_bytes budget; PNG, JPEG or WebP, at most 2 MB (REM-309)'),
+('research-platform','function','research.resolve_image','uuid','specs/tables/schema.md §4: an article image''s bytes resolved through any revision the caller may read that pins it as an image (REM-309)'),
 ('research-platform','function','research.withdraw_endorsement','uuid,text','architecture.md §6: a withdrawal stays visible as inactive'),
 ('research-platform','table','engagement.comment_likes',null,'architecture.md §5'),
 ('research-platform','table','engagement.comment_versions',null,'architecture.md §5'),
