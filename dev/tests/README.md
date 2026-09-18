@@ -209,8 +209,8 @@ understood, and a fourth found the mechanism.
 `run.sh` now compares the `.so`'s mtime to the newest commit touching
 `extension/percolate_parser/` and stands the compiled assertions down on either
 lag — see PACKAGING §*"Telling a lag red from a real red, without asking
-anybody"*. What it still cannot do is diff a compiled body the way `currency.sh`
-diffs a SQL one: an mtime says the artifact is older than its source, not what
+anybody"*. It still cannot diff a compiled body the way `currency.sh` diffs a
+SQL one: an mtime says the artifact is older than its source, not what
 changed in it. That is the remaining gap, and provenance on the artifact — a
 sidecar beside the `.so`, or an image label — is what would close it, because
 `public.percolate_build` records it in a database that `dev/reload.sh` drops.
