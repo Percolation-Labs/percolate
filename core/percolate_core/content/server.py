@@ -248,6 +248,89 @@ async def save_evidence(request: Request, claims: dict | None = Depends(caller))
             "bytes": len(data), "content_type": content_type}
 
 
+@routes.post("/research-images", status_code=201)
+async def save_research_image(request: Request, claims: dict | None = Depends(caller),
+                              x_p8_title: str | None = Header(default=None)):
+    """Keep an image a writer puts in an article (REM-309).
+
+    `/evidence` for bytes the person sends rather than a page this server
+    fetches: the same policy (`research:insert` and the `evidence_bytes`
+    budget, asked by `content.register_research_image`), the same private
+    copy. The bytes decide the type, not the header (`images.check`): PNG,
+    JPEG or WebP, at most 2 MB, at least 600 x 400. A refused image is 422
+    with `saved: false` and the reason, and stores nothing.
+    """
+    if not claims:
+        raise HTTPException(401, "Sign in before uploading an image")
+    from .images import ImageRefused, MAX_BYTES, check
+
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_BYTES:
+        return JSONResponse({"saved": False, "reason": "An article image is at most 2 MB."}, status_code=422)
+    data = await request.body()
+    try:
+        content_type, width, height = check(data)
+    except ImageRefused as e:
+        return JSONResponse({"saved": False, "reason": str(e)}, status_code=422)
+
+    try:
+        async with as_caller(claims) as conn:
+            state = await conn.fetchval(
+                "select rbac.limit_state(rbac.current_user_id(), 'evidence_bytes')")
+        state = state if isinstance(state, dict) else json.loads(state or "{}")
+        if state.get("status") in ("finite", "exhausted") and int(state.get("remaining") or 0) < len(data):
+            return JSONResponse({"saved": False, "reason": "Your allowance for keeping images is used up for now.",
+                                 "limit": state}, status_code=REFUSED_STATUS)
+
+        checksum, key = storage.put(data, content_type)
+        async with as_caller(claims) as conn:
+            resource_id = await conn.fetchval(
+                "select content.register_research_image($1,$2,$3,$4,$5,$6)",
+                checksum, storage.bucket(), key, len(data), content_type, x_p8_title)
+    except Exception as e:
+        refused = refusal(e)
+        if refused is not None:
+            return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+        raise HTTPException(400, str(e).split("\n")[0])
+
+    return {"saved": True, "resource_id": str(resource_id), "checksum": checksum, "bytes": len(data),
+            "content_type": content_type, "width": width, "height": height}
+
+
+@routes.get("/research-images/{snapshot_id}")
+async def read_research_image(snapshot_id: UUID, claims: dict | None = Depends(caller)):
+    """An article image, for anybody who may read some revision that shows it.
+
+    `research.resolve_image` asks the revision, not the uploader's private
+    resource, so a signed-out reader of a published article gets its pictures
+    (data-model.md, hosted artifacts). Served inline, unlike `/files`, because
+    it is only ever an image: the database returns only image types, and the
+    bytes are identified again here before they leave, so a stored object
+    that is not what its row says is refused rather than served.
+    """
+    from .images import identify
+
+    async with as_caller(claims) as conn:
+        row = await conn.fetchrow("select * from research.resolve_image($1)", snapshot_id)
+    if not row:
+        raise HTTPException(404, "no such image, or not yours to read")
+    body = storage.get(row["bucket"], row["object_key"])
+    found = identify(body)
+    if found is None or found[0] != row["content_type"]:
+        raise HTTPException(404, "no such image, or not yours to read")
+    return Response(
+        body,
+        media_type=row["content_type"],
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            # Private: the revision that grants the read can be withdrawn. Short, for the same reason.
+            "Cache-Control": "private, max-age=300",
+            "ETag": f'"{row["checksum"]}"',
+        },
+    )
+
+
 @routes.get("/health")
 async def health():
     return {"status": "ok", "bucket": storage.bucket()}
