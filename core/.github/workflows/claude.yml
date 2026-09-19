@@ -44,7 +44,12 @@ jobs:
       (github.event_name == 'issues' &&
        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    # THE RUNNER. The self-hosted runner holds P8_RELEASE_TOKEN's reach and the machine it runs on, so a PR from a fork
+    # goes to ubuntu-latest even when a trusted person asked. Testing `github.event_name != 'pull_request'` was true
+    # for every event this workflow listens to, so nothing ever left the runner (REM-560 in p8-subsystems, REM-569
+    # here). The review events carry the PR and are tested on its head; an issue_comment on a PR carries no head
+    # repository and stays on the runner behind the author check alone.
+    runs-on: ${{ (!github.event.pull_request || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
       pull-requests: write
