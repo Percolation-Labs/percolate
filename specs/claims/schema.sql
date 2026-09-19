@@ -940,6 +940,155 @@ grant execute on function claims.propose_resolution(uuid, uuid, text, text, text
                           claims.review_resolution(bigint, text, text) to authenticated;
 
 -- ------------------------------------------------------------
+-- 10e. Consensus (graph.md §12, REM-496). Independent work converging on a position, recorded apart from event
+--      resolutions so it never counts as a checked outcome. The independent studies behind it are counted here from
+--      origin entities, never taken from the proposer and never from package counts: the studies cited by readable
+--      occurrences of the claim, of its confirmed identity set, and of claims confirmed to agree with it, each study
+--      once. A person holding research:resolve confirms, disputes or reopens it; a confirmed contradicts from a
+--      study it did not count, asserted after it was confirmed, is reported as dissent. Nothing computes
+--      reliability from it.
+-- ------------------------------------------------------------
+create table if not exists claims.consensus (
+    id           bigint generated always as identity primary key,
+    restates     bigint references claims.consensus(id),
+    claim_id     uuid not null references claims.claims(id),
+    value        text not null check (value in ('holds', 'rejected')),
+    studies      uuid[] not null,
+    since        date not null,
+    status       text not null check (status in ('proposed', 'confirmed', 'disputed', 'reopened')),
+    evidence     uuid not null references research.revisions(id) on delete cascade,
+    tx           bigint not null references claims.tx(id),
+    check (restates is null or restates < id),
+    check (restates is not null or status = 'proposed')
+);
+create index if not exists consensus_claim on claims.consensus (claim_id, id desc);
+create index if not exists consensus_restates on claims.consensus (restates) where restates is not null;
+
+-- The independent studies behind a claim's position, as the caller may read them.
+create or replace function claims.consensus_studies(p_claim uuid, p_at timestamptz default now()) returns uuid[]
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with members as (
+        select i as claim from claims.identity_set(p_claim, p_at) i
+        union
+        select case when r.src = p_claim then r.dst else r.src end
+          from claims.relations_at(p_claim, p_at) r where r.predicate = 'agrees' and r.status = 'confirmed')
+    select coalesce(array_agg(distinct e.study order by e.study), '{}')
+      from members m cross join lateral claims.evidence(m.claim, p_at) e;
+$$;
+
+-- The proposal runs as the caller, so the studies are counted under their row security; record_consensus then
+-- writes it, and refuses a study that is not behind the claim at all, so a caller can undercount but never invent one.
+create or replace function claims.propose_consensus(p_claim uuid, p_evidence uuid, p_value text, p_since date)
+returns bigint
+language sql volatile security invoker set search_path = pg_catalog, public as $$
+    select claims.record_consensus(p_claim, p_evidence, p_value, p_since, claims.consensus_studies(p_claim));
+$$;
+
+create or replace function claims.record_consensus(p_claim uuid, p_evidence uuid, p_value text, p_since date,
+                                                   p_studies uuid[])
+returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'select');
+    t      bigint;
+    v_id   bigint;
+begin
+    if not research.revision_readable(p_evidence)
+       or not exists (select 1 from claims.expresses e where e.revision_id = p_evidence and e.claim_id = p_claim) then
+        raise no_data_found using message = 'Claim not found in that revision';
+    end if;
+    if not (coalesce(p_studies, '{}') <@ claims.consensus_studies(p_claim)) then
+        raise check_violation using message = 'A study named is not behind this claim';
+    end if;
+    if cardinality(coalesce(p_studies, '{}')) < 2 then
+        raise check_violation using message = 'A consensus needs at least two independent studies',
+            detail = cardinality(coalesce(p_studies, '{}'))::text;
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), p_evidence, 'consensus proposed')
+    returning id into t;
+    insert into claims.consensus (claim_id, value, studies, since, status, evidence, tx)
+    values (p_claim, p_value, p_studies, p_since, 'proposed', p_evidence, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+create or replace function claims.review_consensus(p_consensus bigint, p_status text, p_reason text default null)
+returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'resolve');
+    c      claims.consensus;
+    t      bigint;
+    v_id   bigint;
+begin
+    if p_status not in ('confirmed', 'disputed', 'reopened') then
+        raise check_violation using message = 'A review confirms, disputes or reopens', detail = p_status;
+    end if;
+    select * into c from claims.consensus where id = p_consensus and restates is null;
+    if not found or not research.revision_readable(c.evidence) then
+        raise no_data_found using message = 'Consensus not found';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), c.evidence,
+            coalesce(nullif(btrim(p_reason), ''), 'consensus ' || p_status))
+    returning id into t;
+    insert into claims.consensus (restates, claim_id, value, studies, since, status, evidence, tx)
+    values (c.id, c.claim_id, c.value, c.studies, c.since, p_status, c.evidence, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+do $$
+begin
+    execute 'create or replace trigger trg_refuse_rewrite before update or delete on claims.consensus '
+            'for each row execute function research.refuse_rewrite()';
+    execute 'create or replace trigger trg_refuse_truncate before truncate on claims.consensus '
+            'for each statement execute function research.refuse_rewrite()';
+end $$;
+alter table claims.consensus enable row level security;
+drop policy if exists consensus_readable on claims.consensus;
+create policy consensus_readable on claims.consensus for select using (research.revision_readable(evidence));
+grant select on claims.consensus to authenticated;
+grant execute on function claims.consensus_studies(uuid, timestamptz),
+                          claims.propose_consensus(uuid, uuid, text, date),
+                          claims.record_consensus(uuid, uuid, text, date, uuid[]),
+                          claims.review_consensus(bigint, text, text) to authenticated;
+
+-- A claim's consensus as it stands, and any dissent since it was confirmed: a confirmed contradicts touching the
+-- claim or its identity set, asserted after the confirmation, from a claim whose studies the consensus did not
+-- count. Dissent is reported, not acted on; a resolver reopens.
+create or replace function claims.consensus_of(p_claim uuid, p_at timestamptz default now())
+returns table (consensus bigint, value text, studies int, since date, status text, confirmed_at timestamptz,
+               dissent bigint[])
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with c as (
+        select p.id, p.value, p.studies, p.since,
+               coalesce(l.status, p.status) as status,
+               (select min(rt.at) from claims.consensus r join claims.tx rt on rt.id = r.tx
+                 where r.restates = p.id and r.status = 'confirmed' and rt.at <= p_at) as confirmed_at,
+               (select min(r.tx) from claims.consensus r join claims.tx rt on rt.id = r.tx
+                 where r.restates = p.id and r.status = 'confirmed' and rt.at <= p_at) as confirmed_tx
+          from claims.consensus p join claims.tx pt on pt.id = p.tx
+          left join lateral (select r.status from claims.consensus r join claims.tx rt on rt.id = r.tx
+                              where r.restates = p.id and rt.at <= p_at order by r.id desc limit 1) l on true
+         where p.claim_id = p_claim and p.restates is null and pt.at <= p_at)
+    select c.id, c.value, cardinality(c.studies), c.since, c.status, c.confirmed_at,
+           (select array_agg(r.id order by r.id)
+              from claims.identity_set(p_claim, p_at) m
+              cross join lateral claims.relations_at(m, p_at) r
+             where c.confirmed_tx is not null and r.predicate = 'contradicts' and r.status = 'confirmed'
+               -- after the confirmation: transactions are numbered in the order they were made
+               and (select x.tx from claims.relations x where x.id = r.id) > c.confirmed_tx
+               and exists (select 1 from claims.evidence(case when r.src = m then r.dst else r.src end, p_at) e
+                            where not e.study = any (c.studies)))
+      from c;
+$$;
+grant execute on function claims.consensus_of(uuid, timestamptz) to authenticated;
+
+-- ------------------------------------------------------------
 -- 10c. Erasure (graph.md §13, REM-481). research.erase_work deletes a work, and the cascade takes its occurrences
 --      and every assertion evidenced by one of its revisions: expresses, frames, cites, answered, relations and
 --      origin links. An assertion also made from another work is its own row there and survives. What the cascade
@@ -964,7 +1113,8 @@ language sql stable security definer set search_path = pg_catalog, public as $$
         'answered',    (select count(*) from claims.answered where evidence = any (p_revisions)),
         'relations',   (select count(*) from claims.relations where evidence = any (p_revisions) or evidence2 = any (p_revisions)),
         'origin_links',(select count(*) from claims.origin_links where evidence = any (p_revisions)),
-        'resolutions', (select count(*) from claims.resolutions where evidence = any (p_revisions)));
+        'resolutions', (select count(*) from claims.resolutions where evidence = any (p_revisions)),
+        'consensus',   (select count(*) from claims.consensus where evidence = any (p_revisions)));
 $$;
 
 -- After the cascade: remove what only the erased revisions minted and nothing names any more.
@@ -986,7 +1136,8 @@ begin
        and not exists (select 1 from claims.expresses e where e.claim_id = c.id)
        and not exists (select 1 from claims.relations r where r.src = c.id or r.dst = c.id)
        and not exists (select 1 from claims.answered a where a.claim_id = c.id)
-       and not exists (select 1 from claims.resolutions r where r.claim_id = c.id);
+       and not exists (select 1 from claims.resolutions r where r.claim_id = c.id)
+       and not exists (select 1 from claims.consensus r where r.claim_id = c.id);
     get diagnostics n_c = row_count;
     delete from claims.origins o
      where not exists (select 1 from claims.cites c where c.origin_id = o.id)
@@ -1012,7 +1163,8 @@ begin
        and not exists (select 1 from claims.origin_links x where x.tx = t.id)
        and not exists (select 1 from claims.origins x where x.tx = t.id)
        and not exists (select 1 from claims.questions x where x.tx = t.id)
-       and not exists (select 1 from claims.resolutions x where x.tx = t.id);
+       and not exists (select 1 from claims.resolutions x where x.tx = t.id)
+       and not exists (select 1 from claims.consensus x where x.tx = t.id);
     get diagnostics n_t = row_count;
     return jsonb_build_object('claims', n_c, 'origins', n_o, 'questions', n_q, 'transactions', n_t);
 end;
@@ -1032,7 +1184,8 @@ create policy tx_readable on claims.tx for select using (
     or exists (select 1 from claims.relations r where r.tx = tx.id)
     or exists (select 1 from claims.answered a where a.tx = tx.id)
     or exists (select 1 from claims.cites c where c.tx = tx.id)
-    or exists (select 1 from claims.resolutions r where r.tx = tx.id));
+    or exists (select 1 from claims.resolutions r where r.tx = tx.id)
+    or exists (select 1 from claims.consensus c where c.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
 
 -- ------------------------------------------------------------

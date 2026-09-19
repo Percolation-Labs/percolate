@@ -437,6 +437,32 @@
     },
     {
       "admits": [
+        "proposed",
+        "confirmed",
+        "disputed",
+        "reopened"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "consensus",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "holds",
+        "rejected"
+      ],
+      "column": "value",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "consensus",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "unchanged",
         "reworded",
         "new"
