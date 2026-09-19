@@ -1098,8 +1098,11 @@ $$;
 -- claims, sources, citations, edges, endorsements, comments, votes -- asks
 -- this, so it narrows with it. visible_head and the listing do not: a
 -- publication exposure is reached by its exact revision, never found as a head.
+-- COST 1000, not the default 100: each call reads the revision, its work, the caller's grants and two exposure
+-- tables, about 0.3 ms. Priced at the default, the planner checked every row of a table once rather than the few
+-- rows a policy asked about, and a claim page on production spent 3.3 s doing it (REM-626).
 create or replace function research.revision_readable(p_revision uuid) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
+language sql stable security definer cost 1000 set search_path = pg_catalog, public as $$
     select coalesce((select research.work_readable_in_full(r.work_id)
                             or (research.readable(r.work_id)
                                 and exists (select 1 from research.exposures e where e.revision_id = r.id))

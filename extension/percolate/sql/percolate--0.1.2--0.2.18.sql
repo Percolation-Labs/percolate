@@ -30107,8 +30107,11 @@ $$;
 -- claims, sources, citations, edges, endorsements, comments, votes -- asks
 -- this, so it narrows with it. visible_head and the listing do not: a
 -- publication exposure is reached by its exact revision, never found as a head.
+-- COST 1000, not the default 100: each call reads the revision, its work, the caller's grants and two exposure
+-- tables, about 0.3 ms. Priced at the default, the planner checked every row of a table once rather than the few
+-- rows a policy asked about, and a claim page on production spent 3.3 s doing it (REM-626).
 create or replace function research.revision_readable(p_revision uuid) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
+language sql stable security definer cost 1000 set search_path = pg_catalog, public as $$
     select coalesce((select research.work_readable_in_full(r.work_id)
                             or (research.readable(r.work_id)
                                 and exists (select 1 from research.exposures e where e.revision_id = r.id))
@@ -33270,6 +33273,16 @@ create policy tx_readable on claims.tx for select using (
     or exists (select 1 from claims.resolutions r where r.tx = tx.id)
     or exists (select 1 from claims.consensus c where c.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
+-- Each exists above finds the rows naming one transaction. Without these the planner hashed every table whole, so
+-- one tx read ran research.revision_readable on every row in the graph: a claim page took 3.3 s on production with
+-- 700 occurrences in all, growing with every unrelated package (REM-626).
+create index if not exists expresses_tx on claims.expresses (tx);
+create index if not exists relations_tx on claims.relations (tx);
+create index if not exists answered_tx on claims.answered (tx);
+create index if not exists cites_tx on claims.cites (tx);
+create index if not exists origin_links_tx on claims.origin_links (tx);
+create index if not exists resolutions_tx on claims.resolutions (tx);
+create index if not exists consensus_tx on claims.consensus (tx);
 
 -- ------------------------------------------------------------
 -- 12. Reading the graph (graph.md §10). Every function is security invoker, so row security decides what it
