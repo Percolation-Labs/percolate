@@ -221,6 +221,11 @@ jobs:
           tags: |
             percolationlabs/percolate-core:${{ needs.version.outputs.version }}
             percolationlabs/percolate-core:latest
+          # Layers are reused across runs and runners from the registry: the
+          # builder setup-buildx makes is new every run, so it has no cache of
+          # its own. Written only when publishing, which is when we are logged in.
+          cache-from: type=registry,ref=percolationlabs/percolate-core:buildcache
+          cache-to: ${{ inputs.publish && 'type=registry,ref=percolationlabs/percolate-core:buildcache,mode=max' || '' }}
       - name: Confirm both architectures are in the manifest
         # The failure this catches shows up first for someone else, on the Helm
         # path, long after everything looked fine here: a single-arch image
