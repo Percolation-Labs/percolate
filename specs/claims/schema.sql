@@ -844,6 +844,84 @@ grant select on claims.origins, claims.cites, claims.origin_links to authenticat
 revoke all on function claims.origin_for(text, text, bigint), claims.project_cites(uuid) from public;
 
 -- ------------------------------------------------------------
+-- 10c. Erasure (graph.md §13, REM-481). research.erase_work deletes a work, and the cascade takes its occurrences
+--      and every assertion evidenced by one of its revisions: expresses, frames, cites, answered, relations and
+--      origin links. An assertion also made from another work is its own row there and survives. What the cascade
+--      cannot reach is swept here: claims no occurrence expresses any more, origins and questions nothing cites or
+--      answers any more, and the transactions only those rows named. An origin or question another work still cites
+--      or answers stays, because it is that work's evidence too. The tombstone is counts, with no text.
+-- ------------------------------------------------------------
+create table if not exists claims.erasures (
+    erasure_id  bigint primary key references research.erasures(id),
+    counts      jsonb not null check (jsonb_typeof(counts) = 'object'),
+    at          timestamptz not null default now()
+);
+
+-- What of the claims graph rests on these revisions, counted before they go.
+create or replace function claims.graph_counts(p_revisions uuid[]) returns jsonb
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select jsonb_build_object(
+        'occurrences', (select count(*) from research.claims where revision_id = any (p_revisions)),
+        'expresses',   (select count(*) from claims.expresses where revision_id = any (p_revisions)),
+        'frames',      (select count(*) from claims.frames where revision_id = any (p_revisions)),
+        'cites',       (select count(*) from claims.cites where revision_id = any (p_revisions)),
+        'answered',    (select count(*) from claims.answered where evidence = any (p_revisions)),
+        'relations',   (select count(*) from claims.relations where evidence = any (p_revisions) or evidence2 = any (p_revisions)),
+        'origin_links',(select count(*) from claims.origin_links where evidence = any (p_revisions)));
+$$;
+
+-- After the cascade: remove what only the erased revisions minted and nothing names any more.
+create or replace function claims.sweep_erased(p_revisions uuid[]) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    txs  bigint[];
+    n_c  int;
+    n_o  int;
+    n_q  int := 0;
+    n_q1 int;
+    n_t  int;
+begin
+    if not exists (select 1 from research.erasures where xact = pg_current_xact_id()) then
+        raise insufficient_privilege using message = 'Only research.erase_work sweeps the claims graph';
+    end if;
+    select array_agg(id) into txs from claims.tx where revision_id = any (p_revisions);
+    delete from claims.claims c where c.tx = any (txs)
+       and not exists (select 1 from claims.expresses e where e.claim_id = c.id)
+       and not exists (select 1 from claims.relations r where r.src = c.id or r.dst = c.id)
+       and not exists (select 1 from claims.answered a where a.claim_id = c.id);
+    get diagnostics n_c = row_count;
+    delete from claims.origins o
+     where not exists (select 1 from claims.cites c where c.origin_id = o.id)
+       and not exists (select 1 from claims.origin_links l where l.a = o.id or l.b = o.id)
+       and o.tx = any (txs);
+    get diagnostics n_o = row_count;
+    -- A refined question goes before the broader one it names, so repeat until nothing more goes.
+    loop
+        delete from claims.questions q
+         where q.tx = any (txs)
+           and not exists (select 1 from claims.answered a where a.question_id = q.id)
+           and not exists (select 1 from claims.questions r where r.refines = q.id);
+        get diagnostics n_q1 = row_count;
+        exit when n_q1 = 0;
+        n_q := n_q + n_q1;
+    end loop;
+    delete from claims.tx t where t.id = any (txs)
+       and not exists (select 1 from claims.claims x where x.tx = t.id)
+       and not exists (select 1 from claims.expresses x where x.tx = t.id)
+       and not exists (select 1 from claims.relations x where x.tx = t.id)
+       and not exists (select 1 from claims.answered x where x.tx = t.id)
+       and not exists (select 1 from claims.cites x where x.tx = t.id)
+       and not exists (select 1 from claims.origin_links x where x.tx = t.id)
+       and not exists (select 1 from claims.origins x where x.tx = t.id)
+       and not exists (select 1 from claims.questions x where x.tx = t.id);
+    get diagnostics n_t = row_count;
+    return jsonb_build_object('claims', n_c, 'origins', n_o, 'questions', n_q, 'transactions', n_t);
+end;
+$$;
+revoke all on function claims.graph_counts(uuid[]), claims.sweep_erased(uuid[]) from public;
+alter table claims.erasures enable row level security;
+
+-- ------------------------------------------------------------
 -- 11. Who asserted, and when, behind a row the caller may read (graph.md §9). An actor sees their own transactions;
 --     anybody else sees a transaction's id, time and actor kind when a link or relation they may read names it, and
 --     never its actor, credential or reason.

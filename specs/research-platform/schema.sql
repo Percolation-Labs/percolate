@@ -2583,6 +2583,9 @@ language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
     w research.works;
     v_revisions int;
+    v_revs uuid[];
+    v_erasure bigint;
+    v_counts jsonb;
 begin
     if coalesce(btrim(p_reason), '') = '' then
         raise check_violation using message = 'Erasing a work needs a reason';
@@ -2591,10 +2594,16 @@ begin
     if not found then
         raise no_data_found using message = 'Research package not found';
     end if;
-    select count(*) into v_revisions from research.revisions where work_id = w.id;
-    insert into research.erasures (work_id, public_id, reason) values (w.id, w.public_id, p_reason);
+    select count(*), array_agg(id) into v_revisions, v_revs from research.revisions where work_id = w.id;
+    insert into research.erasures (work_id, public_id, reason) values (w.id, w.public_id, p_reason)
+    returning id into v_erasure;
+    -- The claims graph resting on the work (REM-481): counted before the cascade, swept after it, and the counts are
+    -- the tombstone, with no text.
+    v_counts := claims.graph_counts(coalesce(v_revs, '{}'));
     delete from research.works where id = w.id;
-    return jsonb_build_object('package_id', w.public_id, 'work_id', w.id, 'revisions', v_revisions);
+    v_counts := v_counts || claims.sweep_erased(coalesce(v_revs, '{}'));
+    insert into claims.erasures (erasure_id, counts) values (v_erasure, v_counts);
+    return jsonb_build_object('package_id', w.public_id, 'work_id', w.id, 'revisions', v_revisions, 'claims_graph', v_counts);
 end;
 $$;
 revoke all on function research.erase_work(text, text) from public;
