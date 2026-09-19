@@ -452,4 +452,106 @@ begin
     raise notice 'rbac/02: no policy still scopes on the retired org predicates';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 10. NO TABLE A WEB ROLE CAN REACH HAS RLS OFF, UNLESS IT IS NAMED HERE.
+--
+-- REM-551. workflow.task_events had no policy of its own and was granted to
+-- api_viewer so that task_events_api, which api_viewer owns, could read it.
+-- api_viewer is also the role a person's SQL step runs as, so a step naming
+-- the table instead of the view read every tenant's task history, input
+-- included. Its siblings workflow.task_dependencies and workflow.rate_limits
+-- (every sign-in address the view hides) had the same shape and were found by
+-- this section on its first run. §2b asks whether a VIEW bypasses a table's
+-- policy; this asks whether the TABLE has one.
+--
+-- From the database outward, as §8 is: every table in a schema the extension
+-- owns, plus public, that web_anon, authenticated or api_viewer can read or
+-- write -- through any role they are members of, and through a column grant --
+-- has RLS enabled, or is in the list below with the reason it may be read
+-- whole. A write grant on such a table is never exempt.
+--
+-- The list is data a reviewer reads, so each reason says why EVERY row may be
+-- read by EVERY caller. An entry that no longer matches a reachable, unpolicied
+-- table fails too, so the list cannot outlive what it excuses.
+-- ---------------------------------------------------------------------
+create temp table rls_off_exempt (pattern text primary key, why text not null) on commit drop;
+insert into rls_off_exempt values
+  -- The contract and the build stamp: public by design, web_anon included.
+  ('percolate.types',            'the declared payload shapes; the contract, readable before sign-in'),
+  ('public.percolate_build',     'which build this database is; no row belongs to anybody'),
+  -- Vocabularies and deployment configuration. None has an owner, org or user column.
+  ('aiq.db_objects',             'the catalogue of database objects; describes the schema, not anybody''s rows'),
+  ('aiq.embedding_models',       'the registered models; credential_ref names a secret, it does not hold one'),
+  ('aiq.embedding_providers',    'request templates per provider'),
+  ('aiq.entity_registry',        'which tables project into the graph'),
+  ('aiq.graph_vocabulary',       'the relation vocabulary'),
+  ('aiq.lexical_sources',        'which tables are text-searchable, and how'),
+  ('aiq.relation_types',         'the typed relations between entity types'),
+  ('aiq.schema_examples',        'example queries per facet'),
+  ('aiq.schema_facets',          'what SCHEMA "<name>" can describe'),
+  ('aiq.schema_revisions',       'the captured schema documents; the database''s shape, rendered by the definer'),
+  ('aiq.semantic_sources',       'which tables are embedded, and where'),
+  ('claims.predicates',          'the claim-graph predicate vocabulary'),
+  ('rbac.applications',          'which applications are declared, and at what version'),
+  ('rbac.permission_kinds',      'the grantable (resource, action) pairs'),
+  ('rbac.plan_limits',           'the limits per plan; a plan is not a person'),
+  ('rbac.plans',                 'the plan names'),
+  ('rbac.resource_kinds',        'the metered resources'),
+  ('rbac.role_permissions',      'what each role holds; who holds a role is rbac.user_roles, which is policied'),
+  ('rbac.roles',                 'the role names'),
+  ('rbac.scope_aliases',         'what each credential scope expands to'),
+  ('workflow.lifecycle_states',  'the status vocabulary'),
+  ('workflow.queue_config',      'per-queue timeouts'),
+  ('workflow.step_functions',    'the registered step functions a SQL step may call'),
+  -- NOT LEGITIMATE, and listed so the gate can be armed today rather than when
+  -- it is fixed. An embedding space holds (chunk_id, vector) for every chunk of
+  -- every tenant; a vector is readable content. REM-567 owns it: the spaces are
+  -- created by register_embedding_space and need a policy through the chunk.
+  ('aiq.emb\_%',                 'KNOWN DEFECT, REM-567: every tenant''s chunk vectors are readable');
+
+do $$
+declare v_bad text; v_stale text;
+begin
+    with reach as (
+        select c.oid, n.nspname || '.' || c.relname as name, c.relrowsecurity,
+               (select string_agg(r, ',' order by r) from unnest(array['web_anon','authenticated','api_viewer']) r
+                 where has_table_privilege(r, c.oid, 'select') or has_any_column_privilege(r, c.oid, 'select')) as readers,
+               (select string_agg(r, ',' order by r) from unnest(array['web_anon','authenticated','api_viewer']) r
+                 where has_table_privilege(r, c.oid, 'insert,update,delete,truncate')
+                    or has_any_column_privilege(r, c.oid, 'insert,update')) as writers
+          from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where c.relkind in ('r', 'p')
+           and (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'public'))
+    select string_agg(format('%s (%s)', name, coalesce(writers, readers)), ', ' order by name) into v_bad
+      from reach
+     where not relrowsecurity
+       and (writers is not null
+            or (readers is not null
+                and not exists (select 1 from rls_off_exempt e where reach.name like e.pattern)));
+    if v_bad is not null then
+        raise exception 'these tables are reachable by a web role and have RLS off: %. api_viewer is '
+            'the role a person''s SQL step runs as, so a grant it holds for a view''s sake is a grant '
+            'to every step author (REM-551). Enable RLS with a policy, or -- for a read-only '
+            'vocabulary with no owner -- add it to rls_off_exempt in this file with the reason every '
+            'caller may read every row.', v_bad;
+    end if;
+
+    select string_agg(e.pattern, ', ' order by e.pattern) into v_stale
+      from rls_off_exempt e
+     where not exists (
+        select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where c.relkind in ('r', 'p') and not c.relrowsecurity
+           and n.nspname || '.' || c.relname like e.pattern
+           and (has_table_privilege('api_viewer', c.oid, 'select')
+                or has_table_privilege('authenticated', c.oid, 'select')
+                or has_table_privilege('web_anon', c.oid, 'select')))
+       -- An embedding space exists only once a model is registered.
+       and e.pattern <> 'aiq.emb\_%';
+    if v_stale is not null then
+        raise exception 'rls_off_exempt excuses tables that are no longer reachable with RLS off: %. '
+            'Remove the entries.', v_stale;
+    end if;
+    raise notice 'rbac/02: every table a web role can reach has RLS on, or a stated reason to be read whole';
+end $$;
+
 rollback;

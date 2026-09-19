@@ -228,12 +228,23 @@ select d.id,
 -- 2. The audit trail. A trigger writes `task_events` on every status change
 --    and nothing could read it, so a run timeline had no source.
 --
---    task_events has no RLS of its own -- it inherits scope the way
---    `tasks_via_run` does, by joining the run whose policy already decides
---    what this caller may see. The join is the security control, not a
---    convenience: drop it and this view publishes every tenant's history.
+--    The view inherits scope the way `tasks_via_run` does, by joining the run
+--    whose policy already decides what this caller may see.
+--
+--    AND THE TABLE CARRIES THE SAME POLICY, because the view's join was never
+--    the only way in (REM-551). The grant below exists so that api_viewer, the
+--    view's owner, can read the table -- and api_viewer is also the role a
+--    person's SQL step runs as (user-rbac/roles.sql §2). A step that named
+--    `workflow.task_events` instead of the view read every tenant's history,
+--    `input_snapshot` included: a copy of the task input that `tasks_via_run`
+--    protects on workflow.tasks. rbac/02 §10 now refuses any table a web role
+--    can reach with RLS off.
 -- ------------------------------------------------------------
 grant select on workflow.task_events to api_viewer;
+alter table workflow.task_events enable row level security;
+drop policy if exists task_events_via_run on workflow.task_events;
+create policy task_events_via_run on workflow.task_events for select
+  using (exists (select 1 from workflow.runs r where r.id = workflow.task_events.run_id));
 
 create or replace view workflow.task_events_api as
 select e.id,
@@ -254,8 +265,13 @@ select e.id,
 -- 3. The edges. The task graph a run detail draws is `task_dependencies`,
 --    which nothing could read -- so a caller could list a run's tasks and not
 --    the shape they form. Scoped through the run, same as above.
+--    The table is policied as well, for the reason task_events is above.
 -- ------------------------------------------------------------
 grant select on workflow.task_dependencies to api_viewer;
+alter table workflow.task_dependencies enable row level security;
+drop policy if exists task_dependencies_via_task on workflow.task_dependencies;
+create policy task_dependencies_via_task on workflow.task_dependencies for select
+  using (exists (select 1 from workflow.tasks t where t.id = workflow.task_dependencies.task_id));
 
 create or replace view workflow.task_dependencies_api as
 select d.task_id,
@@ -336,8 +352,18 @@ select q.queue,
 --    obvious way to publish this -- would publish the email address of
 --    everyone who has recently tried to sign in, to every authenticated
 --    caller. That is why this is a filtered view and not a grant.
+--
+--    AND WHY THE TABLE HOLDS THE SAME FILTER AS A POLICY (REM-551). The view
+--    needs its owner, api_viewer, to read the table, and api_viewer is the role
+--    a person's SQL step runs as -- so a step naming `workflow.rate_limits`
+--    read every sign-in address the view hides. The token bucket's writers are
+--    SECURITY DEFINER and own the table, so the policy does not reach them.
 -- ------------------------------------------------------------
 grant select on workflow.rate_limits to api_viewer;
+alter table workflow.rate_limits enable row level security;
+drop policy if exists rate_limits_not_personal on workflow.rate_limits;
+create policy rate_limits_not_personal on workflow.rate_limits for select
+  using (key not like 'login:%' and key not like 'reset:%');
 
 create or replace view workflow.rate_limits_api as
 select key, capacity, tokens, refill_rate, updated_at
