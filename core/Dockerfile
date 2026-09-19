@@ -14,7 +14,15 @@
 # stage writes the requirement list `pip install percolate-core[all]` resolves,
 # with the version left out, so the install layer below is reused until a
 # dependency changes, and a version bump alone does not invalidate it.
-FROM python:3.11-slim AS spec
+#
+# EVERY PIP STEP RUNS NATIVELY, FOR THE TARGET PLATFORM. The amd64 image is built
+# on an ARM runner, and pip under QEMU took 783 seconds to install what takes 58
+# natively (release 35465268934, 2026-09-19). So `spec`, `build` and `deps` run on
+# the build platform, `deps` asks pip for the target platform's binary wheels
+# (`--platform`, `--only-binary`) and installs them into a directory, and the
+# image only copies that directory in. amd64 and arm64 wheels exist for
+# everything in [all], which is what `--only-binary=:all:` insists on.
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS spec
 COPY pyproject.toml /spec/
 RUN python - > /spec/requirements.txt <<'EOF'
 import re, tomllib
@@ -35,23 +43,39 @@ while todo:
 print("\n".join(sorted(reqs)))
 EOF
 
-FROM python:3.11-slim AS build
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS build
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY percolate_core ./percolate_core
 RUN pip install --no-cache-dir build && python -m build --wheel
 
-FROM python:3.11-slim
+# The target platform's wheels, installed by the build platform's pip. glibc
+# 2.36 is what python:3.11-slim (bookworm) carries, so manylinux 2.17 to 2.36.
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS deps
+ARG TARGETARCH
+RUN arch=$([ "$TARGETARCH" = amd64 ] && echo x86_64 || echo aarch64) && \
+    { echo "--only-binary=:all: --python-version 3.11 --implementation cp --platform manylinux2014_$arch"; \
+      for g in $(seq 17 36); do echo "--platform manylinux_2_${g}_$arch"; done; } | tr '\n' ' ' > /pip-target
+COPY --from=spec /spec/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --target /deps $(cat /pip-target) -r /tmp/requirements.txt && \
+    mkdir -p /deps-bin && mv /deps/bin/* /deps-bin/ 2>/dev/null; rm -rf /deps/bin
 # Installed from the wheel rather than the source tree, so the image contains
 # exactly what a `pip install percolate-core` user gets -- an image that worked
 # while the published package did not would be a difference nobody notices
-# until a user reports it.
-COPY --from=spec /spec/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+# until a user reports it. --no-deps because the layer above installed them;
+# `pip check` refuses the image if the wheel's own metadata asks for anything
+# that layer did not give.
 COPY --from=build /src/dist/*.whl /tmp/
-# --no-deps because the layer above installed them; `pip check` refuses the
-# image if the wheel's own metadata asks for anything that layer did not give.
-RUN pip install --no-cache-dir --no-deps /tmp/*.whl && rm /tmp/*.whl && pip check
+RUN pip install --no-cache-dir --target /pkg --no-deps $(cat /pip-target) /tmp/*.whl && \
+    mkdir -p /pkg-bin && mv /pkg/bin/* /pkg-bin/ && rm -rf /pkg/bin && \
+    PYTHONPATH=/deps:/pkg python -m pip check
+
+FROM python:3.11-slim
+# Two layers, so a source change reuses the dependency layer.
+COPY --from=deps /deps /usr/local/lib/python3.11/site-packages/
+COPY --from=deps /deps-bin /usr/local/bin/
+COPY --from=deps /pkg /usr/local/lib/python3.11/site-packages/
+COPY --from=deps /pkg-bin /usr/local/bin/
 
 # DuckDB extensions are downloads from extensions.duckdb.org at first use, and a
 # worker without egress would otherwise meet that inside a customer's step. They
