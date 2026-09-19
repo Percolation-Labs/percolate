@@ -17025,6 +17025,17 @@ alter table aiq.lexical_sources add column if not exists shipped boolean not nul
 alter table aiq.lexical_sources alter column shipped set default
     (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
+-- A SOURCE WITH ITS OWN SEARCH, which aiq.lexical refuses (REM-519). Under row
+-- security the policy runs on every row before `@@`, because ts_match_vq is not
+-- leakproof, so a search as the caller reads the whole table: 3 to 7 minutes
+-- over 960 K research claims (specs/research-platform/scale.md §2). A schema
+-- whose policy is that expensive writes a definer search that asks the index
+-- first and readability of each candidate, and names it here; aiq.lexical then
+-- refuses the source and names the function. Null for every other source, and
+-- `chunks` and `skills` stay searchable as the caller, by design (the note
+-- above aiq.search).
+alter table aiq.lexical_sources add column if not exists search_with text;
+
 -- A generated tsvector column + GIN index is the standard shape: the vector
 -- is maintained by Postgres on write, never by application code that can
 -- forget, and the index is what makes it a search rather than a scan.
@@ -17059,6 +17070,11 @@ declare s aiq.lexical_sources;
 begin
     select * into s from aiq.lexical_sources where name = p_source;
     if not found then raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
+    if s.search_with is not null then
+        raise exception 'lexical source % is searched with %, not aiq.lexical', p_source, s.search_with
+            using errcode = 'feature_not_supported',
+                  hint = 'as the caller, its row security reads every row before the text index (REM-519)';
+    end if;
     return query execute format(
         'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
          from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
@@ -17711,7 +17727,7 @@ begin
             -- These are the registries whose "not registered" errors do not
             -- list the alternatives; this is where the alternatives live.
             'text_sources',     coalesce((select jsonb_agg(jsonb_build_object(
-                                    'name', name, 'regconfig', regconfig) order by name)
+                                    'name', name, 'regconfig', regconfig, 'search_with', search_with) order by name)
                                  from aiq.lexical_sources), '[]'::jsonb),
             'semantic_sources', coalesce((select jsonb_agg(jsonb_build_object(
                                     'name', name) order by name)
@@ -29475,12 +29491,16 @@ create table if not exists research.argument_edges (
 );
 
 -- SEARCH OVER CLAIMS AND SOURCES, SCOPED BY THE ROWS THEMSELVES (REM-152, specs/tables/schema.md §3). Lexical
--- sources rather than entity projections: aiq.lexical runs as the caller, so claims_readable and
--- sources_readable decide what a search returns, and a package write adds no aiq row -- nobody needs a
+-- sources rather than entity projections: revision_readable decides what a search returns, and a package
+-- write adds no aiq row -- nobody needs a
 -- write grant on aiq, on the first insert or any other. The registration adds a generated search_tsv
 -- column and its GIN index to each table; the projections stay the record, and the index is derived.
 select aiq.register_lexical_source('research_claims', 'research.claims', 'text');
 select aiq.register_lexical_source('research_sources', 'research.sources', 'title');
+-- Both are searched through their definer searches, research.search_claims and research.search_sources
+-- (REM-519): as the caller, the policy ran on every row before the index, 7 minutes at 960 K claims.
+update aiq.lexical_sources set search_with = 'research.search_claims'  where name = 'research_claims';
+update aiq.lexical_sources set search_with = 'research.search_sources' where name = 'research_sources';
 
 -- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
 -- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
@@ -30486,10 +30506,15 @@ $$;
 -- and readability is asked of each candidate, so the answer holds no claim the caller could not read.
 -- p_candidates bounds the work for a term that matches millions; a common term still costs what its
 -- matches cost (scale.md §3), which is the open part.
+--
+-- THE QUERY IS PARSED WITH THE REGCONFIG THE COLUMN WAS BUILT WITH (REM-519). It was 'simple' against an
+-- 'english' search_tsv, so "rates" never matched "Interest rates are rising": the column holds the stem.
+-- The probes used unstemmed synthetic words, and test 17 a word with no stem, so nothing saw it.
 create or replace function research.search_claims(p_query text, p_limit int default 20, p_candidates int default 2000)
 returns table (claim_id uuid, revision_id uuid, claim_key text, text text, score real)
 language sql stable security definer set search_path = pg_catalog, public as $$
-    with q as (select plainto_tsquery('simple', p_query) as q),
+    with q as (select plainto_tsquery(l.regconfig::regconfig, p_query) as q
+                 from aiq.lexical_sources l where l.name = 'research_claims'),
     candidates as (
         select c.id, c.revision_id, c.claim_key, c.text, c.search_tsv
           from research.claims c, q where c.search_tsv @@ q.q
@@ -30498,6 +30523,24 @@ language sql stable security definer set search_path = pg_catalog, public as $$
       from candidates k, q
      where research.revision_readable(k.revision_id)
      order by 5 desc
+     limit least(greatest(p_limit, 1), 100)
+$$;
+
+-- SOURCE SEARCH, on the same terms as search_claims (REM-519): the index first, then readability of each
+-- candidate's revision, which is what sources_readable asks.
+create or replace function research.search_sources(p_query text, p_limit int default 20, p_candidates int default 2000)
+returns table (source_id uuid, revision_id uuid, source_key text, title text, url text, score real)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    with q as (select plainto_tsquery(l.regconfig::regconfig, p_query) as q
+                 from aiq.lexical_sources l where l.name = 'research_sources'),
+    candidates as (
+        select s.id, s.revision_id, s.source_key, s.title, s.url, s.search_tsv
+          from research.sources s, q where s.search_tsv @@ q.q
+         limit least(greatest(p_candidates, 1), 10000))
+    select k.id, k.revision_id, k.source_key, k.title, k.url, ts_rank(k.search_tsv, q.q)::real
+      from candidates k, q
+     where research.revision_readable(k.revision_id)
+     order by 6 desc
      limit least(greatest(p_limit, 1), 100)
 $$;
 
@@ -31402,6 +31445,7 @@ grant execute on function
     research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
     research.list_listed(timestamptz, int), research.search_claims(text, int, int),
+    research.search_sources(text, int, int),
     research.trust_state(text, timestamptz),
     engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid),
     research.resolve_image(uuid)

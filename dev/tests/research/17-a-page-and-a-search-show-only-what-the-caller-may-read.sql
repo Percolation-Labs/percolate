@@ -1,4 +1,4 @@
--- research.list_listed and research.search_claims run as their owner, so row security never sees them
+-- research.list_listed, research.search_claims and research.search_sources run as their owner, so row security never sees them
 -- (REM-500, specs/research-platform/scale.md §2). rbac/14 proves each calls its readability predicate;
 -- this proves the answer: another person's private claim is never found, a listed one is, and the owner
 -- finds their own. One transaction, rolled back.
@@ -20,7 +20,7 @@ set local role authenticated;
 do $$
 declare
     d jsonb := '{"schema_version": "0.1", "summary": "A package for the REM-500 access test.",
-                 "sources": [{"id": "S1", "title": "S", "url": "https://example.com/s", "origin": "Example", "status": "Reported", "locator": "p1"}],
+                 "sources": [{"id": "S1", "title": "zqxsource ratings", "url": "https://example.com/s", "origin": "Example", "status": "Reported", "locator": "p1"}],
                  "edges": []}';
 begin
     perform research.submit_package(d || '{"title": "Alice private", "visibility": "private",
@@ -30,6 +30,12 @@ begin
         "claims": [{"id": "C1", "kind": "Inference", "text": "zqxlistedword is in alice listed work", "source_ids": ["S1"], "locator": ""}]}',
         null, 'rp-scale-listed');
     assert (select count(*) from research.search_claims('zqxprivateword')) = 1, 'the owner finds her own private claim';
+    -- A word the column holds as a stem. The query was parsed 'simple' against an 'english' column, so
+    -- "works" never matched "work" (REM-519).
+    assert (select count(*) from research.search_claims('zqxprivateword works')) = 1,
+        'a search finds a claim through a stemmed word';
+    assert (select count(*) from research.search_sources('zqxsource rating')) = 2,
+        'the owner finds the source of both her packages, through a stemmed word';
 end $$;
 reset role;
 
@@ -42,6 +48,8 @@ begin
         'another person''s private claim is not found by search';
     assert (select count(*) from research.search_claims('zqxlistedword')) = 1,
         'a listed claim is found by anybody';
+    assert (select count(*) from research.search_sources('zqxsource ratings')) = 1,
+        'another person''s private source is not found, a listed one is';
     assert not exists (select 1 from research.list_listed(null, 100) x where x->>'id' = 'rp-scale-private'),
         'another person''s private work is not in the listing';
     assert exists (select 1 from research.list_listed(null, 100) x where x->>'id' = 'rp-scale-listed'),

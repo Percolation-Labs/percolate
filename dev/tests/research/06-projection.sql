@@ -85,8 +85,21 @@ begin
     assert position('search_tsv' in t::text) = 0, 'the search column never reaches a read';
 
     -- Search, as the owner.
-    assert exists (select 1 from aiq.lexical('research_claims', 'zephyrine', 10)), 'the owner finds their own private claim';
-    assert exists (select 1 from aiq.lexical('research_sources', 'marmalade', 10)), 'and their own private source';
+    assert exists (select 1 from research.search_claims('zephyrine', 10)), 'the owner finds their own private claim';
+    assert exists (select 1 from research.search_sources('marmalade', 10)), 'and their own private source';
+    -- aiq.lexical refuses both and names the search to use (REM-519).
+    begin
+        perform aiq.lexical('research_claims', 'zephyrine', 10);
+        assert false, 'aiq.lexical refuses research_claims';
+    exception when feature_not_supported then
+        assert sqlerrm like '%research.search_claims%', 'and names research.search_claims: ' || sqlerrm;
+    end;
+    begin
+        perform aiq.lexical('research_sources', 'marmalade', 10);
+        assert false, 'aiq.lexical refuses research_sources';
+    exception when feature_not_supported then
+        assert sqlerrm like '%research.search_sources%', 'and names research.search_sources: ' || sqlerrm;
+    end;
     assert not has_table_privilege('authenticated', 'aiq.nodes', 'insert')
        and not has_table_privilege('authenticated', 'aiq.node_keys', 'insert'), 'with no write on aiq';
     assert not has_function_privilege('authenticated', 'research.rebuild_projection(uuid)', 'execute'),
@@ -100,8 +113,8 @@ set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000152b2"}'
 set local role authenticated;
 do $$
 begin
-    assert not exists (select 1 from aiq.lexical('research_claims', 'zephyrine', 10)), 'a stranger''s search finds no private claim';
-    assert not exists (select 1 from aiq.lexical('research_sources', 'marmalade', 10)), 'nor a private source';
+    assert not exists (select 1 from research.search_claims('zephyrine', 10)), 'a stranger''s search finds no private claim';
+    assert not exists (select 1 from research.search_sources('marmalade', 10)), 'nor a private source';
 end $$;
 reset role;
 

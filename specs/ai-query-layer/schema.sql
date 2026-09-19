@@ -3448,6 +3448,17 @@ alter table aiq.lexical_sources add column if not exists shipped boolean not nul
 alter table aiq.lexical_sources alter column shipped set default
     (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
+-- A SOURCE WITH ITS OWN SEARCH, which aiq.lexical refuses (REM-519). Under row
+-- security the policy runs on every row before `@@`, because ts_match_vq is not
+-- leakproof, so a search as the caller reads the whole table: 3 to 7 minutes
+-- over 960 K research claims (specs/research-platform/scale.md §2). A schema
+-- whose policy is that expensive writes a definer search that asks the index
+-- first and readability of each candidate, and names it here; aiq.lexical then
+-- refuses the source and names the function. Null for every other source, and
+-- `chunks` and `skills` stay searchable as the caller, by design (the note
+-- above aiq.search).
+alter table aiq.lexical_sources add column if not exists search_with text;
+
 -- A generated tsvector column + GIN index is the standard shape: the vector
 -- is maintained by Postgres on write, never by application code that can
 -- forget, and the index is what makes it a search rather than a scan.
@@ -3482,6 +3493,11 @@ declare s aiq.lexical_sources;
 begin
     select * into s from aiq.lexical_sources where name = p_source;
     if not found then raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
+    if s.search_with is not null then
+        raise exception 'lexical source % is searched with %, not aiq.lexical', p_source, s.search_with
+            using errcode = 'feature_not_supported',
+                  hint = 'as the caller, its row security reads every row before the text index (REM-519)';
+    end if;
     return query execute format(
         'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
          from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
@@ -4134,7 +4150,7 @@ begin
             -- These are the registries whose "not registered" errors do not
             -- list the alternatives; this is where the alternatives live.
             'text_sources',     coalesce((select jsonb_agg(jsonb_build_object(
-                                    'name', name, 'regconfig', regconfig) order by name)
+                                    'name', name, 'regconfig', regconfig, 'search_with', search_with) order by name)
                                  from aiq.lexical_sources), '[]'::jsonb),
             'semantic_sources', coalesce((select jsonb_agg(jsonb_build_object(
                                     'name', name) order by name)

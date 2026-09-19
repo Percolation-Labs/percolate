@@ -204,6 +204,8 @@ insert into t14_declared (fn, mechanism, why) values
  'a page of exposed works, newest first, each kept only if the caller may read the work (REM-500)'),
 ('research.search_claims(text,integer,integer)', 'research.revision_readable',
  'each candidate the text index returns is kept only if the caller may read its revision (REM-500)'),
+('research.search_sources(text,integer,integer)', 'research.revision_readable',
+ 'each candidate the text index returns is kept only if the caller may read its revision (REM-519)'),
 ('claims.propose_resolution(uuid,uuid,text,text,text,date,text)', 'rbac.require',
  'research:select, and the evidence revision must be readable to the caller and express the claim (REM-480)'),
 ('claims.review_resolution(bigint,text,text)', 'rbac.require',

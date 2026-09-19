@@ -680,6 +680,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','function','research.list_packages','boolean','architecture.md §4: owned and visible packages'),
 ('research-platform','function','research.list_listed','timestamptz,integer','scale.md §2: the listing a page at a time, the same cost at any size; list_packages visited every work (REM-500)'),
 ('research-platform','function','research.search_claims','text,integer,integer','scale.md §2: claim search that asks the index before readability, so it does not read every claim under row security (REM-500)'),
+('research-platform','function','research.search_sources','text,integer,integer','scale.md §2: source search on the same terms as search_claims; aiq.lexical refuses research_sources and names it (REM-519)'),
 ('research-platform','function','research.readable','uuid','architecture.md §4: may the caller read this work'),
 ('research-platform','function','research.receipt','uuid,boolean','architecture.md §4: ids, label and hash for a revision the caller may read'),
 ('research-platform','function','research.revise_package','text,jsonb,text,text','architecture.md §4: append from the expected head; stale is 409'),
