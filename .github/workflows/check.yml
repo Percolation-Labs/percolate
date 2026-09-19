@@ -57,6 +57,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # THE SELF-MODEL LOADS THE WHOLE CORPUS ONCE A NIGHT, and otherwise only when its loader or schema changes (below).
+  schedule:
+    - cron: "30 2 * * *"
 
 # MAIN IS BATCHED, AND A BATCH IS CHECKED AGAINST THE LAST GREEN RUN.
 # One group for main, never cancelled while running. GitHub keeps at most one
@@ -139,31 +142,29 @@ jobs:
             fi
           fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$GITHUB_EVENT_NAME" = schedule ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "selfmodel=true" >> "$GITHUB_OUTPUT"
-            echo "dispatched: everything runs"; exit 0
+            echo "$GITHUB_EVENT_NAME: everything runs"; exit 0
           fi
           if ! files=$(git diff --no-renames --name-only "$BASE...HEAD"); then
             echo "::warning::could not diff against $BASE -- running everything"
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "selfmodel=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          # A PR RUNS THE SELF-MODEL ONLY WHEN THE LOADER OR THE SCHEMA CHANGES.
-          # A corpus-only change (a spec, a postmortem) cannot break the loader
-          # except through its content, and the main batch below still loads
-          # every such change before main goes green (00e798a). Measured
-          # 2026-09-19: self-model averaged 13 min on r1, up to 32, and ran on
-          # nearly every PR, so one heavy runner held 13 runs for over two hours.
+          # THE SELF-MODEL RUNS ONLY WHEN THE LOADER OR THE SCHEMA CHANGES, on a PR
+          # and on main alike, and loads the whole corpus nightly (the schedule
+          # above). A corpus-only change (a spec, a postmortem) cannot break the
+          # loader except through its content, and the nightly run catches that
+          # within a day. Measured 2026-09-19: self-model averaged 13 min on r1,
+          # up to 32, and ran on nearly every PR, so one heavy runner held 13
+          # runs for over two hours. #314 took it off corpus-only PRs. Each main
+          # batch still spent 17 minutes on it ahead of the database gate, on
+          # the runner every p8 release and schema PR needs. Releases have a
+          # 10-minute SLA (percolate-application dev skill, "Release time").
           LOADER='^(applications/percolate-self-model/|extension/|specs/contract/|dev/ci-database\.sh$|dev/lib/)|^specs/.*\.sql$'
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            if printf '%s\n' "$files" | grep -qE "$LOADER"; then
-              echo "selfmodel=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "selfmodel=false" >> "$GITHUB_OUTPUT"; echo "no loader or schema change: self-model waits for the main batch"
-            fi
-          elif printf '%s\n' "$files" | grep -qv '\.md$' || printf '%s\n' "$files" | grep -qE '^(specs|meta)/'; then
+          if printf '%s\n' "$files" | grep -qE "$LOADER"; then
             echo "selfmodel=true" >> "$GITHUB_OUTPUT"
           else
-            echo "selfmodel=false" >> "$GITHUB_OUTPUT"; echo "no code, specs/ or meta/ changed: self-model stands down"
+            echo "selfmodel=false" >> "$GITHUB_OUTPUT"; echo "no loader or schema change: the self-model waits for the nightly run"
           fi
           printf '%s\n' "$files" | sed 's/^/  /'
           # PATHS NO PARSER OR DATABASE GATE READS. Checked 2026-09-19: none is
