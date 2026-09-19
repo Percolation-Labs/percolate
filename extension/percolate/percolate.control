@@ -1,5 +1,5 @@
 comment = 'Percolate: workflow, identity, query and content'
-default_version = '0.2.16'
+default_version = '0.2.17'
 relocatable = false
 
 # NON-superuser installable, and that is the entire point. Objects created by
