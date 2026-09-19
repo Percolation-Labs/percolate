@@ -38,6 +38,15 @@ VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percol
 [ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 2; }
 TAG="v$VERSION"
 
+# ASK THE REMOTE, NOT ONLY THIS CHECKOUT'S TAGS. On 2026-09-18 v0.2.12 was tagged at
+# 21:30Z; a branch pushed at 21:38Z from a checkout that had not fetched it passed
+# this gate in the pre-push hook ("unreleased (no tag)"), merged 0.2.12-labelled SQL
+# that differed from the tag, and CI -- which fetches every tag -- failed on main.
+# The same lesson dev/references.sh §3 records: a gate whose answer depends on which
+# refs a checkout holds disagrees between CI and a laptop. So fetch this one tag
+# first. Offline, or with no such tag, the fetch fails and the local answer stands.
+env -u GIT_DIR -u GIT_WORK_TREE git fetch -q --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+
 if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "version $VERSION is unreleased (no tag $TAG) -- ok"
     exit 0
