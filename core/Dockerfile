@@ -8,6 +8,33 @@
 #   docker run percolationlabs/percolate-core percolate worker --queue http
 #   docker run percolationlabs/percolate-core percolate content serve
 #   docker run percolationlabs/percolate-core percolate agent serve
+# THE DEPENDENCIES ARE A LAYER OF THEIR OWN, KEYED ON WHAT THEY ARE. Installing
+# them with the wheel meant every source change reinstalled all of them, under
+# QEMU for amd64: the image job took 12 minutes of a release on 2026-09-19. This
+# stage writes the requirement list `pip install percolate-core[all]` resolves,
+# with the version left out, so the install layer below is reused until a
+# dependency changes, and a version bump alone does not invalidate it.
+FROM python:3.11-slim AS spec
+COPY pyproject.toml /spec/
+RUN python - > /spec/requirements.txt <<'EOF'
+import re, tomllib
+p = tomllib.load(open("/spec/pyproject.toml", "rb"))["project"]
+extras, name = p.get("optional-dependencies", {}), p["name"]
+reqs, seen, todo = set(p.get("dependencies", [])), set(), ["all"]
+while todo:
+    extra = todo.pop()
+    if extra in seen:
+        continue
+    seen.add(extra)
+    for r in extras[extra]:
+        m = re.fullmatch(re.escape(name) + r"\[(.+)\]", r)
+        if m:
+            todo += [x.strip() for x in m.group(1).split(",")]
+        else:
+            reqs.add(r)
+print("\n".join(sorted(reqs)))
+EOF
+
 FROM python:3.11-slim AS build
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
@@ -19,10 +46,12 @@ FROM python:3.11-slim
 # exactly what a `pip install percolate-core` user gets -- an image that worked
 # while the published package did not would be a difference nobody notices
 # until a user reports it.
+COPY --from=spec /spec/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 COPY --from=build /src/dist/*.whl /tmp/
-# The extras suffix cannot be applied to a glob -- pip reads /tmp/*.whl[all]
-# as a literal path. Resolve the filename first.
-RUN whl=$(ls /tmp/*.whl) && pip install --no-cache-dir "${whl}[all]" && rm /tmp/*.whl
+# --no-deps because the layer above installed them; `pip check` refuses the
+# image if the wheel's own metadata asks for anything that layer did not give.
+RUN pip install --no-cache-dir --no-deps /tmp/*.whl && rm /tmp/*.whl && pip check
 
 # DuckDB extensions are downloads from extensions.duckdb.org at first use, and a
 # worker without egress would otherwise meet that inside a customer's step. They
