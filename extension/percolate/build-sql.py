@@ -458,10 +458,6 @@ NOT_SHIPPED = {
         "with the trigger that would promote each, in workflow-engine/roadmap.md "
         "\u00a75; they get built there or deleted there. Shipping the schema now "
         "would put tables in the product ahead of that decision.",
-    "percolate-application/data-model.sql":
-        "the writing hub's market schema, a draft from the table review. The hub owns it; research-platform/schema.sql is the core half. Kept as the reviewed fixture until the hub migrates.",
-    "percolate-application/data-model-test.sql":
-        "the tests for that draft, run by hand against a disposable database, not an extension schema.",
     "world-model-ingestion/tradecraft.sql":
         "grading and corroboration over evidence classes. Core-eligible under "
         "SKILL.md \u00a75's transcribed-standard rule (Admiralty, ICD 203, Bellingcat "
