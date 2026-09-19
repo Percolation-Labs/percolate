@@ -31830,8 +31830,56 @@ begin
         raise check_violation using message = 'This predicate does not relate two claims', detail = p_predicate;
     end if;
     if v_pred.kind = 'comparative' then
-        raise feature_not_supported using message = 'A comparative relation needs the question both claims answer',
-            detail = p_predicate, hint = 'REM-479 moves comparisons into core, with the question check';
+        -- comparison-and-trust.md *Stance labels*, moved here from the application's validator (REM-479). The frame
+        -- match is the proposer's judgement of each slot (same, overlaps, differs, unknown); a slot nobody checked is
+        -- unknown, never same. uncertain is not a relation: it is what a pair is when a requirement is missing.
+        -- Readability first, so no rule below can say anything about a revision the caller may not read.
+        if not research.revision_readable(p_evidence)
+           or (p_evidence2 is not null and not research.revision_readable(p_evidence2)) then
+            raise no_data_found using message = 'Research revision not found';
+        end if;
+        if p_evidence2 is null or (select work_id from research.revisions where id = p_evidence2)
+                                = (select work_id from research.revisions where id = p_evidence) then
+            raise check_violation using message = 'A comparison pairs claims from two different works';
+        end if;
+        if exists (select 1 from jsonb_each_text(coalesce(p_spans->'frame_match', '{}'::jsonb)) m
+                    where m.key not in ('subject', 'outcome', 'population', 'setting', 'period', 'comparator', 'evidence_type')
+                       or m.value not in ('same', 'overlaps', 'differs', 'unknown')) then
+            raise check_violation using message = 'frame_match names the seven slots, each same, overlaps, differs or unknown';
+        end if;
+        if p_predicate in ('agrees', 'contradicts') and not (
+               (select bool_and(coalesce(p_spans->'frame_match'->>k, 'unknown') = 'same')
+                  from unnest(array['subject', 'outcome', 'evidence_type']) k)
+           and (select bool_and(coalesce(p_spans->'frame_match'->>k, 'unknown') in ('same', 'overlaps'))
+                  from unnest(array['population', 'period']) k)) then
+            raise check_violation using message = p_predicate || ' needs the same question: subject, outcome and '
+                'evidence_type same, population and period same or overlapping',
+                hint = 'A differing slot is different_scope; a missing one is uncertain, which is not a relation';
+        end if;
+        if p_predicate in ('agrees', 'contradicts', 'same_source_opposite')
+           and (coalesce(p_spans->>'src', '') = '' or coalesce(p_spans->>'dst', '') = '') then
+            raise check_violation using message = p_predicate || ' needs a quoted span from both passages';
+        end if;
+        if p_predicate = 'contradicts' and exists (
+               select 1 from unnest(array['subject', 'outcome', 'population', 'setting', 'period', 'comparator',
+                                          'evidence_type']) k
+                where coalesce(p_spans->'frame_match'->>k, 'unknown') not in ('same', 'overlaps')) then
+            raise check_violation using message = 'contradicts needs every frame slot same or overlaps';
+        end if;
+        if p_predicate = 'different_scope' and not exists (
+               select 1 from jsonb_each_text(coalesce(p_spans->'frame_match', '{}'::jsonb)) m where m.value = 'differs') then
+            raise check_violation using message = 'different_scope names the slot that differs: mark it differs in frame_match';
+        end if;
+        if p_predicate = 'same_source_opposite' and not (
+               coalesce(p_spans->>'shared_origin', '') <> ''
+           and exists (select 1 from claims.cites c join claims.origins o on o.id = c.origin_id
+                        where c.revision_id = p_evidence and c.claim_key = p_src_key
+                          and o.key = claims.study_key(p_spans->>'shared_origin'))
+           and exists (select 1 from claims.cites c join claims.origins o on o.id = c.origin_id
+                        where c.revision_id = p_evidence2 and c.claim_key = p_dst_key
+                          and o.key = claims.study_key(p_spans->>'shared_origin'))) then
+            raise check_violation using message = 'same_source_opposite needs shared_origin, an origin both claims cite';
+        end if;
     elsif p_predicate = 'same_as' then
         -- graph.md §5: judged, never computed, and carrying what was judged. Both occurrences, a span quoted from
         -- each, and the slots compared for both sides, so a reader can see why they were called substitutable.
@@ -31855,8 +31903,19 @@ begin
         raise insufficient_privilege using message = 'Only a person confirms a relation; an agent proposes it',
             hint = 'human_only';
     end if;
-    if not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
-                    where v.id = p_evidence and w.owner_id = v_user) then
+    -- A comparison's author compares works they may read, which need not be their own (REM-479); every other
+    -- relation is asserted from a revision of the caller's own work.
+    -- A comparison also labels a pair qualifies (comparison-and-trust.md): across two works that is a reader's label
+    -- like the comparative ones, where within one work it is the writer's argument.
+    if v_pred.kind = 'comparative'
+       or (p_predicate = 'qualifies' and p_evidence2 is not null
+           and (select work_id from research.revisions where id = p_evidence2)
+               is distinct from (select work_id from research.revisions where id = p_evidence)) then
+        if not research.revision_readable(p_evidence) then
+            raise no_data_found using message = 'Research revision not found';
+        end if;
+    elsif not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                       where v.id = p_evidence and w.owner_id = v_user) then
         raise insufficient_privilege using message = 'A relation is asserted from a revision of your own work',
             hint = 'no_grant';
     end if;
@@ -31914,7 +31973,10 @@ begin
         raise no_data_found using message = 'Relation not found';
     end if;
     if not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
-                    where v.id = r.evidence and w.owner_id = v_user) then
+                    where v.id = r.evidence and w.owner_id = v_user)
+       and not exists (select 1 from claims.relations f join claims.tx t on t.id = f.tx
+                        where f.src = r.src and f.predicate = r.predicate and f.dst = r.dst and f.evidence = r.evidence
+                          and f.evidence2 is not distinct from r.evidence2 and f.keys = r.keys and t.actor_id = v_user) then
         -- The other side (graph.md §5): the owner of the second revision may dispute, as a person, and do nothing
         -- else. A dispute is a later row; the assertion it answers stays in the history.
         if r.evidence2 is null or not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id

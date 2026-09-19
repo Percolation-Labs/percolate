@@ -53,8 +53,8 @@ begin
     -- Requirements that need records not built yet are refused, naming what builds them.
     begin
         perform claims.assert_relation('C1', 'contradicts', 'C2', rev);
-        raise exception 'a comparative relation was written without a question';
-    exception when feature_not_supported then null;
+        raise exception 'a comparative relation was written within one work (REM-479)';
+    exception when check_violation then null;
     end;
     begin
         perform claims.assert_relation('C1', 'same_as', 'C2', rev);
