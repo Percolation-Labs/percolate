@@ -62,9 +62,10 @@ def sanctioned_origins() -> set[tuple[str, str, int]]:
     NOT A NEW LIST. It is the one templates already read -- ``P8_AGENT_URL``,
     ``LLM_URL``, and whatever ``P8_TEMPLATE_ENV`` adds -- because that list
     already means "endpoints this operator sanctions", and a second list for the
-    same fact is a second list to forget. A deployment that wants the worker, the
-    probe or an API source to reach another internal service names it there and
-    gets all three at once.
+    same fact is a second list to forget. A deployment that wants the worker or
+    an API source to reach another internal service names it there and gets
+    both. The probe and ``/evidence`` do not read it (REM-555): see
+    ``refuse_internal_egress``'s ``sanctioned``.
     """
     names = set(TEMPLATE_ENV) | {
         n.strip() for n in os.environ.get("P8_TEMPLATE_ENV", "").split(",") if n.strip()}
@@ -91,7 +92,7 @@ def _internal(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
             or not address.is_global)
 
 
-def refuse_internal_egress(url: str) -> None:
+def refuse_internal_egress(url: str, *, sanctioned: bool = True) -> None:
     """Refuse a URL that points this process back at its own network.
 
     The worker's step ``url`` is resolved from ``{{run.*}}`` and ``{{steps.*}}``
@@ -110,6 +111,14 @@ def refuse_internal_egress(url: str) -> None:
     Call it on EVERY URL that will be requested: after template resolution, and
     on each redirect hop and continuation page, since each is a new URL.
 
+    ``sanctioned=False`` for a URL a person typed for this one request (the
+    probe, and ``/evidence`` through it): the operator's endpoints are not
+    exempt then (REM-555). ``LLM_URL`` names a model server this deployment
+    trusts its workers to call; it does not make that server a page any
+    signed-in caller may read. A worker step and a saved API source keep the
+    exemption, because naming an endpoint in ``P8_TEMPLATE_ENV`` is how an
+    operator lets those reach it.
+
     WHAT THIS DOES NOT DO: it resolves and checks, and does not pin the resolved
     address for the request that follows, so a name answering differently on a
     second lookup is not covered. That is DNS rebinding; it has no incident
@@ -121,7 +130,7 @@ def refuse_internal_egress(url: str) -> None:
     except ValueError as exc:
         raise EgressRefused(f"url is not a usable HTTP(S) URL: {exc}") from None
 
-    if target in sanctioned_origins():
+    if sanctioned and target in sanctioned_origins():
         return
 
     _, host, port = target
@@ -143,6 +152,12 @@ def refuse_internal_egress(url: str) -> None:
         # A scoped IPv6 address comes back as `fe80::1%eth0`.
         address = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
         if _internal(address):
+            if not sanctioned:
+                raise EgressRefused(
+                    f"refusing {host}: it resolves to an address on this machine's "
+                    "own network, and a URL typed for this request may only reach "
+                    "the public internet.",
+                    address=str(address))
             raise EgressRefused(
                 f"refusing {host}: it resolves to an address on this machine's own "
                 "network. The url may come from a run, an earlier step, a saved "

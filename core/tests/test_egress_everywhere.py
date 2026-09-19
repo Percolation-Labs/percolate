@@ -33,6 +33,7 @@ import httpx
 from percolate_core.content import probe as probe_module
 from percolate_core.content.probe import ProbeFailed, probe
 from percolate_core.core import TerminalError
+from percolate_core.core.egress import EgressRefused, refuse_internal_egress
 from percolate_core.ingest import api as api_module
 
 PUBLIC = "93.184.216.34"
@@ -163,13 +164,26 @@ class ProbeRefusesThisNetwork(unittest.TestCase):
         self.assertEqual(report["url"], "https://cdn.example.com/items")
         self.assertEqual(self.upstream.hosts(), ["api.example.com", "cdn.example.com"])
 
-    def test_an_internal_endpoint_the_operator_named_is_probed(self):
-        # The escape hatch is the worker's: P8_TEMPLATE_ENV names an endpoint
-        # this deployment sanctions, and the probe honours the same list.
-        env = {"P8_TEMPLATE_ENV": "SEARCH_URL", "SEARCH_URL": "http://search:7700"}
-        with patch.dict(os.environ, env), resolving({"search": "10.0.0.5"}):
-            report = run_probe("http://search:7700/items")
-        self.assertEqual(report["kind"], "records")
+    def test_an_endpoint_the_operator_sanctioned_is_not_probed(self):
+        # REM-555. LLM_URL, P8_AGENT_URL and P8_TEMPLATE_ENV name endpoints the
+        # worker may reach. A probe URL is typed by a caller, so the same list
+        # let any signed-in caller read an internal model server through it.
+        env = {"LLM_URL": "http://model:8000", "P8_AGENT_URL": "http://agent:8080",
+               "P8_TEMPLATE_ENV": "SEARCH_URL", "SEARCH_URL": "http://search:7700"}
+        hosts = {"model": "10.0.0.4", "agent": "10.0.0.6", "search": "10.0.0.5"}
+        for url in ("http://model:8000/v1/models", "http://agent:8080/v1/chat/completions",
+                    "http://search:7700/items"):
+            with self.subTest(url=url), patch.dict(os.environ, env), resolving(hosts):
+                self.assertRefused(url)
+        self.assertEqual(self.upstream.sent, [])
+
+    def test_the_worker_still_reaches_what_the_operator_named(self):
+        # The control: the exemption is withdrawn from caller URLs only.
+        env = {"LLM_URL": "http://model:8000"}
+        with patch.dict(os.environ, env), resolving({"model": "10.0.0.4"}):
+            refuse_internal_egress("http://model:8000/v1/chat/completions")
+            with self.assertRaises(EgressRefused):
+                refuse_internal_egress("http://model:8000/v1/models", sanctioned=False)
 
     def test_a_named_credential_does_not_follow_a_redirect_to_another_origin(self):
         # Following redirects by hand means deciding what a hop carries. httpx

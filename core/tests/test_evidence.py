@@ -66,8 +66,19 @@ class FetchTest(unittest.TestCase):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
-        # Loopback is refused by the egress guard; sanctioned the way an operator names an internal endpoint.
-        cls.env = patch.dict(os.environ, {"P8_TEMPLATE_ENV": "EVIDENCE_TEST_URL", "EVIDENCE_TEST_URL": cls.base})
+        # Loopback is refused by the egress guard, and a URL a caller typed gets
+        # no operator allowlist (REM-555). So the guard is told about exactly
+        # this origin, and every other URL, a redirect hop included, gets the
+        # real check.
+        from percolate_core.content import probe as probe_module
+        from percolate_core.core.credentials import origin
+        real = probe_module.refuse_internal_egress
+
+        def guard(url, **kw):
+            if origin(url) != origin(cls.base) or cls.refuse_all:
+                real(url, **kw)
+        cls.refuse_all = False
+        cls.env = patch.object(probe_module, "refuse_internal_egress", guard)
         cls.env.start()
 
     @classmethod
@@ -97,7 +108,17 @@ class FetchTest(unittest.TestCase):
             self.assertIn(words, str(refused.exception))
 
     def test_an_internal_address_is_refused_before_any_request(self):
-        with patch.dict(os.environ, {"P8_TEMPLATE_ENV": ""}), self.assertRaises(EvidenceRefused):
+        type(self).refuse_all = True
+        self.addCleanup(setattr, type(self), "refuse_all", False)
+        with self.assertRaises(EvidenceRefused):
+            asyncio.run(fetch(self.base + "/study"))
+
+    def test_an_operator_endpoint_is_not_a_page_a_caller_may_keep(self):
+        # REM-555: LLM_URL is sanctioned for the worker, not for a caller's URL.
+        type(self).refuse_all = True
+        self.addCleanup(setattr, type(self), "refuse_all", False)
+        with patch.dict(os.environ, {"LLM_URL": self.base, "P8_TEMPLATE_ENV": "X", "X": self.base}), \
+             self.assertRaises(EvidenceRefused):
             asyncio.run(fetch(self.base + "/study"))
 
 

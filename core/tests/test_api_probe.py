@@ -58,10 +58,15 @@ class APIProbeTest(unittest.TestCase):
   cls.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
   threading.Thread(target=cls.server.serve_forever,daemon=True).start()
   cls.base='http://127.0.0.1:%d'%cls.server.server_address[1]
-  # The listener is on loopback, which a probe refuses (test_egress_everywhere.py).
-  # Sanctioned the way an operator names an internal endpoint, so every test here
-  # also proves the override reaches exactly that origin and still works.
-  cls.env=patch.dict(os.environ,{'P8_TEMPLATE_ENV':'PROBE_TEST_URL','PROBE_TEST_URL':cls.base})
+  # The listener is on loopback, which a probe refuses (test_egress_everywhere.py),
+  # and a probe honours no operator allowlist (REM-555). So the guard is told
+  # about exactly this one origin, and every other URL still gets the real check.
+  from percolate_core.content import probe as probe_module
+  from percolate_core.core.credentials import origin
+  real=probe_module.refuse_internal_egress
+  def guard(url,**kw):
+   if origin(url)!=origin(cls.base): real(url,**kw)
+  cls.env=patch.object(probe_module,'refuse_internal_egress',guard)
   cls.env.start()
 
  @classmethod

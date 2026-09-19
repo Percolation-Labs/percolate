@@ -22,6 +22,10 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
   an id; no SQL changed.
 - **A delegation's budget headers narrow the operator's `P8_TREE_*` limits and never widen them** (REM-554).
   `x-p8-usage` alone used to run the child with no limits; each limit is now the smaller of the two.
+- **`/probe` and `/evidence` no longer reach the endpoints the operator sanctioned** (REM-555). The origins
+  of `LLM_URL`, `P8_AGENT_URL` and `P8_TEMPLATE_ENV` are exempt from the egress check for the worker and for
+  API sources; a URL a caller types gets the check without them. **A probe of an internal API source that
+  `P8_TEMPLATE_ENV` names, which 0.2.0 answered, is refused.** The source itself still pulls.
 
 ## Unreleased, after 0.1.13
 

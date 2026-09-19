@@ -124,9 +124,15 @@ def _headers(auth_type: str, credential_ref: str, auth_header: str, url: str) ->
 
 
 async def _refuse_internal(url: str) -> None:
-    """`core.egress`, off the event loop (it resolves), restated as a probe refusal."""
+    """`core.egress`, off the event loop (it resolves), restated as a probe refusal.
+
+    WITHOUT THE OPERATOR'S ENDPOINTS (REM-555). A probe URL, and an /evidence
+    URL through `_fetch`, is typed by the caller, so `LLM_URL` or
+    `P8_AGENT_URL` being sanctioned for the worker must not let a caller read
+    an internal model server through this route.
+    """
     try:
-        await asyncio.to_thread(refuse_internal_egress, url)
+        await asyncio.to_thread(refuse_internal_egress, url, sanctioned=False)
     except TerminalError as exc:
         raise ProbeFailed(str(exc)) from None
 
