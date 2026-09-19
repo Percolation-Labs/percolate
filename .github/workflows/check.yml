@@ -177,6 +177,12 @@ jobs:
       # installing the extension needs no Python at all.
       - run: pip install --quiet pyyaml
       - run: dev/check.sh --tree
+      # A CORE FREEZE REFUSES A PR THAT WOULD MERGE INTO IT (REM-536). The
+      # pre-push hook refuses a direct push to main; this is the merge path.
+      # Red while a release is cut, and a re-run after release.yml clears it
+      # goes green. dev/freeze.sh says why.
+      - if: github.event_name == 'pull_request'
+        run: dev/freeze.sh check "origin/${{ github.base_ref }}" HEAD
 
   # THE COMPILED HALF, BUILT FROM THIS TREE.
   #

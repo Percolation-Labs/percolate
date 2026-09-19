@@ -381,6 +381,18 @@ jobs:
           echo "::error::could not open the next version on main after three attempts; bump by hand with .github/scripts/bump_extension_version.py patch" >&2
           exit 1
 
+      # THE FREEZE ENDS WITH THE RELEASE, tagged or failed (REM-536). A dry run
+      # leaves it: the cut is still under way. dev/freeze.sh set is what froze it.
+      - name: Clear the core freeze
+        if: always() && inputs.publish
+        env:
+          GH_PAT: ${{ secrets.P8_RELEASE_TOKEN }}
+        run: |
+          for r in $(git ls-remote --refs origin 'refs/freeze/*' | awk '{print $2}'); do
+            git push "https://x-access-token:$GH_PAT@github.com/${{ github.repository }}" ":$r"
+            echo "::notice::cleared ${r#refs/freeze/}"
+          done
+
       - name: Summary
         run: |
           V=${{ steps.v.outputs.version }}
