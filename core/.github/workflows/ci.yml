@@ -26,6 +26,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Each check below carries `if: !cancelled() && install succeeded`, so a red
+# step no longer skips every step after it: from 8e85f80 one missing binary
+# hid forty test steps and the run reported one failure (REM-568). The job is
+# still red when any step is.
 jobs:
   smoke:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
@@ -39,12 +43,21 @@ jobs:
       - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
 
+      # The browser-module tests run under node. The self-hosted runners (p8-ci
+      # on p8-arm) have none, and a hosted image's node is not a version anyone
+      # chose, so the job installs its own -- the same pin as
+      # percolate-application's release.yml. Missing node failed "Screens and
+      # their audit" on every main run from 8e85f80 (REM-568).
+      - uses: actions/setup-node@v7
+        with: {node-version: "24"}
+
       # [all], not the base install: one of the checks asserts that every model
       # provider the package claims to ship can actually be constructed, and it
       # can only fail meaningfully when they are present. With the base install
       # it reports "provider not installed", which is true of the environment
       # rather than of the package.
       - name: Install with every extra it claims to ship
+        id: install
         run: pip install --quiet ".[all]"
 
       # This job names every file it runs, so the step names say what each one
@@ -52,12 +65,15 @@ jobs:
       # among them the tests REM-62 and REM-69 were closed on. First, because
       # it is the cheapest step here and its answer does not depend on the rest.
       - name: Every test file is run, or says why it is not
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: dev/check-tests-run.sh
 
       - name: The stated guarantees still hold
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python tests/smoke.py
 
       - name: Browser transport remains opt-in and authenticated
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_agent_cors.py
 
       # The live half of this needs a database and lives in dev/ui_reads.py.
@@ -65,18 +81,21 @@ jobs:
       # screens share their read contracts with the audit, so a projection
       # cannot go unexecuted the way five of them did.
       - name: Screens and their audit still read the same contracts
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_reads.py
 
       # Every run in a delegation tree publishes on one session channel
       # (brief.md §4). Chat keeps each run's text apart, lets only the root run
       # end the turn, and nests a child's output under its delegation.
       - name: Chat keeps a delegated run's stream out of its parent's answer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_chat_stream.py
 
       # A component this deployment did not install (the pool schema, and the
       # key issuing and load trials that do not exist yet) reads as that, in
       # words, with the SQLSTATE and the installing file behind a toggle.
       - name: Uninstalled components read as words, with operator detail kept
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_uninstalled.py
 
       # The Schedules screen reimplements the engine's cron matcher so it can
@@ -84,24 +103,30 @@ jobs:
       # ordinary cron library; dev/cron_agrees.py runs both against a live
       # database, which needs one and so does not run here.
       - name: The browser's cron reader still means what the engine means
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_cron.py
 
       - name: Expired browser sessions recover safely
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_session.py
 
       - name: Browser file uploads preserve authentication
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_content_cors.py
       # REM-309: an article image is identified by its bytes and read through a revision.
       - name: Article images are checked by their bytes and read through a revision
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_research_images.py
 
       # The half of the lake's boundary that needs no database or bucket: what
       # authored SQL may say, and what a sealed DuckDB connection may touch.
       # The end-to-end run is p8-subsystems/dev/tests/content/e2e-lake.py.
       - name: Lake SQL is one SELECT, inside a seal it cannot undo
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_lake_guard.py
 
       - name: Tool identity and persisted execution
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_tool_auth.py
 
       # README.md documents the scheduled step as `{{task.id}}` and `task` was
@@ -112,6 +137,7 @@ jobs:
       # that the step is SENT: an async http_call returned before its request
       # and the loop completed the task, so no scheduled run reached the runtime.
       - name: The documented scheduled step resolves, and a bad one is refused
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_scheduled_step_resolves.py
 
       # The runtime completed a scheduled run's task by switching its
@@ -120,6 +146,7 @@ jobs:
       # complete_task and fail_task go through P8_WORKER_DSN, and that a refused
       # switch names the variable.
       - name: A scheduled run can complete the task that dispatched it
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_task_completion_uses_the_worker_login.py
 
       # The documented scheduled step posts to {{env.P8_AGENT_URL}}/internal/run,
@@ -127,6 +154,7 @@ jobs:
       # every scheduled run was a 404. Pins the route on `agent serve` and what
       # is refused before a 202.
       - name: A scheduled run reaches the agent service
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_internal_run_on_the_agent_service.py
 
       # workflow.heartbeat_task shipped, was granted to `worker`, and was called
@@ -137,6 +165,7 @@ jobs:
       # that it stops before the terminal transition. The live proof needs a
       # database and is p8-subsystems/dev/tests/workflow/19-*.sql.
       - name: A long task is heartbeated, so it finishes once
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_worker_heartbeat.py
 
       # A token's claims reach the database whole and before the role switch
@@ -144,6 +173,7 @@ jobs:
       # to (REM-49). The worker and API-ingest files are here because the
       # binding changed what they assert; none of them was run by CI before.
       - name: Caller claims stay whole, credentials stay on their origin
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           for t in test_caller_identity.py test_credential_origins.py \
                    test_worker_agent_auth.py test_worker_row_templates.py test_api_ingest.py; do
@@ -160,6 +190,7 @@ jobs:
       # two call sites had it and three more writes (an http_call response, an
       # API source page, a tool catalogue) did not.
       - name: A hostile byte does not abort a write
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_nul_at_the_boundary.py
 
       # The caller's ambient context goes only where their token may (REM-148).
@@ -170,6 +201,7 @@ jobs:
       # thirteen cases are controls -- a bound first-party origin must still
       # receive the context and the caller's token, or delegation breaks.
       - name: The caller's context stops where their token stops
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_context_stops_where_the_token_stops.py
 
       # A summary is derived text and carries no more authority than the window
@@ -181,6 +213,7 @@ jobs:
       # -- so the property cannot be satisfied by dropping summaries or by
       # demoting everything.
       - name: Derived text carries no authority it did not arrive with
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_summary_authority.py
 
       # The agent editor tells authors a pinned skill is concatenated into the
@@ -189,6 +222,7 @@ jobs:
       # skill the caller's RLS hides is not composed, and that the resolved
       # bodies never travel back to upsert_agent as authored keys.
       - name: Pinned skills reach the prompt they were pinned to
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_pinned_skills.py
       # REM-91 items 4, 5 and 8, from the 2026-09-12 security audit. Three
       # unrelated mechanisms with one shape -- a value from outside used
@@ -203,6 +237,7 @@ jobs:
       # true of five files in this directory when the audit looked, which is why
       # the line above this one exists too.
       - name: Untrusted input cannot widen what a caller may do
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_untrusted_input_cannot_widen.py
 
       # REM-91 item 6, the third leg of the same audit. A step's url is resolved
@@ -214,6 +249,7 @@ jobs:
       # unauthenticated GET to a service that answers because the caller is on
       # its network.
       - name: The worker cannot be pointed back at its own network
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_worker_egress.py
 
       # The same guard at the other two places a caller's URL is fetched. The
@@ -224,6 +260,7 @@ jobs:
       # it, and it now exercises the operator override for its loopback server.
       # test_evidence.py is the third caller-chosen fetch, POST /evidence (REM-239).
       - name: No caller can point a fetch back at this network
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           for t in test_egress_everywhere.py test_api_probe.py test_evidence.py; do
             python -m unittest discover -s tests -p "$t" || exit 1
@@ -236,12 +273,14 @@ jobs:
       # worth keeping: the same eight turns against the old size must FAIL, in
       # bounded time, with the arithmetic in the message.
       - name: Eight people can hold a conversation at once
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_pool_concurrency.py
 
       # content.api_source in the extension is the one home of an API source's
       # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
       # copies, and a copy that drifts saves a different source.
       - name: API source settings mean what the database says
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_api_source_contract.py
 
       # These three exist because the dependency moves under us. `result.usage`
@@ -251,12 +290,15 @@ jobs:
       # rename lands as a delegation tree that quietly stops being budgeted --
       # which is indistinguishable from a limit nobody happened to hit.
       - name: A delegation tree still spends one budget
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_delegation_budget.py
 
       - name: Usage is captured and limits still bind
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_engine_usage.py
 
       - name: Telemetry stays off unless configured, and cannot fail a turn
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_telemetry.py
 
       # REM-67. What a statement the database refused comes back as, on both
@@ -265,18 +307,21 @@ jobs:
       # pins an unknown or hidden agent as 404, a refusal inside a started turn
       # as 403, and a quota cutoff as a 429 our own client does not retry.
       - name: A refused caller is told so, and an upstream failure is still 502
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_database_refusals.py
 
       # REM-174. The quota gate asks core: the function decides when it exists,
       # a database with no quota policy is allowed as before, and quota policy
       # without the function refuses instead of calling a model unchecked.
       - name: The quota gate asks core, and a broken install refuses
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_quota_gate.py
 
       # An exhausted or refused provider account stops after one attempt on
       # every path that calls a provider, and a rate limit is still retried
       # (REM-53).
       - name: A provider failure means one thing on every path
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_provider_failures.py
 
       # A runtime that cannot serve the database it is pointed at refuses at
@@ -292,33 +337,39 @@ jobs:
       # turn failed was gone and only the cleanup's own failure was logged.
       # Found by the tour (p8-subsystems scenarios/tour).
       - name: A failed connection reset keeps its cause
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_reset_failure_keeps_its_cause.py
 
       - name: A runtime refuses a database it cannot serve
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_startup_refuses_a_database_it_cannot_serve.py
 
       # P8_DSN and P8_DATABASE_URL name one database, and a process holding
       # both used to open two (REM-69). The S3 settings are shared too, while
       # the Content Server and the lake keep their different answers to absence.
       - name: One database and one object store, whoever is asking
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_one_config.py
 
       # An agent with a structured_output_schema answers through an output
       # tool, and the stream mapper carried only text parts, so `stream: true`
       # finished with no answer in it.
       - name: A structured answer reaches a streaming client
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_structured_stream.py
 
       # A refused tool call reached the model as a successful result, so the
       # model called it again 54 times until request_limit stopped the run,
       # and TOOL_CALL_END said is_error: false while the rows said true.
       - name: A refused tool call reaches the model and the stream as a failure
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_a_refused_tool_call_is_an_error.py
 
       # brief.md §5.1: the agent gateway is the same deployed runtime. Only
       # `agent gateway` served MCP, no shipped deployment runs it, and the
       # documented http://agent:8080/mcp answered 404.
       - name: agent serve answers MCP at /mcp, as the agent gateway
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_gateway_on_agent_serve.py
 
       # The query tool server a get-percolate install runs as `query-mcp`:
@@ -326,17 +377,20 @@ jobs:
       # from SCHEMA "p8ql", and the caller's bearer is what reaches PostgREST.
       # `sample load` syncs the catalogue of every server its plugin registers.
       - name: percolate query mcp keeps its three properties, and sample load syncs it
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_query_mcp.py
 
       - name: Prose has one wrapping default and one measure
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_theme.py
 
       # These drive the browser modules under node, and every one of them
       # passes when node is missing: four files skip, two error on every case.
       # A skip reads as green, so the step asks for node by name before it
-      # runs anything. The runner image ships node; if that changes, this step
-      # goes red instead of passing on skips.
+      # runs anything. setup-node above provides it; if that step goes, this
+      # one goes red instead of passing on skips.
       - name: The browser's assistants keep one suggestion contract (REM-62)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           node --version
           for t in test_suggestion_contract.py test_query_assist.py test_api_source_assist.py \
@@ -352,15 +406,18 @@ jobs:
       # retryable for a failed chained action and a cancelled turn. They used to
       # say nothing, or complete it (quota), or fail everything retryable.
       - name: A failed scheduled turn fails its task, terminal or not by cause
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_a_failed_turn_fails_its_task.py
 
       # Summarizing is a side effect of a turn that has already answered. A
       # dispatch that raised used to fail the answered turn, and on a stock
       # install it always raised: the workflow is seeded only in dev/seed.sql.
       - name: A summary that cannot be dispatched never fails an answered turn
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_summary_never_fails_an_answered_turn.py
 
       - name: A released version number may not be reused
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: dev/check-version.sh
 
       # The other half of the same question. check-version.sh asks whether THIS
@@ -368,6 +425,7 @@ jobs:
       # v0.1.8 points at a tree that says 0.1.7 and nobody noticed for six days,
       # because a tag is read only when somebody tries to reproduce a release.
       - name: Every published tag is accounted for
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: dev/check-releases.sh
 
       # What keeps the two gates above from going red after every release:
@@ -375,6 +433,7 @@ jobs:
       # number from the latest tag (bump_version.py release). Proved against the
       # gates themselves -- red without the tail, green with it (REM-150).
       - name: A release leaves the version gates green
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_a_release_leaves_the_tree_green.py
 
       # The CLI is what the documentation tells people to run, and it is the
@@ -382,6 +441,7 @@ jobs:
       # the subcommands exist is not a deep test; it is the one that would have
       # caught three doc pages naming a command no published artifact had.
       - name: Every documented subcommand exists
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           for cmd in worker agent content ingest auth sample; do
             percolate "$cmd" --help >/dev/null \
