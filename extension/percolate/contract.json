@@ -598,6 +598,33 @@
     },
     {
       "admits": [
+        "proposed",
+        "confirmed",
+        "disputed"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "resolutions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "held",
+        "failed",
+        "partly",
+        "unresolvable"
+      ],
+      "column": "value",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "resolutions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "person",
         "agent",
         "platform"

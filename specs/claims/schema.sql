@@ -844,6 +844,102 @@ grant select on claims.origins, claims.cites, claims.origin_links to authenticat
 revoke all on function claims.origin_for(text, text, bigint), claims.project_cites(uuid) from public;
 
 -- ------------------------------------------------------------
+-- 10d. Event resolutions (graph.md §12, REM-480). Whether a claim turned out right, settled by something that
+--      happened and can be cited. tradecraft.resolutions' fields, adapted: the value, the event, what settled it,
+--      when it was checked and how, and who ran it (the transaction). Any reader of the claim may propose one; only
+--      a person holding research:resolve confirms or disputes it. Nothing here computes a reliability score:
+--      graph.md §18 holds that until 200 confirmed resolutions across 20 origins exist.
+-- ------------------------------------------------------------
+insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person) values
+    ('research', 'resolve', 'function claims.review_resolution', true, false)
+on conflict (resource, action) do update
+    set checked_by = excluded.checked_by, human_only = excluded.human_only, every_person = excluded.every_person;
+
+create table if not exists claims.resolutions (
+    id           bigint generated always as identity primary key,
+    restates     bigint references claims.resolutions(id),
+    claim_id     uuid not null references claims.claims(id),
+    value        text not null check (value in ('held', 'failed', 'partly', 'unresolvable')),
+    event        text not null check (length(btrim(event)) > 0),
+    evidence_ref text not null check (length(btrim(evidence_ref)) > 0),
+    checked_on   date not null,
+    method       text not null check (length(btrim(method)) > 0),
+    status       text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    evidence     uuid not null references research.revisions(id) on delete cascade,
+    tx           bigint not null references claims.tx(id),
+    check (restates is null or restates < id)
+);
+create index if not exists resolutions_claim on claims.resolutions (claim_id, id desc);
+create index if not exists resolutions_restates on claims.resolutions (restates) where restates is not null;
+
+-- A reader proposes: the evidence revision is one they may read that expresses the claim, so the resolution is
+-- readable to exactly the people who can read what it resolves.
+create or replace function claims.propose_resolution(p_claim uuid, p_evidence uuid, p_value text, p_event text,
+                                                     p_evidence_ref text, p_checked_on date, p_method text)
+returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'select');
+    t      bigint;
+    v_id   bigint;
+begin
+    if not research.revision_readable(p_evidence)
+       or not exists (select 1 from claims.expresses e where e.revision_id = p_evidence and e.claim_id = p_claim) then
+        raise no_data_found using message = 'Claim not found in that revision';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), p_evidence, 'resolution proposed')
+    returning id into t;
+    insert into claims.resolutions (claim_id, value, event, evidence_ref, checked_on, method, status, evidence, tx)
+    values (p_claim, p_value, p_event, p_evidence_ref, p_checked_on, p_method, 'proposed', p_evidence, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- A resolver confirms or disputes a proposal: a later row restating it with the new status. The proposal stays.
+create or replace function claims.review_resolution(p_resolution bigint, p_status text, p_reason text default null)
+returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'resolve');
+    r      claims.resolutions;
+    t      bigint;
+    v_id   bigint;
+begin
+    if p_status not in ('confirmed', 'disputed') then
+        raise check_violation using message = 'A review confirms or disputes', detail = p_status;
+    end if;
+    select * into r from claims.resolutions where id = p_resolution and restates is null;
+    if not found or not research.revision_readable(r.evidence) then
+        raise no_data_found using message = 'Resolution not found';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), r.evidence,
+            coalesce(nullif(btrim(p_reason), ''), 'resolution ' || p_status))
+    returning id into t;
+    insert into claims.resolutions (restates, claim_id, value, event, evidence_ref, checked_on, method, status, evidence, tx)
+    values (r.id, r.claim_id, r.value, r.event, r.evidence_ref, r.checked_on, r.method, p_status, r.evidence, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+do $$
+begin
+    execute 'create or replace trigger trg_refuse_rewrite before update or delete on claims.resolutions '
+            'for each row execute function research.refuse_rewrite()';
+    execute 'create or replace trigger trg_refuse_truncate before truncate on claims.resolutions '
+            'for each statement execute function research.refuse_rewrite()';
+end $$;
+alter table claims.resolutions enable row level security;
+drop policy if exists resolutions_readable on claims.resolutions;
+create policy resolutions_readable on claims.resolutions for select using (research.revision_readable(evidence));
+grant select on claims.resolutions to authenticated;
+grant execute on function claims.propose_resolution(uuid, uuid, text, text, text, date, text),
+                          claims.review_resolution(bigint, text, text) to authenticated;
+
+-- ------------------------------------------------------------
 -- 10c. Erasure (graph.md §13, REM-481). research.erase_work deletes a work, and the cascade takes its occurrences
 --      and every assertion evidenced by one of its revisions: expresses, frames, cites, answered, relations and
 --      origin links. An assertion also made from another work is its own row there and survives. What the cascade
@@ -867,7 +963,8 @@ language sql stable security definer set search_path = pg_catalog, public as $$
         'cites',       (select count(*) from claims.cites where revision_id = any (p_revisions)),
         'answered',    (select count(*) from claims.answered where evidence = any (p_revisions)),
         'relations',   (select count(*) from claims.relations where evidence = any (p_revisions) or evidence2 = any (p_revisions)),
-        'origin_links',(select count(*) from claims.origin_links where evidence = any (p_revisions)));
+        'origin_links',(select count(*) from claims.origin_links where evidence = any (p_revisions)),
+        'resolutions', (select count(*) from claims.resolutions where evidence = any (p_revisions)));
 $$;
 
 -- After the cascade: remove what only the erased revisions minted and nothing names any more.
@@ -888,7 +985,8 @@ begin
     delete from claims.claims c where c.tx = any (txs)
        and not exists (select 1 from claims.expresses e where e.claim_id = c.id)
        and not exists (select 1 from claims.relations r where r.src = c.id or r.dst = c.id)
-       and not exists (select 1 from claims.answered a where a.claim_id = c.id);
+       and not exists (select 1 from claims.answered a where a.claim_id = c.id)
+       and not exists (select 1 from claims.resolutions r where r.claim_id = c.id);
     get diagnostics n_c = row_count;
     delete from claims.origins o
      where not exists (select 1 from claims.cites c where c.origin_id = o.id)
@@ -913,7 +1011,8 @@ begin
        and not exists (select 1 from claims.cites x where x.tx = t.id)
        and not exists (select 1 from claims.origin_links x where x.tx = t.id)
        and not exists (select 1 from claims.origins x where x.tx = t.id)
-       and not exists (select 1 from claims.questions x where x.tx = t.id);
+       and not exists (select 1 from claims.questions x where x.tx = t.id)
+       and not exists (select 1 from claims.resolutions x where x.tx = t.id);
     get diagnostics n_t = row_count;
     return jsonb_build_object('claims', n_c, 'origins', n_o, 'questions', n_q, 'transactions', n_t);
 end;
@@ -932,7 +1031,8 @@ create policy tx_readable on claims.tx for select using (
     or exists (select 1 from claims.expresses e where e.tx = tx.id)
     or exists (select 1 from claims.relations r where r.tx = tx.id)
     or exists (select 1 from claims.answered a where a.tx = tx.id)
-    or exists (select 1 from claims.cites c where c.tx = tx.id));
+    or exists (select 1 from claims.cites c where c.tx = tx.id)
+    or exists (select 1 from claims.resolutions r where r.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
 
 -- ------------------------------------------------------------
@@ -1229,6 +1329,39 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       from mine m join theirs t on t.study = m.study
      group by m.study;
 $$;
+
+-- A claim's resolutions as they stand: each proposal with its latest status.
+create or replace function claims.resolutions_of(p_claim uuid, p_at timestamptz default now())
+returns table (resolution bigint, value text, event text, evidence_ref text, checked_on date, method text,
+               status text, proposed_by text, at timestamptz)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select p.id, p.value, p.event, p.evidence_ref, p.checked_on, p.method,
+           coalesce((select r.status from claims.resolutions r join claims.tx rt on rt.id = r.tx
+                      where r.restates = p.id and rt.at <= p_at order by r.id desc limit 1), p.status),
+           pt.actor_kind, pt.at
+      from claims.resolutions p join claims.tx pt on pt.id = p.tx
+     where p.claim_id = p_claim and p.restates is null and pt.at <= p_at;
+$$;
+
+-- An origin's record: the confirmed resolutions of the readable claims that cite its study, counted by value. A
+-- claim counts once however many revisions cite the study. A tally, never a score (graph.md §12).
+create or replace function claims.origin_record(p_origin uuid)
+returns table (value text, claims int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with study as (select claims.study_of(p_origin) as s),
+         citing as (select distinct e.claim_id
+                      from claims.cites c
+                      join claims.expresses e on e.revision_id = c.revision_id and e.claim_key = c.claim_key
+                     where claims.study_of(c.origin_id) = (select s from study)),
+         settled as (select distinct on (p.claim_id) p.claim_id, p.value
+                       from claims.resolutions p
+                      where p.restates is null and p.claim_id in (select claim_id from citing)
+                        and (select r.status from claims.resolutions r where r.restates = p.id order by r.id desc limit 1) = 'confirmed'
+                      order by p.claim_id, p.id desc)
+    select value, count(*)::int from settled group by value order by value;
+$$;
+
+grant execute on function claims.resolutions_of(uuid, timestamptz), claims.origin_record(uuid) to authenticated;
 
 grant execute on function claims.study_of(uuid), claims.source_studies(uuid, text), claims.evidence(uuid, timestamptz),
                           claims.same_study(uuid, text) to authenticated;
