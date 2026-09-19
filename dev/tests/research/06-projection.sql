@@ -122,14 +122,21 @@ begin
     alter table research.citations disable trigger trg_refuse_rewrite;
     alter table research.argument_edges disable trigger trg_refuse_rewrite;
     alter table research.claims disable trigger trg_refuse_rewrite;
-    alter table claims.expresses disable trigger trg_refuse_rewrite;   -- a claim's link goes with its occurrence (REM-473)
+    -- Every claims table an occurrence cascades into goes with it (REM-473, REM-476, REM-477), found from the catalog
+    -- so the next such table does not break this test.
+    perform set_config('p8test.claims_cascades', (select string_agg(conrelid::regclass::text, ',')
+        from pg_constraint where contype = 'f' and confrelid = 'research.claims'::regclass
+         and connamespace = 'claims'::regnamespace), true);
+    execute (select string_agg(format('alter table %s disable trigger trg_refuse_rewrite', t), '; ')
+               from unnest(string_to_array(current_setting('p8test.claims_cascades'), ',')) t);
     delete from research.citations where revision_id = rev and claim_key = 'C3';
     delete from research.argument_edges where revision_id = rev and relation = 'limits';
     delete from research.claims where revision_id = rev and claim_key = 'C2';   -- takes its citations and edges with it
     alter table research.citations enable trigger trg_refuse_rewrite;
     alter table research.argument_edges enable trigger trg_refuse_rewrite;
     alter table research.claims enable trigger trg_refuse_rewrite;
-    alter table claims.expresses enable trigger trg_refuse_rewrite;
+    execute (select string_agg(format('alter table %s enable trigger trg_refuse_rewrite', t), '; ')
+               from unnest(string_to_array(current_setting('p8test.claims_cascades'), ',')) t);
 
     counts := research.rebuild_projection(rev);
     assert counts = '{"claims": 3, "sources": 3, "citations": 3, "edges": 6}', 'the rebuild restores everything: ' || counts;

@@ -1208,6 +1208,7 @@ begin
     perform claims.link_revision(p_revision);
     perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
     perform claims.project_frames(p_revision);  -- and its frames, and the questions they answer (REM-476)
+    perform claims.project_cites(p_revision);   -- and the origins its claims cite (REM-477)
 end;
 $$;
 

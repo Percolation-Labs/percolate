@@ -424,6 +424,19 @@
     },
     {
       "admits": [
+        "origin",
+        "url",
+        "frame"
+      ],
+      "column": "via",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "cites",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "unchanged",
         "reworded",
         "new"
@@ -458,6 +471,31 @@
       "members": "shipped",
       "schema": "claims",
       "table": "expresses",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "assert",
+        "retract"
+      ],
+      "column": "op",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "origin_links",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "proposed",
+        "confirmed",
+        "disputed"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "origin_links",
       "vocabulary": null
     },
     {

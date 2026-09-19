@@ -12,7 +12,9 @@
 --
 -- Frames, questions and which question a claim answers are §10a (REM-476).
 --
--- WHAT IS NOT HERE YET. The reads over origins (evidence, question_evidence: REM-477),
+-- Origins and what cites them are §10b (REM-477).
+--
+-- WHAT IS NOT HERE YET. question_evidence (with comparisons, REM-479),
 -- cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
 -- answer to a reworded claim (REM-483). A claim with no occurrence left after an erasure is REM-481's.
 
@@ -589,6 +591,164 @@ grant select on claims.frames, claims.questions, claims.answered to authenticate
 revoke all on function claims.question_for(text, text, jsonb, bigint), claims.project_frames(uuid) from public;
 
 -- ------------------------------------------------------------
+-- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
+--      by claims.study_key -- the application's REM-430 key, moved here -- so two packages that read one study
+--      cite one origin however they word it. An occurrence cites an origin through a source's origin text, its
+--      address, or its frame's origin. A source naming the study two ways is evidence that the two keys are one
+--      study: the platform asserts that in claims.origin_links, and neither origin is rewritten.
+-- ------------------------------------------------------------
+
+-- One key per study, whatever wording names it: its DOI when the text carries one, else its web address without
+-- scheme, www, query or trailing slash, else its words folded to lower case. Byte for byte the application's
+-- study_key (percolate-application api/percolate_application/related.py), which is what makes an origin minted
+-- here the study the application already groups by.
+create or replace function claims.study_key(p_text text) returns text
+language sql immutable parallel safe set search_path = pg_catalog as $$
+    select case
+        when coalesce(p_text, '') = '' then ''
+        when p_text ~* '\m10\.\d{4,9}/[^\s"<>]+' then
+            'doi:' || lower(rtrim((regexp_match(p_text, '\m(10\.\d{4,9}/[^\s"<>]+)', 'i'))[1], '.,;)'))
+        when p_text ~* 'https?://[^\s"<>]+' then
+            'url:' || rtrim(split_part(split_part(regexp_replace(lower((regexp_match(p_text, '(https?://[^\s"<>]+)', 'i'))[1]),
+                                                                 '^https?://(www\.)?', ''), '?', 1), '#', 1), '/')
+        else coalesce('title:' || nullif(array_to_string(array(select m[1] from regexp_matches(lower(p_text), '([a-z0-9]+)', 'g') m), ' '), ''), '')
+    end;
+$$;
+
+create table if not exists claims.origins (
+    id    uuid primary key default uuidv7(),
+    key   text not null unique check (key ~ '^(doi|url|title):.'),
+    label text not null,
+    tx    bigint not null references claims.tx(id)
+);
+
+create table if not exists claims.cites (
+    id          bigint generated always as identity primary key,
+    revision_id uuid not null,
+    claim_key   text not null,
+    source_key  text not null,
+    via         text not null check (via in ('origin', 'url', 'frame')),
+    origin_id   uuid not null references claims.origins(id),
+    tx          bigint not null references claims.tx(id),
+    unique (revision_id, claim_key, source_key, via),
+    foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
+);
+create index if not exists cites_origin on claims.cites (origin_id);
+
+-- Two origins that name one study. `a` and `b` are ordered (a < b), so one pair is one statement.
+create table if not exists claims.origin_links (
+    id          bigint generated always as identity primary key,
+    a           uuid not null references claims.origins(id),
+    b           uuid not null references claims.origins(id),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    op          text not null default 'assert' check (op in ('assert', 'retract')),
+    evidence    uuid not null references research.revisions(id) on delete cascade,
+    source_key  text not null,
+    tx          bigint not null references claims.tx(id),
+    check (a < b)
+);
+create index if not exists origin_links_a on claims.origin_links (a);
+create index if not exists origin_links_b on claims.origin_links (b);
+
+-- The origin a key names, minted under p_tx with p_label when none exists yet.
+create or replace function claims.origin_for(p_key text, p_label text, p_tx bigint) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare o uuid;
+begin
+    select id into o from claims.origins where key = p_key;
+    if found then
+        return o;
+    end if;
+    insert into claims.origins (key, label, tx) values (p_key, coalesce(nullif(btrim(p_label), ''), p_key), p_tx)
+    on conflict (key) do nothing returning id into o;
+    return coalesce(o, (select id from claims.origins where key = p_key));
+end;
+$$;
+
+-- A revision's citations as cites, and the links a two-key source asserts. Only what is not there yet is written.
+create or replace function claims.project_cites(p_revision uuid) returns int
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    t  bigint;
+    r  record;
+    k1 text;
+    k2 text;
+    o1 uuid;
+    o2 uuid;
+    n  int := 0;
+begin
+    for r in select c.claim_key, s.source_key, s.origin, s.url
+               from research.citations c
+               join research.sources s on s.revision_id = c.revision_id and s.source_key = c.source_key
+              where c.revision_id = p_revision
+             union all
+             select f.claim_key, '', f.frame->>'origin', ''
+               from claims.frames f
+              where f.revision_id = p_revision and coalesce(f.frame->>'origin', '') <> ''
+             order by 1, 2 loop
+        continue when exists (select 1 from claims.cites x where x.revision_id = p_revision
+                                  and x.claim_key = r.claim_key and x.source_key = r.source_key);
+        k1 := claims.study_key(btrim(coalesce(r.origin, '')));
+        k2 := claims.study_key(btrim(coalesce(r.url, '')));
+        continue when k1 = '' and k2 = '';
+        if t is null then
+            insert into claims.tx (actor_kind, revision_id, reason)
+            values ('platform', p_revision, 'citations of ' || (select label from research.revisions where id = p_revision))
+            returning id into t;
+        end if;
+        o1 := null;
+        o2 := null;
+        if k1 <> '' then
+            o1 := claims.origin_for(k1, r.origin, t);
+            insert into claims.cites (revision_id, claim_key, source_key, via, origin_id, tx)
+            values (p_revision, r.claim_key, r.source_key, case when r.source_key = '' then 'frame' else 'origin' end, o1, t)
+            on conflict do nothing;
+            n := n + 1;
+        end if;
+        if k2 <> '' then
+            o2 := claims.origin_for(k2, coalesce(nullif(btrim(r.origin), ''), r.url), t);
+            insert into claims.cites (revision_id, claim_key, source_key, via, origin_id, tx)
+            values (p_revision, r.claim_key, r.source_key, 'url', o2, t)
+            on conflict do nothing;
+            n := n + 1;
+        end if;
+        if o1 is not null and o2 is not null and o1 <> o2
+           and not exists (select 1 from claims.origin_links l
+                            where l.a = least(o1, o2) and l.b = greatest(o1, o2) and l.evidence = p_revision) then
+            insert into claims.origin_links (a, b, status, evidence, source_key, tx)
+            values (least(o1, o2), greatest(o1, o2), 'confirmed', p_revision, r.source_key, t);
+        end if;
+    end loop;
+    return n;
+end;
+$$;
+
+do $$
+declare t text;
+begin
+    foreach t in array array['claims.origins', 'claims.cites', 'claims.origin_links'] loop
+        execute format('create or replace trigger trg_refuse_rewrite before update or delete on %s '
+                       'for each row execute function research.refuse_rewrite()', t);
+        execute format('create or replace trigger trg_refuse_truncate before truncate on %s '
+                       'for each statement execute function research.refuse_rewrite()', t);
+    end loop;
+end $$;
+
+-- Access: a citation and a link are readable with their revision; an origin when a readable citation names it.
+alter table claims.cites enable row level security;
+drop policy if exists cites_readable on claims.cites;
+create policy cites_readable on claims.cites for select using (research.revision_readable(revision_id));
+alter table claims.origin_links enable row level security;
+drop policy if exists origin_links_readable on claims.origin_links;
+create policy origin_links_readable on claims.origin_links for select using (research.revision_readable(evidence));
+alter table claims.origins enable row level security;
+drop policy if exists origins_readable on claims.origins;
+create policy origins_readable on claims.origins for select
+    using (exists (select 1 from claims.cites c where c.origin_id = origins.id));
+grant select on claims.origins, claims.cites, claims.origin_links to authenticated;
+revoke all on function claims.origin_for(text, text, bigint), claims.project_cites(uuid) from public;
+
+-- ------------------------------------------------------------
 -- 11. Who asserted, and when, behind a row the caller may read (graph.md §9). An actor sees their own transactions;
 --     anybody else sees a transaction's id, time and actor kind when a link or relation they may read names it, and
 --     never its actor, credential or reason.
@@ -598,7 +758,8 @@ create policy tx_readable on claims.tx for select using (
     actor_id = rbac.current_user_id()
     or exists (select 1 from claims.expresses e where e.tx = tx.id)
     or exists (select 1 from claims.relations r where r.tx = tx.id)
-    or exists (select 1 from claims.answered a where a.tx = tx.id));
+    or exists (select 1 from claims.answered a where a.tx = tx.id)
+    or exists (select 1 from claims.cites c where c.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
 
 -- ------------------------------------------------------------
@@ -810,6 +971,95 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      where h.rev is not null;
 $$;
 
+-- The study an origin names, as one representative origin (graph.md §3, REM-477). A DOI or an address is strong
+-- identity, and two strong keys joined by a link name one study, because a link is only ever asserted from one
+-- source carrying both. A title is weak: two different documents can carry one title ("Our theory manuscript"
+-- labelled both a paper and its data file on the live corpus). So a title never bridges two strong keys: it
+-- belongs to a study only when every strong key it is linked to is in that one study, and otherwise stands alone.
+-- Only links the caller may read are walked.
+create or replace function claims.study_of(p_origin uuid) returns uuid
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    k     text;
+    comps uuid[];
+begin
+    select key into k from claims.origins where id = p_origin;
+    if k is null then
+        return null;
+    end if;
+    if k ~ '^(doi|url):' then
+        return (with recursive g(o, path) as (
+                    select p_origin, array[p_origin]
+                    union all
+                    select n.id, g.path || n.id
+                      from g join claims.origin_links l on (l.a = g.o or l.b = g.o) and l.status = 'confirmed' and l.op = 'assert'
+                      join claims.origins n on n.id = case when l.a = g.o then l.b else l.a end and n.key ~ '^(doi|url):'
+                     where not n.id = any (g.path) and cardinality(g.path) < 64)
+                select min(o::text)::uuid from g);
+    end if;
+    select array_agg(distinct claims.study_of(n.id)) into comps
+      from claims.origin_links l
+      join claims.origins n on n.id = case when l.a = p_origin then l.b else l.a end and n.key ~ '^(doi|url):'
+     where (l.a = p_origin or l.b = p_origin) and l.status = 'confirmed' and l.op = 'assert';
+    return case when cardinality(comps) = 1 then comps[1] else p_origin end;
+end;
+$$;
+
+-- The study each source of one occurrence names: a source with a strong key is that key's study, and one with only
+-- a title is its title's. The frame's origin counts as a source of its own (source_key '').
+create or replace function claims.source_studies(p_revision uuid, p_claim_key text)
+returns table (source_key text, study uuid)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select c.source_key,
+           coalesce(min(claims.study_of(c.origin_id)::text) filter (where o.key ~ '^(doi|url):'),
+                    min(claims.study_of(c.origin_id)::text))::uuid
+      from claims.cites c join claims.origins o on o.id = c.origin_id
+     where c.revision_id = p_revision and c.claim_key = p_claim_key
+     group by c.source_key;
+$$;
+
+-- A claim's evidence grouped by study (graph.md §10): one row per independent study, with the keys that name it
+-- and how many readable occurrences of the claim cite it. The number of rows is the number of independent origins;
+-- ten packages repeating one study are one row.
+create or replace function claims.evidence(p_claim uuid, p_at timestamptz default now())
+returns table (study uuid, keys text[], citing_occurrences int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with occ as (select distinct e.revision_id, e.claim_key from claims.expresses e join claims.tx t on t.id = e.tx
+                  where e.claim_id = p_claim and e.op = 'assert' and t.at <= p_at),
+         st as (select o.revision_id, o.claim_key, s.study from occ o cross join lateral claims.source_studies(o.revision_id, o.claim_key) s)
+    select st.study,
+           (select array_agg(distinct og.key order by og.key) from claims.cites c join claims.origins og on og.id = c.origin_id
+             where (c.revision_id, c.claim_key) in (select revision_id, claim_key from occ)
+               and claims.study_of(c.origin_id) = st.study),
+           count(distinct (st.revision_id, st.claim_key))::int
+      from st where st.study is not null
+     group by st.study;
+$$;
+
+-- The readable works whose shown revision cites the same study as one occurrence (REM-219's question, answered from
+-- origins): one row per study the occurrence cites, with the works and claims citing it. independent_evidence is 1
+-- per row, however many works repeat it.
+create or replace function claims.same_study(p_revision uuid, p_claim_key text)
+returns table (study uuid, keys text[], works jsonb, independent_evidence int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with mine as (select distinct s.study from claims.source_studies(p_revision, p_claim_key) s where s.study is not null),
+         heads as (select w.public_id, research.visible_head(w.id) as rev from research.works w
+                    where w.id <> (select v.work_id from research.revisions v where v.id = p_revision)),
+         theirs as (select distinct h.public_id, c.revision_id, c.claim_key, s.study
+                      from heads h join (select distinct revision_id, claim_key from claims.cites) c on c.revision_id = h.rev
+                      cross join lateral claims.source_studies(c.revision_id, c.claim_key) s)
+    select m.study,
+           (select array_agg(distinct o.key order by o.key) from claims.cites c join claims.origins o on o.id = c.origin_id
+             where c.revision_id = p_revision and c.claim_key = p_claim_key and claims.study_of(c.origin_id) = m.study),
+           jsonb_agg(distinct jsonb_build_object('package_id', t.public_id, 'revision_id', t.revision_id, 'claim_key', t.claim_key)),
+           1
+      from mine m join theirs t on t.study = m.study
+     group by m.study;
+$$;
+
+grant execute on function claims.study_of(uuid), claims.source_studies(uuid, text), claims.evidence(uuid, timestamptz),
+                          claims.same_study(uuid, text) to authenticated;
+
 grant execute on function claims.answers_of(uuid, timestamptz), claims.answers(uuid, timestamptz),
                           claims.frame_coverage(text) to authenticated;
 
@@ -855,5 +1105,13 @@ begin
                 and not exists (select 1 from claims.frames f where f.revision_id = r.id)
               order by r.work_id, r.number loop
         perform claims.project_frames(v);
+    end loop;
+end $$;
+do $$
+declare v uuid;
+begin
+    for v in select distinct c.revision_id from research.citations c
+              where not exists (select 1 from claims.cites x where x.revision_id = c.revision_id) loop
+        perform claims.project_cites(v);
     end loop;
 end $$;
