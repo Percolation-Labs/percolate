@@ -60,7 +60,7 @@ jobs:
   #    the artifacts are built from the commit that names them.
   # -------------------------------------------------------------------------
   version:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write        # commit the bump and push the tag
     outputs:
@@ -142,7 +142,7 @@ jobs:
   # -------------------------------------------------------------------------
   build:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -171,7 +171,7 @@ jobs:
   pypi:
     needs: [version, build]
     if: inputs.publish
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     environment:
       name: pypi
       url: https://pypi.org/p/percolate-core/${{ needs.version.outputs.version }}
@@ -202,7 +202,7 @@ jobs:
   # -------------------------------------------------------------------------
   image:
     needs: [version, build]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -245,7 +245,7 @@ jobs:
     # there it annotates rather than creates.
     needs: [version, pypi, image, tag]
     if: inputs.publish
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
     steps:
@@ -289,7 +289,7 @@ jobs:
       always() && needs.version.result == 'success'
       && (inputs.publish != true
           || (needs.pypi.result == 'success' && needs.image.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: Require the token, rather than skipping quietly
         # A missing secret must not look like a successful release. The chart
@@ -412,7 +412,7 @@ jobs:
   tag:
     needs: [version, pypi, image]
     if: inputs.publish
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
     steps:
@@ -477,7 +477,7 @@ jobs:
   after:
     needs: [version, tag]
     if: inputs.publish
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
     steps:
@@ -515,7 +515,7 @@ jobs:
   rehearse_after:
     needs: version
     if: inputs.publish != true
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with: {fetch-depth: 0}
