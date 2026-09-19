@@ -1,7 +1,7 @@
 -- A reworded claim asks whether it is the same claim (REM-483, specs/claims/graph.md §5): the writer sees each
 -- rewording with both wordings; "same" confirms the claim carried forward; "new" mints a claim, keeps the old link
 -- in the history and may record that the new one supersedes it; the next revision carries the answer forward; and
--- only the owner, or their agent with research:publish, may answer.
+-- only the owner, or their agent with research:publish, may answer a revision others can read.
 --
 -- One transaction, rolled back.
 
@@ -39,7 +39,11 @@ end $$;
 reset role;
 insert into ids select 'old_' || lower(claim_key), claim_id::text from claims.expresses where revision_id = (select v::uuid from ids where k = 'r1');
 
--- The agent without a publishing delegation cannot answer; a stranger cannot see or answer.
+-- On a revision others can read, the agent without a publishing delegation cannot answer; a stranger cannot see
+-- or answer. (On a private draft the agent may relay the person's answer: research/34, REM-622.)
+insert into research.exposures (revision_id, work_id, exposed_by)
+select v.id, v.work_id, '00000000-0000-4000-8000-0000000483a1' from research.revisions v
+ where v.id = (select v::uuid from ids where k = 'r2');
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000483a1", "api_key_id": "00000000-0000-4000-8000-0000000483c1"}';
 set local role authenticated;
 do $$ begin

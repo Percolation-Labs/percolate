@@ -31981,41 +31981,102 @@ $$;
 -- The writer's answer to a rewording (graph.md §5, REM-483). The projection links a reworded key to its earlier claim
 -- as a proposal; the work's owner answers. "same" confirms that link, a later row. "new" retracts it, mints a claim
 -- for the new wording, links the occurrence to it, and when asked records that the new claim supersedes the old,
--- evidenced by this revision and its predecessor. An agent answers only with research:publish, the delegation §5
--- names. Not answering changes nothing: the reader sees "reworded, unconfirmed".
+-- evidenced by this revision and its predecessor. Not answering changes nothing: the reader sees "reworded,
+-- unconfirmed".
+--
+-- WHO MAY ANSWER (REM-622). The owner, as a person. Their agent, relaying the answer the person gave it in
+-- conversation, on a private draft: a revision nobody but its owner may read, so not listed, in no publication and
+-- not shared with an org. Its transaction names the agent and the credential it used, which
+-- claims.rewording_answers shows the owner, and a person's answer after an agent's reverses it with later rows, so
+-- both stay in the history. On any other revision an agent needs research:publish, which is human-only unless the
+-- person delegated it, and the refusal names the conditions that would allow it, not only the reason code.
 create or replace function claims.answer_rewording(p_revision uuid, p_claim_key text, p_answer text,
                                                    p_supersedes boolean default false)
 returns uuid
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
-    v_user  uuid := rbac.require('research', 'insert');
-    v_actor text := rbac.current_actor();
-    r       research.revisions;
-    cur     claims.expresses;
-    t       bigint;
-    cid     uuid;
-    pred    uuid;
-    answer  record;
+    v_user   uuid := rbac.require('research', 'insert');
+    v_actor  text := rbac.current_actor();
+    v_decide jsonb;
+    r        research.revisions;
+    cur      claims.expresses;
+    t        bigint;
+    cid      uuid;
+    old      uuid;
+    prior    bigint;
+    pred     uuid;
+    answer   record;
 begin
     if p_answer not in ('same', 'new') then
         raise check_violation using message = 'A rewording is answered same or new', detail = p_answer;
     end if;
-    select v.* into r from research.revisions v join research.works w on w.id = v.work_id
-     where v.id = p_revision and w.owner_id = v_user;
+    select v.* into r from research.revisions v join research.works o on o.id = v.work_id
+     where v.id = p_revision and o.owner_id = v_user;
     if not found then
         raise no_data_found using message = 'Research revision not found';
     end if;
-    if v_actor <> 'person' then
-        perform rbac.require('research', 'publish');
+    if v_actor <> 'person'
+       and (exists (select 1 from research.works o where o.id = r.work_id and o.visibility = 'org')
+            or exists (select 1 from research.exposures e where e.revision_id = r.id)
+            or exists (select 1 from research.publication_exposures pe where pe.revision_id = r.id)) then
+        v_decide := rbac.decide('research', 'publish');
+        if not (v_decide->>'allowed')::boolean then
+            raise insufficient_privilege
+                using message = format('An agent records a rewording answer only on a private draft, and %s can be '
+                                       'read by others', r.label),
+                      detail = 'It is allowed on a private draft (not listed, in no publication, not shared with an '
+                               'org), or when the person has let this connection publish (research:publish). '
+                               'Otherwise the person answers in Percolate.',
+                      hint = v_decide->>'reason';
+        end if;
     end if;
     select * into cur from claims.expresses
      where revision_id = p_revision and claim_key = p_claim_key and part = 1 order by id desc limit 1;
-    if not found or cur.op <> 'assert' or cur.method <> 'reworded' or cur.status <> 'proposed' then
+    if not found then
         raise check_violation using message = 'That claim is not a rewording waiting for an answer';
     end if;
+    -- An answer an agent recorded, which the person may reverse: the latest link was written by that answer.
+    select x.id into prior from claims.tx x
+     where x.id = cur.tx and x.actor_kind = 'agent' and x.revision_id = p_revision
+       and x.reason like 'rewording answered %';
+    if prior is null or v_actor <> 'person' then
+        prior := null;
+        if cur.op <> 'assert' or cur.method <> 'reworded' or cur.status <> 'proposed' then
+            raise check_violation using message = 'That claim is not a rewording waiting for an answer';
+        end if;
+    elsif exists (select 1 from research.claims c join research.revisions n on n.id = c.revision_id
+                   where n.work_id = r.work_id and n.number > r.number and c.claim_key = p_claim_key) then
+        raise check_violation using message = 'A later revision carries this answer forward, so it is answered there';
+    end if;
     insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
-    values (v_user, v_actor, rbac.current_credential_id(), p_revision, 'rewording answered ' || p_answer)
+    values (v_user, v_actor, rbac.current_credential_id(), p_revision,
+            'rewording answered ' || p_answer
+            || case when prior is not null then ', reversing the agent''s answer' else '' end)
     returning id into t;
+    if prior is not null then
+        -- Back to waiting, with later rows: the agent's answer stays in the history.
+        if cur.method = 'new' then
+            select e.claim_id into old from claims.expresses e
+             where e.tx = prior and e.revision_id = p_revision and e.claim_key = p_claim_key and e.op = 'retract';
+            insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
+            values (p_revision, p_claim_key, cur.claim_id, cur.method, cur.status, 'retract', t);
+            for answer in select * from (
+                select distinct on (a.question_id) a.* from claims.answered a
+                 where a.evidence=p_revision and a.claim_key=p_claim_key order by a.question_id,a.id desc) x
+                where x.op='assert' and x.claim_id=cur.claim_id loop
+                insert into claims.answered(claim_id,question_id,stance,status,op,evidence,claim_key,tx)
+                values(cur.claim_id,answer.question_id,answer.stance,answer.status,'retract',p_revision,p_claim_key,t),
+                      (old,answer.question_id,answer.stance,answer.status,'assert',p_revision,p_claim_key,t);
+            end loop;
+            insert into claims.relations (src, predicate, dst, status, op, evidence, evidence2, keys, tx)
+            select src, predicate, dst, status, 'retract', evidence, evidence2, keys, t
+              from claims.relations where tx = prior and op = 'assert';
+        else
+            old := cur.claim_id;
+        end if;
+        insert into claims.expresses (revision_id, claim_key, claim_id, method, status, tx)
+        values (p_revision, p_claim_key, old, 'reworded', 'proposed', t) returning * into cur;
+    end if;
     if p_answer = 'same' then
         insert into claims.expresses (revision_id, claim_key, claim_id, method, status, tx)
         values (p_revision, p_claim_key, cur.claim_id, 'reworded', 'confirmed', t);
@@ -32047,6 +32108,23 @@ begin
 end;
 $$;
 
+-- Every answer recorded for a revision's reworded claims, oldest first, to the work's owner: which answer, when,
+-- and who recorded it, person or agent, with the credential an agent used (REM-622). claims.tx grants nobody its
+-- credential column, so this is how the owner reviews what their agent recorded, and reverses it if it is wrong.
+create or replace function claims.rewording_answers(p_revision uuid)
+returns table (claim_key text, answer text, at timestamptz, actor_kind text, credential_id uuid, reverses_agent boolean)
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select k.claim_key, split_part(split_part(x.reason, ' ', 3), ',', 1), x.at, x.actor_kind, x.credential_id,
+           x.reason like '%, reversing the agent''s answer'
+      from claims.tx x
+      join research.revisions v on v.id = x.revision_id
+      join research.works o on o.id = v.work_id
+      cross join lateral (select distinct e.claim_key from claims.expresses e where e.tx = x.id) k
+     where x.revision_id = p_revision and x.reason like 'rewording answered %'
+       and o.owner_id = rbac.current_user_id()
+     order by x.id, k.claim_key;
+$$;
+
 -- The reworded claims of a revision waiting for an answer, with the earlier and the new wording.
 create or replace function claims.rewordings(p_revision uuid)
 returns table (claim_key text, claim uuid, was text, now text)
@@ -32062,7 +32140,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      where e.op = 'assert' and e.method = 'reworded' and e.status = 'proposed'
      order by e.claim_key;
 $$;
-grant execute on function claims.answer_rewording(uuid, text, text, boolean), claims.rewordings(uuid) to authenticated;
+grant execute on function claims.answer_rewording(uuid, text, text, boolean), claims.rewordings(uuid),
+    claims.rewording_answers(uuid) to authenticated;
 
 -- ------------------------------------------------------------
 -- 5. History: nothing here is updated or deleted, except by research.erase_work.
