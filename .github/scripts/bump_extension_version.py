@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Bump the extension version everywhere Postgres and cargo look for it.
 
+Run by release.yml, twice per release: the tagged version, then the next patch it opens on main (REM-542). A change
+does not run it: main already carries an untagged version. By hand only for a minor or major move, or when a
+release's last step failed and says so (PACKAGING.md).
+
 The extension is two extensions, and they move as one number. `percolate` is
 the schema and `percolate_parser` is the compiled parsers; they are built,
 released and installed together, and `install.sh` fetches both from the same

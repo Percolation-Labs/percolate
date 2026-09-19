@@ -237,7 +237,11 @@ jobs:
           # later. That gate now runs above, immediately after the bump, which
           # is the half that generalises: staging one more path fixes the file
           # that drifted, and running the check fixes the next one.
-          git add -A extension/ k8s/kind/manifests/postgres.yaml
+          #
+          # And every other file the bump rewrote. It also moves the paths that name the generated script in specs
+          # and board cards (six files on 19 September), which the tree gate above sees in the working tree and
+          # a narrower stage then left behind. The runner's checkout is clean, so -A stages the bump and nothing else.
+          git add -A
           git diff --cached --quiet || git commit -m "extension ${{ steps.v.outputs.version }}: bump"
           git push origin HEAD:"${{ github.ref_name }}"
 
@@ -341,6 +345,41 @@ jobs:
           git tag -a "v$V" -m "percolate extension $V" ${{ steps.sha.outputs.sha }}
           git push "https://x-access-token:$GH_PAT@github.com/${{ github.repository }}" "v$V"
           echo "::notice::v$V tagged -- the assets and image it names are already published"
+
+      # OPEN THE NEXT VERSION, so main is never on a tagged number (REM-542). A change to extension/ under a
+      # tagged version is refused by dev/check-version.sh, so until this step every first change after a release had
+      # to bump, and two sessions bumping, or one tagging while another's change was in review, collided three times
+      # on 18-19 September (meta/postmortems/2026-09-19-a-night-the-checks-did-not-run.md §2). Now the release that
+      # spends a number opens the next one, a change never bumps, and the next run publishes what the tree carries.
+      # From the latest main, because main moved while this built; a push that loses the race is retried from the
+      # new main. A main already past this version (somebody opened it by hand) is left alone.
+      - name: Open the next version on main
+        if: inputs.publish
+        run: |
+          V=${{ steps.v.outputs.version }}
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch -q origin "${{ github.ref_name }}" --tags
+            git checkout -q -B open-next "origin/${{ github.ref_name }}"
+            CUR=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
+            if [ "$CUR" != "$V" ]; then
+              echo "::notice::main already carries $CUR, past v$V; nothing to open"
+              exit 0
+            fi
+            python .github/scripts/bump_extension_version.py patch
+            dev/check.sh --tree
+            git add -A
+            NEXT=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
+            git commit -q -m "extension $NEXT: opened after v$V" -m "The release that tagged v$V moves main to the next patch, so no change has to bump (REM-542)."
+            if git push origin HEAD:"${{ github.ref_name }}"; then
+              echo "::notice::main opened at $NEXT"
+              exit 0
+            fi
+            echo "main moved during the push; opening again from the new main (attempt $attempt)"
+          done
+          echo "::error::could not open the next version on main after three attempts; bump by hand with .github/scripts/bump_extension_version.py patch" >&2
+          exit 1
 
       - name: Summary
         run: |
