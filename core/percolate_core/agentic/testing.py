@@ -60,6 +60,7 @@ class MemoryRepository:
         self.workflows: list[tuple[str, dict[str, Any]]] = []
         self.completed_tasks: list[tuple[UUID, dict[str, Any]]] = []
         self.failed_tasks: list[tuple[UUID, dict[str, Any], bool]] = []
+        self.task_workers: list[tuple[str, UUID, str | None]] = []
         self.hidden_tasks: set[UUID] = set()
         self.quota_allowed = True
 
@@ -188,11 +189,15 @@ class MemoryRepository:
         self.workflows.append((name, payload))
         return uuid4()
 
-    async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None:
+    async def complete_task(self, task_id: UUID, output: dict[str, Any],
+                            worker_id: str | None = None) -> None:
         self.completed_tasks.append((task_id, output))
+        self.task_workers.append(("complete", task_id, worker_id))
 
-    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool,
+                        worker_id: str | None = None) -> None:
         self.failed_tasks.append((task_id, error, terminal))
+        self.task_workers.append(("fail", task_id, worker_id))
 
     async def can_see_task(self, task_id: UUID) -> bool:
         return task_id not in self.hidden_tasks

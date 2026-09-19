@@ -119,7 +119,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
              patch("percolate_core.worker.loop.offload", AsyncMock(side_effect=lambda conn, task, out: out)):
             self.assertTrue(await run_once("briefs", "brief-worker"))
         conn.fetchval.assert_any_await("select workflow.task_owner($1, $2)", str(task), "brief-worker")
-        conn.execute.assert_awaited_once_with("select workflow.complete_task($1, $2::jsonb)", str(task), {"result":"brief"})
+        conn.execute.assert_awaited_once_with("select workflow.complete_task($1, $2::jsonb, $3)", str(task), {"result":"brief"}, "brief-worker")
 
     async def test_refused_owner_never_dispatches_or_retries(self):
         for error in (asyncpg.InsufficientPrivilegeError("agent execution requires a run owner"), asyncpg.UndefinedFunctionError("missing task_owner")):
@@ -134,7 +134,8 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
                  patch.dict("percolate_core.worker.loop.HANDLERS", {"http_call":execute}):
                 await run_once("briefs", "brief-worker")
             execute.assert_not_awaited()
-            self.assertEqual(conn.execute.await_args.args[0], "select workflow.fail_task($1, $2::jsonb, true)")
+            self.assertEqual(conn.execute.await_args.args[0], "select workflow.fail_task($1, $2::jsonb, true, $3)")
+            self.assertEqual(conn.execute.await_args.args[3], "brief-worker")
             self.assertTrue(conn.execute.await_args.args[2]["terminal"])
 
     async def test_an_agent_started_run_carries_its_starter_into_the_step_token(self):
@@ -222,6 +223,16 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(claims["role"], "authenticated")
         self.assertEqual(claims["exp"] - claims["iat"], 300)
         self.assertNotIn(KEY, json.dumps(resolved))
+
+    def test_the_scheduled_step_names_its_lease_holder(self):
+        # REM-553: the runtime completes this task while this worker holds the
+        # lease, and lease_violation compares holders only when told one.
+        ctx = {**self.context(), "_worker_id": "worker-7"}
+        request, _ = build_request(self.run_spec(), ctx)
+        self.assertEqual(request["headers"]["X-P8-Worker-Id"], "worker-7")
+        # Only /internal/run completes a task; a chat completion is not told.
+        request, _ = build_request(self.spec(), ctx)
+        self.assertNotIn("X-P8-Worker-Id", request["headers"])
 
     def test_both_runtime_endpoints_mint_and_nothing_else_does(self):
         # The eligible set is exactly what the compiler emits. A third path on

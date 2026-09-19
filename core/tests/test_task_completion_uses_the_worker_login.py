@@ -115,8 +115,8 @@ class TaskCompletionUsesTheWorkerLogin(unittest.IsolatedAsyncioTestCase):
         await repo.fail_task(TASK, {"error": "x"}, True)
         await repo.complete_task(TASK, {"result": "y"})
         self.assertEqual(self.conn.statements, [
-            "set local role worker", "select workflow.fail_task($1, $2::jsonb, $3)",
-            "set local role worker", "select workflow.complete_task($1, $2::jsonb)",
+            "set local role worker", "select workflow.fail_task($1, $2::jsonb, $3, $4)",
+            "set local role worker", "select workflow.complete_task($1, $2::jsonb, $3)",
         ])
 
 

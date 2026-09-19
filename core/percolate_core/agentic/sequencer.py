@@ -137,6 +137,10 @@ class TurnSequencer:
         # what makes this run 'scheduled' rather than 'interactive', and what
         # obliges this runtime to complete that task when the run finishes.
         self.workflow_task_id: UUID | None = None
+        # The worker holding that task's lease, as /internal/run was told it
+        # (REM-553). Passed to complete_task/fail_task so the lease fence can
+        # refuse a run whose dispatching worker was reaped.
+        self.workflow_worker_id: str | None = None
         # The delegation tree's allowance and running total. A root run takes
         # the deployment default; the gateway replaces this with what the parent
         # sent, so every run in one tree spends against one budget rather than
@@ -713,6 +717,7 @@ class TurnSequencer:
                 await self.repo.complete_task(
                     self.workflow_task_id,
                     {"run_id": str(run.id), "status": status},
+                    worker_id=self.workflow_worker_id,
                 )
                 self._record("finish", "brief §3", f"completed task {self.workflow_task_id}")
         self._record("finish", "brief §5.1", status)
@@ -730,6 +735,7 @@ class TurnSequencer:
         error: dict[str, Any] = {"error": message, "run_id": str(run.id), "status": run.status}
         if terminal:
             error["terminal"] = True
-        await self.repo.fail_task(self.workflow_task_id, error, terminal)
+        await self.repo.fail_task(self.workflow_task_id, error, terminal,
+                                 worker_id=self.workflow_worker_id)
         self._record("finish", "brief §3",
                      f"failed task {self.workflow_task_id} ({'terminal' if terminal else 'retryable'})")

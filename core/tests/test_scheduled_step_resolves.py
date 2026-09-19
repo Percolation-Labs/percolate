@@ -272,7 +272,7 @@ class TheDocumentedStepIsSent(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_sync_step_is_still_completed_by_the_loop(self):
         statements = await self.run_step({"status": 200, "result": {"ok": True}})
-        self.assertEqual(statements, ["select workflow.complete_task($1, $2::jsonb)"])
+        self.assertEqual(statements, ["select workflow.complete_task($1, $2::jsonb, $3)"])
 
 
 if __name__ == "__main__":

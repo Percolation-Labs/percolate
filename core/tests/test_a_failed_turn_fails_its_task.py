@@ -66,8 +66,12 @@ class RecordingRepository(MemoryRepository):
 
         self.client = Client()
 
-    async def fail_task(self, task_id, error, terminal):
+    async def fail_task(self, task_id, error, terminal, worker_id=None):
         self.failed_tasks.append((task_id, error, terminal))
+
+
+async def _record(calls, op, worker_id):
+    calls.append((op, worker_id))
 
 
 class ScheduledTurn(unittest.IsolatedAsyncioTestCase):
@@ -101,6 +105,29 @@ class ScheduledTurn(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(was_terminal, terminal, error)
         self.assertEqual(error.get("terminal", False), terminal)
         return error
+
+    async def test_the_lease_holder_is_named_on_completion_and_failure(self):
+        # REM-553: without the worker id the fence cannot tell a reaped
+        # worker's run from the live holder's.
+        for raises, op in ((None, "complete"), (ConnectionError("reset"), "fail")):
+            with self.subTest(op):
+                repo = RecordingRepository()
+                repo.agents["summarizer"] = AgentSpec(name="summarizer", system_prompt="summarize")
+                sequencer = TurnSequencer(repo, Settings(default_model="test"))
+                sequencer.workflow_task_id = TASK
+                sequencer.workflow_worker_id = "worker-7"
+                calls = []
+                repo.complete_task = lambda t, o, worker_id=None: _record(calls, "complete", worker_id)
+                repo.fail_task = lambda t, e, term, worker_id=None: _record(calls, "fail", worker_id)
+
+                async def failing_model(*a, **kw):
+                    raise raises
+                with patch.object(TurnSequencer, "invoke_model", failing_model) if raises else _nothing():
+                    await sequencer.run_turn(
+                        ChatRequest(model="summarizer",
+                                    messages=[InboundMessage(role="user", content="w")]),
+                        RequestContext())
+                self.assertEqual(calls, [(op, "worker-7")])
 
     async def test_a_successful_turn_still_completes_and_fails_nothing(self):
         repo, result = await self.turn()

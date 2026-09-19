@@ -139,7 +139,26 @@ class AcceptRun(unittest.IsolatedAsyncioTestCase):
         self.dispatch.assert_awaited_once()
         kwargs = self.dispatch.await_args.kwargs
         self.assertEqual((kwargs["task_id"], kwargs["agent_name"]), (TASK, "summarizer"))
+        self.assertIsNone(kwargs["worker_id"], "no lease holder was named")
         self.fail_task.assert_not_called()
+
+    async def test_the_lease_holder_travels_to_the_run(self):
+        """REM-553: the worker names itself, and the run completes as that holder.
+
+        workflow.lease_violation compares holders only when an id is passed, so
+        a run dispatched by a worker whose lease was reaped would otherwise
+        complete a task another worker holds. The header is what the worker
+        sends; the body field is what a step author may write.
+        """
+        for label, headers, body in (
+            ("header", {**bearer(), "X-P8-Worker-Id": "worker-7"}, BODY),
+            ("body", bearer(), {**BODY, "worker_id": "worker-7"}),
+        ):
+            with self.subTest(label):
+                self.dispatch.reset_mock()
+                status, payload, _ = await self.accept(headers, body=body)
+                self.assertEqual(status, 202, payload)
+                self.assertEqual(self.dispatch.await_args.kwargs["worker_id"], "worker-7")
 
 
 class TheAgentServiceServesIt(unittest.TestCase):

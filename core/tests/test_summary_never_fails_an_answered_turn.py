@@ -48,7 +48,7 @@ class NoSummaryWorkflow(MemoryRepository):
             raise self.error
         return await super().start_workflow(name, payload, trace_id)
 
-    async def fail_task(self, task_id, error, terminal):
+    async def fail_task(self, task_id, error, terminal, worker_id=None):
         self.failed_tasks.append((task_id, error, terminal))
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -67,6 +68,12 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     if authorization := agent_authorization(original, spec, ctx.get("_agent_caller"), ctx.get("_agent_starter")):
         headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         headers["Authorization"] = authorization
+        # THE LEASE HOLDER, for /internal/run (REM-553). The runtime completes
+        # this task itself, while this worker holds the lease; naming the
+        # holder lets workflow.lease_violation refuse a run whose dispatching
+        # worker was reaped. Sent only here, to the configured runtime.
+        if ctx.get("_worker_id") and urlsplit(spec["url"]).path == "/internal/run":
+            headers["X-P8-Worker-Id"] = str(ctx["_worker_id"])
     elif ref := spec.get("credential_ref"):
         headers["Authorization"] = (
             f"{spec.get('auth_scheme', 'Bearer')} {credential_for(ref, spec['url'])}")

@@ -12,6 +12,15 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
+## Unreleased, after 0.2.0
+
+### Review fixes, 19 September
+
+- **A worker whose lease was reaped can no longer complete or requeue the task** (REM-553). The worker
+  passes its id to `complete_task` and `fail_task`, and to `/internal/run` as `X-P8-Worker-Id`, which the
+  runtime passes on when it completes or fails the task. The database already compared holders when given
+  an id; no SQL changed.
+
 ## Unreleased, after 0.1.13
 
 ### A writer puts an image in an article

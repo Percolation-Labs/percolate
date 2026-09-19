@@ -353,8 +353,12 @@ async def run_once(queue: str, worker_id: str) -> bool:
             # text". This worker was that producer. Measured on the dogfood
             # stack before this line changed -- workflow.encoding_drift()
             # reported 10 repairs from ingest-1 and 2 from worker-1.
+            #
+            # WITH THE WORKER ID (REM-553). lease_violation compares holders
+            # only when one is passed, so a worker whose lease was reaped and
+            # handed to another could complete that other worker's task.
             await conn.execute(
-                "select workflow.complete_task($1, $2::jsonb)", task_id, out)
+                "select workflow.complete_task($1, $2::jsonb, $3)", task_id, out, worker_id)
         if isinstance(out, dict) and "$artifact" in out:
             print(f"[{worker_id}]   ok -- offloaded to {out['$artifact']}", flush=True)
         else:
@@ -363,9 +367,10 @@ async def run_once(queue: str, worker_id: str) -> bool:
         print(f"[{worker_id}]   terminal: {e}", flush=True)
         async with as_service() as conn:
             await conn.execute(
-                "select workflow.fail_task($1, $2::jsonb, true)",
-                # The object, for the reason complete_task above carries.
-                task_id, {"error": str(e), "terminal": True})
+                "select workflow.fail_task($1, $2::jsonb, true, $3)",
+                # The object, for the reason complete_task above carries, and
+                # the worker id for the lease fence (REM-553).
+                task_id, {"error": str(e), "terminal": True}, worker_id)
     except Exception as e:
         # A CONSTRAINT VIOLATION IS NOT A TRANSIENT FAULT, and treating every
         # non-TerminalError as one meant the same row was re-inserted against
@@ -392,10 +397,12 @@ async def run_once(queue: str, worker_id: str) -> bool:
             payload["terminal"] = True
         async with as_service() as conn:
             await conn.execute(
-                "select workflow.fail_task($1, $2::jsonb, $3)",
+                "select workflow.fail_task($1, $2::jsonb, $3, $4)",
                 # Same: normalize_output is reached from fail_task's error
-                # too, which is why its event name covers both.
-                task_id, payload, terminal)
+                # too, which is why its event name covers both. The worker id
+                # matters most here: without it a reaped worker's retryable
+                # failure set the live holder's task back to ready (REM-553).
+                task_id, payload, terminal, worker_id)
     return True
 
 

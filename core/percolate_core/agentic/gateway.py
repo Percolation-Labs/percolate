@@ -259,6 +259,15 @@ async def accept_run(
         session_id = UUID(str(run_input["session_id"])) if run_input.get("session_id") else None
     except ValueError as exc:
         return 400, {"error": f"workflow_task_id and input.session_id must be uuids: {exc}"}
+    # The lease holder that dispatched this run (REM-553): the worker sends it
+    # as X-P8-Worker-Id, and a step body may name it as "worker_id":
+    # "{{task.worker_id}}". Completing without it skips the holder comparison
+    # in workflow.lease_violation, so a run from a reaped worker could complete
+    # a task another worker holds. Optional, so a caller that names none keeps
+    # the fence's terminal-state half, as before.
+    worker_id = body.get("worker_id") or next(
+        (v for k, v in headers.items() if k.lower() == "x-p8-worker-id"), None)
+    worker_id = str(worker_id) if worker_id else None
 
     claims = caller_claims(headers)
     if claims is None:
@@ -280,6 +289,7 @@ async def accept_run(
     task = asyncio.create_task(_dispatch(
         settings,
         task_id=task_id,
+        worker_id=worker_id,
         agent_name=run_input["agent"],
         session_id=session_id,
         prompt=run_input.get("prompt", ""),
@@ -321,22 +331,23 @@ async def _dispatch(settings: Settings, **kwargs: Any) -> None:
         # now, because nobody else will say it.
         await _fail_task(settings, kwargs["task_id"],
                          "CancelledError: the runtime stopped before the turn finished",
-                         terminal=False)
+                         terminal=False, worker_id=kwargs.get("worker_id"))
         raise
     except Exception as exc:  # noqa: BLE001 - any failure must reach the task
         import traceback
 
         traceback.print_exc()
         await _fail_task(settings, kwargs["task_id"], f"{type(exc).__name__}: {exc}",
-                         terminal=failure_is_terminal(exc))
+                         terminal=failure_is_terminal(exc), worker_id=kwargs.get("worker_id"))
 
 
-async def _fail_task(settings: Settings, task_id: UUID, message: str, *, terminal: bool) -> None:
+async def _fail_task(settings: Settings, task_id: UUID, message: str, *, terminal: bool,
+                     worker_id: str | None = None) -> None:
     error: dict[str, Any] = {"error": message}
     if terminal:
         error["terminal"] = True
     async with connected(settings, None) as repo:
-        await repo.fail_task(task_id, error, terminal)
+        await repo.fail_task(task_id, error, terminal, worker_id=worker_id)
 
 
 async def run_scheduled(
@@ -348,6 +359,7 @@ async def run_scheduled(
     prompt: str,
     headers: dict[str, str],
     for_agent: str | None = None,
+    worker_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute one scheduled run: same agent config, same rows, no live client.
 
@@ -376,6 +388,7 @@ async def run_scheduled(
         authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
         sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
         sequencer.workflow_task_id = task_id
+        sequencer.workflow_worker_id = worker_id
         result = await sequencer.run_turn(
             ChatRequest(
                 model=agent_name,

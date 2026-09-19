@@ -361,8 +361,9 @@ class WorkerRetryTest(unittest.IsolatedAsyncioTestCase):
              patch.dict("percolate_core.worker.loop.HANDLERS", {"work": handler}):
             await run_once("ingest", "worker-1")
         handler.assert_awaited_once()
-        sql, _task, payload, terminal = conn.execute.await_args.args
-        self.assertEqual(sql, "select workflow.fail_task($1, $2::jsonb, $3)")
+        sql, _task, payload, terminal, worker = conn.execute.await_args.args
+        self.assertEqual(sql, "select workflow.fail_task($1, $2::jsonb, $3, $4)")
+        self.assertEqual(worker, "worker-1", "the lease fence needs the worker id (REM-553)")
         self.assertEqual(payload.get("terminal", False), terminal)
         return terminal
 

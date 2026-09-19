@@ -80,8 +80,10 @@ class Repository(Protocol):
     async def start_workflow(
         self, name: str, payload: dict[str, Any], trace_id: str | None = None
     ) -> UUID: ...
-    async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None: ...
-    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None: ...
+    async def complete_task(self, task_id: UUID, output: dict[str, Any],
+                            worker_id: str | None = None) -> None: ...
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool,
+                        worker_id: str | None = None) -> None: ...
     async def can_see_task(self, task_id: UUID) -> bool: ...
 
 
@@ -506,8 +508,14 @@ class PgRepository:
                 trace_id,
             )
 
-    async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None:
-        """``select workflow.complete_task($1, $2::jsonb)``, as the ``worker`` role.
+    async def complete_task(self, task_id: UUID, output: dict[str, Any],
+                            worker_id: str | None = None) -> None:
+        """``select workflow.complete_task($1, $2::jsonb, $3)``, as the ``worker`` role.
+
+        ``worker_id`` is the lease holder that dispatched the run, when it said
+        (REM-553): ``workflow.lease_violation`` compares holders only when one
+        is passed, so without it a run dispatched by a reaped worker completes
+        the task another worker now holds.
 
         ``brief.md`` §3: "the runtime ... calls ``complete_task(task_id,
         output)`` itself once the run and any ``chained_action`` it fires
@@ -521,15 +529,18 @@ class PgRepository:
         cannot become ``worker``. See ``core.identity.as_task_worker``.
         """
         async with identity.as_task_worker() as conn:
-            await conn.execute("select workflow.complete_task($1, $2::jsonb)", task_id, output)
+            await conn.execute(
+                "select workflow.complete_task($1, $2::jsonb, $3)", task_id, output, worker_id)
 
-    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
-        """``select workflow.fail_task($1, $2::jsonb, $3)``, as ``worker``, like
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool,
+                        worker_id: str | None = None) -> None:
+        """``select workflow.fail_task($1, $2::jsonb, $3, $4)``, as ``worker``, like
         ``complete_task`` and for the same reason. ``terminal`` is the engine's
         "do not retry"; `task_outcome.failure_is_terminal` decides it."""
         async with identity.as_task_worker() as conn:
             await conn.execute(
-                "select workflow.fail_task($1, $2::jsonb, $3)", task_id, error, terminal)
+                "select workflow.fail_task($1, $2::jsonb, $3, $4)",
+                task_id, error, terminal, worker_id)
 
     async def can_see_task(self, task_id: UUID) -> bool:
         """Whether this caller can see the task, through ``workflow.tasks_api``.
