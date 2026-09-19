@@ -3094,6 +3094,7 @@ declare
     -- Restoring the previous value rather than blanking it keeps nesting
     -- honest: a sql step whose completion autoruns its successor is this
     -- function inside itself.
+    v_prev_task text := coalesce(current_setting('workflow.current_task_id', true), '');
     v_prev text := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
 begin
     select * into t from workflow.tasks where id = p_task_id;
@@ -3116,6 +3117,7 @@ begin
     -- connection's next transaction; the same hazard rbac.current_user_id()
     -- was hardened against.
     perform set_config('workflow.current_run_id', t.run_id::text, true);
+    perform set_config('workflow.current_task_id', t.id::text, true);
     -- §20a-ter: resolve_args puts `{` back into row text after its one pass.
     -- Always set, to '' when absent, so the previous task's sentinel in the
     -- same transaction cannot apply to this one.
@@ -3145,9 +3147,11 @@ begin
                 v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
         end if;
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         return true;
     exception when others then
+        perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),

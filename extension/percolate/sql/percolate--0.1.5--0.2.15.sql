@@ -3799,6 +3799,7 @@ declare
     -- Restoring the previous value rather than blanking it keeps nesting
     -- honest: a sql step whose completion autoruns its successor is this
     -- function inside itself.
+    v_prev_task text := coalesce(current_setting('workflow.current_task_id', true), '');
     v_prev text := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
 begin
     select * into t from workflow.tasks where id = p_task_id;
@@ -3821,6 +3822,7 @@ begin
     -- connection's next transaction; the same hazard rbac.current_user_id()
     -- was hardened against.
     perform set_config('workflow.current_run_id', t.run_id::text, true);
+    perform set_config('workflow.current_task_id', t.id::text, true);
     -- §20a-ter: resolve_args puts `{` back into row text after its one pass.
     -- Always set, to '' when absent, so the previous task's sentinel in the
     -- same transaction cannot apply to this one.
@@ -3850,9 +3852,11 @@ begin
                 v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
         end if;
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         return true;
     exception when others then
+        perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
@@ -31840,9 +31844,9 @@ end $$;
 --
 -- Origins and what cites them are §10b (REM-477).
 --
--- WHAT IS NOT HERE YET. question_evidence (with comparisons, REM-479),
--- cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
--- answer to a reworded claim (REM-483). A claim with no occurrence left after an erasure is REM-481's.
+-- REM-584 adds explicit revision readings; REM-590 records durable execution provenance.
+-- REM-603 keeps question links and aggregate counts aligned with occurrence reassignment.
+-- Parts beyond the first remain REM-506's work.
 
 create schema if not exists claims;
 
@@ -31980,6 +31984,7 @@ declare
     t       bigint;
     cid     uuid;
     pred    uuid;
+    answer  record;
 begin
     if p_answer not in ('same', 'new') then
         raise check_violation using message = 'A rewording is answered same or new', detail = p_answer;
@@ -32010,6 +32015,16 @@ begin
     insert into claims.claims (tx) values (t) returning id into cid;
     insert into claims.expresses (revision_id, claim_key, claim_id, method, status, tx)
     values (p_revision, p_claim_key, cid, 'new', 'confirmed', t);
+    -- The frame was projected while this occurrence still proposed the old identity. Move each active
+    -- question assertion to the writer's new identity with two append-only rows, preserving the old reading.
+    for answer in select * from (
+        select distinct on (a.question_id) a.* from claims.answered a
+         where a.evidence=p_revision and a.claim_key=p_claim_key order by a.question_id,a.id desc) x
+        where x.op='assert' and x.claim_id=cur.claim_id loop
+        insert into claims.answered(claim_id,question_id,stance,status,op,evidence,claim_key,tx)
+        values(cur.claim_id,answer.question_id,answer.stance,answer.status,'retract',p_revision,p_claim_key,t),
+              (cid,answer.question_id,answer.stance,answer.status,'assert',p_revision,p_claim_key,t);
+    end loop;
     if p_supersedes then
         pred := coalesce(r.predecessor_id,
                          (select v.id from research.revisions v where v.work_id = r.work_id and v.number = r.number - 1));
@@ -33022,6 +33037,7 @@ $$;
 create or replace function claims.sweep_erased(p_revisions uuid[]) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
+    task_ids uuid[];
     txs  bigint[];
     n_c  int;
     n_o  int;
@@ -33055,6 +33071,7 @@ begin
         exit when n_q1 = 0;
         n_q := n_q + n_q1;
     end loop;
+    select array_agg(distinct task_id) into task_ids from claims.execution_receipts where tx = any(txs);
     delete from claims.tx t where t.id = any (txs)
        and not exists (select 1 from claims.claims x where x.tx = t.id)
        and not exists (select 1 from claims.expresses x where x.tx = t.id)
@@ -33067,6 +33084,8 @@ begin
        and not exists (select 1 from claims.resolutions x where x.tx = t.id)
        and not exists (select 1 from claims.consensus x where x.tx = t.id);
     get diagnostics n_t = row_count;
+    delete from claims.execution_results x where x.task_id = any(task_ids)
+       and not exists(select 1 from claims.execution_receipts r where r.task_id=x.task_id);
     return jsonb_build_object('claims', n_c, 'origins', n_o, 'questions', n_q, 'transactions', n_t);
 end;
 $$;
@@ -33085,6 +33104,7 @@ create policy tx_readable on claims.tx for select using (
     or exists (select 1 from claims.relations r where r.tx = tx.id)
     or exists (select 1 from claims.answered a where a.tx = tx.id)
     or exists (select 1 from claims.cites c where c.tx = tx.id)
+    or exists (select 1 from claims.origin_links l where l.tx = tx.id)
     or exists (select 1 from claims.resolutions r where r.tx = tx.id)
     or exists (select 1 from claims.consensus c where c.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
@@ -33286,6 +33306,34 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      group by l.stance order by l.stance;
 $$;
 
+-- REM-584: reduce an occurrence by its key BEFORE asking which claim it expresses.
+-- A reassignment is a later row with a different claim_id; filtering that id first resurrects the old link.
+create or replace function claims.occurrences_at(p_claim uuid, p_at timestamptz, p_revisions uuid[])
+returns setof claims.expresses
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select x.* from (
+        select distinct on (e.revision_id, e.claim_key, e.part) e.*
+          from claims.expresses e join claims.tx t on t.id = e.tx
+         where (p_revisions is null or e.revision_id = any(p_revisions)) and t.at <= p_at
+           and (e.revision_id, e.claim_key, e.part) in
+               (select revision_id, claim_key, part from claims.expresses where claim_id = p_claim)
+         order by e.revision_id, e.claim_key, e.part, e.id desc
+    ) x where x.claim_id = p_claim and x.op = 'assert';
+$$;
+
+-- Each evidence/source assertion has its own history. One source withdrawing its link does not withdraw
+-- another source's assertion of that pair. Present RLS applies before reduction, including in historical reads.
+create or replace function claims.origin_links_at(p_at timestamptz, p_revisions uuid[])
+returns setof claims.origin_links
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select x.* from (
+        select distinct on (l.a, l.b, l.evidence, l.source_key) l.*
+          from claims.origin_links l join claims.tx t on t.id = l.tx
+         where t.at <= p_at and (p_revisions is null or l.evidence = any(p_revisions))
+         order by l.a, l.b, l.evidence, l.source_key, l.id desc
+    ) x where x.op = 'assert' and x.status = 'confirmed';
+$$;
+
 -- How many of a work's claims carry a frame, in the revision the caller is shown (graph.md §7): frame coverage as a
 -- number. Null when the caller may read no revision of the work.
 create or replace function claims.frame_coverage(p_public_id text)
@@ -33293,7 +33341,11 @@ returns table (revision_id uuid, claims int, framed int, answering int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select h.rev, (select count(*)::int from research.claims c where c.revision_id = h.rev),
            (select count(*)::int from claims.frames f where f.revision_id = h.rev),
-           (select count(distinct a.claim_key)::int from claims.answered a where a.evidence = h.rev and a.op = 'assert')
+           (select count(distinct a.claim_key)::int from
+               (select distinct on (x.claim_key,x.question_id) x.* from claims.answered x join claims.tx t on t.id=x.tx
+                 where x.evidence=h.rev and t.at<=now() order by x.claim_key,x.question_id,x.id desc) a
+             where a.op='assert' and exists(select 1 from claims.occurrences_at(a.claim_id,now(),array[h.rev]) o
+                                            where o.claim_key=a.claim_key))
       from (select research.visible_head(w.id) as rev from research.works w where w.public_id = p_public_id) h
      where h.rev is not null;
 $$;
@@ -33304,7 +33356,7 @@ $$;
 -- labelled both a paper and its data file on the live corpus). So a title never bridges two strong keys: it
 -- belongs to a study only when every strong key it is linked to is in that one study, and otherwise stands alone.
 -- Only links the caller may read are walked.
-create or replace function claims.study_of(p_origin uuid) returns uuid
+create or replace function claims.study_of(p_origin uuid, p_at timestamptz, p_revisions uuid[]) returns uuid
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
     k     text;
@@ -33315,17 +33367,16 @@ begin
         return null;
     end if;
     if k ~ '^(doi|url):' then
-        return (with recursive g(o, path) as (
-                    select p_origin, array[p_origin]
-                    union all
-                    select n.id, g.path || n.id
-                      from g join claims.origin_links l on (l.a = g.o or l.b = g.o) and l.status = 'confirmed' and l.op = 'assert'
-                      join claims.origins n on n.id = case when l.a = g.o then l.b else l.a end and n.key ~ '^(doi|url):'
-                     where not n.id = any (g.path) and cardinality(g.path) < 64)
+        return (with recursive g(o) as (
+                    select p_origin
+                    union
+                    select n.id
+                      from g join claims.origin_links_at(p_at, p_revisions) l on (l.a = g.o or l.b = g.o)
+                      join claims.origins n on n.id = case when l.a = g.o then l.b else l.a end and n.key ~ '^(doi|url):')
                 select min(o::text)::uuid from g);
     end if;
-    select array_agg(distinct claims.study_of(n.id)) into comps
-      from claims.origin_links l
+    select array_agg(distinct claims.study_of(n.id, p_at, p_revisions)) into comps
+      from claims.origin_links_at(p_at, p_revisions) l
       join claims.origins n on n.id = case when l.a = p_origin then l.b else l.a end and n.key ~ '^(doi|url):'
      where (l.a = p_origin or l.b = p_origin) and l.status = 'confirmed' and l.op = 'assert';
     return case when cardinality(comps) = 1 then comps[1] else p_origin end;
@@ -33334,34 +33385,130 @@ $$;
 
 -- The study each source of one occurrence names: a source with a strong key is that key's study, and one with only
 -- a title is its title's. The frame's origin counts as a source of its own (source_key '').
-create or replace function claims.source_studies(p_revision uuid, p_claim_key text)
+create or replace function claims.source_studies(p_revision uuid, p_claim_key text, p_at timestamptz, p_revisions uuid[])
 returns table (source_key text, study uuid)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select c.source_key,
-           coalesce(min(claims.study_of(c.origin_id)::text) filter (where o.key ~ '^(doi|url):'),
-                    min(claims.study_of(c.origin_id)::text))::uuid
-      from claims.cites c join claims.origins o on o.id = c.origin_id
-     where c.revision_id = p_revision and c.claim_key = p_claim_key
+           coalesce(min(claims.study_of(c.origin_id, p_at, p_revisions)::text) filter (where o.key ~ '^(doi|url):'),
+                    min(claims.study_of(c.origin_id, p_at, p_revisions)::text))::uuid
+      from claims.cites c join claims.origins o on o.id = c.origin_id join claims.tx t on t.id = c.tx
+     where c.revision_id = p_revision and c.claim_key = p_claim_key and t.at <= p_at
+       and (p_revisions is null or c.revision_id = any(p_revisions))
      group by c.source_key;
 $$;
 
 -- A claim's evidence grouped by study (graph.md §10): one row per independent study, with the keys that name it
 -- and how many readable occurrences of the claim cite it. The number of rows is the number of independent origins;
 -- ten packages repeating one study are one row.
-create or replace function claims.evidence(p_claim uuid, p_at timestamptz default now())
+create or replace function claims.evidence(p_claim uuid, p_at timestamptz, p_revisions uuid[])
 returns table (study uuid, keys text[], citing_occurrences int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    with occ as (select distinct e.revision_id, e.claim_key from claims.expresses e join claims.tx t on t.id = e.tx
-                  where e.claim_id = p_claim and e.op = 'assert' and t.at <= p_at),
-         st as (select o.revision_id, o.claim_key, s.study from occ o cross join lateral claims.source_studies(o.revision_id, o.claim_key) s)
+    with occ as (select distinct e.revision_id, e.claim_key from claims.occurrences_at(p_claim, p_at, p_revisions) e),
+         st as (select o.revision_id, o.claim_key, s.study from occ o cross join lateral claims.source_studies(o.revision_id, o.claim_key, p_at, p_revisions) s)
     select st.study,
-           (select array_agg(distinct og.key order by og.key) from claims.cites c join claims.origins og on og.id = c.origin_id
-             where (c.revision_id, c.claim_key) in (select revision_id, claim_key from occ)
-               and claims.study_of(c.origin_id) = st.study),
+           (select array_agg(distinct og.key order by og.key) from claims.cites c join claims.origins og on og.id = c.origin_id join claims.tx ct on ct.id = c.tx
+             where ct.at <= p_at and (c.revision_id, c.claim_key) in (select revision_id, claim_key from occ)
+               and claims.study_of(c.origin_id, p_at, p_revisions) = st.study),
            count(distinct (st.revision_id, st.claim_key))::int
       from st where st.study is not null
      group by st.study;
 $$;
+
+-- Compatibility signatures keep all readable revisions, with corrected assertion-time semantics.
+create or replace function claims.study_of(p_origin uuid) returns uuid
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select claims.study_of(p_origin, now(), null);
+$$;
+create or replace function claims.source_studies(p_revision uuid, p_claim_key text)
+returns table (source_key text, study uuid)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from claims.source_studies(p_revision, p_claim_key, now(), null);
+$$;
+create or replace function claims.evidence(p_claim uuid, p_at timestamptz default now())
+returns table (study uuid, keys text[], citing_occurrences int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from claims.evidence(p_claim, p_at, null);
+$$;
+
+-- The versioned entry point. Legacy graph functions retain their all-readable-revisions scope.
+-- Cutoffs use transaction timestamps and highest statement id as the tie-breaker; neither is a commit clock.
+create or replace function claims.reading(p_claim uuid, p_mode text default 'current',
+                                         p_revisions uuid[] default null, p_at timestamptz default null)
+returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    cutoff timestamptz := coalesce(p_at, now());
+    selected uuid[];
+    occurrences jsonb;
+    edges jsonb;
+    members uuid[];
+    answer_rows jsonb;
+begin
+    if p_mode is null or p_mode not in ('current', 'pinned', 'historical')
+       or (p_mode = 'current' and p_at is not null)
+       or (p_mode = 'historical' and p_at is null)
+       or (p_mode = 'pinned' and p_revisions is null)
+       or (p_mode <> 'pinned' and p_revisions is not null) then
+        raise invalid_parameter_value using message = 'Choose current, pinned revisions with optional cutoff, or historical with cutoff';
+    end if;
+    if p_mode = 'pinned' then
+        -- Refuse the whole request for a missing or denied input, without disclosing which it was.
+        if exists (select 1 from unnest(p_revisions) r where not coalesce(research.revision_readable(r), false)) then
+            return null;
+        end if;
+        select coalesce(array_agg(distinct r.id order by r.id), '{}') into selected
+          from research.revisions r where r.id = any(p_revisions) and r.created_at <= cutoff;
+    elsif p_mode = 'current' then
+        select coalesce(array_agg(h.id order by h.id), '{}') into selected
+          from research.works w cross join lateral (select research.visible_head(w.id) id) h
+         where h.id is not null and research.revision_readable(h.id);
+    else
+        -- trust_state owns visibility history and present access. Its head is the owned/org view; shown is public.
+        select coalesce(array_agg(r.id order by r.id), '{}') into selected
+          from research.works w cross join lateral (select research.trust_state(w.public_id, cutoff) v) h
+          join research.revisions r on r.work_id = w.id and r.label = coalesce(h.v->>'head', h.v->>'shown')
+         where research.revision_readable(r.id);
+    end if;
+    select jsonb_agg(jsonb_build_object('revision_id', e.revision_id, 'claim_key', e.claim_key,
+                    'part', e.part, 'status', e.status, 'method', e.method, 'text', coalesce(e.gloss, c.text))
+                    order by e.revision_id, e.claim_key, e.part) into occurrences
+      from claims.occurrences_at(p_claim, cutoff, selected) e
+      join research.claims c on (c.revision_id, c.claim_key) = (e.revision_id, e.claim_key);
+    if occurrences is null then return null; end if;
+    -- UNION is node reachability, not path enumeration. C2 adds serving budgets and completion metadata.
+    with recursive ids(id) as (
+        select p_claim union
+        select case when r.src = i.id then r.dst else r.src end
+          from ids i cross join lateral claims.relations_at(i.id, cutoff) r
+         where r.predicate = 'same_as' and r.status = 'confirmed'
+           and r.evidence = any(selected) and (r.evidence2 is null or r.evidence2 = any(selected))
+    ) select array_agg(id order by id) into members from ids;
+    select coalesce(jsonb_agg(to_jsonb(r) order by r.id), '[]') into edges
+      from claims.relations_at(p_claim, cutoff) r
+     where r.evidence = any(selected) and (r.evidence2 is null or r.evidence2 = any(selected));
+    -- An answer belongs to its occurrence, even if that occurrence has since changed claim identity.
+    select coalesce(jsonb_agg(jsonb_build_object('question_id', a.question_id, 'stance', a.stance,
+                         'status', a.status, 'evidence', a.evidence, 'claim_key', a.claim_key)
+                         order by a.evidence, a.claim_key, a.question_id), '[]') into answer_rows
+      from (select distinct on (x.evidence, x.claim_key, x.question_id) x.*
+              from claims.answered x join claims.tx t on t.id = x.tx
+             where x.evidence = any(selected) and t.at <= cutoff
+             order by x.evidence, x.claim_key, x.question_id, x.id desc) a
+     where a.op = 'assert' and a.claim_id = p_claim
+       and exists (select 1 from claims.occurrences_at(p_claim, cutoff, selected) o
+                    where (o.revision_id, o.claim_key) = (a.evidence, a.claim_key));
+    return jsonb_build_object('contract_version', '1', 'claim_id', p_claim, 'mode', p_mode,
+        'cutoff', cutoff, 'selected_revisions', selected, 'occurrences', occurrences,
+        'identity_set', members, 'relations', edges, 'answers', answer_rows,
+        'evidence', coalesce((select jsonb_agg(to_jsonb(e) order by e.study)
+                               from claims.evidence(p_claim, cutoff, selected) e), '[]'::jsonb));
+end;
+$$;
+
+grant execute on function claims.occurrences_at(uuid, timestamptz, uuid[]),
+    claims.origin_links_at(timestamptz, uuid[]), claims.study_of(uuid, timestamptz, uuid[]),
+    claims.source_studies(uuid, text, timestamptz, uuid[]), claims.evidence(uuid, timestamptz, uuid[]),
+    claims.reading(uuid, text, uuid[], timestamptz) to authenticated;
 
 -- The readable works whose shown revision cites the same study as one occurrence (REM-219's question, answered from
 -- origins): one row per study the occurrence cites, with the works and claims citing it. independent_evidence is 1
@@ -33405,8 +33552,11 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     with study as (select claims.study_of(p_origin) as s),
          citing as (select distinct e.claim_id
                       from claims.cites c
-                      join claims.expresses e on e.revision_id = c.revision_id and e.claim_key = c.claim_key
-                     where claims.study_of(c.origin_id) = (select s from study)),
+                      cross join lateral (
+                          select distinct on (x.part) x.claim_id,x.op from claims.expresses x join claims.tx t on t.id=x.tx
+                           where x.revision_id=c.revision_id and x.claim_key=c.claim_key and t.at<=now()
+                           order by x.part,x.id desc) e
+                     where e.op='assert' and claims.study_of(c.origin_id) = (select s from study)),
          settled as (select distinct on (p.claim_id) p.claim_id, p.value
                        from claims.resolutions p
                       where p.restates is null and p.claim_id in (select claim_id from citing)
@@ -33428,6 +33578,188 @@ grant execute on function claims.relations_at(uuid, timestamptz), claims.claim(u
                           claims.neighbourhood(uuid, text[], int, timestamptz), claims.rests_on(uuid, timestamptz),
                           claims.challenged_through(uuid, timestamptz), claims.history(uuid),
                           claims.revision_diff(uuid, uuid) to authenticated;
+
+-- REM-590. Detached execution identity survives workflow retention. No prompts, credentials or raw SQL
+-- enter the public projection. Unknown provider versions and missing results remain unknown.
+create table if not exists claims.execution_receipts (
+    tx bigint primary key references claims.tx(id) on delete cascade,
+    kind text not null check (kind in ('manual','projection','workflow','untracked_agent')),
+    run_id uuid,
+    task_id uuid,
+    step_key text,
+    attempt int,
+    method text not null,
+    method_version text not null,
+    recorded_at timestamptz not null default now(),
+    check ((kind='workflow') = (run_id is not null))
+);
+alter table claims.execution_receipts enable row level security;
+-- Result attachment and erasure find one task attempt, rather than scanning the assertion history.
+create index if not exists execution_receipts_task on claims.execution_receipts(task_id,attempt) where task_id is not null;
+create table if not exists claims.execution_inputs (
+    tx bigint not null references claims.execution_receipts(tx) on delete cascade,
+    revision_id uuid not null,
+    content_hash text not null,
+    primary key(tx,revision_id)
+);
+alter table claims.execution_inputs enable row level security;
+create or replace function claims.capture_execution() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    rid uuid := nullif(current_setting('workflow.current_run_id',true),'')::uuid;
+    tid uuid := coalesce(nullif(current_setting('workflow.current_task_id',true),'')::uuid,
+                         nullif(nullif(current_setting('request.jwt.claims',true),'')::jsonb->>'workflow_task_id','')::uuid);
+    token jsonb := coalesce(nullif(current_setting('request.jwt.claims',true),'')::jsonb,'{}');
+    task workflow.tasks;
+    actor uuid := coalesce(new.actor_id, rbac.current_user_id());
+    source text;
+begin
+    if tid is not null then
+        select * into task from workflow.tasks where id=tid;
+        if not found or task.status not in ('running','waiting_external')
+           or (rid is not null and rid <> task.run_id) then
+            raise check_violation using message='An assertion records only an executing workflow task';
+        end if;
+        if nullif(current_setting('workflow.current_task_id',true),'') is null
+           and (task.claimed_by is distinct from token->>'workflow_worker_id'
+                or task.attempts is distinct from (token->>'workflow_attempt')::int) then
+            raise check_violation using message='An assertion records only its dispatching task attempt';
+        end if;
+        rid := task.run_id;
+    end if;
+    if rid is not null and (actor is null or workflow.run_owner_of(rid) is distinct from actor) then
+        raise check_violation using message='An assertion workflow run belongs to its actor';
+    end if;
+    source := case when rid is not null then 'workflow' when new.actor_kind='platform' then 'projection'
+                   when new.actor_kind='person' then 'manual' else 'untracked_agent' end;
+    insert into claims.execution_receipts(tx,kind,run_id,task_id,step_key,attempt,method,method_version)
+    values(new.id,source,rid,tid,task.step_key,task.attempts,
+           case when source='workflow' then 'workflow.' || coalesce(task.kind,'unknown_step') else source end,
+           'claims-execution/1');
+    insert into claims.execution_inputs(tx,revision_id,content_hash)
+    select new.id,id,content_hash from research.revisions where id=new.revision_id;
+    return new;
+end;
+$$;
+create or replace trigger trg_capture_execution after insert on claims.tx
+for each row execute function claims.capture_execution();
+revoke all on function claims.capture_execution() from public;
+
+-- A comparison has a second input. Capture its immutable hash when the assertion is written, not when read.
+create or replace function claims.capture_execution_inputs() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    insert into claims.execution_inputs(tx,revision_id,content_hash)
+    select new.tx,id,content_hash from research.revisions where id in (new.evidence,new.evidence2)
+    on conflict do nothing;
+    return new;
+end;
+$$;
+create or replace trigger trg_capture_execution_inputs after insert on claims.relations
+for each row execute function claims.capture_execution_inputs();
+revoke all on function claims.capture_execution_inputs() from public;
+
+-- A snapshot of the producer's usage, not a new quota/spend counter. Results arrive after assertions.
+-- No live workflow FK: retention may remove the task. Assertion erasure removes its receipt normally.
+create table if not exists claims.execution_results (
+    task_id uuid not null,
+    attempt int not null,
+    agent_run_id uuid not null,
+    method_version text not null,
+    model text,
+    model_version text,
+    evaluation_resource uuid,
+    usage jsonb not null check (jsonb_typeof(usage)='object'),
+    recorded_at timestamptz not null default now(),
+    primary key(task_id,attempt,agent_run_id)
+);
+alter table claims.execution_results enable row level security;
+-- Only the trusted runtime/worker can attach provider metadata. A caller can name neither a model nor usage
+-- on an assertion; a stale dispatch attempt cannot attach a result to the worker that replaced it.
+create or replace function claims.record_execution_result(p_task uuid, p_worker text, p_attempt int,
+    p_agent_run uuid, p_method_version text, p_model text, p_model_version text, p_usage jsonb,
+    p_evaluation_resource uuid default null) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare task workflow.tasks; safe_usage jsonb; existing claims.execution_results;
+begin
+    select * into task from workflow.tasks where id=p_task for update;
+    if not found or task.status not in ('running','waiting_external') or p_worker is null
+       or task.claimed_by is distinct from p_worker or task.attempts is distinct from p_attempt then
+        raise insufficient_privilege using message='Execution results belong to the current task lease';
+    end if;
+    -- Keep assertion provenance, not a second archive of every model call made by the installation.
+    if not exists(select 1 from claims.execution_receipts r where r.task_id=p_task and r.attempt=p_attempt) then
+        return;
+    end if;
+    select coalesce(jsonb_object_agg(key,value),'{}') into safe_usage from jsonb_each(p_usage)
+     where key in ('input_tokens','output_tokens','requests','tool_calls','cache_read_tokens','cache_write_tokens')
+       and jsonb_typeof(value)='number' and (value::text)::numeric >= 0;
+    select * into existing from claims.execution_results
+     where task_id=p_task and attempt=p_attempt and agent_run_id=p_agent_run;
+    if found then
+        if (existing.method_version,existing.model,existing.model_version,existing.usage,existing.evaluation_resource)
+            is distinct from (p_method_version,p_model,p_model_version,safe_usage,p_evaluation_resource) then
+            raise check_violation using message='An execution result retry must match its recorded result';
+        end if;
+        return;
+    end if;
+    insert into claims.execution_results(task_id,attempt,agent_run_id,method_version,model,model_version,evaluation_resource,usage)
+    values(p_task,p_attempt,p_agent_run,p_method_version,p_model,p_model_version,p_evaluation_resource,safe_usage);
+end;
+$$;
+revoke all on function claims.record_execution_result(uuid,text,int,uuid,text,text,text,jsonb,uuid) from public;
+grant usage on schema claims to worker;
+grant execute on function claims.record_execution_result(uuid,text,int,uuid,text,text,text,jsonb,uuid) to worker;
+
+do $$ declare t text; begin
+    foreach t in array array['claims.execution_receipts','claims.execution_inputs','claims.execution_results'] loop
+        execute format('create or replace trigger trg_refuse_rewrite before update or delete on %s for each row execute function research.refuse_rewrite()',t);
+        execute format('create or replace trigger trg_refuse_truncate before truncate on %s for each statement execute function research.refuse_rewrite()',t);
+    end loop;
+end $$;
+
+-- A receipt is read only through a currently readable assertion. The view never accepts a run id as authority.
+-- Keep raw receipt rows private: revision hashes of an inaccessible input are also protected content metadata.
+create or replace function claims.execution_receipt(p_tx bigint) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare r claims.execution_receipts; results jsonb; artifacts jsonb; actor uuid; visible boolean;
+begin
+    if not rbac.may('research','select') then return null; end if;
+    select * into r from claims.execution_receipts where tx=p_tx;
+    if not found then return null; end if;
+    select actor_id into actor from claims.tx where id=p_tx;
+    -- Repeat the tx policy's evidence checks under explicit revision permissions because this is a definer.
+    visible := actor=rbac.current_user_id()
+        or exists(select 1 from claims.expresses e where e.tx=p_tx and research.revision_readable(e.revision_id))
+        or exists(select 1 from claims.relations e where e.tx=p_tx and research.revision_readable(e.evidence)
+                    and (e.evidence2 is null or research.revision_readable(e.evidence2)))
+        or exists(select 1 from claims.answered e where e.tx=p_tx and research.revision_readable(e.evidence))
+        or exists(select 1 from claims.cites e where e.tx=p_tx and research.revision_readable(e.revision_id))
+        or exists(select 1 from claims.origin_links e where e.tx=p_tx and research.revision_readable(e.evidence))
+        or exists(select 1 from claims.resolutions e where e.tx=p_tx and research.revision_readable(e.evidence))
+        or exists(select 1 from claims.consensus e where e.tx=p_tx and research.revision_readable(e.evidence));
+    if not coalesce(visible,false) then return null; end if;
+    select jsonb_agg(jsonb_build_object('agent_run_id',x.agent_run_id,'method_version',x.method_version,
+                'model',x.model,'model_version',x.model_version,'usage',x.usage,'recorded_at',x.recorded_at) order by x.agent_run_id),
+           jsonb_agg(case when x.evaluation_resource is null then jsonb_build_object('status','not_recorded')
+                when exists(select 1 from content.resolve_file(x.evaluation_resource)) then
+                    jsonb_build_object('status','available','resource_id',x.evaluation_resource)
+                else jsonb_build_object('status','unavailable') end order by x.agent_run_id)
+      into results,artifacts from claims.execution_results x where x.task_id=r.task_id and x.attempt=r.attempt;
+    return jsonb_build_object('contract_version','1','kind',r.kind,'recorded_at',r.recorded_at,
+        'run_id',r.run_id,'task_id',r.task_id,'step_key',r.step_key,'attempt',r.attempt,
+        'method',r.method,'method_version',r.method_version,
+        'inputs',coalesce((select jsonb_agg(case when research.revision_readable(i.revision_id) then
+                         jsonb_build_object('status','available','revision_id',i.revision_id,'content_hash',i.content_hash)
+                     else jsonb_build_object('status','unavailable') end order by i.revision_id)
+                        from claims.execution_inputs i where i.tx=p_tx),'[]'::jsonb),
+        'execution',case when results is null then jsonb_build_object('status','unavailable') else
+            jsonb_build_object('status','available','scope','workflow_task_attempt','runs',results) end,
+        'evaluation_artifacts',coalesce(artifacts,'[]'::jsonb));
+end;
+$$;
+revoke all on function claims.execution_receipt(bigint) from public;
+grant execute on function claims.execution_receipt(bigint) to authenticated;
 
 -- ------------------------------------------------------------
 -- 13. The backfill: every revision projected before this existed gets its links, oldest first within each work, so
@@ -34002,6 +34334,7 @@ declare
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
+        'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
         'agentic.agents',
         'agentic.messages',
@@ -34629,6 +34962,9 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
+ ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
+ ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),
+ ('claims','execution_results','natural','one producer result per task attempt and agent run, detached from operational retention (REM-590)'),
  ('claims','erasures','natural',
   'a sidecar keyed by research.erasures(id): the counts an erasure removed from the claims graph, with no text (REM-481)'),
  ('rbac','plan_assignments','natural',

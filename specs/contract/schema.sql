@@ -518,6 +518,7 @@ declare
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
+        'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
         'agentic.agents',
         'agentic.messages',
