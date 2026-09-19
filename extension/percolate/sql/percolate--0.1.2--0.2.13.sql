@@ -32064,7 +32064,20 @@ begin
         raise feature_not_supported using message = 'A comparative relation needs the question both claims answer',
             detail = p_predicate, hint = 'REM-479 moves comparisons into core, with the question check';
     elsif p_predicate = 'same_as' then
-        raise feature_not_supported using message = 'same_as between claims is REM-478', detail = p_predicate;
+        -- graph.md §5: judged, never computed, and carrying what was judged. Both occurrences, a span quoted from
+        -- each, and the slots compared for both sides, so a reader can see why they were called substitutable.
+        if p_evidence2 is null then
+            raise check_violation using message = 'same_as names an occurrence on each side: pass both revisions';
+        end if;
+        if coalesce(p_spans->>'src', '') = '' or coalesce(p_spans->>'dst', '') = '' then
+            raise check_violation using message = 'same_as quotes a span from each occurrence (spans.src, spans.dst)';
+        end if;
+        if exists (select 1 from unnest(array['src', 'dst']) side, unnest(array['subject', 'predicate', 'object',
+                                                                              'scope', 'polarity', 'modality']) slot
+                    where not coalesce(p_spans->'slots'->side ? slot, false)) then
+            raise check_violation using message = 'same_as records the slots it compared for both sides',
+                hint = 'spans.slots.src and spans.slots.dst each name subject, predicate, object, scope, polarity and modality';
+        end if;
     end if;
     if v_status not in ('proposed', 'confirmed', 'disputed') then
         raise check_violation using message = 'Unknown status', detail = v_status;
@@ -32089,6 +32102,11 @@ begin
     if v_src is null or v_dst is null then
         raise foreign_key_violation using message = 'Each claim must be an occurrence in its evidence revision',
             detail = coalesce(p_src_key, '') || ' ' || coalesce(p_dst_key, '');
+    end if;
+    if p_predicate = 'same_as' and (
+           position(p_spans->>'src' in (select text from research.claims where revision_id = p_evidence and claim_key = p_src_key)) = 0
+        or position(p_spans->>'dst' in (select text from research.claims where revision_id = p_evidence2 and claim_key = p_dst_key)) = 0) then
+        raise check_violation using message = 'Each span must be words its occurrence says';
     end if;
     if p_predicate = 'supersedes' and not exists (
            select 1 from claims.expresses x join research.revisions v on v.id = x.revision_id
@@ -32123,9 +32141,24 @@ declare
     v_id    bigint;
 begin
     select * into r from claims.relations where id = p_relation;
-    if not found or not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
-                                 where v.id = r.evidence and w.owner_id = v_user) then
+    if not found then
         raise no_data_found using message = 'Relation not found';
+    end if;
+    if not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                    where v.id = r.evidence and w.owner_id = v_user) then
+        -- The other side (graph.md §5): the owner of the second revision may dispute, as a person, and do nothing
+        -- else. A dispute is a later row; the assertion it answers stays in the history.
+        if r.evidence2 is null or not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                                               where v.id = r.evidence2 and w.owner_id = v_user) then
+            raise no_data_found using message = 'Relation not found';
+        end if;
+        if p_retract or p_status is distinct from 'disputed' then
+            raise insufficient_privilege using message = 'The other side of a relation may only dispute it',
+                hint = 'no_grant';
+        end if;
+        if v_actor <> 'person' then
+            raise insufficient_privilege using message = 'Only a person disputes a relation', hint = 'human_only';
+        end if;
     end if;
     select * into cur from claims.relations c
      where c.src = r.src and c.predicate = r.predicate and c.dst = r.dst and c.evidence = r.evidence

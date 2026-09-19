@@ -58,8 +58,8 @@ begin
     end;
     begin
         perform claims.assert_relation('C1', 'same_as', 'C2', rev);
-        raise exception 'same_as was written before REM-478';
-    exception when feature_not_supported then null;
+        raise exception 'same_as was written without an occurrence on each side (REM-478)';
+    exception when check_violation then null;
     end;
     begin
         perform claims.assert_relation('C1', 'answers', 'C2', rev);

@@ -209,7 +209,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('claims.assert_relation(text,text,text,uuid,uuid,text,jsonb,text)', 'rbac.require',
  'research:insert, from a revision of the caller''s own work; a second revision must be readable to them (REM-474)'),
 ('claims.restate_relation(bigint,text,boolean,text)', 'rbac.require',
- 'research:insert, and only a relation asserted from the caller''s own work; anybody else''s is not found (REM-474)'),
+ 'research:insert; the asserting side''s owner restates, the other side''s owner may only dispute, as a person; anybody else''s is not found (REM-474, REM-478)'),
 ('research.submit_package(jsonb,text,text)', 'rbac.require',
  'research:insert, and research:list to list'),
 ('research.revise_package(text,jsonb,text,text)', 'rbac.require',
