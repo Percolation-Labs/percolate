@@ -229,6 +229,48 @@ alter table aiq.edges add column if not exists last_recalled_at timestamptz;
 drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
+-- THE TWO PAIRS 0.2.0 GATES, given once to every role that existed before them
+-- (REM-552). agents:invoke and resources:create gate chat and upload, which
+-- were ungated until this hop, so without this every existing role loses both
+-- the moment the schema loads -- a silent outage produced by a security
+-- improvement, which is how security improvements get reverted. Denying becomes
+-- the deliberate act, and it lasts:
+--
+--     delete from rbac.role_permissions
+--      where role = 'member' and resource = 'agents' and action = 'invoke';
+--
+-- HERE, AND NOT IN user-rbac/schema.sql, where it was until 0.2.14. That body
+-- is replayed by every upgrade, so the backfill re-granted both pairs to every
+-- ordinary role on every release and undid the deny above each time. A hop runs
+-- only for a database older than it.
+--
+-- The pairs are declared first because this file runs BEFORE the replayed
+-- schema, and role_permissions has a foreign key to permission_kinds. The
+-- schema's own insert then sets checked_by to its current value (it ends
+-- `do update`), so the strings here need not track it. A 0.1.1 database has no
+-- permission_kinds and no such key, so there is nothing to declare there; the
+-- replayed schema creates the table and both pairs after this runs.
+--
+-- NOT APPLICATION ROLES (REM-193): an application's role holds only what
+-- rbac.application_may_hold admits, and grant_application_role refuses a role
+-- carrying either pair.
+do $$
+begin
+    if to_regclass('rbac.permission_kinds') is not null then
+        insert into rbac.permission_kinds (resource, action, checked_by) values
+            ('agents',    'invoke', 'agentic.may_invoke'),
+            ('resources', 'create', 'content.may_upload')
+        on conflict (resource, action) do nothing;
+    end if;
+end $$;
+
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r
+  cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
+ where r.description is distinct from 'granted by an application'
+on conflict do nothing;
+
 -- ============================================================
 -- percolate 0.2.14 -- the whole schema, as one extension script.
 --
@@ -9797,35 +9839,22 @@ select r.name, k.resource, k.action
  where r.grants_all
 on conflict do nothing;
 
--- UPGRADE BACKFILL for the two pairs added in 0.1.10 (agents:invoke,
--- resources:create). Both gate a capability that was previously ungated, so
--- without this every existing role loses chat and upload the moment the
--- schema loads -- a silent outage produced by a security improvement, which is
--- how security improvements get reverted.
+-- THE 0.1.10 BACKFILL IS A MIGRATION NOW (REM-552), in
+-- specs/migrations/0.1.6--0.2.0.sql: agents:invoke and resources:create, given
+-- once to every role that existed before the two pairs did, so that a security
+-- improvement did not take chat and upload away from existing roles.
 --
--- So: existing roles keep what they had, and DENYING becomes the deliberate
--- act it should be --
+-- It sat here, and this body is replayed by every ALTER EXTENSION UPDATE, so it
+-- ran on every upgrade rather than once -- and gave both pairs back to every
+-- ordinary role. The deny it tells an operator to make,
 --
 --     delete from rbac.role_permissions
 --      where role = 'member' and resource = 'agents' and action = 'invoke';
 --
--- On a fresh install this matches nothing (no roles exist yet) and
--- bootstrap_admin() grants every pair to the first administrator, so a new
--- deployment starts closed to everyone else and opens by grant.
---
--- NOT APPLICATION ROLES (REM-193). This statement runs on every upgrade,
--- because the upgrade replays the whole schema, so it gave both pairs back to
--- every role an application had provisioned -- and research-platform's
--- grant_application_role refuses a role carrying them. On Hetzner, 2026-09-13,
--- that turned the listing token into a 403 on every request until the two rows
--- were deleted by hand. An application's roles are the ones
--- grant_application_role created, which it marks 'granted by an application'.
-insert into rbac.role_permissions (role, resource, action)
-select r.name, k.resource, k.action
-  from rbac.roles r
-  cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
- where r.description is distinct from 'granted by an application'
-on conflict do nothing;
+-- lasted until the next release. It had already been found doing the same to
+-- application roles (REM-193) and was narrowed rather than moved.
+-- build-sql.py now refuses top-level DML in a replayed body outside
+-- REPLAYED_DML, and dev/upgrade-with-data.sh asserts that a deny survives.
 
 -- WHAT AN APPLICATION'S ROLE MAY HOLD: its own dotted capabilities, research:list, research:publish and
 -- engagement:moderate. ONE COPY. It was four -- this repair and three checks in research-platform's

@@ -204,6 +204,162 @@ def check_raise_format(path, text):
 # itself looks to answer "what version is this extension", so a second copy in
 # this file would be a second answer -- and the one that loses is whichever the
 # release tooling forgot. Read it, do not restate it.
+# THE REPLAYED BODY WRITES NO ROWS BUT THESE (REM-552).
+#
+# Every ALTER EXTENSION UPDATE replays the whole schema, so a top-level INSERT,
+# UPDATE or DELETE runs on every upgrade, not once. A one-time backfill written
+# there becomes a standing policy: user-rbac/schema.sql gave agents:invoke and
+# resources:create to every ordinary role on every release, undoing each deny an
+# operator made, and it had already done the same to application roles
+# (REM-193) and taken research:publish away from them (REM-311) before anybody
+# asked what class of statement it was. A one-time change belongs in
+# specs/migrations/<from>--<to>.sql, which runs only for a database older than
+# the hop.
+#
+# What may stay is what is right to repeat: a shipped vocabulary converging to
+# its current value, a repair whose target no deployment would want kept, and a
+# carry-over that can only find rows from before a table existed. Each entry is
+# (file, "<verb> <table>") -> (how many statements, why a replay may run them).
+# The count is part of the key's meaning: a second statement against the same
+# table in the same file is a new decision, not a copy of the old one. What this
+# cannot see is DML inside a DO block or a function a top-level SELECT calls;
+# those are named in the reason where they exist.
+REPLAYED_DML = {
+    ("workflow-engine/schema.sql", "insert workflow.lifecycle_states"):
+        (1, "the status vocabulary, shipped, converged with do update"),
+    ("workflow-engine/schema.sql", "update workflow.rate_limits"):
+        (1, "clamps a token count the old function could leave outside [0, capacity]; "
+            "no deployment wants such a row"),
+    ("user-rbac/schema.sql", "insert rbac.permission_kinds"):
+        (2, "the core (resource, action) vocabulary; do update on checked_by only"),
+    ("user-rbac/schema.sql", "update rbac.roles"):
+        (1, "marks the role holding users:admin grants_all; that pair is what makes a role "
+            "the administrator, so there is no administrator to mark otherwise"),
+    ("user-rbac/schema.sql", "insert rbac.role_permissions"):
+        (1, "a grants_all role holds every declared pair; that is the flag's definition, "
+            "and a pair declared by this release reaches the administrator here"),
+    ("user-rbac/schema.sql", "delete rbac.role_permissions"):
+        (1, "the REM-193 repair: an application role keeps only what "
+            "rbac.application_may_hold admits, the rule grant_application_role enforces"),
+    ("user-rbac/schema.sql", "insert rbac.visibilities"):
+        (1, "the visibility vocabulary, shipped"),
+    ("user-rbac/schema.sql", "insert rbac.orgs"):
+        (1, "the shared org, one shipped row, do nothing"),
+    ("ai-query-layer/schema.sql", "insert aiq.embedding_providers"):
+        (1, "the shipped provider templates, do update (REM-68)"),
+    ("ai-query-layer/schema.sql", "update aiq.embedding_providers"):
+        (1, "fills openai's batch template where it is still null; a set one is left alone"),
+    ("ai-query-layer/schema.sql", "update aiq.semantic_sources"):
+        (1, "a no-op write that re-fires the forget-vectors trigger; changes no value"),
+    ("world-model-ingestion/integration.sql", "insert aiq.semantic_sources"):
+        (1, "the shipped chunks source, do nothing"),
+    ("world-model-ingestion/integration.sql", "insert aiq.relation_types"):
+        (1, "the shipped relation vocabulary"),
+    ("world-model-ingestion/integration.sql", "insert content.channels"):
+        (1, "the shipped workflow_artifacts channel, where not exists"),
+    ("world-model-ingestion/integration.sql", "update content.channels"):
+        (1, "marks that one shipped channel shipped and public, which register_upload needs"),
+    ("agentic/schema.sql", "update agentic.agents"):
+        (1, "canonicalises a model spelling the trigger would canonicalise on any write; "
+            "touches only rows whose spelling changes"),
+    ("research-platform/schema.sql", "insert rbac.permission_kinds"):
+        (1, "the research and engagement pairs, shipped, do update"),
+    ("research-platform/schema.sql", "update rbac.permission_kinds"):
+        (1, "research:publish is delegable; a core kind is the extension's row, not the deployment's"),
+    ("research-platform/schema.sql", "insert rbac.grants"):
+        (1, "records a held role in the grant ledger where it has no active grant; the role "
+            "is held either way, so this changes what is recorded, not what is allowed"),
+    ("research-platform/schema.sql", "insert rbac.scope_aliases"):
+        (1, "the shipped credential scopes"),
+    ("research-platform/schema.sql", "insert rbac.plans"):
+        (1, "the default plan, do nothing"),
+    ("research-platform/schema.sql", "insert rbac.resource_kinds"):
+        (2, "the metered resources, shipped"),
+    ("research-platform/schema.sql", "insert rbac.plan_limits"):
+        (2, "the default plan's shipped limits, do nothing, so a deployment's change stands"),
+    ("research-platform/schema.sql", "update aiq.lexical_sources"):
+        (2, "points the two shipped research sources at their definer searches (REM-519)"),
+    ("research-platform/schema.sql", "insert research.endorsement_withdrawals"):
+        (1, "carries withdrawals from before the event table; do nothing, and a withdrawal "
+            "made since writes its own row"),
+    ("research-platform/schema.sql", "insert research.visibility_changes"):
+        (1, "one opening row for a work with no history, which only a work from before the "
+            "table can lack"),
+    ("research-platform/schema.sql", "insert research.exposures"):
+        (1, "exposes a public work's revisions only where the work has no exposure at all "
+            "(REM-185). Replays: a public work whose owner withdrew every exposure is "
+            "re-exposed -- flagged on REM-552, not decided here"),
+    ("research-platform/schema.sql", "insert content.channels"):
+        (1, "the shipped research_evidence channel, where not exists"),
+    ("research-platform/schema.sql", "update content.channels"):
+        (1, "marks that one shipped channel shipped and public"),
+    ("claims/schema.sql", "insert claims.predicates"):
+        (1, "the predicate vocabulary, shipped, do update"),
+    ("claims/schema.sql", "insert rbac.permission_kinds"):
+        (1, "the claims pairs, shipped, do update"),
+    ("identity/declarations.sql", "delete percolate.null_means"):
+        (1, "retracts five declarations an earlier release shipped wrongly; the rows are the extension's"),
+    ("identity/declarations.sql", "insert percolate.null_means"):
+        (1, "the extension's declarations about its own columns, do update"),
+    ("identity/declarations.sql", "insert percolate.table_kinds"):
+        (2, "the extension's declarations about its own tables"),
+}
+
+_DML = re.compile(r'\b(insert\s+into|update|delete\s+from|merge\s+into|truncate(?:\s+table)?)'
+                  r'\s+(?:only\s+)?([\w."]+)', re.I)
+
+
+def replayed_dml(text):
+    """Every top-level statement in `text` that writes rows, as
+    (line, "<verb> <table>"). A statement is top-level when its first word is
+    live text -- not a comment, a string or a dollar-quoted body -- so DML
+    inside a function or a DO block is not one."""
+    live = [" "] * len(text)
+    for a, b in _live_spans(text):
+        live[a:b] = text[a:b]
+    live = "".join(live)
+    out, pos = [], 0
+    for part in live.split(";"):
+        s = part.lstrip()
+        off = pos + len(part) - len(s)
+        pos += len(part) + 1
+        words = s.split(None, 1)
+        if not words or words[0].lower() not in (
+                "insert", "update", "delete", "merge", "truncate", "with"):
+            continue
+        m = _DML.search(s)
+        if m:
+            verb = m.group(1).split()[0].lower()
+            out.append((text[:off].count("\n") + 1, f"{verb} {m.group(2).lower()}"))
+    return out
+
+
+def check_replayed_dml(found) -> None:
+    """Refuse top-level DML in a replayed body that REPLAYED_DML does not name,
+    and an entry whose count no longer matches. `found` is (file, line, key)."""
+    from collections import Counter
+    seen = Counter((f, k) for f, _, k in found)
+    bad = []
+    for (f, k), n in sorted(seen.items()):
+        want = REPLAYED_DML.get((f, k))
+        if want is None or want[0] != n:
+            lines = ", ".join(str(ln) for g, ln, kk in found if (g, kk) == (f, k))
+            bad.append(f"  specs/{f}:{lines}  {k} -- {n} statement(s), "
+                       + ("not in REPLAYED_DML" if want is None else f"REPLAYED_DML says {want[0]}"))
+    for (f, k), (n, _) in sorted(REPLAYED_DML.items()):
+        if (f, k) not in seen:
+            bad.append(f"  REPLAYED_DML names {f}: {k}, which no longer exists -- remove the entry")
+    if bad:
+        raise SystemExit(
+            "top-level DML in the replayed schema that nobody has decided may run on every upgrade:\n"
+            + "\n".join(bad) +
+            "\nEvery ALTER EXTENSION UPDATE replays these files, so a statement here runs on every "
+            "release, not once (REM-552). A one-time backfill or repair goes in "
+            "specs/migrations/<from>--<to>.sql. A statement that is right to repeat -- a shipped "
+            "vocabulary, a repair no deployment would want undone -- goes in REPLAYED_DML in "
+            "extension/percolate/build-sql.py with the reason.")
+
+
 def _version() -> str:
     control = ROOT / "extension/percolate/percolate.control"
     m = re.search(r"^default_version\s*=\s*'([^']+)'", control.read_text(), re.M)
@@ -974,6 +1130,7 @@ def main() -> int:
     check_every_spec_is_accounted_for()
     parts = [HEADER]
     sigs_by_file = []
+    dml = []
 
     def emit(rel: str, why: str) -> bool:
         src = ROOT / "specs" / rel
@@ -985,6 +1142,7 @@ def main() -> int:
         raw = src.read_text()
         check_raise_format(rel, raw)
         check_idempotent(rel, raw)
+        dml.extend((rel, ln, k) for ln, k in replayed_dml(raw))
         sigs_by_file.append((rel, check_single_definition(rel, raw)))
         body = re.sub(r"^create extension if not exists [a-z_]+;.*$", "",
                       raw, flags=re.M)
@@ -1008,6 +1166,7 @@ def main() -> int:
         return 1
 
     check_cross_file_redefinitions(sigs_by_file)
+    check_replayed_dml(dml)
 
     out = ROOT / f"extension/percolate/sql/percolate--{VERSION}.sql"
     body = "\n".join(parts)

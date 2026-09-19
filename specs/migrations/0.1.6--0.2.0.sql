@@ -75,3 +75,45 @@ alter table aiq.edges add column if not exists last_recalled_at timestamptz;
 -- that works. The body recreates both, owned and granted as it says.
 drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
+
+-- THE TWO PAIRS 0.2.0 GATES, given once to every role that existed before them
+-- (REM-552). agents:invoke and resources:create gate chat and upload, which
+-- were ungated until this hop, so without this every existing role loses both
+-- the moment the schema loads -- a silent outage produced by a security
+-- improvement, which is how security improvements get reverted. Denying becomes
+-- the deliberate act, and it lasts:
+--
+--     delete from rbac.role_permissions
+--      where role = 'member' and resource = 'agents' and action = 'invoke';
+--
+-- HERE, AND NOT IN user-rbac/schema.sql, where it was until 0.2.14. That body
+-- is replayed by every upgrade, so the backfill re-granted both pairs to every
+-- ordinary role on every release and undid the deny above each time. A hop runs
+-- only for a database older than it.
+--
+-- The pairs are declared first because this file runs BEFORE the replayed
+-- schema, and role_permissions has a foreign key to permission_kinds. The
+-- schema's own insert then sets checked_by to its current value (it ends
+-- `do update`), so the strings here need not track it. A 0.1.1 database has no
+-- permission_kinds and no such key, so there is nothing to declare there; the
+-- replayed schema creates the table and both pairs after this runs.
+--
+-- NOT APPLICATION ROLES (REM-193): an application's role holds only what
+-- rbac.application_may_hold admits, and grant_application_role refuses a role
+-- carrying either pair.
+do $$
+begin
+    if to_regclass('rbac.permission_kinds') is not null then
+        insert into rbac.permission_kinds (resource, action, checked_by) values
+            ('agents',    'invoke', 'agentic.may_invoke'),
+            ('resources', 'create', 'content.may_upload')
+        on conflict (resource, action) do nothing;
+    end if;
+end $$;
+
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r
+  cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
+ where r.description is distinct from 'granted by an application'
+on conflict do nothing;

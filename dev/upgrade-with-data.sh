@@ -76,14 +76,22 @@ select workflow.start_workflow('ci_upgrade','{}'::jsonb);
 -- backfill in user-rbac/schema.sql gave agents:invoke and resources:create to
 -- every role on every replay, including the roles grant_application_role
 -- creates -- which that function then refuses to grant again. On Hetzner the
--- listing token went 403 after the 0.2.2 update. An ordinary role beside it
--- shows the backfill still reaches the roles it is for.
+-- listing token went 403 after the 0.2.2 update.
+--
+-- AND AN ORDINARY ROLE AN OPERATOR DENIED (REM-552). The same backfill gave
+-- both pairs back to every other role too, so the deny it told an operator to
+-- make lasted until the next release. ci-member holds neither pair, which is
+-- what the delete the backfill's comment prescribed leaves behind; ci-invoker
+-- holds agents:invoke, so the gate also sees a grant the upgrade must keep.
 insert into rbac.roles (name, description) values
-    ('ci-lister', 'granted by an application'), ('ci-member', null)
+    ('ci-lister', 'granted by an application'), ('ci-member', null), ('ci-invoker', null)
 on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
-    ('ci-lister', 'research', 'list'), ('ci-lister', 'agents', 'invoke'), ('ci-lister', 'resources', 'create')
+    ('ci-lister', 'research', 'list'), ('ci-lister', 'agents', 'invoke'), ('ci-lister', 'resources', 'create'),
+    ('ci-invoker', 'agents', 'invoke')
 on conflict do nothing;
+delete from rbac.role_permissions
+ where role = 'ci-member' and (resource, action) in (('agents', 'invoke'), ('resources', 'create'));
 -- A PUBLICATION ROLE AS AN APPLICATION PROVISIONS IT (REM-311). research:publish is a capability an application
 -- may grant (REM-252), and the replayed REM-193 repair deleted it on the 0.2.7 upgrade, so every publisher on
 -- production answered no_grant. The upgrade must keep it.
@@ -265,8 +273,12 @@ do \$\$ begin
   -- A PUBLICATION ROLE KEEPS research:publish (REM-311).
   if not exists (select 1 from rbac.role_permissions where role = 'ci-publisher' and resource = 'research' and action = 'publish')
     then raise exception 'the upgrade removed research:publish from an application''s publication role, which an application may grant (REM-311)'; end if;
-  if not exists (select 1 from rbac.role_permissions where role = 'ci-member' and resource = 'agents' and action = 'invoke')
-    then raise exception 'the backfill no longer reaches an ordinary role'; end if;
+  -- A DENY SURVIVES THE UPGRADE (REM-552), and a grant beside it is kept.
+  if exists (select 1 from rbac.role_permissions where role = 'ci-member'
+              and (resource, action) in (('agents', 'invoke'), ('resources', 'create')))
+    then raise exception 'the upgrade re-granted agents:invoke or resources:create to a role an operator had denied them (REM-552)'; end if;
+  if not exists (select 1 from rbac.role_permissions where role = 'ci-invoker' and resource = 'agents' and action = 'invoke')
+    then raise exception 'the upgrade removed agents:invoke from a role that held it'; end if;
   perform rbac.grant_application_role((select id from rbac.users where email = 'upgrade@ci'), 'ci-lister',
                                       'research', 'list', 'operator', 'upgrade gate', 'hub', null);
 
