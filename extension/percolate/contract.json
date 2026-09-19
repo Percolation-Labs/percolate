@@ -463,6 +463,20 @@
     },
     {
       "admits": [
+        "manual",
+        "projection",
+        "workflow",
+        "untracked_agent"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "execution_receipts",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "unchanged",
         "reworded",
         "new"

@@ -206,6 +206,8 @@ insert into t14_declared (fn, mechanism, why) values
  'each candidate the text index returns is kept only if the caller may read its revision (REM-500)'),
 ('research.search_sources(text,integer,integer)', 'research.revision_readable',
  'each candidate the text index returns is kept only if the caller may read its revision (REM-519)'),
+('claims.execution_receipt(bigint)', 'research.revision_readable',
+ 'research:select plus the actor or a currently readable assertion; both relation inputs are required and every input hash is checked separately (REM-590)'),
 ('claims.propose_resolution(uuid,uuid,text,text,text,date,text)', 'rbac.require',
  'research:select, and the evidence revision must be readable to the caller and express the claim (REM-480)'),
 ('claims.review_resolution(bigint,text,text)', 'rbac.require',
