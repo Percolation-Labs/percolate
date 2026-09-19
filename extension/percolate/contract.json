@@ -385,6 +385,45 @@
     },
     {
       "admits": [
+        "assert",
+        "retract"
+      ],
+      "column": "op",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "answered",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "yes",
+        "no",
+        "depends",
+        "unknown"
+      ],
+      "column": "stance",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "answered",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "proposed",
+        "confirmed",
+        "disputed"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "answered",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "unchanged",
         "reworded",
         "new"

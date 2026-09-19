@@ -204,6 +204,8 @@ insert into t14_declared (fn, mechanism, why) values
  'a page of exposed works, newest first, each kept only if the caller may read the work (REM-500)'),
 ('research.search_claims(text,integer,integer)', 'research.revision_readable',
  'each candidate the text index returns is kept only if the caller may read its revision (REM-500)'),
+('claims.question_readable(uuid)', 'research.revision_readable',
+ 'the questions policy: true only when a revision the caller may read answers the question or one refining it (REM-476)'),
 ('claims.assert_relation(text,text,text,uuid,uuid,text,jsonb,text)', 'rbac.require',
  'research:insert, from a revision of the caller''s own work; a second revision must be readable to them (REM-474)'),
 ('claims.restate_relation(bigint,text,boolean,text)', 'rbac.require',

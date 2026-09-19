@@ -29978,6 +29978,7 @@ begin
     -- Each occurrence expresses a claim (REM-473, specs/claims/schema.sql). A repair links only what is unlinked.
     perform claims.link_revision(p_revision);
     perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
+    perform claims.project_frames(p_revision);  -- and its frames, and the questions they answer (REM-476)
 end;
 $$;
 
@@ -31725,8 +31726,10 @@ end $$;
 --
 -- The graph is read through §12's functions (REM-475), each security invoker and each as of a date.
 --
--- WHAT IS NOT HERE YET. The reads over questions and origins (answers, evidence, question_evidence: REM-476, REM-477),
--- frames and questions (REM-476), cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
+-- Frames, questions and which question a claim answers are §10a (REM-476).
+--
+-- WHAT IS NOT HERE YET. The reads over origins (evidence, question_evidence: REM-477),
+-- cross-package same_as (REM-478), parts beyond the first (REM-506) and the writer's
 -- answer to a reworded claim (REM-483). A claim with no occurrence left after an erasure is REM-481's.
 
 create schema if not exists claims;
@@ -32022,7 +32025,7 @@ begin
     end if;
     if v_pred.kind = 'comparative' then
         raise feature_not_supported using message = 'A comparative relation needs the question both claims answer',
-            detail = p_predicate, hint = 'REM-476 builds questions; REM-479 moves comparisons into core';
+            detail = p_predicate, hint = 'REM-479 moves comparisons into core, with the question check';
     elsif p_predicate = 'same_as' then
         raise feature_not_supported using message = 'same_as between claims is REM-478', detail = p_predicate;
     end if;
@@ -32134,6 +32137,174 @@ grant execute on function claims.assert_relation(text, text, text, uuid, uuid, t
                           claims.restate_relation(bigint, text, boolean, text) to authenticated;
 
 -- ------------------------------------------------------------
+-- 10a. Frames and questions (graph.md §7, REM-476). A frame is what an occurrence says about the question it
+--      answers; it lives in the revision's document and is projected here, one row per framed occurrence, never
+--      updated. A question is identified by its normalised subject and outcome and by any refining slot; a
+--      question with refining slots names the broader one it refines. Which question a claim answers is an
+--      assertion with a stance: the platform asserts it from the slots, confirmed because slot matching is
+--      computed, with stance `unknown` because a stance is judged.
+-- ------------------------------------------------------------
+create table if not exists claims.frames (
+    revision_id   uuid not null,
+    claim_key     text not null,
+    subject       text,
+    outcome       text,
+    population    text,
+    setting       text,
+    period        text,
+    comparator    text,
+    evidence_type text,
+    direction     text,
+    magnitude     text,
+    frame         jsonb not null check (jsonb_typeof(frame) = 'object'),
+    primary key (revision_id, claim_key),
+    foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
+);
+
+create table if not exists claims.questions (
+    id          uuid primary key default uuidv7(),
+    subject     text not null check (length(subject) > 0),
+    outcome     text not null check (length(outcome) > 0),
+    refinements jsonb not null default '{}'::jsonb check (jsonb_typeof(refinements) = 'object'),
+    refines     uuid references claims.questions(id),
+    key         text not null unique,
+    tx          bigint not null references claims.tx(id),
+    check ((refinements = '{}'::jsonb) = (refines is null))
+);
+create index if not exists questions_refines on claims.questions (refines) where refines is not null;
+
+create table if not exists claims.answered (
+    id          bigint generated always as identity primary key,
+    claim_id    uuid not null references claims.claims(id),
+    question_id uuid not null references claims.questions(id),
+    stance      text not null check (stance in ('yes', 'no', 'depends', 'unknown')),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    op          text not null default 'assert' check (op in ('assert', 'retract')),
+    evidence    uuid not null references research.revisions(id) on delete cascade,
+    claim_key   text not null,
+    tx          bigint not null references claims.tx(id)
+);
+create index if not exists answered_question on claims.answered (question_id, claim_id, id desc);
+create index if not exists answered_claim on claims.answered (claim_id);
+create index if not exists answered_evidence on claims.answered (evidence);
+
+-- The refining slots of a frame, normalised and without the empty ones. direction and magnitude are the answer,
+-- not the question, and origin is evidence, so none of them refines.
+create or replace function claims.refinements(p_frame jsonb) returns jsonb
+language sql immutable parallel safe set search_path = pg_catalog as $$
+    select coalesce(jsonb_object_agg(k, claims.normalised(p_frame->>k) order by k), '{}'::jsonb)
+      from unnest(array['population', 'setting', 'period', 'comparator', 'evidence_type']) k
+     where nullif(btrim(coalesce(p_frame->>k, '')), '') is not null;
+$$;
+
+-- The question a subject, an outcome and refining slots identify, minted under p_tx when none exists yet. A refined
+-- question mints its broader one first, so `refines` always names a row.
+create or replace function claims.question_for(p_subject text, p_outcome text, p_refinements jsonb, p_tx bigint)
+returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    k    text := claims.normalised(p_subject) || '|' || claims.normalised(p_outcome) || '|' || p_refinements::text;
+    base uuid;
+    q    uuid;
+begin
+    select id into q from claims.questions where key = k;
+    if found then
+        return q;
+    end if;
+    if p_refinements <> '{}'::jsonb then
+        base := claims.question_for(p_subject, p_outcome, '{}'::jsonb, p_tx);
+    end if;
+    insert into claims.questions (subject, outcome, refinements, refines, key, tx)
+    values (btrim(p_subject), btrim(p_outcome), p_refinements, base, k, p_tx)
+    on conflict (key) do nothing
+    returning id into q;
+    if q is null then
+        select id into q from claims.questions where key = k;
+    end if;
+    return q;
+end;
+$$;
+
+-- A revision's frames and the questions they answer. Only an occurrence with no frame row yet is projected, so a
+-- rebuild and a replay write nothing. A frame without both subject and outcome is kept and answers nothing.
+create or replace function claims.project_frames(p_revision uuid) returns int
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    d   jsonb;
+    c   jsonb;
+    f   jsonb;
+    t   bigint;
+    cid uuid;
+    q   uuid;
+    n   int := 0;
+begin
+    select document into d from research.revisions where id = p_revision;
+    for c in select value from jsonb_array_elements(coalesce(d->'claims', '[]'::jsonb)) loop
+        f := c->'frame';
+        continue when f is null or jsonb_typeof(f) <> 'object' or f = '{}'::jsonb;
+        continue when exists (select 1 from claims.frames x where x.revision_id = p_revision and x.claim_key = c->>'id');
+        continue when not exists (select 1 from research.claims x where x.revision_id = p_revision and x.claim_key = c->>'id');
+        insert into claims.frames (revision_id, claim_key, subject, outcome, population, setting, period, comparator,
+                                   evidence_type, direction, magnitude, frame)
+        values (p_revision, c->>'id', nullif(btrim(f->>'subject'), ''), nullif(btrim(f->>'outcome'), ''),
+                nullif(btrim(f->>'population'), ''), nullif(btrim(f->>'setting'), ''), nullif(btrim(f->>'period'), ''),
+                nullif(btrim(f->>'comparator'), ''), nullif(btrim(f->>'evidence_type'), ''),
+                nullif(btrim(f->>'direction'), ''), nullif(btrim(f->>'magnitude'), ''), f);
+        n := n + 1;
+        continue when nullif(btrim(coalesce(f->>'subject', '')), '') is null
+                   or nullif(btrim(coalesce(f->>'outcome', '')), '') is null;
+        select x.claim_id into cid from claims.expresses x
+         where x.revision_id = p_revision and x.claim_key = c->>'id' and x.part = 1 order by x.id desc limit 1;
+        continue when cid is null;
+        if t is null then
+            insert into claims.tx (actor_kind, revision_id, reason)
+            values ('platform', p_revision, 'frames of ' || (select label from research.revisions where id = p_revision))
+            returning id into t;
+        end if;
+        q := claims.question_for(f->>'subject', f->>'outcome', claims.refinements(f), t);
+        insert into claims.answered (claim_id, question_id, stance, status, evidence, claim_key, tx)
+        values (cid, q, 'unknown', 'confirmed', p_revision, c->>'id', t);
+    end loop;
+    return n;
+end;
+$$;
+
+-- History and access: a frame and an answer are readable with their revision; a question when a readable answer
+-- names it or a question it refines (graph.md §9).
+do $$
+declare t text;
+begin
+    foreach t in array array['claims.frames', 'claims.questions', 'claims.answered'] loop
+        execute format('create or replace trigger trg_refuse_rewrite before update or delete on %s '
+                       'for each row execute function research.refuse_rewrite()', t);
+        execute format('create or replace trigger trg_refuse_truncate before truncate on %s '
+                       'for each statement execute function research.refuse_rewrite()', t);
+    end loop;
+end $$;
+alter table claims.frames enable row level security;
+drop policy if exists frames_readable on claims.frames;
+create policy frames_readable on claims.frames for select using (research.revision_readable(revision_id));
+alter table claims.answered enable row level security;
+drop policy if exists answered_readable on claims.answered;
+create policy answered_readable on claims.answered for select using (research.revision_readable(evidence));
+alter table claims.questions enable row level security;
+drop policy if exists questions_readable on claims.questions;
+-- A policy on claims.questions cannot read claims.questions under its own policy, so the refinement walk is a
+-- definer that applies the one rule itself: a readable revision answers the question or one that refines it.
+create or replace function claims.question_readable(p_question uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select exists (select 1 from claims.answered a
+                    where a.question_id in (select p_question union all
+                                            select r.id from claims.questions r where r.refines = p_question)
+                      and research.revision_readable(a.evidence));
+$$;
+create policy questions_readable on claims.questions for select using (claims.question_readable(id));
+-- A policy runs as the caller, so the caller executes it; identity/closing.sql takes PUBLIC's EXECUTE away.
+grant execute on function claims.question_readable(uuid) to authenticated;
+grant select on claims.frames, claims.questions, claims.answered to authenticated;
+revoke all on function claims.question_for(text, text, jsonb, bigint), claims.project_frames(uuid) from public;
+
+-- ------------------------------------------------------------
 -- 11. Who asserted, and when, behind a row the caller may read (graph.md §9). An actor sees their own transactions;
 --     anybody else sees a transaction's id, time and actor kind when a link or relation they may read names it, and
 --     never its actor, credential or reason.
@@ -32142,7 +32313,8 @@ drop policy if exists tx_readable on claims.tx;
 create policy tx_readable on claims.tx for select using (
     actor_id = rbac.current_user_id()
     or exists (select 1 from claims.expresses e where e.tx = tx.id)
-    or exists (select 1 from claims.relations r where r.tx = tx.id));
+    or exists (select 1 from claims.relations r where r.tx = tx.id)
+    or exists (select 1 from claims.answered a where a.tx = tx.id));
 grant select (id, at, actor_kind) on claims.tx to authenticated;
 
 -- ------------------------------------------------------------
@@ -32165,6 +32337,18 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
              where (r.src = p_claim or r.dst = p_claim) and t.at <= p_at
              order by r.src, r.predicate, r.dst, r.evidence, r.evidence2, r.keys, r.id desc) c
      where c.op = 'assert';
+$$;
+
+-- The questions a claim answered at p_at: the latest answered row per (evidence, question), retractions dropped.
+create or replace function claims.answers_of(p_claim uuid, p_at timestamptz default now())
+returns table (question_id uuid, stance text, status text, evidence uuid, claim_key text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select x.question_id, x.stance, x.status, x.evidence, x.claim_key
+      from (select distinct on (a.evidence, a.question_id) a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key
+              from claims.answered a join claims.tx t on t.id = a.tx
+             where a.claim_id = p_claim and t.at <= p_at
+             order by a.evidence, a.question_id, a.id desc) x
+     where x.op = 'assert';
 $$;
 
 -- The claims joined to p_id by confirmed same_as the caller may read, p_id included (graph.md §5, §6: identity is
@@ -32207,7 +32391,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                             'status', m.status, 'at', m.at) order by m.at, m.public_id, m.number)
                           from mine m),
         'identity_set', (select jsonb_agg(i order by i) from claims.identity_set(p_id, p_at) i),
-        'question', null)
+        'questions', (select jsonb_agg(distinct a.question_id) from claims.answers_of(p_id, p_at) a))
     end;
 $$;
 
@@ -32309,6 +32493,42 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
        and not exists (select 1 from tr where (tr.src, tr.predicate, tr.dst) = (fr.src, fr.predicate, fr.dst) and tr.op = 'assert');
 $$;
 
+-- Every readable claim answering a question or a question that refines it, grouped by stance (graph.md §10). A claim
+-- answers once however many revisions say so: its stance is the latest readable assertion's.
+create or replace function claims.answers(p_question uuid, p_at timestamptz default now())
+returns table (stance text, claims jsonb)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with recursive qs(id) as (
+        select p_question
+        union
+        select q.id from claims.questions q join qs on q.refines = qs.id),
+    latest as (
+        select distinct on (a.claim_id) a.claim_id, a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key, t.at
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id in (select id from qs) and t.at <= p_at
+         order by a.claim_id, t.at desc, a.id desc)
+    select l.stance, jsonb_agg(jsonb_build_object('claim', l.claim_id, 'question', l.question_id,
+                                                  'revision_id', l.evidence, 'claim_key', l.claim_key,
+                                                  'status', l.status) order by l.at, l.claim_id)
+      from latest l where l.op = 'assert'
+     group by l.stance order by l.stance;
+$$;
+
+-- How many of a work's claims carry a frame, in the revision the caller is shown (graph.md §7): frame coverage as a
+-- number. Null when the caller may read no revision of the work.
+create or replace function claims.frame_coverage(p_public_id text)
+returns table (revision_id uuid, claims int, framed int, answering int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select h.rev, (select count(*)::int from research.claims c where c.revision_id = h.rev),
+           (select count(*)::int from claims.frames f where f.revision_id = h.rev),
+           (select count(distinct a.claim_key)::int from claims.answered a where a.evidence = h.rev and a.op = 'assert')
+      from (select research.visible_head(w.id) as rev from research.works w where w.public_id = p_public_id) h
+     where h.rev is not null;
+$$;
+
+grant execute on function claims.answers_of(uuid, timestamptz), claims.answers(uuid, timestamptz),
+                          claims.frame_coverage(text) to authenticated;
+
 grant execute on function claims.relations_at(uuid, timestamptz), claims.claim(uuid, timestamptz),
                           claims.identity_set(uuid, timestamptz),
                           claims.neighbourhood(uuid, text[], int, timestamptz), claims.rests_on(uuid, timestamptz),
@@ -32340,6 +32560,17 @@ begin
               where not exists (select 1 from claims.relations r where r.evidence = a.revision_id and r.evidence2 is null)
     loop
         perform claims.project_edges(v);
+    end loop;
+end $$;
+do $$
+declare v uuid;
+begin
+    for v in select r.id from research.revisions r
+              where jsonb_path_exists(r.document, '$.claims[*].frame')
+                and exists (select 1 from research.claims c where c.revision_id = r.id)
+                and not exists (select 1 from claims.frames f where f.revision_id = r.id)
+              order by r.work_id, r.number loop
+        perform claims.project_frames(v);
     end loop;
 end $$;
 
@@ -32869,7 +33100,7 @@ declare
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
-        'claims.claims', 'claims.expresses', 'claims.relations', 'claims.tx',
+        'claims.answered', 'claims.claims', 'claims.expresses', 'claims.frames', 'claims.questions', 'claims.relations', 'claims.tx',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

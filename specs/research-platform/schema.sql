@@ -1207,6 +1207,7 @@ begin
     -- Each occurrence expresses a claim (REM-473, specs/claims/schema.sql). A repair links only what is unlinked.
     perform claims.link_revision(p_revision);
     perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
+    perform claims.project_frames(p_revision);  -- and its frames, and the questions they answer (REM-476)
 end;
 $$;
 
