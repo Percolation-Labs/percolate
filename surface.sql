@@ -530,6 +530,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','function','agentic.detach_skill','text,text','plugins.md §5.5: and so is removing one'),
 ('agentic','view','agentic.skills_api',null,'plugins.md §5: the runtime loads a pinned body over REST like every other client'),
 ('agentic','view','agentic.plugins_api',null,'plugins.md §9: what did this plugin install, answered from the document as applied'),
+('agentic','column','agentic.plugins_api.installed',null,'plugins.md §9: which plugins are installed, apart from the rows that outlive an uninstall (REM-250)'),
 ('agentic','column','agentic.agents.skills',null,'plugins.md §5: the pinned list, which is prompt content the runtime must be able to read'),
 ('agentic','column','agentic.tool_servers.serves_skills',null,'plugins.md §7: the adapter has to recognise a skill load to stop windowing it away'),
 ('agentic','column','agentic.skills.discovery_text',null,'plugins.md §6: only the listing is embedded, and it is generated so it cannot drift'),
