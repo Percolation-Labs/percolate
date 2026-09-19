@@ -212,23 +212,15 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 5. WHAT IS STILL EXPOSED, PINNED SO THAT CLOSING IT IS DELIBERATE.
+-- 5. THE SPACE IS NO MORE PERMISSIVE THAN THE MODE OVER IT.
 --
--- The embedding spaces themselves are directly SELECT-able by `authenticated`.
--- That is not an oversight: integration-rbac.sql grants the schema's tables --
--- and sets ALTER DEFAULT PRIVILEGES so spaces registered later are covered --
--- precisely because the query modes are SECURITY INVOKER and must read them as
--- the caller. Withholding the grant would break every SEMANTIC call.
---
--- The residue is that a caller who queries `aiq.emb_<model>` directly still
--- sees chunk ids and raw vectors for content it cannot read. Raw vectors are
--- not innocuous -- embedding inversion is a published attack -- so this is a
--- real exposure with a known fix that is NOT built: per-source row policies on
--- generated spaces, which needs the registry to be consulted at policy time.
---
--- This assertion documents the current state rather than approving it. It is
--- expected to be INVERTED when the policies land, not deleted, so that the
--- engine and graph-identity.md's note change together.
+-- The embedding spaces are directly SELECT-able by `authenticated`, because
+-- the query modes are SECURITY INVOKER and read them as the caller. Until
+-- REM-567 that meant a caller who queried `aiq.emb_<model>` directly saw chunk
+-- ids and raw vectors for content it could not read, and this section pinned
+-- it as documented residue. Each space now carries a read policy through the
+-- registered sources (ai-query-layer/schema.sql §10a-iii), so the space shows
+-- this caller exactly the chunks the mode ranks. rbac/20 proves it per user.
 -- ---------------------------------------------------------------------
 do $$
 declare v_direct int; v_via_mode int;
@@ -239,16 +231,14 @@ begin
     select count(*) into v_via_mode from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-a',50);
     reset role;
 
-    if v_direct <= v_via_mode then
+    if v_direct > v_via_mode then
         raise exception
-            'the embedding space is no longer more permissive than the mode over '
-            'it (direct %, via SEMANTIC %). If per-source policies on generated '
-            'spaces have landed, that is the improvement this assertion is '
-            'waiting for -- update the note in ai-query-layer/schema.sql §10 and '
-            'invert this check rather than deleting it', v_direct, v_via_mode;
+            'the embedding space is more permissive than the mode over it (direct %, '
+            'via SEMANTIC %): a caller reads vectors of chunks it cannot see (REM-567)',
+            v_direct, v_via_mode;
     end if;
-    raise notice 'query/09: the space is readable directly (% rows vs % via the mode) '
-                 '-- documented residue, not a passing grade', v_direct, v_via_mode;
+    raise notice 'query/09: the space shows the caller what the mode does (% rows, % via the mode)',
+                 v_direct, v_via_mode;
 end $$;
 
 rollback;

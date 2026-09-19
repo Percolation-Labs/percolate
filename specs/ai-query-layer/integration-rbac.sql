@@ -216,6 +216,10 @@ grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
 grant select on all tables in schema aiq to authenticated, api_viewer;
 alter default privileges for role app_owner in schema aiq
     grant select on tables to authenticated, api_viewer;
+-- The grant is what a space's read policies are written for: one per role
+-- that holds it (schema.sql §10a-iii, REM-567). Rewritten here as well, so a
+-- space this grant reached for the first time does not stay unreadable.
+select aiq.police_embedding_spaces();
 
 -- ------------------------------------------------------------
 -- 3. Query functions: deny by default, then grant the entry points.

@@ -16136,10 +16136,11 @@ comment on function aiq.extension_boundary() is
 -- was measured rather than reasoned: a space is keyed by MODEL, so it holds
 -- every registered corpus's chunks together, and it has no way to know which
 -- consumer table a chunk_id came from -- `chunk_id` deliberately carries no
--- foreign key, because one space serves many corpora. A generated space
--- therefore cannot carry a row policy of its own.
+-- foreign key, because one space serves many corpora. A space's row policy
+-- therefore cannot be written with the table: it is generated from the
+-- registry of sources.
 --
--- Two things follow, and only the first is fixed.
+-- Two things follow.
 --
 --  1. THE MODE MUST SCOPE ITSELF. aiq.semantic_in() joins the space to the
 --     table registered under the corpus named in `FROM`, which both restricts
@@ -16149,19 +16150,16 @@ comment on function aiq.extension_boundary() is
 --     caller could not read: on the committed fixture, a caller holding org
 --     B's claim saw five of six chunks and SEMANTIC returned all six.
 --
---  2. THE SPACE ITSELF IS STILL READABLE, and this is a known, open exposure
---     rather than a decision. integration-rbac.sql grants SELECT on this
---     schema's tables -- and sets ALTER DEFAULT PRIVILEGES so spaces
---     registered later are covered -- precisely because the modes are SECURITY
---     INVOKER and must read them as the caller; withholding the grant would
---     break every SEMANTIC call. So `select * from aiq.emb_<model>` still
---     hands any authenticated caller chunk ids and raw vectors for content it
---     cannot read, and raw vectors are not innocuous (embedding inversion is a
---     published attack). Closing it needs per-source row policies generated
---     onto each space from aiq.semantic_sources, refreshed as corpora are
---     registered. That is real machinery and it is not built.
---     dev/tests/query/09 §5 pins the current state so that building it is a
---     deliberate act that updates this paragraph.
+--  2. THE SPACE ITSELF MUST BE POLICIED. integration-rbac.sql grants SELECT on
+--     this schema's tables -- and sets ALTER DEFAULT PRIVILEGES so spaces
+--     registered later are covered -- because the modes are SECURITY INVOKER
+--     and must read them as the caller. Until REM-567 the spaces had RLS off,
+--     so `select * from aiq.emb_<model>` handed any authenticated caller chunk
+--     ids and raw vectors for content it could not read, and raw vectors are
+--     not innocuous (embedding inversion is a published attack). Each space
+--     now carries read policies generated from aiq.semantic_sources and
+--     refreshed as sources are registered: §10a-iii. dev/tests/rbac/20 proves
+--     it per user and query/09 §5 compares the space with the mode.
 -- ============================================================
 
 create table if not exists aiq.embedding_models (
@@ -16430,6 +16428,9 @@ begin
             'references it by surrogate; created per registered model')
     on conflict (schema_name, table_name) do nothing;
 
+    -- RLS and its read policies (§10a-iii, REM-567). A space created without
+    -- them would be every tenant's vectors to every caller the grant reaches.
+    perform aiq.police_embedding_spaces();
 end;
 $$ language plpgsql;
 
@@ -16613,6 +16614,122 @@ begin
         raise warning 'aiq: removed % vector(s) whose rows had already been deleted', v_n;
     end if;
 end $$;
+
+-- ------------------------------------------------------------
+-- 10a-iii. A caller reads a vector only if they may read its row (REM-567).
+--
+-- integration-rbac.sql grants SELECT on every space to authenticated and
+-- api_viewer, because semantic_in is SECURITY INVOKER and reads the space as
+-- the caller. With RLS off that grant handed every tenant's chunk ids and
+-- vectors to anyone who selected the table, and a vector is readable content.
+-- rbac/02 §10 found it (REM-551).
+--
+-- Revoking the grant instead was considered and does not work: the search has
+-- to read the space as the caller, so that the consumer table it joins is
+-- filtered by the caller's policies, and an HNSW scan cannot be split across a
+-- definer boundary without losing the iterative scan that gives a narrow
+-- tenant any recall at all (semantic_in, below).
+--
+-- So each space carries a SELECT policy through its source rows: a vector is
+-- visible when one registered source has a row with that id that the caller
+-- can see, which puts that source's own policy in the path. It is generated
+-- from aiq.semantic_sources, because a space does not know which source a
+-- chunk_id came from.
+--
+-- ONE POLICY PER READING ROLE, not one policy. A policy that names a table the
+-- caller cannot SELECT fails the whole read with "permission denied", so a
+-- clause is written only for a role that may read that source: authenticated
+-- cannot read agentic.skills and api_viewer can, so skill vectors are visible
+-- to api_viewer (skill discovery) and to no other web role. api_viewer is a
+-- member of authenticated and gets both policies; its own carries only the
+-- sources the parent's does not. A role reading the space that this function
+-- does not name gets no policy and reads nothing, which is the side to fail on.
+--
+-- Cost: an index lookup per candidate vector through the source's primary key
+-- and its policy. semantic_in already joins the same source, so a search pays
+-- the check twice; dev/tests/query/13 runs it at scale.
+--
+-- Run by register_embedding_space for a new space, by the trigger below when a
+-- source is registered, changed or removed, and once below for an upgrade. It
+-- has to run as the spaces' owner; a registrar that is not gets a WARNING and
+-- the old policies stay.
+create or replace function aiq.police_embedding_spaces()
+returns void as $$
+declare
+    v_tbl   text;
+    v_rel   regclass;
+    v_pol   text;
+    v_role  text;
+    v_using text;
+    v_roles text[] := array['web_anon', 'authenticated', 'api_viewer'];
+begin
+    for v_tbl in
+        select aiq.embedding_space_name(m.name)
+          from aiq.embedding_models m
+         where to_regclass('aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null
+    loop
+        v_rel := to_regclass('aiq.' || quote_ident(v_tbl));
+        execute format('alter table %s enable row level security', v_rel);
+        for v_pol in select polname from pg_policy
+                      where polrelid = v_rel and polname like 'space\_read\_%'
+        loop
+            execute format('drop policy %I on %s', v_pol, v_rel);
+        end loop;
+
+        for v_role in
+            select r from unnest(v_roles) r
+             where exists (select 1 from pg_roles where rolname = r)
+               and has_table_privilege(r, v_rel, 'select')
+        loop
+            select string_agg(format('exists (select 1 from %s s where s.id = %I.chunk_id)',
+                                     src.rel, v_tbl), ' or ' order by src.name)
+              into v_using
+              from (select s.name, to_regclass(s.source_table) as rel
+                      from aiq.semantic_sources s) src
+             where src.rel is not null
+               and exists (select 1 from pg_attribute a
+                            where a.attrelid = src.rel and a.attname = 'id'
+                              and not a.attisdropped)
+               and has_table_privilege(v_role, src.rel, 'select')
+               -- Already written into the policy of a role this one inherits.
+               and not exists (
+                   select 1 from unnest(v_roles) p
+                    where p <> v_role
+                      and exists (select 1 from pg_roles where rolname = p)
+                      and pg_has_role(v_role, p, 'member')
+                      and has_table_privilege(p, v_rel, 'select')
+                      and has_table_privilege(p, src.rel, 'select'));
+            execute format('create policy %I on %s for select to %I using (%s)',
+                           'space_read_' || v_role, v_rel, v_role, coalesce(v_using, 'false'));
+        end loop;
+    end loop;
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+revoke execute on function aiq.police_embedding_spaces() from public;
+
+create or replace function aiq.police_embedding_spaces_on_change()
+returns trigger as $$
+begin
+    perform aiq.police_embedding_spaces();
+    return null;
+exception when insufficient_privilege then
+    raise warning 'aiq: % does not own the embedding spaces, so their read policies '
+                  'still name only the sources registered before this change (%). '
+                  'Vectors of a new source stay hidden until the owner runs '
+                  'aiq.police_embedding_spaces().', current_user, sqlerrm;
+    return null;
+end;
+$$ language plpgsql;
+
+revoke execute on function aiq.police_embedding_spaces_on_change() from public;
+
+create or replace trigger trg_semantic_source_polices
+    after insert or update of source_table or delete on aiq.semantic_sources
+    for each statement execute function aiq.police_embedding_spaces_on_change();
+
+-- A database from before REM-567 has spaces with RLS off; this turns it on.
+select aiq.police_embedding_spaces();
 
 -- ------------------------------------------------------------
 -- 10b. Embedding a CORPUS, in batches, and why that is not the `embed:` step.
@@ -16873,12 +16990,9 @@ revoke execute on function aiq.record_embeddings(text, jsonb) from public;
 -- result. That is the price of a filtered vector search and it is the correct
 -- price to pay; the alternative is a fast wrong answer.
 --
--- What this does NOT fix, and what dev/tests/query/09 pins: `aiq.emb_*` is
--- still directly SELECT-able by `authenticated`, because integration-rbac.sql
--- grants the schema's tables so that SECURITY INVOKER modes can read them. A
--- caller who queries the space directly still sees chunk ids and raw vectors
--- for content they cannot read. Closing that needs per-source policies on
--- generated spaces, which is real machinery and is not built.
+-- The space is policied as well (§10a-iii, REM-567), so a caller who selects
+-- `aiq.emb_*` directly sees only the vectors of chunks they may read. This
+-- join still does the scoping to one corpus.
 -- THE ONE SETTING semantic_in CHANGES, changed on the caller's behalf.
 --
 -- semantic_in runs as its caller, so RLS filters the join by the caller's
@@ -18614,6 +18728,10 @@ grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
 grant select on all tables in schema aiq to authenticated, api_viewer;
 alter default privileges for role app_owner in schema aiq
     grant select on tables to authenticated, api_viewer;
+-- The grant is what a space's read policies are written for: one per role
+-- that holds it (schema.sql §10a-iii, REM-567). Rewritten here as well, so a
+-- space this grant reached for the first time does not stay unreadable.
+select aiq.police_embedding_spaces();
 
 -- ------------------------------------------------------------
 -- 3. Query functions: deny by default, then grant the entry points.

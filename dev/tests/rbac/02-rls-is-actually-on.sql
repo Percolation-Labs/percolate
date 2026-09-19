@@ -502,12 +502,7 @@ insert into rls_off_exempt values
   ('rbac.scope_aliases',         'what each credential scope expands to'),
   ('workflow.lifecycle_states',  'the status vocabulary'),
   ('workflow.queue_config',      'per-queue timeouts'),
-  ('workflow.step_functions',    'the registered step functions a SQL step may call'),
-  -- NOT LEGITIMATE, and listed so the gate can be armed today rather than when
-  -- it is fixed. An embedding space holds (chunk_id, vector) for every chunk of
-  -- every tenant; a vector is readable content. REM-567 owns it: the spaces are
-  -- created by register_embedding_space and need a policy through the chunk.
-  ('aiq.emb\_%',                 'KNOWN DEFECT, REM-567: every tenant''s chunk vectors are readable');
+  ('workflow.step_functions',    'the registered step functions a SQL step may call');
 
 do $$
 declare v_bad text; v_stale text;
@@ -544,9 +539,7 @@ begin
            and n.nspname || '.' || c.relname like e.pattern
            and (has_table_privilege('api_viewer', c.oid, 'select')
                 or has_table_privilege('authenticated', c.oid, 'select')
-                or has_table_privilege('web_anon', c.oid, 'select')))
-       -- An embedding space exists only once a model is registered.
-       and e.pattern <> 'aiq.emb\_%';
+                or has_table_privilege('web_anon', c.oid, 'select')));
     if v_stale is not null then
         raise exception 'rls_off_exempt excuses tables that are no longer reachable with RLS off: %. '
             'Remove the entries.', v_stale;

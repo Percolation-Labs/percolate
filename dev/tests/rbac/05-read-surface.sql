@@ -99,14 +99,9 @@ begin
        -- Any column: a table readable through a column grant alone is readable (REM-475).
        and (has_any_column_privilege('authenticated', c.oid, 'select')
             or has_any_column_privilege('web_anon', c.oid, 'select'))
-       and n.nspname || '.' || c.relname <> all (v_shared)
-       -- Embedding spaces are created dynamically by register_embedding_space,
-       -- so they cannot be listed by name. They hold (chunk_id, vector) and no
-       -- tenant column; query/09 records the residue -- reading a space
-       -- directly returns rows the mode would filter -- as documented rather
-       -- than fixed, because the vector is keyed by a chunk id the caller
-       -- still cannot resolve through any policied table.
-       and c.relname not like 'emb\_%';
+       -- Embedding spaces are not excepted: each carries a read policy
+       -- through its sources (ai-query-layer/schema.sql §10a-iii, REM-567).
+       and n.nspname || '.' || c.relname <> all (v_shared);
 
     if v_bad is not null then
         raise exception
