@@ -34,6 +34,7 @@ opposite and stay retryable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -103,7 +104,9 @@ async def ingest(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
         return {"result": {"resource_id": resource_id, "mode": "skip", "chunks": 0,
                            "detail": "policy says skip; the bytes stay registered"}}
 
-    data = storage.get(target["bucket"], target["object_key"])
+    # Off the loop (REM-556): boto3 blocks, and in the worker the heartbeat
+    # beside this handler shares the loop. Every storage call below, too.
+    data = await asyncio.to_thread(storage.get, target["bucket"], target["object_key"])
     name = _name_of(target)
 
     # ---------------------------------------------------------------- tabular
@@ -122,13 +125,13 @@ async def ingest(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
                 "chunk it as prose instead.") from None
 
         dataset = tabular.dataset_name_for(policy, name, target.get("title"))
-        checksum, _ = storage.put(parquet, "application/vnd.apache.parquet")
+        checksum, _ = await asyncio.to_thread(storage.put, parquet, "application/vnd.apache.parquet")
         key = tabular.object_key_for(dataset, checksum)
         # Written a second time under the dataset prefix, and that is not a
         # duplicate by accident: `objects/<hash>` is the content-addressed
         # store every file lives in, and the dataset prefix is what the DuckDB
         # glob reads. One is storage, the other is a table.
-        storage.put_at(key, parquet, "application/vnd.apache.parquet")
+        await asyncio.to_thread(storage.put_at, key, parquet, "application/vnd.apache.parquet")
 
         async with as_service() as conn:
             receipt = json.loads(await conn.fetchval(
@@ -169,8 +172,8 @@ async def ingest(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
 
     markdown_ref = None
     if policy.keep_markdown:
-        md_checksum, md_key = storage.put(
-            parsed.markdown.encode(), "text/markdown; charset=utf-8")
+        md_checksum, md_key = await asyncio.to_thread(
+            storage.put, parsed.markdown.encode(), "text/markdown; charset=utf-8")
         markdown_ref = {"bucket": storage.bucket(), "object_key": md_key,
                         "bytes": len(parsed.markdown.encode()),
                         "checksum": md_checksum}

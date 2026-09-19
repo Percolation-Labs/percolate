@@ -123,3 +123,35 @@ class UploadIsAuthorizedBeforeItIsStored(unittest.TestCase):
         response, events = self.post(chunks(), env={"P8_UPLOAD_MAX_BYTES": "10"})
         self.assertEqual(response.status_code, 413, response.text)
         self.assertEqual(events, [])
+
+
+class StorageRunsOffTheLoop(unittest.TestCase):
+    """REM-556: boto3 is synchronous, and a put on the event loop stalled every
+    other request the Content Server was serving."""
+
+    def test_the_put_is_not_on_the_loop_thread(self):
+        import threading
+        threads = {}
+        conn = AsyncMock()
+
+        async def fetchval(*args):
+            threads["loop"] = threading.get_ident()
+            return UUID("11111111-1111-1111-1111-111111111111")
+        conn.fetchval.side_effect = fetchval
+
+        @asynccontextmanager
+        async def scoped(_claims):
+            yield conn
+
+        def put(data, content_type=None):
+            threads["put"] = threading.get_ident()
+            return ("checksum", "object-key")
+
+        application = build_app(())
+        application.dependency_overrides[caller] = lambda: {"sub": "test-user"}
+        with patch("percolate_core.content.server.as_caller", scoped), \
+             patch("percolate_core.content.server.storage.put", side_effect=put), \
+             patch("percolate_core.content.server.storage.bucket", return_value="test-bucket"):
+            with TestClient(application) as client:
+                self.assertEqual(client.post("/files", content=b"note").status_code, 201)
+        self.assertNotEqual(threads["put"], threads["loop"])

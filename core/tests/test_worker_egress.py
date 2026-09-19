@@ -111,3 +111,32 @@ class TheCheckIsOnTheResolvedUrl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheLookupRunsOffTheLoop(unittest.IsolatedAsyncioTestCase):
+    """REM-556: http_call resolved the host on the event loop, so a slow DNS
+    answer stalled the heartbeat that keeps the task's lease."""
+
+    async def test_the_egress_lookup_is_not_on_the_loop_thread(self):
+        import threading
+
+        import httpx
+
+        from percolate_core.worker import http as worker_http
+
+        loop_thread = threading.get_ident()
+        seen = []
+
+        def lookup(host, port, *args, **kwargs):
+            seen.append(threading.get_ident())
+            return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+        real = httpx.AsyncClient
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True}))
+        with patch("percolate_core.core.egress.socket.getaddrinfo", lookup), \
+             patch.object(worker_http.httpx, "AsyncClient",
+                          lambda *a, **kw: real(*a, transport=transport, **kw)):
+            out = await worker_http.http_call({"url": "https://api.example.com/x"}, {})
+        self.assertEqual(out["status"], 200)
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], loop_thread)

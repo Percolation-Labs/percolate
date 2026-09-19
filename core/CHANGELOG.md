@@ -29,6 +29,9 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
 - **`POST /files` registers before it stores, and has a size cap** (REM-566). `content.register_upload`
   authorizes the upload, then the object is written inside the same transaction, so a refused upload
   writes nothing. `P8_UPLOAD_MAX_BYTES` (default 100 MB) caps the body; past it the answer is 413.
+- **Object storage and DNS calls run off the event loop** (REM-556). The Content Server's puts and gets, the
+  ingest handler's, the worker's artifact offload, and `http_call`'s egress lookup go through
+  `asyncio.to_thread`, so a slow one no longer stalls other requests or the worker's heartbeat.
 
 ## Unreleased, after 0.1.13
 

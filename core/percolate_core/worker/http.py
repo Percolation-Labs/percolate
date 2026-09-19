@@ -20,6 +20,7 @@ the extension. Three reasons this collection does not, the third being decisive:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from urllib.parse import urlsplit
@@ -128,7 +129,10 @@ def _wait_seconds(spec: dict) -> float:
 
 
 async def http_call(spec: dict, ctx: dict) -> Any:
-    req, spec = build_request(spec, ctx)
+    # In a thread (REM-556): build_request resolves the host for the egress
+    # check, and a slow DNS answer on the loop also stalls the heartbeat that
+    # keeps this task's lease.
+    req, spec = await asyncio.to_thread(build_request, spec, ctx)
     wait_seconds = _wait_seconds(spec) if spec.get("mode") == "async" else None
 
     async with httpx.AsyncClient() as client:

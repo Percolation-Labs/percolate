@@ -30,6 +30,7 @@ those, and carries a bucket name into a row that is meant to stay inspectable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -174,7 +175,8 @@ async def offload(conn: Any, task_id: str, out: Any) -> Any:
     # right response. Only the missing-dependency case above is terminal,
     # because pip will not run itself between attempts.
     data, content_type, nested = _bytes_of(out)
-    checksum, key = storage.put(data, content_type)
+    # Off the loop (REM-556): boto3 blocks, and the heartbeat shares the loop.
+    checksum, key = await asyncio.to_thread(storage.put, data, content_type)
 
     # Casts are explicit: asyncpg sends a str as text, and register_artifact's
     # first argument is uuid and its fifth is bigint. Without them the call

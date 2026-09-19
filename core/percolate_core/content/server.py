@@ -17,6 +17,7 @@ acceptable because it is stateless and scales horizontally.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -31,6 +32,10 @@ from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from . import storage
 
 routes = APIRouter()
+
+# EVERY storage CALL GOES THROUGH asyncio.to_thread (REM-556). boto3 is
+# synchronous, and a put or get of a large object on the event loop stalls
+# every other request this process is serving until it returns.
 
 DEFAULT_UPLOAD_MAX_BYTES = 100_000_000
 """What `/files` accepts in one body when `P8_UPLOAD_MAX_BYTES` is not set."""
@@ -151,7 +156,7 @@ async def upload(request: Request,
             except Exception as e:
                 raise _Unregistered(e) from e
             # Inside the transaction: if the write fails, the row goes too.
-            storage.put(data, content_type)
+            await asyncio.to_thread(storage.put, data, content_type)
     except _Unregistered as wrapped:
         e = wrapped.cause
         # A REFUSAL IS NOT A BAD REQUEST. `content.register_upload` raises
@@ -189,7 +194,7 @@ async def fetch(resource_id: UUID, claims: dict | None = Depends(caller)):
     if not row:
         raise HTTPException(404, "no such file, or not yours")
 
-    body = storage.get(row["bucket"], row["object_key"])
+    body = await asyncio.to_thread(storage.get, row["bucket"], row["object_key"])
     # NEVER INLINE, WHATEVER THE TYPE SAYS. `content_type` is the uploader's own
     # `Content-Type` header, kept verbatim from the upload above, and the bytes
     # are theirs too. Served inline it executes on this origin -- the same origin
@@ -299,7 +304,7 @@ async def save_evidence(request: Request, claims: dict | None = Depends(caller))
             return JSONResponse({"saved": False, "reason": "Your allowance for saving evidence is used up for now.",
                                  "limit": state}, status_code=REFUSED_STATUS)
 
-        checksum, key = storage.put(data, content_type)
+        checksum, key = await asyncio.to_thread(storage.put, data, content_type)
         async with as_caller(claims) as conn:
             resource_id = await conn.fetchval(
                 "select content.register_evidence($1,$2,$3,$4,$5,$6,$7)",
@@ -348,7 +353,7 @@ async def save_research_image(request: Request, claims: dict | None = Depends(ca
             return JSONResponse({"saved": False, "reason": "Your allowance for keeping images is used up for now.",
                                  "limit": state}, status_code=REFUSED_STATUS)
 
-        checksum, key = storage.put(data, content_type)
+        checksum, key = await asyncio.to_thread(storage.put, data, content_type)
         async with as_caller(claims) as conn:
             resource_id = await conn.fetchval(
                 "select content.register_research_image($1,$2,$3,$4,$5,$6)",
@@ -380,7 +385,7 @@ async def read_research_image(snapshot_id: UUID, claims: dict | None = Depends(c
         row = await conn.fetchrow("select * from research.resolve_image($1)", snapshot_id)
     if not row:
         raise HTTPException(404, "no such image, or not yours to read")
-    body = storage.get(row["bucket"], row["object_key"])
+    body = await asyncio.to_thread(storage.get, row["bucket"], row["object_key"])
     found = identify(body)
     if found is None or found[0] != row["content_type"]:
         raise HTTPException(404, "no such image, or not yours to read")
