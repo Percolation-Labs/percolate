@@ -65,7 +65,7 @@ concurrency:
 
 jobs:
   cargo-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -78,8 +78,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: extension/percolate_parser/target-test
-          key: parser-tests-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
-          restore-keys: parser-tests-
+          key: parser-tests-${{ runner.arch }}-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
+          restore-keys: parser-tests-${{ runner.arch }}-
 
       # THE 343 SECONDS THIS JOB SPENT BEFORE IT RAN A SINGLE TEST -- 72% of
       # it -- measured on run 34028283280:
@@ -181,8 +181,8 @@ jobs:
         id: toolchain
         uses: actions/cache@v6
         with:
-          path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-pgrx${{ steps.pins.outputs.pgrx }}-${{ steps.base.outputs.digest }}
+          path: ${{ runner.temp }}/pgrx-builder.tar
+          key: pgrx-builder-image-${{ runner.arch }}-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-pgrx${{ steps.pins.outputs.pgrx }}-${{ steps.base.outputs.digest }}
 
       # THE SAME RECLAIM AS check.yml's parser job, which this job went without
       # and paid for: p8-subsystems#184's cargo-test died with `no space left on
@@ -206,8 +206,8 @@ jobs:
           # Saved UNCOMPRESSED on purpose: actions/cache zstds it on the way up,
           # and compressing twice spends a minute to save nothing. A stale
           # tarball goes first, for check.yml's REM-140 reason.
-          rm -f /tmp/pgrx-builder.tar
-          docker save pgrx-builder -o /tmp/pgrx-builder.tar
+          rm -f "$RUNNER_TEMP/pgrx-builder.tar"
+          docker save pgrx-builder -o "$RUNNER_TEMP/pgrx-builder.tar"
           df -h / | tail -1 | sed 's/^/after save:     /'
 
       # The tarball goes once loaded: on a cache hit actions/cache skips its
@@ -215,8 +215,8 @@ jobs:
       - name: Load the pgrx toolchain image, then drop the tarball
         if: steps.toolchain.outputs.cache-hit == 'true'
         run: |
-          docker load -i /tmp/pgrx-builder.tar
-          rm -f /tmp/pgrx-builder.tar
+          docker load -i "$RUNNER_TEMP/pgrx-builder.tar"
+          rm -f "$RUNNER_TEMP/pgrx-builder.tar"
           df -h / | tail -1 | sed 's/^/after load:     /'
 
       - name: cargo pgrx test
