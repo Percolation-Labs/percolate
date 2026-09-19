@@ -147,16 +147,34 @@ jobs:
             echo "::warning::could not diff against $BASE -- running everything"
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "selfmodel=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if printf '%s\n' "$files" | grep -qv '\.md$' || printf '%s\n' "$files" | grep -qE '^(specs|meta)/'; then
+          # A PR RUNS THE SELF-MODEL ONLY WHEN THE LOADER OR THE SCHEMA CHANGES.
+          # A corpus-only change (a spec, a postmortem) cannot break the loader
+          # except through its content, and the main batch below still loads
+          # every such change before main goes green (00e798a). Measured
+          # 2026-09-19: self-model averaged 13 min on r1, up to 32, and ran on
+          # nearly every PR, so one heavy runner held 13 runs for over two hours.
+          LOADER='^(applications/percolate-self-model/|extension/|specs/contract/|dev/ci-database\.sh$|dev/lib/)|^specs/.*\.sql$'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            if printf '%s\n' "$files" | grep -qE "$LOADER"; then
+              echo "selfmodel=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "selfmodel=false" >> "$GITHUB_OUTPUT"; echo "no loader or schema change: self-model waits for the main batch"
+            fi
+          elif printf '%s\n' "$files" | grep -qv '\.md$' || printf '%s\n' "$files" | grep -qE '^(specs|meta)/'; then
             echo "selfmodel=true" >> "$GITHUB_OUTPUT"
           else
             echo "selfmodel=false" >> "$GITHUB_OUTPUT"; echo "no code, specs/ or meta/ changed: self-model stands down"
           fi
           printf '%s\n' "$files" | sed 's/^/  /'
-          if printf '%s\n' "$files" | grep -qv '\.md$'; then
+          # PATHS NO PARSER OR DATABASE GATE READS. Checked 2026-09-19: none is
+          # named by dev/check.sh's database gates, dev/ci-database.sh, dev/tests
+          # or extension/, and board/'s three gates are tree gates. `tree` still
+          # runs on them. A board.py change used to compile the parser.
+          QUIET='^(board|site|output|demo|\.claude|meta/status)/|\.md$'
+          if printf '%s\n' "$files" | grep -qvE "$QUIET"; then
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "code changed against $BASE"
           else
-            echo "code=false" >> "$GITHUB_OUTPUT"; echo "only markdown changed against $BASE: parser and database stand down"
+            echo "code=false" >> "$GITHUB_OUTPUT"; echo "only markdown, board/, site/ or output/ changed against $BASE: parser and database stand down"
           fi
 
   # Everything answerable from the tree alone. No Docker, no database, seconds.
@@ -219,7 +237,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # THE BUILT .so, KEPT ON THE RUNNER BY THE CRATE'S TREE HASH. A crate that
+      # has not changed is not compiled: the key is the git tree of
+      # extension/percolate_parser plus the toolchain Dockerfile, so any edit to
+      # either misses. $RUNNER_TOOL_CACHE persists on a self-hosted runner and is
+      # empty on a hosted one, which then builds as before. Four keys are kept;
+      # /srv/ci is a 30G disk two runners share.
+      - name: The parser this tree already built
+        id: local
+        run: |
+          C=extension/percolate_parser/Cargo.toml
+          M=$(sed -n 's/^default *= *\["pg\([0-9][0-9]*\)"\].*/\1/p' "$C")
+          X=$(sed -n 's/^pgrx *= *"=\{0,1\}\([0-9][0-9.]*\)".*/\1/p' "$C")
+          KEY="$(uname -m)-$(git rev-parse HEAD:extension/percolate_parser)-$(git hash-object dev/Dockerfile.pgrx-builder | cut -c1-12)-pg$M-pgrx$X"
+          DIR="$RUNNER_TOOL_CACHE/p8-parser/$KEY"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          if [ -f "$DIR/percolate_parser.so" ]; then
+            mkdir -p parser-dist && cp "$DIR"/percolate_parser* parser-dist/
+            echo "hit=true" >> "$GITHUB_OUTPUT"; echo "::notice::parser $KEY is already built on this runner; not compiling"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"; echo "parser $KEY is not built here yet"
+          fi
+
       - name: Cache the crate build
+        if: steps.local.outputs.hit != 'true'
         uses: actions/cache@v6
         with:
           path: extension/percolate_parser/target-ci
@@ -235,6 +276,7 @@ jobs:
       # The tag is read out of the Dockerfile rather than written here twice, so
       # bumping the base stays a one-line edit in one file.
       - name: Resolve the base image the toolchain is built on
+        if: steps.local.outputs.hit != 'true'
         id: base
         run: |
           TAG=$(sed -n 's/^FROM \([^ ]*\).*/\1/p' dev/Dockerfile.pgrx-builder | head -1)
@@ -300,6 +342,7 @@ jobs:
       # This job's whole claim is that it produces the artefact the published
       # container expects, which is false the moment one of those copies drifts.
       - name: The pg major and the pgrx pin, read from Cargo.toml
+        if: steps.local.outputs.hit != 'true'
         id: pins
         run: |
           C=extension/percolate_parser/Cargo.toml
@@ -321,6 +364,7 @@ jobs:
       # every release PR, and parser-tests.yml ran out of disk doing it on
       # p8-subsystems#184 (REM-235). The pin is the only line the image depends on.
       - name: Cache the pgrx toolchain image
+        if: steps.local.outputs.hit != 'true'
         id: toolchain
         uses: actions/cache@v6
         with:
@@ -342,6 +386,7 @@ jobs:
       # host. `|| true` on each because their presence is the runner image's
       # business and not a thing this job should assert.
       - name: Free what this job does not use
+        if: steps.local.outputs.hit != 'true'
         run: |
           df -h / | tail -1 | sed 's/^/before reclaim: /'
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -349,7 +394,7 @@ jobs:
           df -h / | tail -1 | sed 's/^/after reclaim:  /'
 
       - name: Build the pgrx toolchain image
-        if: steps.toolchain.outputs.cache-hit != 'true'
+        if: steps.local.outputs.hit != 'true' && (steps.toolchain.outputs.cache-hit != 'true')
         working-directory: dev
         run: |
           docker build -f Dockerfile.pgrx-builder \
@@ -405,7 +450,7 @@ jobs:
       # would settle that, and what a buildx-layer-cache argument would start
       # from.
       - name: Load the pgrx toolchain image, then drop the tarball
-        if: steps.toolchain.outputs.cache-hit == 'true'
+        if: steps.local.outputs.hit != 'true' && (steps.toolchain.outputs.cache-hit == 'true')
         run: |
           df -h / | tail -1 | sed 's/^/before load:  /'
           docker load -i "$RUNNER_TEMP/pgrx-builder.tar"
@@ -417,6 +462,7 @@ jobs:
       # dev/build-image.sh runs, against the same base image, so the ABI is the
       # one the published container expects.
       - name: cargo pgrx package
+        if: steps.local.outputs.hit != 'true'
         run: |
           df -h / | tail -1 | sed 's/^/before build: /'
           docker run --rm \
@@ -444,12 +490,17 @@ jobs:
       # wants them. Named here rather than in the consumer so a change to what
       # pgrx emits fails in the job that ran pgrx.
       - name: Collect the dist
+        if: steps.local.outputs.hit != 'true'
         run: |
           B=extension/percolate_parser/target-ci
           mkdir -p parser-dist
           cp "$B"/percolate_parser* parser-dist/
           ls -l parser-dist
           grep default_version parser-dist/percolate_parser.control
+          mkdir -p "${{ steps.local.outputs.dir }}"
+          cp parser-dist/percolate_parser* "${{ steps.local.outputs.dir }}/"
+          ls -1t "$(dirname "${{ steps.local.outputs.dir }}")" | tail -n +5 \
+            | while read -r old; do rm -rf "$(dirname "${{ steps.local.outputs.dir }}")/$old"; done
 
       # The SQL pgrx just produced is the surface the committed upgrade scripts were made from, or
       # this fails here, in the job that ran pgrx, naming the one command that regenerates them
@@ -498,6 +549,16 @@ jobs:
           name: parser-dist
           path: parser-dist
 
+      # A RUN KILLED MID-JOB NEVER REACHES ITS `if: always()` CLEANUP. Found
+      # 2026-09-19: p8-ci-35432943851-1-parser-upgrade had been up seven hours
+      # on r1. Anything of ours older than three hours is from a dead run.
+      - name: Remove containers a killed run left behind
+        run: |
+          now=$(date +%s)
+          docker ps -a --format '{{.Names}} {{.CreatedAt}}' | grep -E '^p8-(ci|sm)-' | while read -r name created; do
+            age=$(( now - $(date -d "${created% [A-Z]*}" +%s 2>/dev/null || echo "$now") ))
+            [ "$age" -gt 10800 ] && docker rm -f -v "$name" >/dev/null && echo "removed $name, $((age/3600))h old" || true
+          done
       - run: PARSER_DIST="$GITHUB_WORKSPACE/parser-dist" dev/ci-database.sh
       # PARSER_DIST again, for dev/parser-upgrade.sh: it updates a release's parser to the .so this
       # run compiled, not to the release's own.
@@ -567,6 +628,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install --quiet pyyaml
+      # A RUN KILLED MID-JOB NEVER REACHES ITS `if: always()` CLEANUP. Found
+      # 2026-09-19: p8-ci-35432943851-1-parser-upgrade had been up seven hours
+      # on r1. Anything of ours older than three hours is from a dead run.
+      - name: Remove containers a killed run left behind
+        run: |
+          now=$(date +%s)
+          docker ps -a --format '{{.Names}} {{.CreatedAt}}' | grep -E '^p8-(ci|sm)-' | while read -r name created; do
+            age=$(( now - $(date -d "${created% [A-Z]*}" +%s 2>/dev/null || echo "$now") ))
+            [ "$age" -gt 10800 ] && docker rm -f -v "$name" >/dev/null && echo "removed $name, $((age/3600))h old" || true
+          done
       - run: dev/ci-database.sh
       - run: dev/check.sh --self-model
 
