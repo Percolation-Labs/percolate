@@ -50,6 +50,16 @@ def bucket() -> str:
     return s3().bucket
 
 
+def address(data: bytes) -> tuple[str, str]:
+    """The (checksum, object_key) `put` would store these bytes under.
+
+    Separate from `put` so a caller can register the bytes, which is where the
+    database authorizes them, before anything is written (REM-566).
+    """
+    checksum = hashlib.sha256(data).hexdigest()
+    return checksum, f"objects/{checksum[:2]}/{checksum}"
+
+
 def put(data: bytes, content_type: str | None = None) -> tuple[str, str]:
     """Store content-addressed. Returns (checksum, object_key).
 
@@ -58,8 +68,7 @@ def put(data: bytes, content_type: str | None = None) -> tuple[str, str]:
     retry cannot produce a duplicate object. That is what lets register_upload
     dedup on checksum without a distributed lock.
     """
-    checksum = hashlib.sha256(data).hexdigest()
-    key = f"objects/{checksum[:2]}/{checksum}"
+    checksum, key = address(data)
     client().put_object(
         Bucket=bucket(), Key=key, Body=data,
         ContentType=content_type or "application/octet-stream")

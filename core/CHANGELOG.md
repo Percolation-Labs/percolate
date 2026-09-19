@@ -26,6 +26,9 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
   of `LLM_URL`, `P8_AGENT_URL` and `P8_TEMPLATE_ENV` are exempt from the egress check for the worker and for
   API sources; a URL a caller types gets the check without them. **A probe of an internal API source that
   `P8_TEMPLATE_ENV` names, which 0.2.0 answered, is refused.** The source itself still pulls.
+- **`POST /files` registers before it stores, and has a size cap** (REM-566). `content.register_upload`
+  authorizes the upload, then the object is written inside the same transaction, so a refused upload
+  writes nothing. `P8_UPLOAD_MAX_BYTES` (default 100 MB) caps the body; past it the answer is 413.
 
 ## Unreleased, after 0.1.13
 

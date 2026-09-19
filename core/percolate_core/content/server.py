@@ -32,6 +32,42 @@ from . import storage
 
 routes = APIRouter()
 
+DEFAULT_UPLOAD_MAX_BYTES = 100_000_000
+"""What `/files` accepts in one body when `P8_UPLOAD_MAX_BYTES` is not set."""
+
+
+def upload_max_bytes() -> int:
+    """`P8_UPLOAD_MAX_BYTES`, or the default. A value that is not a positive
+    whole number is a configuration error, raised rather than read as "no cap"."""
+    raw = os.environ.get("P8_UPLOAD_MAX_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_UPLOAD_MAX_BYTES
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError(f"P8_UPLOAD_MAX_BYTES must be a positive whole number of bytes, got {raw!r}")
+    return int(raw)
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+async def read_capped(request: Request, cap: int) -> bytes:
+    """The request body, refused past `cap` bytes before it is all read.
+
+    Content-Length is checked first, and the stream is counted as well,
+    because a chunked body sends no length.
+    """
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > cap:
+        raise BodyTooLarge
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise BodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 async def caller(authorization: str | None = Header(default=None)) -> dict[str, Any] | None:
     """The verified caller, or None for anonymous.
@@ -63,10 +99,21 @@ async def upload(request: Request,
                  x_p8_title_utf8: str | None = Header(default=None),
                  x_p8_org: str | None = Header(default=None),
                  traceparent: str | None = Header(default=None)):
-    """Store bytes, register them, and start the ingestion workflow.
+    """Register bytes, store them, and start the ingestion workflow.
 
     All three in one transaction, so a committed resource always has a run and
     a rolled-back upload leaves neither.
+
+    AUTHORIZED BEFORE ANYTHING IS STORED (REM-566). `content.register_upload`
+    is where the database decides whether this caller may upload, and the
+    bytes went to object storage before it was asked, so a caller without
+    `resources:create` could fill the bucket with objects no row points at.
+    The key is content-addressed, so it is known before the write: register
+    first, then write the object inside the same transaction. A refusal
+    writes nothing, and a failed write rolls the registration back.
+
+    The body is capped at `P8_UPLOAD_MAX_BYTES` (default 100 MB); past it the
+    answer is 413 and nothing is registered or stored.
     """
     if not claims:
         raise HTTPException(401, "Sign in before uploading a file")
@@ -76,12 +123,16 @@ async def upload(request: Request,
             x_p8_title = unquote(x_p8_title_utf8, encoding="utf-8", errors="strict")
         except UnicodeError:
             raise HTTPException(400, "X-P8-Title-Utf8 must contain percent-encoded UTF-8") from None
-    data = await request.body()
+    cap = upload_max_bytes()
+    try:
+        data = await read_capped(request, cap)
+    except BodyTooLarge:
+        raise HTTPException(413, f"the file is larger than {cap} bytes, the most this server accepts") from None
     if not data:
         raise HTTPException(400, "empty body -- send the file bytes")
 
     content_type = request.headers.get("content-type")
-    checksum, key = storage.put(data, content_type)
+    checksum, key = storage.address(data)
 
     # W3C traceparent: take its trace-id field so an upload and everything it
     # causes share one trace rather than three disconnected ones.
@@ -91,12 +142,18 @@ async def upload(request: Request,
 
     try:
         async with as_caller(claims) as conn:
-            resource_id = await conn.fetchval(
-                "select content.register_upload($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-                x_p8_channel, checksum, storage.bucket(), key, len(data),
-                content_type, x_p8_title, f"s3://{storage.bucket()}/{key}",
-                UUID(x_p8_org) if x_p8_org else None, "{}", None, trace_id)
-    except Exception as e:
+            try:
+                resource_id = await conn.fetchval(
+                    "select content.register_upload($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                    x_p8_channel, checksum, storage.bucket(), key, len(data),
+                    content_type, x_p8_title, f"s3://{storage.bucket()}/{key}",
+                    UUID(x_p8_org) if x_p8_org else None, "{}", None, trace_id)
+            except Exception as e:
+                raise _Unregistered(e) from e
+            # Inside the transaction: if the write fails, the row goes too.
+            storage.put(data, content_type)
+    except _Unregistered as wrapped:
+        e = wrapped.cause
         # A REFUSAL IS NOT A BAD REQUEST. `content.register_upload` raises
         # "not authorized to upload content", hint "needs resources:create",
         # and the request that got it was well formed -- the caller may not
@@ -110,6 +167,15 @@ async def upload(request: Request,
         raise HTTPException(400, str(e).split("\n")[0])
 
     return {"resource_id": str(resource_id), "checksum": checksum, "bytes": len(data)}
+
+
+class _Unregistered(Exception):
+    """The database's answer to register_upload, carried out of the
+    transaction so a storage failure is not reported as the caller's 400."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 @routes.get("/files/{resource_id}")
