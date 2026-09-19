@@ -174,6 +174,69 @@ class DegradesRatherThanFails(unittest.TestCase):
         self.assertEqual(usage_dict(None), {})
 
 
+class AHeaderNarrowsTheOperatorsLimitAndNeverWidensIt(unittest.TestCase):
+    """REM-554: the budget headers come from the caller.
+
+    The gateway replaced its P8_TREE_* budget with whatever the headers held,
+    so `x-p8-usage` alone ran a delegated turn with no limits, and a larger
+    `x-p8-budget` ran it with the caller's.
+    """
+
+    OPERATOR = Budget(limits={"request_limit": 5, "cost_limit": 0.5})
+
+    def test_usage_alone_keeps_the_operators_limits(self):
+        got = self.OPERATOR.narrowed_by(Budget.from_headers({USAGE_HEADER: '{"requests":2}'}))
+        self.assertEqual(got.limits, {"request_limit": 5, "cost_limit": 0.5})
+        self.assertEqual(got.spent, {"requests": 2})
+
+    def test_each_limit_is_the_smaller_of_the_two(self):
+        header = {BUDGET_HEADER: json.dumps(
+            {"request_limit": 50, "cost_limit": 0.1, "total_tokens_limit": 900})}
+        got = self.OPERATOR.narrowed_by(Budget.from_headers(header))
+        self.assertEqual(got.limits,
+                         {"request_limit": 5, "cost_limit": 0.1, "total_tokens_limit": 900})
+
+    def test_a_non_number_cannot_stand_in_for_a_limit(self):
+        header = {BUDGET_HEADER: json.dumps({"request_limit": "none", "cost_limit": True})}
+        got = self.OPERATOR.narrowed_by(Budget.from_headers(header))
+        self.assertEqual(got.limits, {"request_limit": 5, "cost_limit": 0.5})
+
+    def test_the_delegated_turn_runs_under_the_narrowed_budget(self):
+        import asyncio
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+        from uuid import uuid4
+
+        from percolate_core.agentic import gateway
+        from percolate_core.agentic.contracts import Message, Run
+        from percolate_core.agentic.sequencer import TurnResult, TurnSequencer
+        from percolate_core.agentic.settings import Settings
+        from percolate_core.agentic.testing import MemoryRepository
+        from percolate_core.core.identity import mint_jwt
+
+        secret = "test-only-secret-not-a-production-key"
+        seen = []
+
+        async def run_turn(self, request, context, **kwargs):
+            seen.append(self.budget)
+            return TurnResult(run=Run(status="succeeded"), session=None,
+                              messages=[Message(role="assistant", content="ok")])
+
+        @asynccontextmanager
+        async def connected(settings, claims):
+            yield MemoryRepository()
+
+        headers = {"Authorization": f"Bearer {mint_jwt(str(uuid4()), secret)}",
+                   USAGE_HEADER: '{"requests":1}'}
+        with patch.dict(os.environ, {"P8_JWT_SECRET": secret, "P8_TREE_REQUEST_LIMIT": "5"}), \
+             patch.object(gateway, "connected", connected), \
+             patch.object(TurnSequencer, "run_turn", run_turn):
+            asyncio.run(gateway.run_delegated(
+                Settings(), agent_name="a", prompt="p", headers=headers))
+        self.assertEqual(seen[0].limits, {"request_limit": 5})
+        self.assertEqual(seen[0].spent, {"requests": 1})
+
+
 class OffUnlessConfigured(unittest.TestCase):
     """No budget is invented for a deployment that did not ask for one."""
 

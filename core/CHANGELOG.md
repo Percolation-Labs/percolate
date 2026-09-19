@@ -20,6 +20,8 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
   passes its id to `complete_task` and `fail_task`, and to `/internal/run` as `X-P8-Worker-Id`, which the
   runtime passes on when it completes or fails the task. The database already compared holders when given
   an id; no SQL changed.
+- **A delegation's budget headers narrow the operator's `P8_TREE_*` limits and never widen them** (REM-554).
+  `x-p8-usage` alone used to run the child with no limits; each limit is now the smaller of the two.
 
 ## Unreleased, after 0.1.13
 

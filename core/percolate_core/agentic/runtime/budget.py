@@ -119,6 +119,23 @@ class Budget:
             spent=_load(lower.get(USAGE_HEADER)),
         )
 
+    def narrowed_by(self, inherited: Budget) -> Budget:
+        """This process's budget, as a delegation's headers may tighten it.
+
+        The headers arrive from a caller, so they can narrow the operator's
+        ``P8_TREE_*`` limits and never widen them (REM-554). Taking them
+        whole meant a request carrying ``x-p8-usage`` alone ran with no
+        limits at all, and one carrying a larger ``x-p8-budget`` ran with that.
+        Each limit is the smaller of the two; one that only one side sets is
+        kept. Spend comes from the headers, since that is the tree's total.
+        """
+        limits = dict(self.limits or {})
+        for key, value in (inherited.limits or {}).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            limits[key] = min(limits[key], value) if key in limits else value
+        return Budget(limits=limits or None, spent=inherited.spent)
+
     # -- the wire ----------------------------------------------------------
 
     def to_headers(self, spent: Any = None) -> dict[str, str]:

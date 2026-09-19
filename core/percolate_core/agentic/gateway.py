@@ -460,9 +460,13 @@ async def run_delegated(
         # Only when the parent actually sent one: a direct call to this gateway
         # that is not a delegation carries no budget headers, and falling back
         # to the deployment default is the right answer for it.
+        #
+        # NARROWED, NOT REPLACED (REM-554). The headers come from the caller,
+        # so they may tighten the operator's P8_TREE_* limits and never
+        # loosen them; `x-p8-usage` alone used to remove every limit.
         inherited = Budget.from_headers(headers)
         if inherited.limits or inherited.spent:
-            sequencer.budget = inherited
+            sequencer.budget = sequencer.budget.narrowed_by(inherited)
         result = await sequencer.run_turn(
             ChatRequest(
                 model=agent_name,

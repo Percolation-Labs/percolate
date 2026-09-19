@@ -293,6 +293,8 @@ delegation here is an MCP call into `gateway.run_delegated`.
 
 Off unless configured — a limit invented here would be a number nobody chose, and
 the first thing it would do is fail somebody's legitimate long run.
+A delegated turn runs under the smaller of each limit: the one set here and the
+one the parent sent. The headers can narrow these limits and never widen them.
 
 | | |
 |---|---|
