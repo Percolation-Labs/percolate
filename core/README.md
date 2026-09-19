@@ -156,6 +156,18 @@ is still streaming through.
 
 ---
 
+Workflow-generated claim assertions can carry durable execution receipts with extension 0.2.15. The worker
+signs the verified task, lease holder and attempt into its existing caller token. The runtime records measured
+usage through `claims.record_execution_result`, using `P8_WORKER_DSN` when its caller login cannot assume the
+worker role. Receipt rows survive operational workflow pruning; reads continue to check the current caller's
+access. Provider versions remain unknown unless supplied, and missing evaluation content stays unavailable.
+On an older extension the adapter skips receipt recording before requesting a worker connection.
+
+`tests/claims_receipts_db.py` exercises this path against a disposable database specified by
+`CLAIMS_RECEIPTS_TEST_DSN`: worker token, caller RLS, claim reading, usage snapshot, pruning and private-reader
+refusal. It uses a provider fixture and makes no external model call. The receipt describes recorded model
+runs within a task attempt; it does not attribute every assertion to every model in that list.
+
 ## Writing your own worker
 
 Most steps need no worker from you:

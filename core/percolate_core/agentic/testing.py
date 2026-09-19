@@ -58,6 +58,7 @@ class MemoryRepository:
         self.notifications: list[tuple[str, str]] = []
         self.chained_calls: list[tuple[str, dict[str, Any]]] = []
         self.workflows: list[tuple[str, dict[str, Any]]] = []
+        self.execution_receipts: list[tuple[UUID, dict[str, Any]]] = []
         self.completed_tasks: list[tuple[UUID, dict[str, Any]]] = []
         self.failed_tasks: list[tuple[UUID, dict[str, Any], bool]] = []
         self.task_workers: list[tuple[str, UUID, str | None]] = []
@@ -188,6 +189,9 @@ class MemoryRepository:
     ) -> UUID:
         self.workflows.append((name, payload))
         return uuid4()
+
+    async def record_execution_receipt(self, run_id: UUID, receipt: dict[str, Any]) -> None:
+        self.execution_receipts.append((run_id, receipt))
 
     async def complete_task(self, task_id: UUID, output: dict[str, Any],
                             worker_id: str | None = None) -> None:

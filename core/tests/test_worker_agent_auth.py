@@ -57,6 +57,32 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(request["headers"]["Authorization"], json.dumps(resolved))
         self.assertNotIn(KEY, json.dumps(resolved))
 
+    def test_task_provenance_comes_from_worker_context_not_the_body(self):
+        task = str(uuid4())
+        forged = str(uuid4())
+        ctx = self.context()
+        ctx["_task_id"] = task
+        ctx["_worker_id"] = "worker-1"
+        ctx["attempt"] = 2
+        request, _ = build_request(self.spec(body={"workflow_task_id": forged}), ctx)
+        self.assertEqual(self.decode(request)["workflow_task_id"], task)
+        self.assertEqual(self.decode(request)["workflow_attempt"], 2)
+        self.assertEqual(self.decode(request)["workflow_worker_id"], "worker-1")
+        request, _ = build_request(self.spec(body={"workflow_task_id": forged}), self.context())
+        self.assertNotIn("workflow_task_id", self.decode(request))
+
+    async def test_older_extension_needs_no_receipt_worker_connection(self):
+        from percolate_core.agentic.db.repository import PgRepository
+        class Client:
+            @asynccontextmanager
+            async def as_user(self, claims):
+                conn = AsyncMock()
+                conn.fetchval.return_value = False
+                yield conn
+        repo = PgRepository(Client(), {"sub": ALICE, "workflow_task_id": str(uuid4())})
+        with patch("percolate_core.core.identity.as_task_worker", side_effect=AssertionError("worker connection on old extension")):
+            await repo.record_execution_receipt(uuid4(), {"method_version": "test", "usage": {}})
+
     def test_missing_verified_owner_cannot_fall_back_to_input(self):
         for owner in (None, "", "forged"):
             with self.subTest(owner=owner), self.assertRaisesRegex(TerminalError, "verified run owner"):
@@ -102,7 +128,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
     async def test_worker_uses_claimed_owner_rpc_and_keeps_identity_out_of_output(self):
         # A database from before workflow.task_principal (REM-247): the owner alone, as it always was.
         task = uuid4()
-        context = {"kind":"http_call", "step_key":"brief", "task_input":self.spec(),
+        context = {"kind":"http_call", "attempt":1, "step_key":"brief", "task_input":self.spec(),
                    "run_input":{"question":"Prepare a brief", "owner_id":BOB, "_agent_caller":BOB}}
         conn = AsyncMock()
         conn.fetchval.side_effect = [task, json.dumps(context), False, ALICE]
@@ -140,7 +166,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_agent_started_run_carries_its_starter_into_the_step_token(self):
         task, key = uuid4(), uuid4()
-        context = {"kind":"http_call", "step_key":"brief", "task_input":self.spec(), "run_input":{"question":"Q"}}
+        context = {"kind":"http_call", "attempt":1, "step_key":"brief", "task_input":self.spec(), "run_input":{"question":"Q"}}
         conn = AsyncMock()
         conn.fetchval.side_effect = [task, json.dumps(context), True]
         conn.fetchrow.return_value = {"owner_id": ALICE, "started_actor": "agent", "started_credential_id": key}

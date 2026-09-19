@@ -66,7 +66,8 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     # whatever the last step returned. Resolving the name alone let those pick
     # the destination of the worker's secret. The operator's
     # P8_CREDENTIAL_ORIGINS says where each one may go; nothing on the row can.
-    if authorization := agent_authorization(original, spec, ctx.get("_agent_caller"), ctx.get("_agent_starter")):
+    if authorization := agent_authorization(original, spec, ctx.get("_agent_caller"), ctx.get("_agent_starter"), task_id=ctx.get("_task_id"),
+                                            worker_id=ctx.get("_worker_id"), attempt=ctx.get("attempt")):
         headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         headers["Authorization"] = authorization
         # THE LEASE HOLDER, for /internal/run (REM-553). The runtime completes

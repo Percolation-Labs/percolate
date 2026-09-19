@@ -17,6 +17,8 @@ started duplicating a component.
 
 from __future__ import annotations
 
+from .. import __version__
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -242,6 +244,16 @@ class TurnSequencer:
             )
             await self.maybe_chain(agent, run, execution)
             await self.maybe_summarize(session, agent, execution)
+            # Preserve the producer's measured counters when the operational workflow task is later pruned.
+            # A provider model version is unknown unless the provider supplied one; a configured model is not it.
+            receipt = {
+                "method_version": f"percolate-core/{__version__}",
+                "model": (model if isinstance(model, str) else getattr(model, "model_name", None))
+                or agent.model or self.settings.default_model,
+                "model_version": None,
+                "usage": dict(execution.usage),
+            }
+            await self.repo.record_execution_receipt(run.id, receipt)
             result = await self.finish(run, session, status="succeeded")
             result.messages = messages
             result.execution = execution

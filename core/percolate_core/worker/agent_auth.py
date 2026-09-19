@@ -87,7 +87,8 @@ def uses_run_identity(spec: dict) -> bool:
 
 
 def agent_authorization(original: dict, resolved: dict, caller: str | None,
-                        starter: dict | None = None) -> str | None:
+                        starter: dict | None = None, *, task_id: str | None = None,
+                        worker_id: str | None = None, attempt: int | None = None) -> str | None:
     """The Authorization header for a compiled agent step: the run owner, and the agent that started the run.
 
     STARTER, NOT ONLY OWNER (REM-247). ``workflow.task_principal`` returns the
@@ -122,6 +123,16 @@ def agent_authorization(original: dict, resolved: dict, caller: str | None,
     if not secret:
         raise TerminalError("The agent signing key file is empty")
     extra = {}
+    # Supplied by the worker after task_principal checked its lease; never taken from a step body.
+    if task_id is not None:
+        if not worker_id or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise TerminalError("Agent task has no verified lease attempt")
+        extra["workflow_worker_id"] = worker_id
+        extra["workflow_attempt"] = attempt
+        try:
+            extra["workflow_task_id"] = str(UUID(str(task_id)))
+        except ValueError:
+            raise TerminalError("Agent task has no verified task id") from None
     if starter and starter.get("actor") == "agent":
         extra["actor"] = "agent"
         if starter.get("credential_id") is not None:

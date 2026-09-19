@@ -80,6 +80,8 @@ class Repository(Protocol):
     async def start_workflow(
         self, name: str, payload: dict[str, Any], trace_id: str | None = None
     ) -> UUID: ...
+    async def record_execution_receipt(self, run_id: UUID, receipt: dict[str, Any]) -> None: ...
+
     async def complete_task(self, task_id: UUID, output: dict[str, Any],
                             worker_id: str | None = None) -> None: ...
     async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool,
@@ -506,6 +508,29 @@ class PgRepository:
                 name,
                 payload,
                 trace_id,
+            )
+
+    async def record_execution_receipt(self, run_id: UUID, receipt: dict[str, Any]) -> None:
+        """Retain this producer's measured usage through the worker-only receipt writer.
+
+        Task/lease identity comes from the worker-signed token, never a prompt or request body.
+        Interactive turns without workflow provenance have no workflow receipt to attach to.
+        """
+        task = (self.claims or {}).get("workflow_task_id")
+        if not task:
+            return
+        # Probe as the caller first: an older extension must not require new worker credentials.
+        async with self.client.as_user(self.claims) as conn:
+            if not await conn.fetchval(
+                "select to_regprocedure('claims.record_execution_result(uuid,text,integer,uuid,text,text,text,jsonb,uuid)') is not null"
+            ):
+                return
+        async with identity.as_task_worker() as conn:
+            await conn.execute(
+                "select claims.record_execution_result($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)",
+                UUID(str(task)), self.claims.get("workflow_worker_id"), self.claims.get("workflow_attempt"),
+                run_id, receipt["method_version"], receipt.get("model"), receipt.get("model_version"),
+                receipt["usage"], receipt.get("evaluation_resource"),
             )
 
     async def complete_task(self, task_id: UUID, output: dict[str, Any],

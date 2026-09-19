@@ -133,6 +133,12 @@ class ScheduledTurn(unittest.IsolatedAsyncioTestCase):
         repo, result = await self.turn()
         self.assertEqual(result.run.status, "succeeded")
         self.assertEqual(len(repo.completed_tasks), 1)
+        self.assertEqual(repo.execution_receipts[0][0], result.run.id)
+        receipt = repo.execution_receipts[0][1]
+        self.assertTrue(receipt["method_version"].startswith("percolate-core/"))
+        self.assertEqual(receipt["usage"], result.execution.usage)
+        self.assertIsNone(receipt["model_version"])
+        self.assertNotIn("prompt", receipt)
         self.assertEqual(repo.failed_tasks, [])
 
     async def test_an_exception_inside_the_turn_fails_the_task(self):
