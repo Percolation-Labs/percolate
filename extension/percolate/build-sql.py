@@ -287,8 +287,9 @@ REPLAYED_DML = {
             "table can lack"),
     ("research-platform/schema.sql", "insert research.exposures"):
         (1, "exposes a public work's revisions only where the work has no exposure at all "
-            "(REM-185). Replays: a public work whose owner withdrew every exposure is "
-            "re-exposed -- flagged on REM-552, not decided here"),
+            "(REM-185). A replay finds nothing: every path that makes a work public adds an "
+            "exposure, and trg_refuse_rewrite refuses deleting one, so only research.erase_work "
+            "removes them, with the work (REM-580)"),
     ("research-platform/schema.sql", "insert content.channels"):
         (1, "the shipped research_evidence channel, where not exists"),
     ("research-platform/schema.sql", "update content.channels"):
