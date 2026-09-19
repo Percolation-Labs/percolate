@@ -517,6 +517,9 @@ declare
         'research.endorsement_claims', 'research.endorsement_withdrawals',
         -- Trust history and the record of erasures (REM-464).
         'research.visibility_changes', 'research.publication_withdrawals', 'research.erasures',
+        -- A research programme's protocols, runs, evaluations and decisions (REM-594): what a deployment's researchers wrote.
+        'research.programmes', 'research.protocols', 'research.protocol_freezes', 'research.programme_runs',
+        'research.run_results', 'research.run_evaluations', 'research.run_decisions',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
         'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',

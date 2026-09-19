@@ -1110,6 +1110,32 @@
     },
     {
       "admits": [
+        "supported",
+        "rejected",
+        "inconclusive"
+      ],
+      "column": "verdict",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "research",
+      "table": "run_decisions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "completed",
+        "failed",
+        "stopped"
+      ],
+      "column": "state",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "research",
+      "table": "run_results",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "org",
         "private",
         "public"
