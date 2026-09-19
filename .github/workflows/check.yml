@@ -467,9 +467,11 @@ jobs:
         if: failure()
         run: docker logs "$CONTAINER" | tail -60
 
-      - name: Remove this run's container
+      # By prefix, because gates start siblings named after it: agent-turn.sh
+      # leaves `$CONTAINER-agent` running, and the first run on p8-arm left one.
+      - name: Remove this run's containers
         if: always()
-        run: docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+        run: docker ps -aq --filter "name=^$CONTAINER" | xargs -r docker rm -f -v >/dev/null
 
   # THE SELF-MODEL, REBUILT FROM THE REPOSITORY ALONE.
   #
@@ -521,6 +523,8 @@ jobs:
         if: failure()
         run: docker logs "$CONTAINER" | tail -60
 
-      - name: Remove this run's container
+      # By prefix, because gates start siblings named after it: agent-turn.sh
+      # leaves `$CONTAINER-agent` running, and the first run on p8-arm left one.
+      - name: Remove this run's containers
         if: always()
-        run: docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+        run: docker ps -aq --filter "name=^$CONTAINER" | xargs -r docker rm -f -v >/dev/null
