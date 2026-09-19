@@ -33445,15 +33445,31 @@ $$;
 create or replace function claims.evidence(p_claim uuid, p_at timestamptz, p_revisions uuid[])
 returns table (study uuid, keys text[], citing_occurrences int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    with occ as (select distinct e.revision_id, e.claim_key from claims.occurrences_at(p_claim, p_at, p_revisions) e),
-         st as (select o.revision_id, o.claim_key, s.study from occ o cross join lateral claims.source_studies(o.revision_id, o.claim_key, p_at, p_revisions) s)
-    select st.study,
-           (select array_agg(distinct og.key order by og.key) from claims.cites c join claims.origins og on og.id = c.origin_id join claims.tx ct on ct.id = c.tx
-             where ct.at <= p_at and (c.revision_id, c.claim_key) in (select revision_id, claim_key from occ)
-               and claims.study_of(c.origin_id, p_at, p_revisions) = st.study),
-           count(distinct (st.revision_id, st.claim_key))::int
-      from st where st.study is not null
-     group by st.study;
+    -- Resolve each cited origin once. Inlining the study traversal into both the grouped source read and
+    -- its correlated keys subquery repeated RLS checks until ordinary published claims timed out (REM-615).
+    with occ as materialized (
+        select distinct e.revision_id, e.claim_key from claims.occurrences_at(p_claim, p_at, p_revisions) e),
+    cited as materialized (
+        select c.revision_id, c.claim_key, c.source_key, c.origin_id, og.key
+          from occ o cross join lateral (
+              select c.* from claims.cites c
+               where c.revision_id=o.revision_id and c.claim_key=o.claim_key offset 0) c
+          cross join lateral (select og.key from claims.origins og where og.id=c.origin_id offset 0) og
+          cross join lateral (select ct.at from claims.tx ct where ct.id=c.tx offset 0) ct
+         where ct.at <= p_at),
+    origin_studies as materialized (
+        select o.origin_id, claims.study_of(o.origin_id, p_at, p_revisions) as study
+          from (select distinct origin_id from cited) o),
+    named as materialized (
+        select c.*, s.study from cited c join origin_studies s using (origin_id)),
+    sources as materialized (
+        select revision_id, claim_key, source_key,
+               coalesce(min(study::text) filter (where key ~ '^(doi|url):'), min(study::text))::uuid as study
+          from named group by revision_id, claim_key, source_key)
+    select s.study,
+           (select array_agg(distinct n.key order by n.key) from named n where n.study=s.study),
+           count(distinct (s.revision_id, s.claim_key))::int
+      from sources s where s.study is not null group by s.study;
 $$;
 
 -- Compatibility signatures keep all readable revisions, with corrected assertion-time semantics.
