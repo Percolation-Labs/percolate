@@ -212,6 +212,8 @@ insert into t14_declared (fn, mechanism, why) values
  'research:select, a readable revision expressing the claim, and every study named behind the claim (REM-496)'),
 ('claims.review_consensus(bigint,text,text)', 'rbac.require',
  'research:resolve, human-only and held by no one without a grant; the proposal''s revision must be readable (REM-496)'),
+('claims.answer_rewording(uuid,text,text,boolean)', 'rbac.require',
+ 'research:insert and the work''s owner; an agent also needs research:publish, the delegation graph.md §5 names (REM-483)'),
 ('claims.question_readable(uuid)', 'research.revision_readable',
  'the questions policy: true only when a revision the caller may read answers the question or one refining it (REM-476)'),
 ('claims.assert_relation(text,text,text,uuid,uuid,text,jsonb,text)', 'rbac.require',

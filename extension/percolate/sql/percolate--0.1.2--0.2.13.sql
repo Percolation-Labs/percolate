@@ -31897,6 +31897,81 @@ begin
 end;
 $$;
 
+-- The writer's answer to a rewording (graph.md §5, REM-483). The projection links a reworded key to its earlier claim
+-- as a proposal; the work's owner answers. "same" confirms that link, a later row. "new" retracts it, mints a claim
+-- for the new wording, links the occurrence to it, and when asked records that the new claim supersedes the old,
+-- evidenced by this revision and its predecessor. An agent answers only with research:publish, the delegation §5
+-- names. Not answering changes nothing: the reader sees "reworded, unconfirmed".
+create or replace function claims.answer_rewording(p_revision uuid, p_claim_key text, p_answer text,
+                                                   p_supersedes boolean default false)
+returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user  uuid := rbac.require('research', 'insert');
+    v_actor text := rbac.current_actor();
+    r       research.revisions;
+    cur     claims.expresses;
+    t       bigint;
+    cid     uuid;
+    pred    uuid;
+begin
+    if p_answer not in ('same', 'new') then
+        raise check_violation using message = 'A rewording is answered same or new', detail = p_answer;
+    end if;
+    select v.* into r from research.revisions v join research.works w on w.id = v.work_id
+     where v.id = p_revision and w.owner_id = v_user;
+    if not found then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    if v_actor <> 'person' then
+        perform rbac.require('research', 'publish');
+    end if;
+    select * into cur from claims.expresses
+     where revision_id = p_revision and claim_key = p_claim_key and part = 1 order by id desc limit 1;
+    if not found or cur.op <> 'assert' or cur.method <> 'reworded' or cur.status <> 'proposed' then
+        raise check_violation using message = 'That claim is not a rewording waiting for an answer';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, v_actor, rbac.current_credential_id(), p_revision, 'rewording answered ' || p_answer)
+    returning id into t;
+    if p_answer = 'same' then
+        insert into claims.expresses (revision_id, claim_key, claim_id, method, status, tx)
+        values (p_revision, p_claim_key, cur.claim_id, 'reworded', 'confirmed', t);
+        return cur.claim_id;
+    end if;
+    insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
+    values (p_revision, p_claim_key, cur.claim_id, 'reworded', 'proposed', 'retract', t);
+    insert into claims.claims (tx) values (t) returning id into cid;
+    insert into claims.expresses (revision_id, claim_key, claim_id, method, status, tx)
+    values (p_revision, p_claim_key, cid, 'new', 'confirmed', t);
+    if p_supersedes then
+        pred := coalesce(r.predecessor_id,
+                         (select v.id from research.revisions v where v.work_id = r.work_id and v.number = r.number - 1));
+        insert into claims.relations (src, predicate, dst, status, evidence, evidence2, keys, tx)
+        values (cid, 'supersedes', cur.claim_id, case when v_actor = 'person' then 'confirmed' else 'proposed' end,
+                p_revision, pred, jsonb_build_object('src', p_claim_key, 'dst', p_claim_key), t);
+    end if;
+    return cid;
+end;
+$$;
+
+-- The reworded claims of a revision waiting for an answer, with the earlier and the new wording.
+create or replace function claims.rewordings(p_revision uuid)
+returns table (claim_key text, claim uuid, was text, now text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select e.claim_key, e.claim_id, pc.text, c.text
+      from (select distinct on (x.claim_key) x.* from claims.expresses x
+             where x.revision_id = p_revision and x.part = 1 order by x.claim_key, x.id desc) e
+      join research.claims c on c.revision_id = e.revision_id and c.claim_key = e.claim_key
+      join research.revisions v on v.id = e.revision_id
+      left join research.claims pc on pc.claim_key = e.claim_key
+       and pc.revision_id = coalesce(v.predecessor_id,
+                                     (select p.id from research.revisions p where p.work_id = v.work_id and p.number = v.number - 1))
+     where e.op = 'assert' and e.method = 'reworded' and e.status = 'proposed'
+     order by e.claim_key;
+$$;
+grant execute on function claims.answer_rewording(uuid, text, text, boolean), claims.rewordings(uuid) to authenticated;
+
 -- ------------------------------------------------------------
 -- 5. History: nothing here is updated or deleted, except by research.erase_work.
 -- ------------------------------------------------------------
