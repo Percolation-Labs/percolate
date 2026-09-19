@@ -58,18 +58,24 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# A RUN ON MAIN IS NEVER CANCELLED BY THE NEXT ONE. A push's `changes` job diffs
-# against `github.event.before`, the push immediately before it, and nothing
-# else. With one group for main and cancel-in-progress, a code push followed
-# within minutes by a markdown push had its run cancelled, and the surviving run
-# saw only markdown, so parser and database stood down and main went green over a
-# schema nobody had checked. Measured 2026-09-18: 00e798a (extension 0.2.11) was
-# cancelled by 14ac107 (one .md file), and the database job had not run on main
-# since REM-423. So on main each commit is its own group. A PR keeps one group
-# per branch: its newest head supersedes, and its diff is against the base.
+# MAIN IS BATCHED, AND A BATCH IS CHECKED AGAINST THE LAST GREEN RUN.
+# One group for main, never cancelled while running. GitHub keeps at most one
+# run going and one waiting, and a newer push replaces the waiting one, so a
+# burst of pushes costs two runs, not one per push. Measured 2026-09-19: 19
+# main pushes started 19 full runs, and PRs queued 40+ minutes behind them on
+# two self-hosted runners.
+#
+# What made batching unsafe before is why `changes` no longer diffs against
+# the push before. On 2026-09-18, 00e798a (extension 0.2.11) was cancelled by
+# 14ac107 (one .md file). The surviving run saw only markdown, so parser and
+# database stood down, and main went green over a schema nobody had checked.
+# A main run now diffs against the head of the last SUCCESSFUL main run. Each
+# green run therefore covers everything since the green before it, whatever was
+# skipped, cancelled or red in between. A PR keeps one group per branch: its
+# newest head supersedes, and its diff is against the base.
 concurrency:
-  group: check-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  cancel-in-progress: true
+  group: check-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # WHERE THESE RUN IS A REPOSITORY VARIABLE, NOT THIS FILE. With `P8_RUNNER`
@@ -101,6 +107,8 @@ jobs:
     outputs:
       code: ${{ steps.diff.outputs.code }}
       selfmodel: ${{ steps.diff.outputs.selfmodel }}
+      base: ${{ steps.diff.outputs.base }}
+    permissions: {contents: read, actions: read}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -108,8 +116,21 @@ jobs:
           filter: blob:none
       - id: diff
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            green=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?branch=main&event=push&status=success&per_page=1" \
+                      --jq '.workflow_runs[0].head_sha // empty' || true)
+            if [ -n "$green" ] && git merge-base --is-ancestor "$green" HEAD; then
+              BASE=$green; echo "main batch: diffing against the last green main run, ${green::7}"
+            else
+              echo "::warning::no green main run is an ancestor of HEAD -- running everything"
+              echo "base=$BASE" >> "$GITHUB_OUTPUT"
+              echo "code=true" >> "$GITHUB_OUTPUT"; echo "selfmodel=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "selfmodel=true" >> "$GITHUB_OUTPUT"
             echo "dispatched: everything runs"; exit 0
@@ -133,12 +154,13 @@ jobs:
   # Everything answerable from the tree alone. No Docker, no database, seconds.
   tree:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    needs: changes
     env:
-      # WHAT `banned.py --changed` DIFFS AGAINST. It defaulted to
-      # `origin/main...HEAD`, and on a push to main that range is empty, so the
-      # house-voice gate reported 0 hunks for every merge. A push diffs against
-      # the commit the push replaced; a PR diffs against its base branch.
-      CHANGED_BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
+      # WHAT `banned.py --changed` DIFFS AGAINST: the base `changes` chose, so
+      # a batched main run checks the house voice of every commit since the
+      # last green run, and the two jobs cannot disagree about what changed. A
+      # PR diffs against its base branch.
+      CHANGED_BASE: ${{ needs.changes.outputs.base }}
     steps:
       - uses: actions/checkout@v7
         with:
