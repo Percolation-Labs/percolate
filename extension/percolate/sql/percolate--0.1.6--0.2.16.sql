@@ -33372,24 +33372,55 @@ language plpgsql stable security invoker set search_path = pg_catalog, public as
 declare
     k     text;
     comps uuid[];
+    seen uuid[] := array[p_origin];
+    frontier uuid[] := array[p_origin];
+    reached uuid[];
 begin
     select key into k from claims.origins where id = p_origin;
     if k is null then
         return null;
     end if;
     if k ~ '^(doi|url):' then
-        return (with recursive g(o) as (
-                    select p_origin
-                    union
-                    select n.id
-                      from g join claims.origin_links_at(p_at, p_revisions) l on (l.a = g.o or l.b = g.o)
-                      join claims.origins n on n.id = case when l.a = g.o then l.b else l.a end and n.key ~ '^(doi|url):')
-                select min(o::text)::uuid from g);
+        -- Reduce only incident assertions. Reducing the entire caller-visible graph at each hop caused
+        -- application claim pages to exceed 30 seconds with fewer than 200 unrelated revisions (REM-606).
+        -- Materialize the RLS-filtered candidates before joining tx, whose own RLS checks assertion access.
+        loop
+            with candidates as materialized (
+                select l.* from claims.origin_links l
+                 where (l.a = any(frontier) or l.b = any(frontier))
+                   and (p_revisions is null or l.evidence = any(p_revisions))),
+            latest as (
+                select distinct on (l.a,l.b,l.evidence,l.source_key) l.*
+                  from candidates l cross join lateral
+                       (select t.at from claims.tx t where t.id=l.tx offset 0) t where t.at<=p_at
+                 order by l.a,l.b,l.evidence,l.source_key,l.id desc)
+            select array_agg(distinct n.id) into reached
+              from latest l cross join lateral (values(l.a),(l.b)) endpoint(id)
+              cross join lateral (select n.id,n.key from claims.origins n
+                                    where n.id=endpoint.id offset 0) n
+             where l.op='assert' and l.status='confirmed' and n.key ~ '^(doi|url):'
+               and not (n.id=any(seen));
+            exit when reached is null;
+            seen := seen || reached;
+            frontier := reached;
+        end loop;
+        return (select min(o::text)::uuid from unnest(seen) o);
     end if;
+    with candidates as materialized (
+        select l.* from claims.origin_links l where (l.a=p_origin or l.b=p_origin)
+          and (p_revisions is null or l.evidence=any(p_revisions))),
+    latest as (
+        select distinct on (l.a,l.b,l.evidence,l.source_key) l.*
+          from candidates l cross join lateral
+               (select t.at from claims.tx t where t.id=l.tx offset 0) t where t.at<=p_at
+         order by l.a,l.b,l.evidence,l.source_key,l.id desc),
+    neighbors as (
+        select distinct n.id from latest l
+          cross join lateral (select n.id,n.key from claims.origins n
+                               where n.id=case when l.a=p_origin then l.b else l.a end offset 0) n
+         where n.key ~ '^(doi|url):' and l.status='confirmed' and l.op='assert')
     select array_agg(distinct claims.study_of(n.id, p_at, p_revisions)) into comps
-      from claims.origin_links_at(p_at, p_revisions) l
-      join claims.origins n on n.id = case when l.a = p_origin then l.b else l.a end and n.key ~ '^(doi|url):'
-     where (l.a = p_origin or l.b = p_origin) and l.status = 'confirmed' and l.op = 'assert';
+      from neighbors n;
     return case when cardinality(comps) = 1 then comps[1] else p_origin end;
 end;
 $$;
