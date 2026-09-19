@@ -72,6 +72,8 @@ jobs:
       # tag without moving what they check out is what made the first real run
       # of this ordering die in `actions/checkout` before it built anything.
       sha: ${{ steps.sha.outputs.sha }}
+      # True when this run finishes a release whose PyPI step already passed (REM-619).
+      resume: ${{ steps.refuse.outputs.resume }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -101,16 +103,39 @@ jobs:
         run: python .github/scripts/bump_version.py release "${{ inputs.bump }}"
 
       - name: Refuse to re-release a version that already exists
+        id: refuse
         # Cheap, and the alternative is finding out from PyPI's rejection after
         # the image has already been pushed -- half a release, unwound by hand.
+        #
+        # A VERSION ON PYPI WITH NO TAG IS A RELEASE TO FINISH, NOT TO REFUSE
+        # (REM-619). 0.2.1 reached PyPI, its image failed, and this step then
+        # refused every retry while bump_version.py refused to bump past it, so
+        # nothing could finish it. When the tree kept its number (mode as-is), no
+        # tag exists and PyPI's sdist holds exactly this commit's package, the run
+        # resumes: `pypi` is skipped and the image, chart and tag carry on. A
+        # different commit is refused, because the image would not be the wheel.
         run: |
           v="${{ steps.bump.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
             echo "::error::tag v$v already exists" >&2; exit 1
           fi
-          if curl -fsS "https://pypi.org/pypi/percolate-core/$v/json" >/dev/null 2>&1; then
+          if ! curl -fsS "https://pypi.org/pypi/percolate-core/$v/json" -o "$RUNNER_TEMP/pypi.json" 2>/dev/null; then
+            echo "resume=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "${{ steps.bump.outputs.mode }}" != as-is ]; then
             echo "::error::percolate-core $v is already on PyPI" >&2; exit 1
           fi
+          sdist=$(python -c "import json,sys; print(next(u['url'] for u in json.load(open(sys.argv[1]))['urls'] if u['packagetype'] == 'sdist'))" "$RUNNER_TEMP/pypi.json")
+          mkdir -p "$RUNNER_TEMP/sdist" && curl -fsSL "$sdist" | tar -xz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          differs=$(cd "$RUNNER_TEMP/sdist" && find percolate_core pyproject.toml -type f ! -name '*.pyc' | while read -r f; do cmp -s "$f" "$GITHUB_WORKSPACE/$f" || echo "$f"; done
+                    git -C "$GITHUB_WORKSPACE" ls-files 'percolate_core/*.py' | while read -r f; do [ -e "$RUNNER_TEMP/sdist/$f" ] || echo "$f (not on PyPI)"; done)
+          if [ -n "$differs" ]; then
+            echo "::error::percolate-core $v is on PyPI untagged, but from a different tree than this commit:" >&2
+            echo "$differs" | head -20 >&2
+            exit 1
+          fi
+          echo "resume=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::percolate-core $v is on PyPI from this exact tree with no tag: resuming after the PyPI step"
 
       # THE BUMP LANDS UNTAGGED. The tag is created by `tag` below, after PyPI
       # and the image exist -- it used to happen here, so a failed publish left
@@ -170,7 +195,7 @@ jobs:
   # -------------------------------------------------------------------------
   pypi:
     needs: [version, build]
-    if: inputs.publish
+    if: inputs.publish && needs.version.outputs.resume != 'true'
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     environment:
       name: pypi
@@ -249,7 +274,8 @@ jobs:
     # doing the one thing the ordering exists to defer. With the tag already
     # there it annotates rather than creates.
     needs: [version, pypi, image, tag]
-    if: inputs.publish
+    # always(): a resumed run skips `pypi`, and a skipped need skips its dependents.
+    if: always() && inputs.publish && needs.tag.result == 'success'
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     permissions:
       contents: write
@@ -293,7 +319,8 @@ jobs:
     if: >-
       always() && needs.version.result == 'success'
       && (inputs.publish != true
-          || (needs.pypi.result == 'success' && needs.image.result == 'success'))
+          || ((needs.pypi.result == 'success' || needs.version.outputs.resume == 'true')
+              && needs.image.result == 'success'))
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     steps:
       - name: Require the token, rather than skipping quietly
@@ -427,7 +454,10 @@ jobs:
   # -------------------------------------------------------------------------
   tag:
     needs: [version, pypi, image]
-    if: inputs.publish
+    # always(): a resumed run skips `pypi`, and a skipped need skips its dependents.
+    if: >-
+      always() && inputs.publish && needs.version.result == 'success' && needs.image.result == 'success'
+      && (needs.pypi.result == 'success' || needs.version.outputs.resume == 'true')
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     permissions:
       contents: write
@@ -492,7 +522,7 @@ jobs:
   # -------------------------------------------------------------------------
   after:
     needs: [version, tag]
-    if: inputs.publish
+    if: always() && inputs.publish && needs.tag.result == 'success'
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     permissions:
       contents: write
