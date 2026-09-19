@@ -371,35 +371,46 @@ jobs:
           echo "::error::chart $CHART is committed on get-percolate but $INDEX does not list it after 25 minutes. Its scheduled docs.yml run should have published it; check get-percolate's docs runs." >&2
           exit 1
 
-      # p8-subsystems still gets an issue, and deliberately: what is stale over
-      # there is `dev/docker-compose.yml`, the harness its own test suite runs
-      # against, and PACKAGING.md's prose. Which version the DEV stack pins is a
-      # choice somebody makes, not a number derived from a release -- it pins
-      # what the tests were last run against on purpose.
-      - name: Ask p8-subsystems to catch up
+      # p8-subsystems gets a PULL REQUEST, and a person still merges it (REM-540). What is stale over there, the dev
+      # harness `dev/docker-compose.yml` and every `percolate-core:<version>` literal, is a choice about what its tests
+      # run against, so it is not pushed. But it used to be an issue asking @claude to find the pins, and meanwhile
+      # `dev/references.sh` §3 refused every p8-subsystems push for the mismatch: 13 minutes on 18 September, until a
+      # session moved about a dozen pins by hand (#270 is that issue, still open). The PR moves them all, the same way
+      # that session did, and passes the gate that was refusing, so the judgement left is whether to merge.
+      - uses: actions/checkout@v7
         if: inputs.publish
+        with:
+          repository: ${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}
+          token: ${{ secrets.P8_RELEASE_TOKEN }}
+          path: p8-subsystems
+          # The full history: dev/references.sh resolves in-tree citations through git, and on a shallow clone 24 of
+          # them read as missing (checked while writing this step).
+          fetch-depth: 0
+      - name: Open the p8-subsystems pin PR
+        if: inputs.publish
+        working-directory: p8-subsystems
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           V: ${{ needs.version.outputs.version }}
           PREV: ${{ needs.version.outputs.previous }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          cat > specs-issue.md <<EOF
-          @claude percolate-core **$V** is published. get-percolate moved itself
-          (chart, compose and docs, by \`ci/versions.py\`). This repository
-          quotes the version in two places that are a judgement call rather than
-          a derivation, so they are asked for rather than pushed:
-
-          - \`dev/docker-compose.yml\` -- the harness \`dev/tests/run.sh\` runs
-            against. It pins \`$PREV\`. Moving it means the suite is exercising
-            $V, which is usually right and is still a decision.
-          - \`PACKAGING.md\` -- the summary table and the "Current version" line.
-
-          Released by [\`release.yml\`]($RUN).
-          EOF
-          gh issue create --repo "${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}" \
-            --title "percolate-core $V: the dev pin and PACKAGING" \
-            --body-file specs-issue.md
+          branch="percolate-core-$V"
+          git checkout -q -b "$branch"
+          sed -i "s/^core = \"[0-9.]*\"/core = \"$V\"/" versions.toml
+          git grep -l -E "percolate-core:[0-9]+\.[0-9]+\.[0-9]+" -- . | while read -r f; do
+            sed -i -E "s/percolate-core:[0-9]+\.[0-9]+\.[0-9]+/percolate-core:$V/g" "$f"
+          done
+          git diff --quiet && { echo "p8-subsystems already pins $V"; exit 0; }
+          git --no-pager diff --stat
+          dev/references.sh
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "percolate-core $V is published, so every pin and versions.toml follow it"
+          git push -q origin "$branch"
+          gh pr create --repo "${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}" --head "$branch" \
+            --title "percolate-core $V: the pins and versions.toml follow it" \
+            --body "percolate-core **$V** is published ([release]($RUN)). This moves \`versions.toml\` and every \`percolate-core:$PREV\` literal to $V; \`dev/references.sh\` passed on it. Merging is the judgement: the dev harness then runs its tests against $V (REM-540)."
 
   # -------------------------------------------------------------------------
   # THE COMMIT POINT, and it is last on purpose.
