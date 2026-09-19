@@ -77,6 +77,14 @@ concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# THE HEAVY JOBS KEEP TO ONE RUNNER (REM-598). Three repositories share two
+# self-hosted runners. On 2026-09-19 one main run held both with self-model and
+# database, and application releases queued 35-50 minutes behind it. parser,
+# database and self-model run on `P8_HEAVY_RUNNER` (label p8-heavy, p8-arm-r1
+# only). changes and tree stay on `P8_RUNNER` and take seconds. Releases in all
+# three repositories run on `P8_RELEASE_RUNNER` (label p8-release, p8-arm-r2).
+# Deleting either variable routes the jobs back to P8_RUNNER.
+
 jobs:
   # WHERE THESE RUN IS A REPOSITORY VARIABLE, NOT THIS FILE. With `P8_RUNNER`
   # set to `p8-ci`, every job goes to the self-hosted arm64 runner that
@@ -205,7 +213,7 @@ jobs:
   # duplication this collection keeps finding, and here it would show up as a
   # permanent cold build rather than as a wrong answer.
   parser:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_HEAVY_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -458,7 +466,7 @@ jobs:
           retention-days: 1
 
   database:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_HEAVY_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     env:
       CONTAINER: p8-ci-${{ github.run_id }}-${{ github.run_attempt }}
       DB: p8ci
@@ -541,7 +549,7 @@ jobs:
   # supported state and therefore one worth testing: two of the eight defects
   # were steps downstream that had quietly made embeddings mandatory.
   self-model:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_HEAVY_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     needs: changes
     if: needs.changes.outputs.selfmodel == 'true'
     env:

@@ -65,7 +65,7 @@ concurrency:
 
 jobs:
   cargo-test:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.P8_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_HEAVY_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
 
