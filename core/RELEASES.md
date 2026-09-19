@@ -24,7 +24,7 @@ that did not finish, dispatch the same bump again.
 
 ## The invariant
 
-**`v<x>` names the commit whose `pyproject.toml` says `<x>`.** The `tag` job
+**`v<x>` names the commit whose `pyproject.toml` says `<x>`.** The `publish` job's tag step
 checks out `needs.version.outputs.sha` — the commit `build` and `image` used —
 and then refuses to tag at all if the tree it landed on disagrees with the
 version it is about to tag. Both halves are needed: the `ref:` is a value

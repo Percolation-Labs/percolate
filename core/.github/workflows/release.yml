@@ -266,63 +266,134 @@ jobs:
             | grep -q linux/arm64
 
   # -------------------------------------------------------------------------
-  # 5. The GitHub release, once the things it describes actually exist.
-  # -------------------------------------------------------------------------
-  github_release:
-    # AFTER `tag`, because softprops/action-gh-release CREATES the tag when it is
-    # missing -- so leaving it earlier would have had the release job quietly
-    # doing the one thing the ordering exists to defer. With the tag already
-    # there it annotates rather than creates.
-    needs: [version, pypi, image, tag]
-    # always(): a resumed run skips `pypi`, and a skipped need skips its dependents.
-    if: always() && inputs.publish && needs.tag.result == 'success'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with: {name: dist, path: dist/}
-      - uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          files: dist/*
-          generate_release_notes: true
-
-  # -------------------------------------------------------------------------
-  # 6. The chart, last.
+  # 5. PUBLISH: the tag, the GitHub release, the tail, then the chart.
   #
-  # Order matters and this is the reason it is a separate job with `needs`:
-  # publish the package and the images FIRST, then the docs and the chart that
-  # reference them. The reverse gives you a window where the documented install
-  # pulls a tag that does not exist yet, and that window is exactly when
-  # somebody tries it.
+  # ONE JOB, BECAUSE EVERY JOB BOUNDARY IS A QUEUE. These were four jobs on the
+  # one runner labelled p8-release, and each waited to be picked up: the image
+  # finished at 20:02:48 on 2026-09-19 and the last of them at 20:07:47, for
+  # under three minutes of work (percolate-application dev skill, "Release
+  # time"). The order the four jobs kept is the step order here, and a failed
+  # step stops the ones after it.
   #
-  # An issue rather than a cross-repo commit. The chart bump is small but it is
-  # not mechanical -- Chart.yaml carries two versions that move for different
-  # reasons, and the docs quote version numbers in prose. get-percolate's
-  # claude.yml picks this up, opens a PR, and merging it fires docs.yml, which
-  # republishes the chart. A human sees the diff before the install path moves.
+  # THE TAG IS THE COMMIT POINT. Everything before it can fail and leave a
+  # bumped, untagged tree that the next run finishes (or resumes, REM-619). Past
+  # it the version is on PyPI and Docker Hub and the tag says so, which is the
+  # fact `dev/check-version.sh` and the preflight read to decide whether a
+  # number is spent.
+  #
+  # THE GITHUB RELEASE COMES AFTER THE TAG, because softprops/action-gh-release
+  # creates the tag when it is missing.
+  #
+  # THE TAIL used to be three hand edits, and every release left main red until
+  # somebody made them (REM-150). after_release.py writes the image pins, the
+  # changelog heading, the RELEASES.md row and the next number, and the two
+  # gates the edits exist for run BEFORE anything is pushed. The paragraph in
+  # RELEASES.md saying WHY the version exists stays human.
+  #
+  # THE CHART IS LAST: publish the package and the images first, then the docs
+  # and the chart that reference them, or the documented install pulls a tag
+  # that does not exist yet. Its wait for get-percolate to publish the chart
+  # index is the longest step here, and nothing waits on it. On a dry run only
+  # the chart steps run, and they commit nothing.
   # -------------------------------------------------------------------------
-  chart:
-    needs: [version, pypi, image]
-    # Removing `if: inputs.publish` was not enough, and the dry run proved it:
-    # this job `needs` pypi, pypi is gated on publish, and a job whose
-    # dependency is SKIPPED is skipped in turn. So the rehearsal still skipped
-    # the riskiest thing here -- checking out another repository and pushing to
-    # it -- while reporting success.
-    #
-    # `always()` re-enables it, and the rest of the condition keeps a real
-    # release honest: on a dry run it goes ahead regardless, and on a real one
-    # it requires the publishes it is about to describe to have actually
-    # happened. Without that second half, `always()` would bump the chart to a
-    # version PyPI had just rejected.
+  publish:
+    needs: [version, build, pypi, image]
     if: >-
       always() && needs.version.result == 'success'
       && (inputs.publish != true
           || ((needs.pypi.result == 'success' || needs.version.outputs.resume == 'true')
               && needs.image.result == 'success'))
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
+    permissions:
+      contents: write
     steps:
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}   # tomllib is stdlib from 3.11
+      - uses: actions/checkout@v7
+        if: inputs.publish
+        with:
+          path: built
+          fetch-depth: 0
+          # THE COMMIT THAT WAS BUILT, which is what `build` and `image` already
+          # check out. Without this the job took `github.sha` -- main as it stood
+          # when the button was pressed -- and tagged that.
+          #
+          # v0.1.8 is the evidence and it is still wrong on the remote:
+          #
+          #     $ git show v0.1.8:pyproject.toml | sed -n 3p
+          #     version = "0.1.7"
+          #
+          # The bump commit is not an ancestor of its own tag. It went unnoticed
+          # because v0.1.8 was the first release under the tag-last ordering and
+          # nothing reads a tag until somebody tries to reproduce what shipped.
+          ref: ${{ needs.version.outputs.sha }}
+      - name: Tag it, now that it exists
+        if: inputs.publish
+        working-directory: built
+        run: |
+          V=${{ needs.version.outputs.version }}
+          # AND THE TREE HAS TO AGREE, because the ref above is a value handed
+          # between jobs and a wrong one would tag silently. This is the whole
+          # invariant a tag carries -- `v0.1.8` names the commit that IS 0.1.8 --
+          # and nothing asserted it before, which is why the defect above shipped
+          # and sat there.
+          HAVE=$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "$HAVE" != "$V" ]; then
+            echo "::error::refusing to tag v$V: this tree says $HAVE." >&2
+            echo "::error::The checkout is not the commit that was built -- check" >&2
+            echo "::error::needs.version.outputs.sha rather than re-pointing the tag." >&2
+            exit 1
+          fi
+          # Set here, not only in the bump step -- that step is skipped on the
+          # retry path, and `git tag -a` without an identity dies on
+          # `fatal: empty ident name` with everything already published.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "percolate-core $V"
+          git push origin "v$V"
+          echo "::notice::v$V tagged -- the wheel and image it names are already published"
+      - uses: actions/download-artifact@v8
+        if: inputs.publish
+        with: {name: dist, path: dist/}
+      - uses: softprops/action-gh-release@v3
+        if: inputs.publish
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+      - uses: actions/checkout@v7
+        if: inputs.publish
+        with:
+          path: tail
+          # main as it is NOW, not the commit that was built: PRs may have
+          # landed during the release, and the tail goes on top of them.
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - name: Pins, changelog heading, RELEASES.md row, and the next number
+        if: inputs.publish
+        working-directory: tail
+        run: python .github/scripts/after_release.py "${{ needs.version.outputs.version }}"
+      - name: The gates the tail exists for, before anything is pushed
+        if: inputs.publish
+        working-directory: tail
+        run: |
+          dev/check-version.sh
+          dev/check-releases.sh
+      - name: Push the tail
+        if: inputs.publish
+        working-directory: tail
+        run: |
+          V=${{ needs.version.outputs.version }}
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet && { echo "the tail of $V is already in the tree"; exit 0; }
+          git commit -qam "$V: the tail -- image pins, changelog, RELEASES.md row, next version"
+          for _ in 1 2 3; do
+            git pull --rebase --quiet origin "${{ github.ref_name }}" \
+              && git push origin HEAD:"${{ github.ref_name }}" && exit 0
+          done
+          echo "::error::v$V is published and its tail could not be pushed after three rebases -- run after_release.py $V on main by hand" >&2
+          exit 1
       - name: Require the token, rather than skipping quietly
         # A missing secret must not look like a successful release. The chart
         # lagging the package is the failure mode this whole workflow exists to
@@ -357,9 +428,6 @@ jobs:
           repository: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
           token: ${{ secrets.P8_RELEASE_TOKEN }}
           path: get-percolate
-      - uses: actions/setup-python@v7
-        with: {python-version: "3.12"}   # tomllib is stdlib from 3.11
-
       - name: Point the chart and the docs at ${{ needs.version.outputs.version }}
         working-directory: get-percolate
         run: |
@@ -444,116 +512,6 @@ jobs:
             --title "percolate-core $V: the pins and versions.toml follow it" \
             --body "percolate-core **$V** is published ([release]($RUN)). This moves \`versions.toml\` and every \`percolate-core:$PREV\` literal to $V; \`dev/references.sh\` passed on it. Merging is the judgement: the dev harness then runs its tests against $V (REM-540)."
 
-  # -------------------------------------------------------------------------
-  # THE COMMIT POINT, and it is last on purpose.
-  #
-  # Everything above can fail and leave a bumped, untagged tree that the next
-  # run finishes. Past here the version is on PyPI and Docker Hub and the tag
-  # says so -- which is the fact `dev/check-version.sh` and the preflight above
-  # both read to decide whether a number is spent.
-  # -------------------------------------------------------------------------
-  tag:
-    needs: [version, pypi, image]
-    # always(): a resumed run skips `pypi`, and a skipped need skips its dependents.
-    if: >-
-      always() && inputs.publish && needs.version.result == 'success' && needs.image.result == 'success'
-      && (needs.pypi.result == 'success' || needs.version.outputs.resume == 'true')
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          # THE COMMIT THAT WAS BUILT, which is what `build` and `image` already
-          # check out. Without this the job took `github.sha` -- main as it stood
-          # when the button was pressed -- and tagged that.
-          #
-          # v0.1.8 is the evidence and it is still wrong on the remote:
-          #
-          #     $ git show v0.1.8:pyproject.toml | sed -n 3p
-          #     version = "0.1.7"
-          #
-          # The bump commit is not an ancestor of its own tag. It went unnoticed
-          # because v0.1.8 was the first release under the tag-last ordering and
-          # nothing reads a tag until somebody tries to reproduce what shipped.
-          ref: ${{ needs.version.outputs.sha }}
-      - name: Tag it, now that it exists
-        run: |
-          V=${{ needs.version.outputs.version }}
-          # AND THE TREE HAS TO AGREE, because the ref above is a value handed
-          # between jobs and a wrong one would tag silently. This is the whole
-          # invariant a tag carries -- `v0.1.8` names the commit that IS 0.1.8 --
-          # and nothing asserted it before, which is why the defect above shipped
-          # and sat there.
-          HAVE=$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -1)
-          if [ "$HAVE" != "$V" ]; then
-            echo "::error::refusing to tag v$V: this tree says $HAVE." >&2
-            echo "::error::The checkout is not the commit that was built -- check" >&2
-            echo "::error::needs.version.outputs.sha rather than re-pointing the tag." >&2
-            exit 1
-          fi
-          # Set here, not only in the bump step -- that step is skipped on the
-          # retry path, and `git tag -a` without an identity dies on
-          # `fatal: empty ident name` with everything already published.
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$V" -m "percolate-core $V"
-          git push origin "v$V"
-          echo "::notice::v$V tagged -- the wheel and image it names are already published"
-
-  # -------------------------------------------------------------------------
-  # 7. The tail, which used to be three hand edits.
-  #
-  # Until this job, every release left main red on every PR in the repository
-  # until somebody noticed: the README pins named the previous image, the tree
-  # still carried the number just spent, and RELEASES.md had no row for the new
-  # tag. 0.1.9, 0.1.10 and 0.1.11 each needed it by hand, and 0.1.11's was found
-  # by a peer whose own PRs went red on it (REM-150) -- after "the remedy is not
-  # remember" had already been written down.
-  #
-  # So the workflow writes it (after_release.py), and runs the two gates the
-  # edits exist to satisfy BEFORE pushing. A tail that would leave either red
-  # fails here, in the release run, instead of in somebody's PR.
-  #
-  # What stays human is the paragraph in RELEASES.md saying WHY the version
-  # exists. The row is derived from git and the reason is not, so the run
-  # summary says it is owed rather than inventing one.
-  # -------------------------------------------------------------------------
-  after:
-    needs: [version, tag]
-    if: always() && inputs.publish && needs.tag.result == 'success'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_RELEASE_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # main as it is NOW, not the commit that was built: PRs may have
-          # landed during the release, and the tail goes on top of them.
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with: {python-version: "3.12"}
-      - name: Pins, changelog heading, RELEASES.md row, and the next number
-        run: python .github/scripts/after_release.py "${{ needs.version.outputs.version }}"
-      - name: The gates the tail exists for, before anything is pushed
-        run: |
-          dev/check-version.sh
-          dev/check-releases.sh
-      - name: Push the tail
-        run: |
-          V=${{ needs.version.outputs.version }}
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git diff --quiet && { echo "the tail of $V is already in the tree"; exit 0; }
-          git commit -qam "$V: the tail -- image pins, changelog, RELEASES.md row, next version"
-          for _ in 1 2 3; do
-            git pull --rebase --quiet origin "${{ github.ref_name }}" \
-              && git push origin HEAD:"${{ github.ref_name }}" && exit 0
-          done
-          echo "::error::v$V is published and its tail could not be pushed after three rebases -- run after_release.py $V on main by hand" >&2
-          exit 1
 
   # The same tail on a dry run, against a tag that exists only in this runner.
   # Without it a rehearsal would say nothing about the part of a release that
