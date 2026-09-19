@@ -25293,10 +25293,21 @@ create or replace view agentic.skills_api as
 -- question asked when something is wrong, and answering it from the document
 -- as applied rather than from the rows is how you find the row that was
 -- edited in place afterwards (brief.md §11.8).
+--
+-- `installed` answers the operator's other question, "which plugins are on this
+-- database", in one query (REM-250). An empty manifest uninstalls a plugin and
+-- its row stays, for the provenance plugins.md §9 keeps; without this column a
+-- plugin that installs nothing reads exactly like one that installs something.
+-- It is a column rather than a second view because the two would differ only
+-- in a filter, and it is last because `create or replace view` may only append.
+-- It counts the rows the caller can see, as everything in this view does.
 create or replace view agentic.plugins_api as
-    select name, version, description, author, homepage, manifest,
-           installed_at, updated_at, owner_id, org_id, visibility
-      from agentic.plugins;
+    select p.name, p.version, p.description, p.author, p.homepage, p.manifest,
+           p.installed_at, p.updated_at, p.owner_id, p.org_id, p.visibility,
+           exists (select 1 from agentic.tool_servers t where t.plugin = p.name)
+        or exists (select 1 from agentic.skills s where s.plugin = p.name)
+        or exists (select 1 from agentic.agents a where a.plugin = p.name) as installed
+      from agentic.plugins p;
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
 -- to remember to filter.

@@ -204,4 +204,32 @@ begin
     end if;
 end $$;
 
+
+-- ---------------------------------------------------------------
+-- 6. AN UNINSTALLED PLUGIN READS AS UNINSTALLED, AND ITS ROW STAYS.
+--
+-- The empty manifest is the uninstall, and it leaves the plugins row for
+-- provenance (plugins.md §9). Before `plugins_api.installed` an operator could
+-- not tell that row from a plugin that installs something without joining out
+-- to three tables (REM-250, measured on 0.1.5 walking scenarios/evals/J2 Act 8).
+-- ---------------------------------------------------------------
+do $$
+begin
+    perform agentic.apply_plugin($j${
+        "name": "t-p-inventory", "version": "1.0.0",
+        "skills": [{"name": "t-p-inv-skill", "description": "x", "content": "y"}]
+    }$j$::jsonb);
+    if not (select installed from agentic.plugins_api where name = 't-p-inventory') then
+        raise exception 'a plugin with a skill installed reads as not installed';
+    end if;
+
+    perform agentic.apply_plugin('{"name": "t-p-inventory", "version": "1.1.0"}'::jsonb);
+    if not exists (select 1 from agentic.plugins_api where name = 't-p-inventory') then
+        raise exception 'uninstalling deleted the plugins row, and with it the provenance';
+    end if;
+    if (select installed from agentic.plugins_api where name = 't-p-inventory') then
+        raise exception 'a plugin with nothing under it still reads as installed';
+    end if;
+end $$;
+
 rollback;
