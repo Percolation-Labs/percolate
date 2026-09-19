@@ -57,6 +57,11 @@ RUN pip install --no-cache-dir --no-deps /tmp/*.whl && rm /tmp/*.whl && pip chec
 # worker without egress would otherwise meet that inside a customer's step. They
 # are installed here, into the user's home that the services run as, and the
 # lake refuses to download at run time unless told to (engine._load).
+#
+# Fetched, not installed: `install` runs DuckDB, and the amd64 image is built
+# on an ARM runner under QEMU, where DuckDB dies with signal 11 (REM-619). So
+# the files are downloaded without DuckDB, and `lake doctor` proves they load
+# wherever the build runs natively, which is the arm64 image production runs.
 
 # Never root. The services hold no table grants and no filesystem state; there
 # is nothing they need root for, and running as root is the default only
@@ -64,7 +69,12 @@ RUN pip install --no-cache-dir --no-deps /tmp/*.whl && rm /tmp/*.whl && pip chec
 RUN useradd --create-home --uid 10001 percolate
 USER percolate
 WORKDIR /home/percolate
-RUN percolate lake doctor --install >/dev/null || percolate lake doctor
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+COPY .github/scripts/fetch_duckdb_extensions.py /tmp/fetch_duckdb_extensions.py
+RUN python /tmp/fetch_duckdb_extensions.py && \
+    if [ "$BUILDPLATFORM" = "$TARGETPLATFORM" ]; then percolate lake doctor >/dev/null || percolate lake doctor; \
+    else echo "built for $TARGETPLATFORM on $BUILDPLATFORM: DuckDB is not run under emulation, so the extensions are fetched, not loaded"; fi
 
 # No default command: the three services are equal citizens, and defaulting to
 # one of them makes the other two look like afterthoughts.
