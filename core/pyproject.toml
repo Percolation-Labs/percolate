@@ -102,7 +102,14 @@ otel = [
 providers = [
     "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=2.38,<3",
 ]
-all = ["percolate-core[content,agent,providers,ingest,tabular,lake,otel]"]
+# The embedding model that runs in the worker (REM-628). Separate from ingest
+# because a deployment that embeds through a hosted provider, or not at all,
+# should not carry onnxruntime; in `all` because the image is one image and
+# this is what makes semantic search work with no key and no bill. fastembed is
+# ONNX Runtime and a tokenizer -- no torch, which is the whole reason this is
+# affordable: ~53MB of wheels and a 64MB quantised model, against ~2GB.
+embed = ["fastembed>=0.7"]
+all = ["percolate-core[content,agent,providers,ingest,tabular,lake,otel,embed]"]
 
 [project.scripts]
 percolate = "percolate_core.cli:app"
