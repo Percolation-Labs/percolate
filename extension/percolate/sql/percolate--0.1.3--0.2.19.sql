@@ -16458,6 +16458,7 @@ on conflict (provider) do update
         method           = excluded.method,
         notes            = excluded.notes;
 
+
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from
 -- what the model actually produces.
@@ -16879,6 +16880,42 @@ alter table aiq.embedding_providers
     add column if not exists batch_request_template jsonb,
     add column if not exists batch_response_path text;
 
+-- A PROVIDER MAY RUN IN THE WORKER RATHER THAN OVER HTTP (REM-628).
+--
+-- Every provider so far is a url and a request body, because every provider so
+-- far was somebody else's service. A small ONNX model is not: it loads in the
+-- worker and answers in milliseconds, so there is no url to call, no credential
+-- to resolve and no request shape to describe. `in_process` says which kind a
+-- row is, and it is the only thing about the model that the worker branches on.
+--
+-- The two template columns become nullable because an in-process provider has
+-- nothing to put in them, and the check keeps them required for every provider
+-- that is still a url: a row with neither a template nor in_process would
+-- describe nothing, and the first thing to notice would be a worker asking an
+-- endpoint of null for a vector.
+alter table aiq.embedding_providers add column if not exists in_process boolean not null default false;
+alter table aiq.embedding_providers alter column request_template drop not null;
+alter table aiq.embedding_providers alter column response_path    drop not null;
+alter table aiq.embedding_providers drop constraint if exists embedding_providers_describes_a_call;
+alter table aiq.embedding_providers add constraint embedding_providers_describes_a_call
+    check (in_process or (request_template is not null and response_path is not null));
+
+-- The in-process provider (REM-628). No url, no credential, no bill: the
+-- worker loads the model named by the model row's `endpoint` and answers from
+-- memory. Kept in its own statement because its template columns are null and
+-- the upsert above sets them from `excluded`.
+insert into aiq.embedding_providers (provider, request_template, response_path, method, in_process, notes) values
+    ('fastembed', null, null, 'LOCAL', true,
+     'Runs in the worker through fastembed (ONNX, CPU, no torch). The model '
+     'row''s endpoint is the model id the runtime loads, such as '
+     'BAAI/bge-small-en-v1.5, not a url; credential_ref is not used.')
+on conflict (provider) do update
+    set request_template = excluded.request_template,
+        response_path    = excluded.response_path,
+        method           = excluded.method,
+        in_process       = excluded.in_process,
+        notes            = excluded.notes;
+
 -- A MODEL MAY NOT NAME A PROVIDER THAT DOES NOT EXIST.
 --
 -- `embedding_models.provider` was free text with a comment ('ollama' | 'openai'
@@ -16979,6 +17016,27 @@ begin
             'aiq.embedding_providers -- so nothing here knows what its request body '
             'looks like or where the vector sits in its response.', m.name, m.provider;
     end if;
+    -- An in-process provider is answered here and returns before any of the
+    -- url and body machinery below, which has nothing to say about it. The
+    -- endpoint is still required and still means "where the model comes from":
+    -- for a url provider that is a service, and for this one it is the model id
+    -- the worker's runtime loads. A worker without that runtime installed fails
+    -- the task naming the extra, which is a better failure than a null url.
+    if p.in_process then
+        if m.endpoint is null then
+            raise exception
+                'embedding model ''%'' runs in the worker (provider ''%''), so its '
+                'endpoint must be the model id the runtime loads, such as '
+                '''BAAI/bge-small-en-v1.5''. It is null.', m.name, m.provider;
+        end if;
+        return jsonb_build_object(
+            'model',      m.name,
+            'dim',        m.dim,
+            'in_process', true,
+            'provider',   m.provider,
+            'model_id',   m.endpoint);
+    end if;
+
     if m.endpoint is null then
         raise exception
             'embedding model ''%'' has no endpoint, so there is nowhere to send its '
@@ -19236,6 +19294,23 @@ begin
             'aiq.embedding_providers -- so nothing here knows what its request '
             'body looks like or where the vector sits in its response.',
             m.name, m.provider;
+    end if;
+
+    -- AN IN-PROCESS MODEL CANNOT BE AN http_call (REM-628). This function
+    -- compiles the marker into an HTTP task, and a provider that runs inside
+    -- the worker has no url to put in one. The corpus path
+    -- (aiq.embed_batch_call, op `embed`) embeds against it and is what an
+    -- upload uses; a query that wants its text embedded inside a workflow
+    -- needs a `work` step, which is not built. Refused here by name, because
+    -- the alternative is a task posting to the literal string
+    -- 'BAAI/bge-small-en-v1.5'.
+    if p.in_process then
+        raise exception
+            'step ''%'' embeds with model ''%'', which runs inside the worker '
+            '(provider ''%''). This step compiles to an HTTP call and there is '
+            'nothing to call. Supply the vector with the query, or embed the '
+            'corpus with the `embed` op, which uses the same model.',
+            p_step_key, m.name, m.provider;
     end if;
 
     -- Refused rather than defaulted: a guessed url is a step that 404s on

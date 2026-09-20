@@ -264,6 +264,7 @@
     },
     {
       "admits": [
+        "fastembed",
         "ollama",
         "openai"
       ],

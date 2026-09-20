@@ -246,7 +246,8 @@ REPLAYED_DML = {
     ("user-rbac/schema.sql", "insert rbac.orgs"):
         (1, "the shared org, one shipped row, do nothing"),
     ("ai-query-layer/schema.sql", "insert aiq.embedding_providers"):
-        (1, "the shipped provider templates, do update (REM-68)"),
+        (2, "the shipped provider templates, do update (REM-68); the second is fastembed, "
+            "whose template columns are null and so cannot share the first's upsert (REM-628)"),
     ("ai-query-layer/schema.sql", "update aiq.embedding_providers"):
         (1, "fills openai's batch template where it is still null; a set one is left alone"),
     ("ai-query-layer/schema.sql", "update aiq.semantic_sources"):

@@ -265,6 +265,23 @@ begin
             m.name, m.provider;
     end if;
 
+    -- AN IN-PROCESS MODEL CANNOT BE AN http_call (REM-628). This function
+    -- compiles the marker into an HTTP task, and a provider that runs inside
+    -- the worker has no url to put in one. The corpus path
+    -- (aiq.embed_batch_call, op `embed`) embeds against it and is what an
+    -- upload uses; a query that wants its text embedded inside a workflow
+    -- needs a `work` step, which is not built. Refused here by name, because
+    -- the alternative is a task posting to the literal string
+    -- 'BAAI/bge-small-en-v1.5'.
+    if p.in_process then
+        raise exception
+            'step ''%'' embeds with model ''%'', which runs inside the worker '
+            '(provider ''%''). This step compiles to an HTTP call and there is '
+            'nothing to call. Supply the vector with the query, or embed the '
+            'corpus with the `embed` op, which uses the same model.',
+            p_step_key, m.name, m.provider;
+    end if;
+
     -- Refused rather than defaulted: a guessed url is a step that 404s on
     -- every run of every workflow that ever names this model, and the message
     -- would name the endpoint rather than the omission.
