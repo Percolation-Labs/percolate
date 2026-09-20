@@ -364,6 +364,77 @@ select workflow.register_step_function(
 -- is what an upgraded database says the first time anything uploads a file.
 drop function if exists content.install_ingest_workflow(text, text, text);
 
+-- A PIPELINE FOR TEXT THAT IS ALREADY TEXT, PACED ON PURPOSE (REM-628).
+--
+-- install_ingest_workflow builds parse -> embed, because an upload arrives as
+-- bytes. content.register_text has the text already, so this installs the embed
+-- step alone: one task per resource, on the ingest queue, against the registered
+-- model.
+--
+-- THE RATE KEY IS WHY THIS FUNCTION EXISTS RATHER THAN A FLAG. Embedding runs
+-- in the worker now, so its cost is this node's CPU rather than somebody's API
+-- quota, and the node also serves readers. A bucket makes the queue SLOW BY
+-- CONSTRUCTION: tasks wait their turn instead of taking every core the moment a
+-- publisher saves fifty articles. The defaults -- 5 tokens refilling at 0.5 a
+-- second -- mean a burst of five resources goes at once and the steady rate is
+-- one resource every two seconds, which at the measured 10 chunks a second is
+-- about a fifth of one core. Raise refill_rate on a machine that has the
+-- headroom; that is a deployment's judgement and it is an argument rather than
+-- a measurement.
+--
+-- THE BUCKET IS CREATED HERE, BEFORE ANY STEP NAMES IT, for the reason the
+-- graph branch below records at length: a rate_key with no row in
+-- workflow.rate_limits is never claimed by anyone, forever, with no error and
+-- an empty-looking queue.
+create or replace function content.install_text_embed_workflow(
+    p_model       text default null,
+    p_queue       text default 'ingest',
+    p_name        text default 'embed_text',
+    p_rate_key    text default 'text_embedding',
+    p_capacity    numeric default 5,
+    p_refill_rate numeric default 0.5
+) returns text as $$
+declare
+    v_model text := p_model;
+begin
+    if v_model is null then
+        select name into v_model from aiq.embedding_models where is_default;
+    elsif not exists (select 1 from aiq.embedding_models where name = v_model) then
+        raise exception
+            'embedding model ''%'' is not registered, so every run of this '
+            'pipeline would fail at its only step.', v_model;
+    end if;
+    if v_model is null then
+        raise exception
+            'no embedding model is registered and none was named, so there is '
+            'nothing for this pipeline to embed with. Register one first: '
+            'specs/ai-query-layer/USAGE.md.';
+    end if;
+
+    insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+    values (p_rate_key, p_capacity, p_capacity, p_refill_rate)
+    on conflict (key) do update
+        set capacity = excluded.capacity, refill_rate = excluded.refill_rate;
+
+    -- define_yaml, the same door install_ingest_workflow uses: a definition is
+    -- a document, and there is no second way to write one.
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: embed
+    work: true
+    queue: %2$s
+    rate_key: %3$s
+    input:
+      op: embed
+      resource_id: '{{run.resource_id}}'
+      model: %4$s
+$y$, p_name, p_queue, p_rate_key, v_model));
+    return format('%s: embed with %s, paced at %s a second (bucket %s, burst %s)',
+                  p_name, v_model, p_refill_rate, p_rate_key, p_capacity);
+end;
+$$ language plpgsql;
+
 create or replace function content.install_ingest_workflow(
     p_model text default null,
     p_queue text default 'ingest',

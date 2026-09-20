@@ -328,6 +328,7 @@ grant select on content.channels, content.resources, content.resource_chunks
 -- proxy precisely so that a storage location never becomes one.
 revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) from public;
 revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
+revoke execute on function content.register_text(text,text,jsonb,text,text,uuid,jsonb,text) from public;
 revoke execute on function content.record_chunks(uuid,jsonb) from public;
 revoke execute on function content.resolve_file(uuid) from public;
 revoke execute on function content.check_drift() from public;
@@ -348,6 +349,10 @@ revoke execute on function content.dataset_uri(text) from public;
 -- grant on any table.
 grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) to authenticated;
 grant execute on function content.register_fetched(text,text,text,text,uuid,jsonb) to authenticated;
+-- register_text to `authenticated` and not to `worker`: it is a WRITER's call,
+-- made when an application publishes text it owns, and it writes as the caller
+-- through may_write. A worker embeds what is already registered.
+grant execute on function content.register_text(text,text,jsonb,text,text,uuid,jsonb,text) to authenticated;
 grant execute on function content.record_chunks(uuid,jsonb) to worker, authenticated;
 grant execute on function content.resolve_file(uuid) to authenticated;
 grant execute on function content.check_drift() to authenticated, worker;

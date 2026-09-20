@@ -483,6 +483,105 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- TEXT THAT IS ALREADY IN A DATABASE, REGISTERED FOR SEARCH IN ONE CALL (REM-628).
+--
+-- The upload path exists because bytes arrive as a file: they are stored, parsed
+-- and chunked, and only then is there text. An application that already HAS the
+-- text -- a published article, a package frame, a claim -- has none of those
+-- problems and should not have to invent a file to get a vector. Before this,
+-- percolate-application had no way to reach the index at all: it calls the
+-- Content Server for evidence and images only, so production held 14 resources
+-- and zero chunks, and registering an embedding model there would have embedded
+-- nothing.
+--
+-- ONE CALL, ONE TRANSACTION, and that is the point rather than a convenience.
+-- The obvious spelling -- register_fetched, then record_chunks, then let the
+-- channel start its workflow -- starts the embed task before the chunks exist
+-- unless the caller holds one transaction open across three calls. The worker
+-- would then embed nothing and report success, which is the failure that looks
+-- most like it worked.
+--
+-- RE-EMBEDDED ONLY WHEN THE TEXT CHANGES. The hash of the chunk text is kept on
+-- the resource, and an unchanged body returns `unchanged` without touching the
+-- chunks or starting a run. A published article is re-saved far more often than
+-- it is rewritten, and every save would otherwise cost the whole document again.
+create or replace function content.register_text(
+    p_channel     text,
+    p_external_id text,
+    p_chunks      jsonb,               -- record_chunks' shape: [{content, ...}]
+    p_title       text default null,
+    p_uri         text default null,
+    p_org_id      uuid default null,
+    p_metadata    jsonb default '{}'::jsonb,
+    p_trace_id    text default null
+) returns jsonb as $$
+declare
+    v_channel  uuid;
+    v_res      uuid;
+    v_hash     text;
+    v_had      text;
+    v_workflow text;
+    v_run      uuid;
+    v_n        int;
+    v_vis      text := rbac.default_visibility(p_org_id);
+begin
+    perform content.assert_org_write(p_org_id, 'register content');
+    select id into v_channel from content.channels where name = p_channel;
+    if not found then
+        raise exception 'no channel named %', p_channel;
+    end if;
+    if jsonb_typeof(p_chunks) is distinct from 'array' or jsonb_array_length(p_chunks) = 0 then
+        raise exception
+            'register_text needs a non-empty array of chunks. Text with no chunks '
+            'would register a resource that every search misses and nothing reports.';
+    end if;
+
+    -- The hash is over the CONTENT in order, so re-chunking the same words
+    -- differently is a change (it is: the vectors would differ), and re-saving
+    -- the same article is not.
+    select md5(string_agg(c->>'content', E'\n' order by ord))
+      into v_hash
+      from jsonb_array_elements(p_chunks) with ordinality e(c, ord);
+
+    insert into content.resources (channel_id, uri, title, org_id, owner_id, visibility,
+                                   metadata, external_id, status)
+    values (v_channel, p_uri, p_title, rbac.org_or_shared(p_org_id), rbac.current_user_id(),
+            v_vis, p_metadata || jsonb_build_object('text_hash', v_hash), p_external_id, 'ready')
+    on conflict (channel_id, external_id) do update
+        set updated_at = now(), title = coalesce(excluded.title, content.resources.title),
+            uri = coalesce(excluded.uri, content.resources.uri)
+    returning id, metadata->>'text_hash' into v_res, v_had;
+
+    -- `v_had` is the value BEFORE this statement only on the update arm; on a
+    -- fresh insert it is already the new hash, so the count decides.
+    if v_had is not distinct from v_hash
+       and exists (select 1 from content.resource_chunks where resource_id = v_res) then
+        return jsonb_build_object('resource_id', v_res, 'status', 'unchanged',
+                                  'chunks', (select count(*) from content.resource_chunks
+                                              where resource_id = v_res));
+    end if;
+
+    update content.resources
+       set metadata = metadata || jsonb_build_object('text_hash', v_hash), updated_at = now()
+     where id = v_res;
+    v_n := content.record_chunks(v_res, p_chunks);
+
+    select config->>'ingest_workflow' into v_workflow from content.channels where id = v_channel;
+    if v_workflow is not null then
+        -- The external id makes the run idempotent per resource, as the upload
+        -- path does: saving twice before the first run finishes does not queue
+        -- the same document twice.
+        v_run := workflow.start_workflow(
+            v_workflow, jsonb_build_object('resource_id', v_res, 'org_id', p_org_id),
+            'text:' || v_res::text, p_trace_id);
+    end if;
+
+    return jsonb_build_object('resource_id', v_res, 'status',
+                              case when v_workflow is null then 'registered' else 'queued' end,
+                              'chunks', v_n, 'run_id', v_run);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
 -- Register a fetched item that has no bytes of its own (a JSON record from a
 -- feed, say). Same shape, no file.
 create or replace function content.register_fetched(

@@ -21387,6 +21387,105 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- TEXT THAT IS ALREADY IN A DATABASE, REGISTERED FOR SEARCH IN ONE CALL (REM-628).
+--
+-- The upload path exists because bytes arrive as a file: they are stored, parsed
+-- and chunked, and only then is there text. An application that already HAS the
+-- text -- a published article, a package frame, a claim -- has none of those
+-- problems and should not have to invent a file to get a vector. Before this,
+-- percolate-application had no way to reach the index at all: it calls the
+-- Content Server for evidence and images only, so production held 14 resources
+-- and zero chunks, and registering an embedding model there would have embedded
+-- nothing.
+--
+-- ONE CALL, ONE TRANSACTION, and that is the point rather than a convenience.
+-- The obvious spelling -- register_fetched, then record_chunks, then let the
+-- channel start its workflow -- starts the embed task before the chunks exist
+-- unless the caller holds one transaction open across three calls. The worker
+-- would then embed nothing and report success, which is the failure that looks
+-- most like it worked.
+--
+-- RE-EMBEDDED ONLY WHEN THE TEXT CHANGES. The hash of the chunk text is kept on
+-- the resource, and an unchanged body returns `unchanged` without touching the
+-- chunks or starting a run. A published article is re-saved far more often than
+-- it is rewritten, and every save would otherwise cost the whole document again.
+create or replace function content.register_text(
+    p_channel     text,
+    p_external_id text,
+    p_chunks      jsonb,               -- record_chunks' shape: [{content, ...}]
+    p_title       text default null,
+    p_uri         text default null,
+    p_org_id      uuid default null,
+    p_metadata    jsonb default '{}'::jsonb,
+    p_trace_id    text default null
+) returns jsonb as $$
+declare
+    v_channel  uuid;
+    v_res      uuid;
+    v_hash     text;
+    v_had      text;
+    v_workflow text;
+    v_run      uuid;
+    v_n        int;
+    v_vis      text := rbac.default_visibility(p_org_id);
+begin
+    perform content.assert_org_write(p_org_id, 'register content');
+    select id into v_channel from content.channels where name = p_channel;
+    if not found then
+        raise exception 'no channel named %', p_channel;
+    end if;
+    if jsonb_typeof(p_chunks) is distinct from 'array' or jsonb_array_length(p_chunks) = 0 then
+        raise exception
+            'register_text needs a non-empty array of chunks. Text with no chunks '
+            'would register a resource that every search misses and nothing reports.';
+    end if;
+
+    -- The hash is over the CONTENT in order, so re-chunking the same words
+    -- differently is a change (it is: the vectors would differ), and re-saving
+    -- the same article is not.
+    select md5(string_agg(c->>'content', E'\n' order by ord))
+      into v_hash
+      from jsonb_array_elements(p_chunks) with ordinality e(c, ord);
+
+    insert into content.resources (channel_id, uri, title, org_id, owner_id, visibility,
+                                   metadata, external_id, status)
+    values (v_channel, p_uri, p_title, rbac.org_or_shared(p_org_id), rbac.current_user_id(),
+            v_vis, p_metadata || jsonb_build_object('text_hash', v_hash), p_external_id, 'ready')
+    on conflict (channel_id, external_id) do update
+        set updated_at = now(), title = coalesce(excluded.title, content.resources.title),
+            uri = coalesce(excluded.uri, content.resources.uri)
+    returning id, metadata->>'text_hash' into v_res, v_had;
+
+    -- `v_had` is the value BEFORE this statement only on the update arm; on a
+    -- fresh insert it is already the new hash, so the count decides.
+    if v_had is not distinct from v_hash
+       and exists (select 1 from content.resource_chunks where resource_id = v_res) then
+        return jsonb_build_object('resource_id', v_res, 'status', 'unchanged',
+                                  'chunks', (select count(*) from content.resource_chunks
+                                              where resource_id = v_res));
+    end if;
+
+    update content.resources
+       set metadata = metadata || jsonb_build_object('text_hash', v_hash), updated_at = now()
+     where id = v_res;
+    v_n := content.record_chunks(v_res, p_chunks);
+
+    select config->>'ingest_workflow' into v_workflow from content.channels where id = v_channel;
+    if v_workflow is not null then
+        -- The external id makes the run idempotent per resource, as the upload
+        -- path does: saving twice before the first run finishes does not queue
+        -- the same document twice.
+        v_run := workflow.start_workflow(
+            v_workflow, jsonb_build_object('resource_id', v_res, 'org_id', p_org_id),
+            'text:' || v_res::text, p_trace_id);
+    end if;
+
+    return jsonb_build_object('resource_id', v_res, 'status',
+                              case when v_workflow is null then 'registered' else 'queued' end,
+                              'chunks', v_n, 'run_id', v_run);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
 -- Register a fetched item that has no bytes of its own (a JSON record from a
 -- feed, say). Same shape, no file.
 create or replace function content.register_fetched(
@@ -22390,6 +22489,7 @@ grant select on content.channels, content.resources, content.resource_chunks
 -- proxy precisely so that a storage location never becomes one.
 revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) from public;
 revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
+revoke execute on function content.register_text(text,text,jsonb,text,text,uuid,jsonb,text) from public;
 revoke execute on function content.record_chunks(uuid,jsonb) from public;
 revoke execute on function content.resolve_file(uuid) from public;
 revoke execute on function content.check_drift() from public;
@@ -22410,6 +22510,10 @@ revoke execute on function content.dataset_uri(text) from public;
 -- grant on any table.
 grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) to authenticated;
 grant execute on function content.register_fetched(text,text,text,text,uuid,jsonb) to authenticated;
+-- register_text to `authenticated` and not to `worker`: it is a WRITER's call,
+-- made when an application publishes text it owns, and it writes as the caller
+-- through may_write. A worker embeds what is already registered.
+grant execute on function content.register_text(text,text,jsonb,text,text,uuid,jsonb,text) to authenticated;
 grant execute on function content.record_chunks(uuid,jsonb) to worker, authenticated;
 grant execute on function content.resolve_file(uuid) to authenticated;
 grant execute on function content.check_drift() to authenticated, worker;
@@ -27518,6 +27622,77 @@ select workflow.register_step_function(
 -- call is then ambiguous: "could not choose a best candidate function", which
 -- is what an upgraded database says the first time anything uploads a file.
 drop function if exists content.install_ingest_workflow(text, text, text);
+
+-- A PIPELINE FOR TEXT THAT IS ALREADY TEXT, PACED ON PURPOSE (REM-628).
+--
+-- install_ingest_workflow builds parse -> embed, because an upload arrives as
+-- bytes. content.register_text has the text already, so this installs the embed
+-- step alone: one task per resource, on the ingest queue, against the registered
+-- model.
+--
+-- THE RATE KEY IS WHY THIS FUNCTION EXISTS RATHER THAN A FLAG. Embedding runs
+-- in the worker now, so its cost is this node's CPU rather than somebody's API
+-- quota, and the node also serves readers. A bucket makes the queue SLOW BY
+-- CONSTRUCTION: tasks wait their turn instead of taking every core the moment a
+-- publisher saves fifty articles. The defaults -- 5 tokens refilling at 0.5 a
+-- second -- mean a burst of five resources goes at once and the steady rate is
+-- one resource every two seconds, which at the measured 10 chunks a second is
+-- about a fifth of one core. Raise refill_rate on a machine that has the
+-- headroom; that is a deployment's judgement and it is an argument rather than
+-- a measurement.
+--
+-- THE BUCKET IS CREATED HERE, BEFORE ANY STEP NAMES IT, for the reason the
+-- graph branch below records at length: a rate_key with no row in
+-- workflow.rate_limits is never claimed by anyone, forever, with no error and
+-- an empty-looking queue.
+create or replace function content.install_text_embed_workflow(
+    p_model       text default null,
+    p_queue       text default 'ingest',
+    p_name        text default 'embed_text',
+    p_rate_key    text default 'text_embedding',
+    p_capacity    numeric default 5,
+    p_refill_rate numeric default 0.5
+) returns text as $$
+declare
+    v_model text := p_model;
+begin
+    if v_model is null then
+        select name into v_model from aiq.embedding_models where is_default;
+    elsif not exists (select 1 from aiq.embedding_models where name = v_model) then
+        raise exception
+            'embedding model ''%'' is not registered, so every run of this '
+            'pipeline would fail at its only step.', v_model;
+    end if;
+    if v_model is null then
+        raise exception
+            'no embedding model is registered and none was named, so there is '
+            'nothing for this pipeline to embed with. Register one first: '
+            'specs/ai-query-layer/USAGE.md.';
+    end if;
+
+    insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+    values (p_rate_key, p_capacity, p_capacity, p_refill_rate)
+    on conflict (key) do update
+        set capacity = excluded.capacity, refill_rate = excluded.refill_rate;
+
+    -- define_yaml, the same door install_ingest_workflow uses: a definition is
+    -- a document, and there is no second way to write one.
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: embed
+    work: true
+    queue: %2$s
+    rate_key: %3$s
+    input:
+      op: embed
+      resource_id: '{{run.resource_id}}'
+      model: %4$s
+$y$, p_name, p_queue, p_rate_key, v_model));
+    return format('%s: embed with %s, paced at %s a second (bucket %s, burst %s)',
+                  p_name, v_model, p_refill_rate, p_rate_key, p_capacity);
+end;
+$$ language plpgsql;
 
 create or replace function content.install_ingest_workflow(
     p_model text default null,
