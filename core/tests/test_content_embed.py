@@ -53,23 +53,29 @@ class EmbedAQuery(unittest.TestCase):
         conn = AsyncMock()
         seen = {}
 
-        async def fetchval(*args):
+        async def fetchrow(*args):
+            # The route reads the registry TABLES as the caller, because the
+            # Content Server's own login cannot set role worker (REM-628). The
+            # row is what those tables answer.
             seen["args"] = args
             seen["loop"] = threading.get_ident()
-            return json.dumps(spec)
-        conn.fetchval.side_effect = fetchval
+            if spec is None:
+                return None
+            return {"name": spec["model"], "dim": spec["dim"], "endpoint": spec.get("model_id") or spec.get("url"),
+                    "provider": spec["provider"], "in_process": spec.get("in_process", False)}
+        conn.fetchrow.side_effect = fetchrow
 
         @asynccontextmanager
-        async def service():
+        async def as_caller(_claims):
             yield conn
 
         application = build_app(())
         if not anonymous:
             application.dependency_overrides[caller] = lambda: {"sub": "test-user"}
-        with patch("percolate_core.content.server.as_service", service):
+        with patch("percolate_core.content.server.as_caller", as_caller):
             with TestClient(application) as client:
                 response = client.post("/embed", json=body)
-        seen["calls"] = conn.fetchval.call_count
+        seen["calls"] = conn.fetchrow.call_count
         return response, seen
 
     def test_a_query_comes_back_as_one_vector_per_text_in_the_registry_s_dimension(self):

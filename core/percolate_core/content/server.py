@@ -457,20 +457,36 @@ async def embed_query(request: Request, claims: dict | None = Depends(caller)):
                                  "a corpus is embedded by an ingest run.")
     model = body.get("model") if isinstance(body.get("model"), str) else None
 
-    # THE WORKER ROLE, NOT THE CALLER'S. `aiq.embed_batch_call` reads the model
-    # registry, and its grant is to `worker` alone -- a caller holds no table
-    # privileges there, so `as_caller` would get "permission denied" for every
-    # signed-in person. Nothing caller-specific is being read: a model's name
-    # and dimension are the same for everyone, and the only other thing the call
-    # can return is the NAME of a credential, which is discarded below.
+    # READ AS THE CALLER, FROM THE REGISTRY TABLES, and this is the second
+    # attempt. The first asked `aiq.embed_batch_call`, whose grant is to
+    # `worker` alone, through `as_service()` -- and `as_service` SETS ROLE
+    # worker, which the Content Server's own login cannot do: it connects as
+    # `authenticator`, which is a member of neither `worker` nor `app_owner`.
+    # In production that was a 42501 the route turned into 403 on every search,
+    # and no token or caller could have changed it (REM-628).
+    #
+    # Nothing here needs that role. A model's name, dimension and runtime id are
+    # the same for everyone and `aiq.embedding_models` and
+    # `aiq.embedding_providers` are already readable by `authenticated`, which
+    # is what SEMANTIC search reads them as anyway. What the worker-only
+    # function adds is a request body and the NAME of a credential -- exactly
+    # the parts a query path discards.
     try:
-        async with as_service() as conn:
-            call = json.loads(await conn.fetchval(
-                # An EMPTY array, not the caller's text. The argument only
-                # fills a hosted provider's body template, which this route
-                # discards; sending the query would put a person's search
-                # string through a round trip that nothing reads.
-                "select aiq.embed_batch_call($1, $2::jsonb)::text", model, "[]"))
+        async with as_caller(claims) as conn:
+            row = await conn.fetchrow(
+                "select m.name, m.dim, m.endpoint, m.provider, coalesce(p.in_process, false) as in_process"
+                "  from aiq.embedding_models m"
+                "  left join aiq.embedding_providers p on p.provider = m.provider"
+                " where case when $1::text is null then m.is_default else m.name = $1 end", model)
+            if row is None:
+                raise HTTPException(400, f"embedding model {model!r} is not registered"
+                                         if model else
+                                         "this deployment has no default embedding model, so there is "
+                                         "nothing to embed a query with")
+            call = {"model": row["name"], "dim": row["dim"], "model_id": row["endpoint"],
+                    "provider": row["provider"], "in_process": row["in_process"]}
+    except HTTPException:
+        raise
     except Exception as e:
         refused = refusal(e)
         if refused is not None:
