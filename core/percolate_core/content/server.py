@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request,
 from fastapi.responses import JSONResponse
 
 from .. import __version__
-from ..core import as_caller, claims_from_jwt, optional
+from ..core import as_caller, as_service, claims_from_jwt, optional
 from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from . import storage
 
@@ -400,6 +400,116 @@ async def read_research_image(snapshot_id: UUID, claims: dict | None = Depends(c
             "ETag": f'"{row["checksum"]}"',
         },
     )
+
+
+QUERY_EMBED_MAX_TEXTS = 16
+QUERY_EMBED_MAX_CHARS = 8_000
+"""A QUERY IS NOT A CORPUS, and these numbers are the difference.
+
+`/embed` turns a search query into a vector, and a search query is a sentence.
+The corpus path is `ingest/embed.py`'s `embed_resource`: a workflow step, with
+a run behind it, a receipt and somewhere to put what it produced. A caller that
+posted a document here instead would be spending unmetered CPU on the process
+that also serves file bytes, with no run to look at afterwards -- so the shape
+of the request is what refuses it, rather than a convention nobody enforces.
+"""
+
+
+@routes.post("/embed")
+async def embed_query(request: Request, claims: dict | None = Depends(caller)):
+    """A vector for a search query, from the model this deployment registered
+    (REM-628, REM-582).
+
+    WHO THIS IS FOR: a caller that can search but holds no embedding model --
+    an application, a CLI, an agent on another machine. A SEMANTIC search
+    compares the query's vector with the corpus's, so the query has to be
+    embedded by the model the corpus was embedded with; a caller that guessed a
+    model would get numbers that rank against nothing. The model, its id and its
+    dimension come from `aiq.embed_batch_call`, exactly as the ingest path gets
+    them, so `model` in the body can only NAME a registered row -- it cannot
+    describe one, and it cannot ask for a dimension the space was not built for.
+
+    SIGNED IN, THOUGH THE READS BESIDE IT ARE NOT. `/files` and
+    `/research-images` let an anonymous caller read what RLS says is public, and
+    that is a database decision. This route runs a model instead, and the
+    anonymous version of it is a free CPU faucet for whoever finds the port.
+
+    Body: `{"texts": ["..."], "model": "<optional registered name>"}`.
+    Answer: `{"model": ..., "dim": ..., "vectors": [[...], ...]}`, one vector
+    per text and in the same order, which is how the caller matches them.
+    """
+    if not claims:
+        raise HTTPException(401, "Sign in before asking for an embedding")
+    body = await request.json() if await request.body() else {}
+    texts = body.get("texts") if isinstance(body, dict) else None
+    if (not isinstance(texts, list) or not texts
+            or not all(isinstance(t, str) and t.strip() for t in texts)):
+        raise HTTPException(400, 'send {"texts": ["a search query"]} -- a non-empty '
+                                 "list of non-empty strings")
+    if len(texts) > QUERY_EMBED_MAX_TEXTS:
+        raise HTTPException(413, f"{len(texts)} texts: this route embeds at most "
+                                 f"{QUERY_EMBED_MAX_TEXTS} at a time. It is the query path; "
+                                 "a corpus is embedded by an ingest run.")
+    total = sum(len(t) for t in texts)
+    if total > QUERY_EMBED_MAX_CHARS:
+        raise HTTPException(413, f"{total} characters: this route embeds at most "
+                                 f"{QUERY_EMBED_MAX_CHARS} at a time. It is the query path; "
+                                 "a corpus is embedded by an ingest run.")
+    model = body.get("model") if isinstance(body.get("model"), str) else None
+
+    # THE WORKER ROLE, NOT THE CALLER'S. `aiq.embed_batch_call` reads the model
+    # registry, and its grant is to `worker` alone -- a caller holds no table
+    # privileges there, so `as_caller` would get "permission denied" for every
+    # signed-in person. Nothing caller-specific is being read: a model's name
+    # and dimension are the same for everyone, and the only other thing the call
+    # can return is the NAME of a credential, which is discarded below.
+    try:
+        async with as_service() as conn:
+            call = json.loads(await conn.fetchval(
+                # An EMPTY array, not the caller's text. The argument only
+                # fills a hosted provider's body template, which this route
+                # discards; sending the query would put a person's search
+                # string through a round trip that nothing reads.
+                "select aiq.embed_batch_call($1, $2::jsonb)::text", model, "[]"))
+    except Exception as e:
+        refused = refusal(e)
+        if refused is not None:
+            return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+        # An unregistered model names itself and lists the registered ones, so
+        # that message is more use to the caller than anything written here.
+        raise HTTPException(400, str(e).split("\n")[0])
+
+    if not call.get("in_process"):
+        # NOT A PROXY FOR SOMEBODY'S PAID API. A hosted provider is reached with
+        # a key this process can resolve and the caller cannot, so serving this
+        # request would spend the operator's key on whatever text a caller
+        # posts, metered by nobody and attributable to no one. The route exists
+        # so a deployment running its own small model can answer queries with no
+        # key and no bill; a deployment on a hosted model gives its callers a
+        # key of their own, or registers a local model beside the hosted one.
+        raise HTTPException(501, f"the embedding model {call.get('model')!r} is served by "
+                                 f"{call.get('provider')!r} over HTTP, and this endpoint does "
+                                 "not call a paid provider on a caller's behalf. Register a "
+                                 "model that runs in this process, or embed the query with "
+                                 "your own key.")
+
+    from ..ingest.local_embed import embed_local
+    from ..worker.templates import TerminalError
+
+    # OFF THE EVENT LOOP, for the reason `embed_resource` gives about its own
+    # call: this process serves every other request too, and ONNX inference is
+    # CPU held for the whole call. On the loop, one 16-text request would stall
+    # every file download and every other query behind it.
+    try:
+        vectors = await asyncio.to_thread(
+            embed_local, call["model_id"], texts, expected_dim=call.get("dim"))
+    except TerminalError as e:
+        # The commonest one by far is an image built without the model or
+        # without `percolate-core[embed]`, and the exception says which. That is
+        # an operator's fact about this deployment, not a fault in the request.
+        raise HTTPException(503, str(e)) from None
+
+    return {"model": call["model"], "dim": call.get("dim"), "vectors": vectors}
 
 
 @routes.get("/health")
