@@ -21430,6 +21430,20 @@ declare
     v_vis      text := rbac.default_visibility(p_org_id);
 begin
     perform content.assert_org_write(p_org_id, 'register content');
+    -- THE SAME PERMISSION register_fetched ASKS, and asked here for the same
+    -- reason (REM-76): assert_org_write above admits a claimless writer -- an
+    -- install, a seed, a step function -- and says nothing about a signed-in
+    -- caller's permissions, so without this a person who may not upload could
+    -- register content through this door instead. `resources:create` is asked
+    -- in exactly one place in this collection, content.may_upload, which is
+    -- what stops the register_* functions drifting apart again; the leading
+    -- operator arm is the collection's spelling of "no person is behind this
+    -- call", and may_upload's own operator arm refuses a worker login.
+    if not (rbac.is_operator() or content.may_upload(p_org_id)) then
+        raise exception 'not authorized to register text'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs resources:create';
+    end if;
     select id into v_channel from content.channels where name = p_channel;
     if not found then
         raise exception 'no channel named %', p_channel;
