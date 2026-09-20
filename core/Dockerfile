@@ -43,6 +43,19 @@ while todo:
 print("\n".join(sorted(reqs)))
 EOF
 
+# THE EMBEDDING MODEL IS DOWNLOADED AT BUILD TIME, ON THE BUILD PLATFORM
+# (REM-628). fastembed fetches from Hugging Face on first use and caches it. A
+# pod doing that at startup needs egress the deployment does not allow
+# (REM-555), pays it on every cold start, and fails its first task rather than
+# this build. The files are an ONNX graph and a tokenizer, so they are the same
+# bytes for both architectures and this stage runs natively whatever it builds
+# for. `bge-small-en-v1.5` resolves to Qdrant's quantised ONNX build, 64MB.
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS embedmodel
+ARG P8_EMBED_MODEL=BAAI/bge-small-en-v1.5
+ENV P8_EMBED_MODEL=$P8_EMBED_MODEL
+COPY .github/scripts/cache_embedding_model.py /tmp/cache_embedding_model.py
+RUN pip install --no-cache-dir "fastembed>=0.7" && python /tmp/cache_embedding_model.py && du -sh /embed-cache
+
 FROM --platform=$BUILDPLATFORM python:3.11-slim AS build
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
@@ -76,6 +89,14 @@ COPY --from=deps /deps /usr/local/lib/python3.11/site-packages/
 COPY --from=deps /deps-bin /usr/local/bin/
 COPY --from=deps /pkg /usr/local/lib/python3.11/site-packages/
 COPY --from=deps /pkg-bin /usr/local/bin/
+
+# The embedding model, from the stage above. P8_EMBED_CACHE is where
+# local_embed.py looks, and it is read at run time only: nothing in a pod
+# writes here, so a missing file is a build that did not run rather than a
+# download nobody expected. `percolate ingest embed-selftest` proves it loads
+# with the network denied.
+COPY --from=embedmodel /embed-cache /opt/percolate/embed-cache
+ENV P8_EMBED_CACHE=/opt/percolate/embed-cache
 
 # DuckDB extensions are downloads from extensions.duckdb.org at first use, and a
 # worker without egress would otherwise meet that inside a customer's step. They

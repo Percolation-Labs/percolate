@@ -18,6 +18,13 @@ shape of its request body, where the vectors are in the response, and the NAME
 of the credential. `aiq.embed_batch_call()` hands all of that back from
 `aiq.embedding_models` + `aiq.embedding_providers`, so this file contains no
 provider knowledge and a second provider is a row rather than a branch.
+
+ONE PROVIDER IS A BRANCH, AND ONLY ONE (REM-628). `in_process` providers -- a
+small ONNX model loaded in this worker -- have no url, no body and no
+credential, so there is no request for the registry to describe. The registry
+still chooses the model, its id and its dimension; what the branch buys is that
+a deployment gets vectors with no key, no bill and no egress. It is a branch on
+one boolean column, and everything after it is the HTTP path unchanged.
 """
 
 from __future__ import annotations
@@ -96,6 +103,17 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
                 batch_size: int = DEFAULT_BATCH,
                 max_chars: int = DEFAULT_MAX_CHARS) -> tuple[list[list[float]], int]:
     """(vectors in input order, requests made). `spec` is aiq.embed_batch_call's."""
+    # A provider that runs here rather than over HTTP (REM-628). The registry
+    # still decides everything -- which model, which id, which dimension -- so
+    # this stays one branch on one column rather than provider knowledge: the
+    # spec says `in_process` and the rest of this function has nothing to do.
+    # "requests" is 0 and means it: a receipt of {"embedded": 412, "requests":
+    # 0} is how a reader tells a local run from a hosted one.
+    if spec.get("in_process"):
+        from .local_embed import DEFAULT_LOCAL_BATCH, embed_local
+        size = batch_size if batch_size != DEFAULT_BATCH else DEFAULT_LOCAL_BATCH
+        return embed_local(spec["model_id"], texts, size, spec.get("dim")), 0
+
     url, method = spec["url"], spec.get("method", "POST")
     # The url and the credential NAME are two columns of the registry, written
     # separately; the binding between them is the operator's, not the row's.

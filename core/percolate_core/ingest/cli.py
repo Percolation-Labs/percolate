@@ -21,6 +21,44 @@ def serve(queue: str = typer.Option("ingest", "--queue", "-q"),
     run(queue=queue, worker_id=worker_id)
 
 
+@app.command("embed-selftest")
+def embed_selftest(
+        model_id: str = typer.Option("BAAI/bge-small-en-v1.5", "--model-id"),
+        count: int = typer.Option(64, "--count", help="how many chunks to time"),
+        chars: int = typer.Option(1800, "--chars", help="characters per chunk"),
+        batch: int = typer.Option(0, "--batch", help="0 uses the local default")) -> None:
+    """Load the in-process embedding model and time it, with no database.
+
+    Two questions, answered where the worker runs rather than on a laptop: does
+    the model load without reaching the network (it must, because a pod has no
+    egress to Hugging Face), and how fast is this machine? The second is why it
+    takes a count and a size: the answer differs by an order of magnitude
+    between a development Mac and a shared ARM core, and the card that asked
+    for this model (REM-628) has numbers only for the first.
+    """
+    import time
+
+    from .local_embed import DEFAULT_LOCAL_BATCH, assert_offline, embed_local
+
+    t0 = time.perf_counter()
+    assert_offline(model_id)
+    load_s = time.perf_counter() - t0
+    texts = [("word " * (chars // 5))[:chars] for _ in range(count)]
+    size = batch or DEFAULT_LOCAL_BATCH
+    t0 = time.perf_counter()
+    vectors = embed_local(model_id, texts, size)
+    took = time.perf_counter() - t0
+    one = time.perf_counter()
+    embed_local(model_id, ["what does the evidence say about claim scope"], size)
+    query_ms = (time.perf_counter() - one) * 1000
+    print(json.dumps({"model_id": model_id, "dim": len(vectors[0]),
+                      "loaded_offline_s": round(load_s, 2), "chunks": count,
+                      "chars_each": chars, "batch": size, "seconds": round(took, 2),
+                      "chunks_per_s": round(count / took, 1),
+                      "chars_per_s": round(count * chars / took),
+                      "query_ms": round(query_ms, 1)}, indent=2))
+
+
 @app.command()
 def file(path: pathlib.Path,
          policy_json: str = typer.Option("{}", "--policy",

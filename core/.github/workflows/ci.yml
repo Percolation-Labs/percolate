@@ -113,6 +113,18 @@ jobs:
       - name: Browser file uploads preserve authentication
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_content_cors.py
+
+      # The in-process embedding provider (REM-628). Both files stub fastembed,
+      # so neither downloads a model: the real one is loaded and proved offline
+      # in the image build (.github/scripts/cache_embedding_model.py), and the
+      # test that uses it skips unless P8_EMBED_CACHE names a cache holding it.
+      - name: An embedding model that runs in the worker
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_local_embed.py
+
+      - name: A search query gets a vector from the registered model
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_content_embed.py
       # REM-309: an article image is identified by its bytes and read through a revision.
       - name: Article images are checked by their bytes and read through a revision
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
