@@ -54,6 +54,8 @@ create table if not exists aiq.nodes (
     updated_at   timestamptz not null default now(),
     unique (entity_type, entity_id)
 );
+comment on table aiq.nodes is
+    'A thing the graph can reach, projected from whatever table actually owns it, carrying the owner and visibility it inherits from there.';
 create index if not exists idx_nodes_org on aiq.nodes (org_id);
 
 create or replace trigger trg_nodes_touch before update on aiq.nodes
@@ -77,6 +79,8 @@ create table if not exists aiq.node_keys (
     org_id       uuid,
     primary key (node_id, key, kind)
 );
+comment on table aiq.node_keys is
+    'The names a node answers to — its identifiers and aliases — so a mention can be resolved without scanning summaries.';
 
 -- `kind` HERE IS THE KEY'S CLASS, not the thing's kind, and the distinction is
 -- worth a comment because the neighbouring table spends the same word on the
@@ -185,6 +189,8 @@ create table if not exists aiq.relation_types (
     is_symmetric boolean,
     primary key (src_type, relation, dst_type)
 );
+comment on table aiq.relation_types is
+    'The typed relations the graph admits, with their inverses and whether each is symmetric.';
 
 -- ...and on a database that already has the table, where `create table if not
 -- exists` above is a no-op and the column is still NOT NULL. Guarded for the
@@ -346,6 +352,8 @@ create table if not exists aiq.edges (
     last_recalled_at timestamptz,
     unique (src_id, dst_id, relation)
 );
+comment on table aiq.edges is
+    'A directed, typed, provenanced link between two nodes, valid over an interval, counting how often it has been recalled.';
 -- Forward and REVERSE both indexed: "what points at this?" is first-class,
 -- and the inverse edge is never stored (graph-identity.md "Edge table").
 create index if not exists idx_edges_src on aiq.edges (src_id);
@@ -518,6 +526,8 @@ create table if not exists aiq.edge_retractions (
     primary key (edge_id, retracted_at),
     check (revived_at > retracted_at)
 );
+comment on table aiq.edge_retractions is
+    'When an edge was withdrawn, and when it was revived, so a correction is a row rather than a deletion.';
 comment on table aiq.edge_retractions is
     'Retractions that were later undone: while [retracted_at, revived_at) the '
     'edge did not hold. Written by trg_record_edge_retraction on every path '
@@ -835,6 +845,8 @@ create table if not exists aiq.entity_registry (
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+comment on table aiq.entity_registry is
+    'How an ordinary table is projected into the graph: its key, summary, org and visibility expressions. Registering one is an insert, never a schema change.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.entity_registry holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -1382,6 +1394,8 @@ create table if not exists aiq.node_resolutions (
     -- again -- and every attempt stays on the record.
     constraint node_resolutions_no_self check (canonical_id <> merged_id)
 );
+comment on table aiq.node_resolutions is
+    'A decision that two nodes were the same thing, with the evidence, who decided, and whether it was undone.';
 
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
@@ -1816,6 +1830,8 @@ create table if not exists aiq.semantic_sources (
     embedding_col text not null default 'embedding',
     link_expr     text                 -- optional SQL expr -> owning node's entity_id
 );
+comment on table aiq.semantic_sources is
+    'Which column of which table carries a vector, and how a hit links back to the row.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.semantic_sources holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -2550,6 +2566,8 @@ create table if not exists aiq.embedding_models (
     notes       text,
     created_at  timestamptz not null default now()
 );
+comment on table aiq.embedding_models is
+    'A registered embedding model: its dimension, endpoint, credential and distance operator. A query names a space rather than a URL.';
 
 -- Exactly one default at a time. A partial unique index rather than a trigger:
 -- the database enforces it, so a bad deploy fails loudly instead of leaving
@@ -2683,6 +2701,8 @@ create table if not exists aiq.embedding_providers (
     method           text  not null default 'POST',
     notes            text
 );
+comment on table aiq.embedding_providers is
+    'How to call one provider''s embedding API, as request and response templates rather than code.';
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
 -- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
@@ -3601,6 +3621,8 @@ create table if not exists aiq.lexical_sources (
     content_col  text not null default 'content',
     regconfig    text not null default 'english'
 );
+comment on table aiq.lexical_sources is
+    'Which column of which table is full-text searchable, and which function searches it.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.lexical_sources holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -4000,6 +4022,8 @@ create table if not exists aiq.schema_facets (
     caller_scoped boolean not null default false,
     registered_at timestamptz not null default now()
 );
+comment on table aiq.schema_facets is
+    'The registry behind SCHEMA mode: each facet''s provider function, its description, and whether its answer is scoped to the caller.';
 
 -- Owner-only, and for the same reason workflow.register_step_function is: it
 -- decides what a `SCHEMA` query can cause to run.
@@ -4043,6 +4067,8 @@ create table if not exists aiq.schema_examples (
     ordinal   int  not null default 100,
     primary key (facet, label)
 );
+comment on table aiq.schema_examples is
+    'Worked examples attached to a facet, so the capability document shows rather than only describes.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.schema_examples holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -4142,6 +4168,8 @@ create table if not exists aiq.schema_revisions (
     captured_at timestamptz not null default now(),
     primary key (facet, revision)
 );
+comment on table aiq.schema_revisions is
+    'A hash of each facet''s answer over time, so drift in what the database says about itself is visible.';
 create index if not exists idx_schema_revisions_hash on aiq.schema_revisions (facet, hash);
 
 -- The one place a facet is produced, so hashing, scoping and the FROM

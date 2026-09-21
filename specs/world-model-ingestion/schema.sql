@@ -47,6 +47,8 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+comment on table content.channels is
+    'Where content comes from — an upload endpoint, a feed, an API — with its configuration and how often to poll it.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. content.channels holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -126,6 +128,8 @@ create table if not exists content.files (
     created_at   timestamptz not null default now(),
     unique (bucket, object_key)
 );
+comment on table content.files is
+    'Stored bytes, addressed by checksum and object key, shared by every resource that has the same content.';
 
 -- ------------------------------------------------------------
 -- 3. Resources — the unit of ingested content.
@@ -170,6 +174,8 @@ create table if not exists content.resources (
     updated_at   timestamptz not null default now(),
     unique (channel_id, external_id)
 );
+comment on table content.resources is
+    'The unit of ingested content: one uploaded document, fetched page or post, pointing at its channel and its bytes.';
 create index if not exists idx_resources_channel on content.resources (channel_id, ingested_at desc);
 create index if not exists idx_resources_org on content.resources (org_id);
 -- Partial on the states worth hunting for. 'stored' joins 'ready' in the
@@ -222,6 +228,8 @@ create table if not exists content.resource_chunks (
     created_at   timestamptz not null default now(),
     unique (resource_id, ordinal)
 );
+comment on table content.resource_chunks is
+    'A resource split for retrieval: a located, searchable span with its offsets and token count.';
 create index if not exists idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
 
 -- ------------------------------------------------------------
@@ -1070,6 +1078,8 @@ create table if not exists content.datasets (
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now()
 );
+comment on table content.datasets is
+    'A tabular dataset in object storage — its format, columns, partitioning and row count — queryable through LAKE.';
 
 -- NULLS NOT DISTINCT, and it is the whole of whether `mode: append` works.
 --
@@ -1147,6 +1157,8 @@ create table if not exists content.dataset_files (
     added_at    timestamptz not null default now(),
     primary key (dataset_id, resource_id)
 );
+comment on table content.dataset_files is
+    'Which resources make up a dataset, with each file''s object key and row count. The join, not a copy of either side.';
 
 -- `create or replace`, matching the `if not exists` on the table above: this
 -- section is written to be re-applicable, because a deployment that already
@@ -1262,3 +1274,54 @@ returns text as $$
     order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;
+
+-- ============================================================
+-- MOVED HERE FROM specs/research-platform/schema.sql, 21 September 2026.
+--
+-- A snapshot is a content table: it references content.resources and
+-- content.files and nothing in research. It was declared in the research
+-- platform's file because pinned evidence is what first needed it.
+-- specs/packages/rows-not-schema.md §7 step 2; dev/owns-its-schema.py refuses
+-- the next one. Nothing changed but the file.
+-- ============================================================
+
+-- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
+-- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
+-- later fetch change what an old revision appears to rely on. A snapshot records the resource, the exact
+-- retained file and its hash, and who captured it, together, taken from the resource row as it stood.
+--
+-- Readable exactly when its resource is (the policy below asks the resource, under the caller's own row
+-- security), rather than carrying copies of owner, org and visibility that could drift from the row they
+-- describe -- aiq.node_keys inherits from aiq.nodes for the same reason. The resource cannot be deleted while
+-- a snapshot pins it. The bytes go only through content.remove_snapshot_bytes, which leaves a tombstone that
+-- keeps the checksum: an endorsement never silently becomes an endorsement of replacement bytes.
+create table if not exists content.resource_snapshots (
+    id             uuid primary key default uuidv7(),
+    resource_id    uuid not null references content.resources(id),
+    file_id        uuid references content.files(id),
+    checksum       text not null,
+    size_bytes     bigint not null check (size_bytes >= 0),
+    content_type   text,
+    uri            text,
+    captured_by    uuid not null references rbac.users(id),
+    actor_kind     text not null check (actor_kind in ('person', 'agent', 'platform')),
+    credential_id  uuid references rbac.api_keys(id),
+    captured_at    timestamptz not null default now(),
+    removed_at     timestamptz,
+    removed_by     uuid references rbac.users(id),
+    removed_reason text,
+    constraint resource_snapshots_removal_says_why check ((removed_at is null) = (removed_reason is null)),
+    constraint resource_snapshots_bytes_until_removed check ((removed_at is null) = (file_id is not null))
+);
+comment on table content.resource_snapshots is
+    'An exact capture of a resource as it stood, with its checksum and who captured it, so a citation cannot be changed by a later fetch.';
+create index if not exists idx_resource_snapshots_file on content.resource_snapshots (file_id);
+create index if not exists idx_resource_snapshots_resource on content.resource_snapshots (resource_id);
+
+-- A snapshot is readable exactly when its resource is: the subquery runs under the caller's own row security on
+-- content.resources, so there is one tenancy fact and it lives on the resource (REM-153).
+alter table content.resource_snapshots enable row level security;
+drop policy if exists resource_snapshots_via_resource on content.resource_snapshots;
+create policy resource_snapshots_via_resource on content.resource_snapshots for select
+    using (exists (select 1 from content.resources r where r.id = resource_snapshots.resource_id));
+grant select on content.resource_snapshots to authenticated;

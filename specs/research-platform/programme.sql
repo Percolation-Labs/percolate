@@ -31,6 +31,8 @@ create table if not exists research.programmes (
     bounds     jsonb not null default '{}'::jsonb check (jsonb_typeof(bounds) = 'object'),
     created_at timestamptz not null default now()
 );
+comment on table research.programmes is
+    'A research programme: the question it asks, its objective and the bounds it works within.';
 
 create table if not exists research.protocols (
     id                uuid primary key default uuidv7(),
@@ -45,6 +47,8 @@ create table if not exists research.protocols (
     created_at        timestamptz not null default now(),
     unique (programme_id, number)
 );
+comment on table research.protocols is
+    'A numbered, hashed method for a programme, amending an earlier one, naming the corpus it runs over.';
 
 create table if not exists research.protocol_freezes (
     id           uuid primary key default uuidv7(),
@@ -53,6 +57,8 @@ create table if not exists research.protocol_freezes (
     frozen_by    uuid references rbac.users(id),
     frozen_at    timestamptz not null default now()
 );
+comment on table research.protocol_freezes is
+    'That a protocol was frozen, once. A run may only start on a frozen protocol.';
 
 create table if not exists research.programme_runs (
     id           uuid primary key default uuidv7(),
@@ -67,6 +73,8 @@ create table if not exists research.programme_runs (
     started_at   timestamptz not null default now(),
     unique (protocol_id, run_key)
 );
+comment on table research.programme_runs is
+    'One execution of a frozen protocol, keyed so the same inputs are a retry rather than a second run.';
 
 create table if not exists research.run_results (
     id           uuid primary key default uuidv7(),
@@ -80,6 +88,8 @@ create table if not exists research.run_results (
     recorded_by  uuid references rbac.users(id),
     recorded_at  timestamptz not null default now()
 );
+comment on table research.run_results is
+    'What a run produced: its state, outputs, failures, usage and a hash of the result.';
 
 create table if not exists research.run_evaluations (
     id            uuid primary key default uuidv7(),
@@ -93,6 +103,8 @@ create table if not exists research.run_evaluations (
     recorded_by   uuid references rbac.users(id),
     recorded_at   timestamptz not null default now()
 );
+comment on table research.run_evaluations is
+    'How a run was judged, by which evaluator and method, including where judges disagreed and what stayed uncertain.';
 
 create table if not exists research.run_decisions (
     id           uuid primary key default uuidv7(),
@@ -105,6 +117,8 @@ create table if not exists research.run_decisions (
     reopen_when  text,
     decided_at   timestamptz not null default now()
 );
+comment on table research.run_decisions is
+    'The verdict taken on a run, what it cited, what to check next and what would reopen it.';
 
 create index if not exists protocols_by_programme on research.protocols (programme_id, number);
 create index if not exists runs_by_programme on research.programme_runs (programme_id);

@@ -172,6 +172,8 @@ create table if not exists percolate.null_means (
     why         text not null,
     primary key (schema_name, table_name, column_name)
 );
+comment on table percolate.null_means is
+    'What a NULL is allowed to mean in a given column: a value or an absence. A column that will not say is refused.';
 
 comment on table percolate.null_means is
     'Declares whether a nullable column''s NULL is a VALUE (a real state, so a '
@@ -225,6 +227,8 @@ create table if not exists percolate.table_kinds (
     why         text not null,
     primary key (schema_name, table_name)
 );
+comment on table percolate.table_kinds is
+    'What each table IS — an entity, a vocabulary, a ledger — declared rather than guessed, with the reason.';
 
 comment on table percolate.table_kinds is
     'What a table IS, which decides what its primary key must be. entity: a '

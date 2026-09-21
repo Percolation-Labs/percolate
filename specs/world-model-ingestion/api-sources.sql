@@ -18,6 +18,8 @@ create table if not exists content.source_state (
     last_page_at timestamptz,
     last_completed_at timestamptz
 );
+comment on table content.source_state is
+    'Everything a resumable pull needs and a reader does not: watermark, next page, what has been visited, and the task currently claiming the source.';
 create table if not exists content.source_records (
     source_id uuid not null references content.channels(id) on delete cascade,
     external_id text not null,
@@ -28,6 +30,8 @@ create table if not exists content.source_records (
     updated_at timestamptz not null default now(),
     primary key(source_id,external_id)
 );
+comment on table content.source_records is
+    'One record as a pulling source returned it, raw and parsed, keyed by the source''s own identifier.';
 alter table content.source_state enable row level security;
 alter table content.source_records enable row level security;
 drop policy if exists source_read on content.source_state;

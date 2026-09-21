@@ -35,6 +35,8 @@ create table if not exists claims.tx (
     reason        text not null check (length(reason) > 0),
     check (actor_kind = 'platform' or actor_id is not null)
 );
+comment on table claims.tx is
+    'One append to the claims graph: who asserted, as what kind of actor, from which revision and why. Every assertion carries its tx.';
 
 -- ------------------------------------------------------------
 -- 2. Claims. A proposition with an identity and nothing else: its text is whatever its occurrences say.
@@ -43,6 +45,8 @@ create table if not exists claims.claims (
     id uuid primary key default uuidv7(),
     tx bigint not null references claims.tx(id)
 );
+comment on table claims.claims is
+    'A claim''s identity, minted once. Everything said about it is an assertion elsewhere that names it.';
 
 -- ------------------------------------------------------------
 -- 3. expresses: occurrence (and part) -> claim, one row per statement, never updated.
@@ -65,6 +69,8 @@ create table if not exists claims.expresses (
     tx          bigint not null references claims.tx(id),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.expresses is
+    'That an occurrence in a revision expresses a claim, by which method, at what review status. Never updated; a change is a later row.';
 -- The spike's index (meta/spikes/2026-09-18-claims-graph, "added after the first 1.1M run"): every read by revision
 -- and the projection's own "is this occurrence linked" check use it.
 create index if not exists expresses_occurrence on claims.expresses (revision_id, claim_key, part, id desc);
@@ -348,6 +354,8 @@ create table if not exists claims.predicates (
     is_symmetric  boolean not null,
     requires     text not null
 );
+comment on table claims.predicates is
+    'The predicates an assertion may use, with the kinds they relate and whether each is transitive or symmetric.';
 insert into claims.predicates (name, kind, subject_kind, object_kind, is_transitive, is_symmetric, requires) values
  ('expresses',            'identity',    'occurrence', 'claim',    false, false, 'platform or owner; written by claims.link_revision'),
  ('same_as',              'identity',    'claim',      'claim',    true,  true,  'evidence on both sides (REM-478)'),
@@ -401,6 +409,8 @@ create table if not exists claims.relations (
     check (src <> dst),
     check (evidence2 is null or evidence2 <> evidence)
 );
+comment on table claims.relations is
+    'A typed assertion between two claims, with its predicate, review status, evidence and the spans it rests on.';
 create index if not exists relations_src on claims.relations (src, predicate, dst, id desc);
 create index if not exists relations_dst on claims.relations (dst, predicate);
 create index if not exists relations_evidence on claims.relations (evidence);
@@ -706,6 +716,8 @@ create table if not exists claims.frames (
     primary key (revision_id, claim_key),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.frames is
+    'A claim''s comparable slots — subject, outcome, population, setting, period, comparator, direction, magnitude — which is what makes agreement checkable.';
 
 create table if not exists claims.questions (
     id          uuid primary key default uuidv7(),
@@ -717,6 +729,8 @@ create table if not exists claims.questions (
     tx          bigint not null references claims.tx(id),
     check ((refinements = '{}'::jsonb) = (refines is null))
 );
+comment on table claims.questions is
+    'The question two claims must share before they can be compared, minted from a frame''s subject and outcome.';
 create index if not exists questions_refines on claims.questions (refines) where refines is not null;
 
 create table if not exists claims.answered (
@@ -730,6 +744,8 @@ create table if not exists claims.answered (
     claim_key   text not null,
     tx          bigint not null references claims.tx(id)
 );
+comment on table claims.answered is
+    'The stance a claim takes on a question: computed from its frame when a revision is projected, or recorded when a person answers whether a reworded claim is still the same one.';
 create index if not exists answered_question on claims.answered (question_id, claim_id, id desc);
 create index if not exists answered_claim on claims.answered (claim_id);
 create index if not exists answered_evidence on claims.answered (evidence);
@@ -881,6 +897,8 @@ create table if not exists claims.origins (
     label text not null,
     tx    bigint not null references claims.tx(id)
 );
+comment on table claims.origins is
+    'A source resolved to a canonical origin, so two citations of the same thing are one origin.';
 
 create table if not exists claims.cites (
     id          bigint generated always as identity primary key,
@@ -893,6 +911,8 @@ create table if not exists claims.cites (
     unique (revision_id, claim_key, source_key, via),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.cites is
+    'That a revision''s claim cites a source, resolved to its origin, which is what makes attribution derivable without a column for it.';
 create index if not exists cites_origin on claims.cites (origin_id);
 
 -- Two origins that name one study. `a` and `b` are ordered (a < b), so one pair is one statement.
@@ -907,6 +927,8 @@ create table if not exists claims.origin_links (
     tx          bigint not null references claims.tx(id),
     check (a < b)
 );
+comment on table claims.origin_links is
+    'Two origins the platform derived as one study, from a claim that cites the same source by both key and URL. Written confirmed by claims.project_cites and by nothing else, so the proposed and disputed the status column admits are unreachable.';
 create index if not exists origin_links_a on claims.origin_links (a);
 create index if not exists origin_links_b on claims.origin_links (b);
 
@@ -1034,6 +1056,8 @@ create table if not exists claims.resolutions (
     tx           bigint not null references claims.tx(id),
     check (restates is null or restates < id)
 );
+comment on table claims.resolutions is
+    'Whether a claim held, failed, partly held or could not be resolved, settled by a citable event, with the date it was checked, the method and its review status.';
 create index if not exists resolutions_claim on claims.resolutions (claim_id, id desc);
 create index if not exists resolutions_restates on claims.resolutions (restates) where restates is not null;
 
@@ -1126,6 +1150,8 @@ create table if not exists claims.consensus (
     check (restates is null or restates < id),
     check (restates is not null or status = 'proposed')
 );
+comment on table claims.consensus is
+    'What a body of studies is asserted to hold on a claim, with what it rests on and its review status.';
 create index if not exists consensus_claim on claims.consensus (claim_id, id desc);
 create index if not exists consensus_restates on claims.consensus (restates) where restates is not null;
 
@@ -1266,6 +1292,8 @@ create table if not exists claims.erasures (
     counts      jsonb not null check (jsonb_typeof(counts) = 'object'),
     at          timestamptz not null default now()
 );
+comment on table claims.erasures is
+    'The tombstone for what an erasure removed from the graph: counts, no text.';
 
 -- What of the claims graph rests on these revisions, counted before they go.
 create or replace function claims.graph_counts(p_revisions uuid[]) returns jsonb
@@ -1899,6 +1927,8 @@ create table if not exists claims.execution_receipts (
     recorded_at timestamptz not null default now(),
     check ((kind='workflow') = (run_id is not null))
 );
+comment on table claims.execution_receipts is
+    'Which run, task, step and attempt produced a transaction, and by what method at what version.';
 alter table claims.execution_receipts enable row level security;
 -- Result attachment and erasure find one task attempt, rather than scanning the assertion history.
 create index if not exists execution_receipts_task on claims.execution_receipts(task_id,attempt) where task_id is not null;
@@ -1908,6 +1938,8 @@ create table if not exists claims.execution_inputs (
     content_hash text not null,
     primary key(tx,revision_id)
 );
+comment on table claims.execution_inputs is
+    'The exact revision content a machine assertion ran over, by hash.';
 alter table claims.execution_inputs enable row level security;
 create or replace function claims.capture_execution() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
@@ -1979,6 +2011,8 @@ create table if not exists claims.execution_results (
     recorded_at timestamptz not null default now(),
     primary key(task_id,attempt,agent_run_id)
 );
+comment on table claims.execution_results is
+    'What a machine extraction actually cost and used: model, version, usage and the evaluation it was scored against.';
 alter table claims.execution_results enable row level security;
 -- Only the trusted runtime/worker can attach provider metadata. A caller can name neither a model nor usage
 -- on an assertion; a stale dispatch attempt cannot attach a result to the worker that replaced it.

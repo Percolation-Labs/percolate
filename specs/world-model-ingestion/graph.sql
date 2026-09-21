@@ -35,6 +35,8 @@ create table if not exists aiq.graph_vocabulary (
     description    text,
     registered_at  timestamptz not null default now()
 );
+comment on table aiq.graph_vocabulary is
+    'The relation names an extractor may emit, and how much weight a machine-made one starts with.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -302,6 +304,8 @@ create table if not exists aiq.soft_nodes (
     -- how the candidate node is evicted -- see aiq.promote_soft_node.
     resolved_node_id uuid references aiq.nodes(id)
 );
+comment on table aiq.soft_nodes is
+    'A thing an extractor named but could not resolve, held until it resolves to a real node or is discarded.';
 
 -- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail --
 -- the same lesson node_keys learned. org_id IS NULL means shared reference
@@ -384,6 +388,8 @@ create table if not exists aiq.lake_nodes (
     first_seen_at timestamptz not null default now(),
     last_seen_at  timestamptz not null default now()
 );
+comment on table aiq.lake_nodes is
+    'A row from the lake given a graph identity, so a DuckDB result can be walked with everything else.';
 -- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
 -- idx_soft_nodes_key above states in full.
 create unique index if not exists idx_lake_nodes_key

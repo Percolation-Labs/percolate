@@ -94,6 +94,8 @@ create table if not exists percolate.types (
     why          text,
     constraint schema_is_an_object check (jsonb_typeof(schema) = 'object')
 );
+comment on table percolate.types is
+    'The published payload shapes a client can fetch, with who owns each and who consumes it.';
 
 comment on table percolate.types is
     'Payload shapes that cannot be derived from the catalog, because a jsonb '

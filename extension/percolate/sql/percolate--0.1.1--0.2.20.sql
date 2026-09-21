@@ -749,6 +749,8 @@ create table if not exists percolate.null_means (
     why         text not null,
     primary key (schema_name, table_name, column_name)
 );
+comment on table percolate.null_means is
+    'What a NULL is allowed to mean in a given column: a value or an absence. A column that will not say is refused.';
 
 comment on table percolate.null_means is
     'Declares whether a nullable column''s NULL is a VALUE (a real state, so a '
@@ -802,6 +804,8 @@ create table if not exists percolate.table_kinds (
     why         text not null,
     primary key (schema_name, table_name)
 );
+comment on table percolate.table_kinds is
+    'What each table IS — an entity, a vocabulary, a ledger — declared rather than guessed, with the reason.';
 
 comment on table percolate.table_kinds is
     'What a table IS, which decides what its primary key must be. entity: a '
@@ -955,6 +959,8 @@ create table if not exists workflow.lifecycle_states (
     is_success  boolean not null default false,
     note        text not null
 );
+comment on table workflow.lifecycle_states is
+    'The closed vocabulary of run and task states, saying which are terminal and which count as success.';
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
 -- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
@@ -1029,6 +1035,8 @@ create table if not exists workflow.definitions (
     deleted_at  timestamptz,
     unique (name, version)
 );
+comment on table workflow.definitions is
+    'A workflow as authored: a name, a version and the YAML spec its tasks are compiled from.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. workflow.definitions holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -1288,6 +1296,8 @@ create table if not exists workflow.runs (
     updated_at       timestamptz not null default now(),
     completed_at     timestamptz
 );
+comment on table workflow.runs is
+    'One execution of a definition, with its input, its status and the compensation state of its saga.';
 
 -- ------------------------------------------------------------
 -- 3. Tasks
@@ -1366,6 +1376,8 @@ create table if not exists workflow.tasks (
     updated_at       timestamptz not null default now(),
     unique (run_id, step_key)
 );
+comment on table workflow.tasks is
+    'The unit of work and the queue itself. A worker claims a row with SKIP LOCKED; status, attempts, dependencies and lease live here.';
 
 create or replace trigger trg_workflow_runs_touch before update on workflow.runs
     for each row execute function public.touch_updated_at();
@@ -1421,6 +1433,8 @@ create table if not exists workflow.task_dependencies (
     depends_on_task_id  uuid not null references workflow.tasks(id) on delete cascade,
     primary key (task_id, depends_on_task_id)
 );
+comment on table workflow.task_dependencies is
+    'Which task waits on which, so a fan-out''s join is a row rather than a controller holding a plan.';
 create index if not exists idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
 
 -- ------------------------------------------------------------
@@ -1454,6 +1468,8 @@ create table if not exists workflow.queue_config (
     stale_timeout  interval not null default workflow.stale_timeout_default(),
     rate_lookahead int not null default 20
 );
+comment on table workflow.queue_config is
+    'Per-queue settings the claim path reads: how long a lease may go stale and how far ahead to look for rate limits.';
 
 -- AND ON A DATABASE THAT ALREADY HAS THE TABLE, which is every deployment.
 -- `create table if not exists` is a no-op there, so the default above would
@@ -1508,6 +1524,8 @@ create table if not exists workflow.rate_limits (
     refill_rate numeric not null,
     updated_at  timestamptz not null default now()
 );
+comment on table workflow.rate_limits is
+    'A token bucket by key, which login throttling and outbound calls both draw from.';
 
 -- THE BUCKET'S INVARIANTS, WHERE THEY CAN BE REFUSED RATHER THAN INTENDED.
 --
@@ -1590,6 +1608,8 @@ create table if not exists workflow.task_events (
     detail         jsonb,
     at             timestamptz not null default now()
 );
+comment on table workflow.task_events is
+    'Every status transition a task made, with the input it saw, which is the saga log.';
 create index if not exists idx_task_events_run on workflow.task_events (run_id, at);
 
 create or replace function workflow.log_task_transition() returns trigger as $$
@@ -3403,6 +3423,8 @@ create table if not exists workflow.step_functions (
     description   text,
     registered_at timestamptz not null default now()
 );
+comment on table workflow.step_functions is
+    'The step kinds a definition may name, each bound to the function that executes it and a timeout.';
 
 -- ON THE TABLE, NOT IN THE FUNCTION THAT WRITES IT, and the move is the point.
 -- These three checks used to live in the body of register_step_function() --
@@ -4455,6 +4477,8 @@ create table if not exists workflow.schedules (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
+comment on table workflow.schedules is
+    'A workflow that runs on a cron expression, with its overlap policy and what the last tick did.';
 create index if not exists idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
 create index if not exists idx_schedules_org on workflow.schedules (org_id);
 
@@ -9492,6 +9516,8 @@ create table if not exists rbac.users (
     created_at    timestamptz not null default now(),
     updated_at    timestamptz not null default now()
 );
+comment on table rbac.users is
+    'A person who can sign in, with their credential state and MFA secret; every owned row in the database points back here.';
 
 -- AND ON A DATABASE THAT ALREADY HAS THE TABLE. `create table if not exists`
 -- is a no-op there, so the column default above would have applied to fresh
@@ -9632,6 +9658,8 @@ create table if not exists rbac.roles (
     name        text primary key,
     description text
 );
+comment on table rbac.roles is
+    'The named roles a grant can confer, one of which may grant everything.';
 
 -- WHOSE ROWS THESE ARE: the deployment's, not the extension's. A from-zero
 -- `create extension percolate` leaves this table empty and every member it ever
@@ -9671,6 +9699,8 @@ create table if not exists rbac.user_roles (
     role    text not null references rbac.roles(name),
     primary key (user_id, role)
 );
+comment on table rbac.user_roles is
+    'The effective role set every policy reads. rbac.grants is the ledger behind it and the two are kept in step.';
 
 -- THE VOCABULARY, AS A TABLE, BECAUSE FREE TEXT HERE FAILS SILENTLY.
 --
@@ -9696,6 +9726,8 @@ create table if not exists rbac.permission_kinds (
     checked_by text not null,   -- where the pair is consulted, so it can be verified
     primary key (resource, action)
 );
+comment on table rbac.permission_kinds is
+    'The closed vocabulary of (resource, action) pairs, each naming what checks it and whether a person must be human, holds it by default, or may delegate it.';
 
 insert into rbac.permission_kinds (resource, action, checked_by) values
     -- RLS policies. Every one of these spells the read action 'select'; that
@@ -9773,6 +9805,8 @@ create table if not exists rbac.role_permissions (
     foreign key (resource, action)
         references rbac.permission_kinds (resource, action)
 );
+comment on table rbac.role_permissions is
+    'Which (resource, action) pairs each role confers; the join a permission check walks.';
 
 -- AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
 -- no-op. `permission_kinds` and this foreign key were added to a table that
@@ -10089,6 +10123,8 @@ create table if not exists rbac.visibilities (
     requires_org boolean not null,
     description  text not null
 );
+comment on table rbac.visibilities is
+    'The ordered visibility scopes a row can carry, and which of them require an org.';
 
 insert into rbac.visibilities (scope, rank, requires_org, description) values
     ('private', 0, false, 'the owner only'),
@@ -10116,6 +10152,8 @@ create table if not exists rbac.orgs (
     created_at  timestamptz not null default now(),
     updated_at  timestamptz not null default now()
 );
+comment on table rbac.orgs is
+    'A tenant. Every scoped row carries an org_id, and rbac.shared_org_id() is the row standing for the shared tier.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. The eighth table of
 -- the class specs/contract/schema.sql section 4 names seven of: the install
@@ -10258,6 +10296,8 @@ create table if not exists rbac.org_members (
     added_at timestamptz not null default now(),
     primary key (org_id, user_id)
 );
+comment on table rbac.org_members is
+    'Who belongs to which org, and in what role there.';
 create index if not exists idx_org_members_user on rbac.org_members (user_id);
 
 -- NOBODY IS A MEMBER OF THE SHARED TIER, and this is the constraint that makes
@@ -10914,6 +10954,8 @@ create table if not exists rbac.refresh_tokens (
     revoked_at   timestamptz,
     replaced_by  uuid references rbac.refresh_tokens(id)  -- rotation chain, for reuse detection
 );
+comment on table rbac.refresh_tokens is
+    'A session''s renewal credential, hashed, with the device it was issued to and what replaced it.';
 create index if not exists idx_refresh_tokens_user on rbac.refresh_tokens (user_id) where revoked_at is null;
 
 -- Rotate: issue a new refresh token, revoke the old one, link the chain.
@@ -11061,6 +11103,8 @@ create table if not exists rbac.password_reset_tokens (
     expires_at timestamptz not null,
     used_at    timestamptz
 );
+comment on table rbac.password_reset_tokens is
+    'A single-use, expiring token proving somebody reached the email on an account.';
 create index if not exists idx_password_reset_tokens_user
     on rbac.password_reset_tokens (user_id) where used_at is null;
 
@@ -11210,6 +11254,8 @@ create table if not exists rbac.api_keys (
     last_used_at timestamptz,
     revoked_at  timestamptz
 );
+comment on table rbac.api_keys is
+    'A long-lived credential an agent presents, stored as a hash with the scopes it carries.';
 
 -- security definer: self-authenticating via key possession, so safe as a
 -- public entry point, but needs to UPDATE last_used_at without granting
@@ -11383,6 +11429,8 @@ create table if not exists rbac.auth_events (
     span_id    text not null default encode(gen_random_bytes(8), 'hex'),
     at         timestamptz not null default now()
 );
+comment on table rbac.auth_events is
+    'Every sign-in attempt and credential event, with the trace it happened under.';
 create index if not exists idx_auth_events_user on rbac.auth_events (user_id, at);
 -- Read by user, and read by time. The first index answers "show me my
 -- sign-ins"; nothing answered "what has happened lately", which is the
@@ -12136,6 +12184,706 @@ begin
 
     raise notice 'user-rbac self-check passed: no base-table write grants; non-superuser owner (%); api views owned by a separate non-superuser role; no operator view granted to a caller', current_user;
 end $$;
+
+
+-- ============================================================
+-- MOVED HERE FROM specs/research-platform/schema.sql, 21 September 2026.
+--
+-- Nine tables, three columns on permission_kinds and a constraint were declared
+-- in the research platform's file because that is where they were first needed.
+-- They are rbac tables: every other subsystem reads them, and a reviewer of
+-- this subsystem never saw them. `dev/owns-its-schema.py` refuses the next one;
+-- specs/packages/rows-not-schema.md §7 step 2 is this move.
+--
+-- Nothing changed but the file. The rows that are the research platform's own
+-- vocabulary -- its permission kinds, and the one kind it may delegate -- stay
+-- where they were, because declaring rows in a core table is what an
+-- application is supposed to do.
+-- ============================================================
+
+-- Extends permission_kinds rather than building a second capability table.
+-- human_only: an agent or a platform job is refused even with a grant.
+-- every_person: any active person holds it without a role (reading and
+-- writing their own research); roles still decide everything else.
+-- delegable: a human_only kind a person may hand to one of their own
+-- credentials, in one org, through rbac.delegate. A live delegation is the only
+-- thing that lets an agent past human_only, and it never stands in for the
+-- person's grant (agents-and-workflows.md, "Delegated publication").
+
+alter table rbac.permission_kinds add column if not exists human_only boolean not null default false;
+alter table rbac.permission_kinds add column if not exists every_person boolean not null default false;
+alter table rbac.permission_kinds add column if not exists delegable boolean not null default false;
+
+-- Only something a person must do needs delegating; delegable on any other kind would be a grant by another name.
+alter table rbac.permission_kinds drop constraint if exists permission_kinds_delegable_is_human_only;
+alter table rbac.permission_kinds add constraint permission_kinds_delegable_is_human_only
+    check (not delegable or human_only);
+
+
+-- The ledger behind user_roles: who granted a role, on what basis, and how it
+-- ended. user_roles stays the effective set every existing policy reads;
+-- grant_with_basis and revoke_grant keep the two in step.
+create table if not exists rbac.grants (
+    id            uuid primary key default uuidv7(),
+    user_id       uuid not null references rbac.users(id) on delete cascade,
+    role          text not null references rbac.roles(name),
+    application   text not null default 'percolate',
+    org_id        uuid not null default rbac.shared_org_id() references rbac.orgs(id),
+    granted_by    uuid references rbac.users(id),
+    basis         text not null check (basis in ('installation', 'operator', 'invitation', 'recommendation', 'contribution')),
+    evidence_ref  text,
+    created_at    timestamptz not null default now(),
+    revoked_at    timestamptz,
+    revoked_by    uuid references rbac.users(id),
+    revoke_reason text,
+    constraint grants_revocation_says_why check ((revoked_at is null) = (revoke_reason is null))
+);
+comment on table rbac.grants is
+    'The ledger behind user_roles: who granted a role, on what basis, with what evidence, and how it ended.';
+create index if not exists grants_active on rbac.grants (user_id, role) where revoked_at is null;
+
+-- EVERY ROLE A PERSON HOLDS SAYS HOW IT WAS GIVEN (REM-171). grant_with_basis, grant_application_role and grant_role
+-- write the grant before the role; any other writer -- an installation step, bootstrap_admin, a fixture -- gets an
+-- 'installation' grant here. rbac.decide then counts a role only through an active grant, so a role row nobody
+-- recorded, and one whose grant was revoked, grant nothing.
+create or replace function rbac.record_role_grant() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if not exists (select 1 from rbac.grants g
+                    where g.user_id = new.user_id and g.role = new.role and g.revoked_at is null) then
+        insert into rbac.grants (user_id, role, granted_by, basis)
+        values (new.user_id, new.role, rbac.current_user_id(), 'installation');
+    end if;
+    return new;
+end;
+$$;
+revoke execute on function rbac.record_role_grant() from public;
+create or replace trigger trg_user_roles_record_grant after insert on rbac.user_roles
+    for each row execute function rbac.record_role_grant();
+
+-- Roles held before the ledger existed, recorded once. Idempotent: a role with an active grant is left alone.
+insert into rbac.grants (user_id, role, basis)
+select ur.user_id, ur.role, 'installation'
+  from rbac.user_roles ur
+ where not exists (select 1 from rbac.grants g
+                    where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
+
+-- A DELEGATION: one person hands one delegable capability to one of their own credentials, in one org. The row is
+-- the record of who gave it, to which credential, when, and how it ended. rbac.delegate writes it,
+-- rbac.revoke_delegation ends it, and rbac.decision reads it. Revoking the credential ends every use of it.
+create table if not exists rbac.delegations (
+    id            uuid primary key default uuidv7(),
+    credential_id uuid not null references rbac.api_keys(id) on delete cascade,
+    user_id       uuid not null references rbac.users(id) on delete cascade,
+    resource      text not null,
+    action        text not null,
+    org_id        uuid not null references rbac.orgs(id) on delete cascade,
+    created_at    timestamptz not null default now(),
+    revoked_at    timestamptz,
+    revoke_reason text,
+    constraint delegations_revocation_says_why check ((revoked_at is null) = (revoke_reason is null)),
+    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
+);
+comment on table rbac.delegations is
+    'A live hand-over of one human-only capability from a person to one of their own credentials, in one org.';
+create unique index if not exists delegations_one_live on rbac.delegations (credential_id, resource, action, org_id)
+    where revoked_at is null;
+select rbac.adopt_shared_org('rbac.delegations');
+
+-- An application (the writing hub) declares its own qualified capabilities.
+create table if not exists rbac.applications (
+    name        text primary key,
+    version     text not null,
+    declared_at timestamptz not null default now()
+);
+comment on table rbac.applications is
+    'The applications allowed to declare vocabulary and hold grants, with the version each declared.';
+
+-- Credential scopes that predate canonical capabilities keep their narrow
+-- meaning: neither package scope lists research.
+create table if not exists rbac.scope_aliases (
+    scope    text not null,
+    resource text not null,
+    action   text not null,
+    primary key (scope, resource, action),
+    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
+);
+comment on table rbac.scope_aliases is
+    'Maps a credential scope onto a (resource, action) pair, so a scope issued before a capability existed keeps its narrow meaning.';
+-- Its rows are the research platform's own scopes and stay with the vocabulary
+-- they alias, in research-platform/schema.sql -- they carry a foreign key into
+-- permission_kinds rows that file inserts, so they cannot run before it.
+
+create or replace function rbac.request_claims() returns jsonb
+language sql stable set search_path = pg_catalog, public as $$
+    select coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb);
+$$;
+
+create or replace function rbac.current_credential_id() returns uuid
+language sql stable set search_path = pg_catalog, public as $$
+    select case when v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then v::uuid end
+      from (select rbac.request_claims()->>'api_key_id') as t(v);
+$$;
+
+-- The trusted boundary mints the claims. A credential makes the caller an
+-- agent unless the boundary says platform: nothing a caller can leave out
+-- turns an agent back into a person.
+create or replace function rbac.current_actor() returns text
+language sql stable set search_path = pg_catalog, public as $$
+    select case
+        when rbac.request_claims()->>'actor' = 'platform' then 'platform'
+        when rbac.request_claims()->>'actor' = 'agent' or rbac.current_credential_id() is not null then 'agent'
+        else 'person'
+    end;
+$$;
+
+-- WHICH APPLICATION'S GRANTS COUNT FOR A CAPABILITY: a platform grant, the calling application's own, or the
+-- application a qualified capability names (hub.publication -> hub). One copy, because rbac.decide and
+-- rbac.decide_in_org both ask it, and two copies of an authorization rule are how they come to disagree.
+-- Internal: nothing but those two calls it.
+create or replace function rbac.grant_application_applies(p_application text, p_resource text) returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select p_application = 'percolate'
+        or p_application = rbac.request_claims()->>'application'
+        or (position('.' in p_resource) > 0 and p_application = split_part(p_resource, '.', 1));
+$$;
+revoke execute on function rbac.grant_application_applies(text, text) from public;
+
+-- THE decision. Every protected operation below asks it, and the access
+-- snapshot reports it, so the two cannot disagree. Order of refusal:
+-- unknown capability, anonymous, inactive, human-only, credential, grant.
+--
+-- p_org is the one org a delegation may be held in: rbac.decide passes the org its claims are narrowed to, and
+-- rbac.decide_in_org passes the org it decides in. A live delegation of this kind to this credential in that org
+-- lets the agent past human_only and stands for the scope; the credential must still be live, and the person's
+-- grant is still asked below. Internal: rbac.decide and rbac.decide_in_org are its only callers.
+create or replace function rbac.decision(p_resource text, p_action text, p_org uuid) returns jsonb
+language plpgsql stable set search_path = pg_catalog, public as $$
+declare
+    v_user      uuid := rbac.current_user_id();
+    v_key       uuid := rbac.current_credential_id();
+    v_kind      rbac.permission_kinds;
+    v_delegated boolean;
+    v_scopes    text[];
+    v_reason    text;
+begin
+    select * into v_kind from rbac.permission_kinds where resource = p_resource and action = p_action;
+    v_delegated := coalesce(v_kind.delegable, false) and v_key is not null and p_org is not null
+        and rbac.current_actor() = 'agent' and exists (
+            select 1 from rbac.delegations d
+             where d.credential_id = v_key and d.user_id = v_user and d.resource = p_resource
+               and d.action = p_action and d.org_id = p_org and d.revoked_at is null);
+    v_reason := case
+        when v_kind.resource is null then 'unknown_capability'
+        when v_user is null then 'anonymous'
+        when not exists (select 1 from rbac.users where id = v_user and status = 'active') then 'inactive'
+        when v_kind.human_only and rbac.current_actor() <> 'person' and not v_delegated then 'human_only'
+        when rbac.request_claims() ? 'api_key_id' and v_key is null then 'credential_invalid'
+        when rbac.current_actor() = 'agent' and v_key is null then 'credential_required'
+    end;
+    if v_reason is null and v_key is not null then
+        select scopes into v_scopes from rbac.api_keys
+         where id = v_key and user_id = v_user and revoked_at is null;
+        if not found then
+            v_reason := 'credential_revoked';
+        elsif not (v_delegated or p_resource || ':' || p_action = any (v_scopes)
+                   or exists (select 1 from rbac.scope_aliases a
+                               where a.scope = any (v_scopes) and a.resource = p_resource and a.action = p_action)) then
+            v_reason := 'scope_missing';
+        end if;
+    end if;
+    if v_reason is null and not (v_kind.every_person or exists (
+        select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
+         where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
+           -- Only an active, matching grant counts (REM-171). Every role row has one: the writers record it, and
+           -- trg_user_roles_record_grant records the rest, so there is no pre-ledger role left to honour.
+           and exists (
+               select 1 from rbac.grants g
+                where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
+                  and rbac.grant_application_applies(g.application, p_resource)
+                  and (g.org_id = rbac.shared_org_id()
+                       or (g.org_id::text = rbac.request_claims()->>'org_id'
+                           and g.org_id in (select rbac.current_org_ids())))
+           )
+    )) then
+        v_reason := 'no_grant';
+    end if;
+    return jsonb_build_object('resource', p_resource, 'action', p_action,
+                              'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
+end;
+$$;
+revoke execute on function rbac.decision(text, text, uuid) from public;
+
+create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v_org text := rbac.request_claims()->>'org_id';
+begin
+    return rbac.decision(p_resource, p_action,
+        case when v_org ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  and rbac.current_user_id() is not null then v_org::uuid end);
+end;
+$$;
+
+create or replace function rbac.may(p_resource text, p_action text) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select (rbac.decide(p_resource, p_action)->>'allowed')::boolean;
+$$;
+
+-- Raise unless allowed; return the caller. The reason code travels as the hint.
+create or replace function rbac.require(p_resource text, p_action text) returns uuid
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare v jsonb := rbac.decide(p_resource, p_action);
+begin
+    if not (v->>'allowed')::boolean then
+        raise insufficient_privilege
+            using message = 'Not allowed: ' || p_resource || ':' || p_action, hint = v->>'reason';
+    end if;
+    return rbac.current_user_id();
+end;
+$$;
+
+-- A DECISION IN EXACTLY ONE ORG (REM-255). rbac.decide counts a grant held in the shared org inside any org's
+-- scope. That is right for what it answers, "may this caller do this", and wrong for a question about one org
+-- alone: one shared-org hub.publication:publish grant would open every publication (REM-249), so an application
+-- had to add its own org-only query beside every such call. This asks decide's person, credential and scope checks
+-- unchanged, then counts only an active grant held in p_org, and only for a member of p_org. A capability every
+-- person holds is not a grant, and passes for any member. rbac.decide itself does not change. A delegation counts
+-- here only when it is held in p_org, whatever org the claims name.
+create or replace function rbac.decide_in_org(p_resource text, p_action text, p_org uuid) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v        jsonb := rbac.decision(p_resource, p_action, p_org);
+    v_user   uuid := rbac.current_user_id();
+    v_every  boolean;
+    v_reason text;
+begin
+    -- Refused before the grant question (unknown, anonymous, inactive, human-only, credential): that answer stands.
+    if v->>'reason' not in ('allowed', 'no_grant') then
+        return v || jsonb_build_object('org_id', p_org);
+    end if;
+    select every_person into v_every from rbac.permission_kinds where resource = p_resource and action = p_action;
+    v_reason := case
+        when p_org is null or rbac.is_shared_org(p_org) then 'org_required'
+        when p_org not in (select rbac.current_org_ids()) then 'not_a_member'
+        when v_every then null
+        when exists (
+            select 1 from rbac.user_roles ur
+              join rbac.role_permissions rp on rp.role = ur.role
+              join rbac.grants g on g.user_id = ur.user_id and g.role = ur.role
+             where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
+               and g.revoked_at is null and g.org_id = p_org
+               and rbac.grant_application_applies(g.application, p_resource)) then null
+        else 'no_grant'
+    end;
+    return jsonb_build_object('resource', p_resource, 'action', p_action, 'org_id', p_org,
+                              'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
+end;
+$$;
+
+create or replace function rbac.may_in_org(p_resource text, p_action text, p_org uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select (rbac.decide_in_org(p_resource, p_action, p_org)->>'allowed')::boolean;
+$$;
+
+-- A PERSON HANDS ONE HUMAN-ONLY CAPABILITY TO ONE OF THEIR OWN CREDENTIALS, IN ONE ORG. Only a person, never the
+-- agent it is for. The kind must be delegable, the credential the caller's own and live, and the caller allowed
+-- the capability in that org now, so a delegation never reaches further than the grant behind it; rbac.decision
+-- asks that grant again on every use. Returns the live delegation; asking again returns the same one.
+create or replace function rbac.delegate(p_credential uuid, p_resource text, p_action text, p_org uuid) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user     uuid := rbac.current_user_id();
+    v_decision jsonb;
+    v_id       uuid;
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person delegates', hint = 'human_only';
+    end if;
+    if not exists (select 1 from rbac.permission_kinds
+                    where resource = p_resource and action = p_action and delegable) then
+        raise insufficient_privilege using message = 'This capability cannot be delegated', hint = 'not_delegable';
+    end if;
+    if not exists (select 1 from rbac.api_keys where id = p_credential and user_id = v_user and revoked_at is null) then
+        raise no_data_found using message = 'Credential not found';
+    end if;
+    v_decision := rbac.decide_in_org(p_resource, p_action, p_org);
+    if not (v_decision->>'allowed')::boolean then
+        raise insufficient_privilege using message = 'A delegation needs the capability in that org',
+                                           hint = v_decision->>'reason';
+    end if;
+    insert into rbac.delegations (credential_id, user_id, resource, action, org_id)
+    values (p_credential, v_user, p_resource, p_action, p_org)
+    on conflict (credential_id, resource, action, org_id) where revoked_at is null do nothing
+    returning id into v_id;
+    return coalesce(v_id, (select id from rbac.delegations
+                            where credential_id = p_credential and resource = p_resource and action = p_action
+                              and org_id = p_org and revoked_at is null));
+end;
+$$;
+
+-- A person ends a delegation they gave, with a reason. The credential keeps everything else it may do. True when a
+-- live delegation ended; somebody else's is not found.
+create or replace function rbac.revoke_delegation(p_delegation uuid, p_reason text) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person revokes a delegation', hint = 'human_only';
+    end if;
+    if coalesce(p_reason, '') = '' then
+        raise invalid_parameter_value using message = 'A revocation says why';
+    end if;
+    update rbac.delegations set revoked_at = now(), revoke_reason = p_reason
+     where id = p_delegation and user_id = rbac.current_user_id() and revoked_at is null;
+    return found;
+end;
+$$;
+
+create or replace function rbac.grant_with_basis(
+    p_user uuid, p_role text, p_basis text, p_evidence text default null,
+    p_application text default 'percolate', p_org uuid default null)
+returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_id uuid; v_by uuid := rbac.current_user_id();
+begin
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person grants a role';
+        end if;
+        perform rbac.require('users', 'admin');
+    end if;
+    insert into rbac.grants (user_id, role, application, org_id, granted_by, basis, evidence_ref)
+    values (p_user, p_role, p_application, coalesce(p_org, rbac.shared_org_id()), v_by, p_basis, p_evidence)
+    returning id into v_id;
+    insert into rbac.user_roles (user_id, role) values (p_user, p_role) on conflict do nothing;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (p_user, 'role_granted', jsonb_build_object('role', p_role, 'by', v_by, 'grant_id', v_id, 'basis', p_basis));
+    return v_id;
+end;
+$$;
+
+create or replace function rbac.revoke_grant(p_grant uuid, p_reason text) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare g rbac.grants; v_by uuid := rbac.current_user_id();
+begin
+    if coalesce(p_reason, '') = '' then
+        raise invalid_parameter_value using message = 'A revocation says why';
+    end if;
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person revokes a role';
+        end if;
+        perform rbac.require('users', 'admin');
+    end if;
+    update rbac.grants set revoked_at = now(), revoked_by = v_by, revoke_reason = p_reason
+     where id = p_grant and revoked_at is null
+    returning * into g;
+    if not found then
+        return;
+    end if;
+    if not exists (select 1 from rbac.grants where user_id = g.user_id and role = g.role and revoked_at is null) then
+        delete from rbac.user_roles where user_id = g.user_id and role = g.role;
+    end if;
+end;
+$$;
+
+create or replace function rbac.declare_application(p_name text, p_version text, p_capabilities jsonb)
+returns void language plpgsql security definer set search_path = pg_catalog, public as $$
+declare c jsonb;
+begin
+    if not rbac.is_operator() then
+        raise insufficient_privilege using message = 'Only an installation step declares an application';
+    end if;
+    if p_name !~ '^[a-z][a-z0-9_-]{1,40}$' then
+        raise invalid_parameter_value using message = 'An application name is a lower-case word';
+    end if;
+    insert into rbac.applications (name, version) values (p_name, p_version)
+    on conflict (name) do update set version = excluded.version, declared_at = now();
+    for c in select value from jsonb_array_elements(coalesce(p_capabilities, '[]'::jsonb)) loop
+        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person, delegable)
+        values (p_name || '.' || (c->>'resource'), c->>'action', 'application ' || p_name,
+                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false),
+                coalesce((c->>'delegable')::boolean, false))
+        on conflict (resource, action) do update
+            set checked_by = excluded.checked_by,
+                human_only = excluded.human_only,
+                every_person = excluded.every_person,
+                delegable = excluded.delegable;
+    end loop;
+end;
+$$;
+
+-- No row in plan_limits is UNSET; 'unlimited' and 'finite' are rows. A
+-- required resource with no policy refuses; an optional one allows.
+-- The default plan is unlimited for model tokens so a self-hosted install
+-- keeps working: nobody chose a number, and this file does not choose one.
+
+create table if not exists rbac.plans (
+    name        text primary key,
+    description text not null,
+    version     int  not null default 1
+);
+comment on table rbac.plans is
+    'A named, versioned plan a subject can be assigned.';
+
+create table if not exists rbac.resource_kinds (
+    name        text primary key,
+    description text not null,
+    required    boolean not null default false
+);
+comment on table rbac.resource_kinds is
+    'The metered resource kinds a plan can limit, and whether a missing policy refuses or allows.';
+
+create table if not exists rbac.plan_limits (
+    plan          text not null references rbac.plans(name) on delete cascade,
+    resource_kind text not null references rbac.resource_kinds(name),
+    mode          text not null check (mode in ('unlimited', 'finite')),
+    amount        bigint check (amount is null or amount >= 0),
+    period        interval not null default interval '1 month',
+    -- true on the rows this file ships, so a dump carries only the deployment's
+    -- (contract/schema.sql §4, the seeded tables).
+    shipped       boolean not null default false,
+    primary key (plan, resource_kind),
+    constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
+);
+comment on table rbac.plan_limits is
+    'One limit per plan and resource kind: unlimited, or finite with an amount and a period. No row means the resource kind''s own required flag decides.';
+
+-- Earlier 0.2.1 development installs already have this table.
+alter table rbac.plan_limits add column if not exists shipped boolean not null default false;
+
+create table if not exists rbac.plan_assignments (
+    user_id     uuid primary key references rbac.users(id) on delete cascade,
+    plan        text not null references rbac.plans(name),
+    assigned_at timestamptz not null default now(),
+    assigned_by uuid references rbac.users(id)
+);
+comment on table rbac.plan_assignments is
+    'Which plan a person is on, and who put them there; no row means the default plan.';
+
+-- One budget per person, shared by every agent acting for them. A
+-- reservation holds capacity; consume settles it; release returns it. The
+-- operation id makes a retry charge once, and a failed transaction takes its
+-- reservation with it.
+create table if not exists rbac.usage_ledger (
+    id            uuid primary key default uuidv7(),
+    user_id       uuid not null references rbac.users(id) on delete cascade,
+    resource_kind text not null references rbac.resource_kinds(name),
+    operation_id  text not null,
+    amount        bigint not null check (amount >= 0),
+    state         text not null check (state in ('reserved', 'consumed', 'released')),
+    actor         text not null check (actor in ('person', 'agent', 'platform')),
+    created_at    timestamptz not null default now(),
+    expires_at    timestamptz,
+    unique (user_id, resource_kind, operation_id)
+);
+comment on table rbac.usage_ledger is
+    'Every reservation and consumption of a metered resource, keyed by a stable operation id so a retry charges once.';
+
+insert into rbac.plans (name, description) values
+    ('default', 'Every account without an assigned plan')
+on conflict (name) do nothing;
+insert into rbac.resource_kinds (name, description, required) values
+    ('llm_tokens', 'Model tokens a run spends through the agent runtime', true)
+on conflict (name) do nothing;
+insert into rbac.plan_limits (plan, resource_kind, mode, shipped) values
+    ('default', 'llm_tokens', 'unlimited', true)
+on conflict (plan, resource_kind) do update set shipped = true;
+
+-- SAVED EVIDENCE IS LIMITED BY BYTES, AND ONLY BY BYTES (REM-242). Optional rather than required, so a plan that
+-- says nothing about it allows saving; the default plan ships a finite daily cap, because unlike model tokens
+-- this is spent on a deployment's own storage by anybody who may write research. 100 MB a day is a hundred
+-- long articles or a dozen papers: generous for a person, and a ceiling on a script. A deployment changes it
+-- with its own plan_limits row.
+insert into rbac.resource_kinds (name, description, required) values
+    ('evidence_bytes', 'Bytes of public pages a person keeps as research evidence (content.register_evidence)', false)
+on conflict (name) do nothing;
+insert into rbac.plan_limits (plan, resource_kind, mode, amount, period, shipped) values
+    ('default', 'evidence_bytes', 'finite', 104857600, interval '1 day', true)
+on conflict (plan, resource_kind) do update set shipped = true;
+
+create or replace function rbac.plan_of(p_user uuid) returns text
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select coalesce((select plan from rbac.plan_assignments where user_id = p_user), 'default');
+$$;
+
+create or replace function rbac.limit_state(p_user uuid, p_kind text) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare k rbac.resource_kinds; l rbac.plan_limits; v_used bigint;
+begin
+    if p_user is distinct from rbac.current_user_id() and not rbac.is_operator() then
+        return jsonb_build_object('resource_kind', p_kind, 'status', 'unknown', 'remaining', null);
+    end if;
+    select * into k from rbac.resource_kinds where name = p_kind;
+    if not found then
+        return jsonb_build_object('resource_kind', p_kind, 'status', 'unknown', 'remaining', null);
+    end if;
+    select * into l from rbac.plan_limits where plan = rbac.plan_of(p_user) and resource_kind = p_kind;
+    if not found then
+        return jsonb_build_object('resource_kind', p_kind, 'status', 'unset', 'required', k.required, 'remaining', null,
+                                  'reason', case when k.required then 'no budget is configured' else 'no limit is configured' end);
+    end if;
+    select coalesce(sum(amount), 0) into v_used from rbac.usage_ledger
+     where user_id = p_user and resource_kind = p_kind and created_at > now() - l.period
+       and (state = 'consumed' or (state = 'reserved' and expires_at > now()));
+    if l.mode = 'unlimited' then
+        return jsonb_build_object('resource_kind', p_kind, 'status', 'unlimited', 'used', v_used,
+                                  'remaining', null, 'period', l.period::text);
+    end if;
+    return jsonb_build_object('resource_kind', p_kind,
+        'status', case when v_used >= l.amount then 'exhausted' else 'finite' end,
+        'limit', l.amount, 'used', v_used, 'remaining', greatest(l.amount - v_used, 0), 'period', l.period::text);
+end;
+$$;
+
+-- The runtime's existing entry point (percolate-core repository.py). A run
+-- with no person has no personal budget to charge: model spend on platform
+-- jobs is a provider concern, not an account quota.
+create or replace function rbac.has_quota_remaining(p_user uuid, p_kind text) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select case
+        when p_user is null then true
+        else case rbac.limit_state(p_user, p_kind)->>'status'
+            when 'unlimited' then true
+            when 'finite' then true
+            when 'unset' then not coalesce((select required from rbac.resource_kinds where name = p_kind), true)
+            else false
+        end
+    end;
+$$;
+
+create or replace function rbac.reserve_usage(p_kind text, p_amount bigint, p_operation_id text,
+                                              p_ttl interval default interval '15 minutes')
+returns jsonb language plpgsql volatile security definer set search_path = pg_catalog, public as $$
+declare v_user uuid := rbac.current_user_id(); s jsonb; held rbac.usage_ledger;
+begin
+    if v_user is null then
+        raise insufficient_privilege using message = 'Usage belongs to a signed-in person';
+    end if;
+    if p_amount is null or p_amount < 0 or coalesce(p_operation_id, '') = '' then
+        raise invalid_parameter_value using message = 'A reservation needs an amount and an operation id';
+    end if;
+    if p_ttl is null or p_ttl <= interval '0' then
+        raise invalid_parameter_value using message = 'A reservation needs a positive time to live';
+    end if;
+    perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
+    select * into held from rbac.usage_ledger
+     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
+    if found then
+        -- A retry keeps the operation's one row. Settled or returned, it holds nothing and must not run again.
+        if held.state in ('consumed', 'released') then
+            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true, 'reason', held.state);
+        end if;
+        if held.expires_at > now() then
+            return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true);
+        end if;
+        -- Expired (REM-189): limit_state no longer counts it, so its capacity may have gone to another
+        -- operation. Reacquire the recorded amount under this lock only if it is still there.
+        s := rbac.limit_state(v_user, p_kind);
+        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
+           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < held.amount) then
+            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
+                                      'retry', true, 'reason', 'expired', 'limit', s);
+        end if;
+        update rbac.usage_ledger set expires_at = now() + p_ttl where id = held.id;
+        return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', 'reserved',
+                                  'retry', true, 'reacquired', true, 'limit', rbac.limit_state(v_user, p_kind));
+    end if;
+    s := rbac.limit_state(v_user, p_kind);
+    if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean) then
+        return jsonb_build_object('reserved', false, 'reason', 'no_policy', 'limit', s);
+    end if;
+    if s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < p_amount then
+        return jsonb_build_object('reserved', false, 'reason', 'quota_exceeded', 'limit', s);
+    end if;
+    insert into rbac.usage_ledger (user_id, resource_kind, operation_id, amount, state, actor, expires_at)
+    values (v_user, p_kind, p_operation_id, p_amount, 'reserved', rbac.current_actor(), now() + p_ttl);
+    return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', 'reserved',
+                              'limit', rbac.limit_state(v_user, p_kind));
+end;
+$$;
+
+create or replace function rbac.consume_usage(p_kind text, p_operation_id text, p_actual bigint default null)
+returns jsonb language plpgsql volatile security definer set search_path = pg_catalog, public as $$
+declare v_user uuid := rbac.current_user_id(); row rbac.usage_ledger; s jsonb; v_amount bigint;
+begin
+    if v_user is not null then
+        perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
+    end if;
+    select * into row from rbac.usage_ledger
+     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
+    -- Settled or returned already: a settlement retry answers with the receipt it has.
+    if not found or row.state <> 'reserved' then
+        return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                                  'consumed', coalesce(row.state = 'consumed', false), 'retry', found);
+    end if;
+    v_amount := coalesce(p_actual, row.amount);
+    -- An expired reservation's capacity may have gone to another operation (REM-189): settle it only if
+    -- the amount is still there, so a late settlement cannot spend a budget twice.
+    if row.expires_at is null or row.expires_at <= now() then
+        s := rbac.limit_state(v_user, p_kind);
+        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
+           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < v_amount) then
+            return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                                      'consumed', false, 'reason', 'expired', 'limit', s);
+        end if;
+    end if;
+    update rbac.usage_ledger set state = 'consumed', amount = v_amount where id = row.id returning * into row;
+    return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
+                              'consumed', true);
+end;
+$$;
+
+create or replace function rbac.release_usage(p_kind text, p_operation_id text)
+returns void language sql volatile security definer set search_path = pg_catalog, public as $$
+    update rbac.usage_ledger set state = 'released'
+     where user_id = rbac.current_user_id() and resource_kind = p_kind
+       and operation_id = p_operation_id and state = 'reserved';
+$$;
+
+-- Explanatory, not reusable: every mutation rechecks in its own transaction.
+create or replace function rbac.access_snapshot(p_application text default null) returns jsonb
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select jsonb_build_object(
+        'version', 1,
+        'principal', rbac.current_user_id(),
+        'actor', rbac.current_actor(),
+        'credential_id', rbac.current_credential_id(),
+        'roles', coalesce((select jsonb_agg(role order by role) from rbac.user_roles
+                            where user_id = rbac.current_user_id()), '[]'::jsonb),
+        'capabilities', coalesce((
+            select jsonb_agg(rbac.decide(k.resource, k.action) || jsonb_build_object('human_only', k.human_only)
+                             order by k.resource, k.action)
+              from rbac.permission_kinds k
+             where k.resource in ('research', 'engagement')
+                or (p_application is not null and k.resource like p_application || '.%')), '[]'::jsonb),
+        'plan', case when rbac.current_user_id() is not null then rbac.plan_of(rbac.current_user_id()) end,
+        'limits', coalesce((select jsonb_agg(rbac.limit_state(rbac.current_user_id(), r.name) order by r.name)
+                              from rbac.resource_kinds r
+                             where rbac.current_user_id() is not null), '[]'::jsonb));
+$$;
+
+alter table rbac.grants enable row level security;
+drop policy if exists grants_self_or_admin on rbac.grants;
+create policy grants_self_or_admin on rbac.grants for select
+    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
+
+alter table rbac.delegations enable row level security;
+drop policy if exists delegations_self_or_admin on rbac.delegations;
+create policy delegations_self_or_admin on rbac.delegations for select
+    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
+
+alter table rbac.plan_assignments enable row level security;
+drop policy if exists plan_assignments_self on rbac.plan_assignments;
+create policy plan_assignments_self on rbac.plan_assignments for select using (user_id = rbac.current_user_id());
+
+alter table rbac.usage_ledger enable row level security;
+drop policy if exists usage_ledger_self on rbac.usage_ledger;
+create policy usage_ledger_self on rbac.usage_ledger for select using (user_id = rbac.current_user_id());
+
+grant select on rbac.grants, rbac.delegations, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
+                rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
 
 
 -- ============================================================
@@ -13841,6 +14589,8 @@ create table if not exists aiq.nodes (
     updated_at   timestamptz not null default now(),
     unique (entity_type, entity_id)
 );
+comment on table aiq.nodes is
+    'A thing the graph can reach, projected from whatever table actually owns it, carrying the owner and visibility it inherits from there.';
 create index if not exists idx_nodes_org on aiq.nodes (org_id);
 
 create or replace trigger trg_nodes_touch before update on aiq.nodes
@@ -13864,6 +14614,8 @@ create table if not exists aiq.node_keys (
     org_id       uuid,
     primary key (node_id, key, kind)
 );
+comment on table aiq.node_keys is
+    'The names a node answers to — its identifiers and aliases — so a mention can be resolved without scanning summaries.';
 
 -- `kind` HERE IS THE KEY'S CLASS, not the thing's kind, and the distinction is
 -- worth a comment because the neighbouring table spends the same word on the
@@ -13972,6 +14724,8 @@ create table if not exists aiq.relation_types (
     is_symmetric boolean,
     primary key (src_type, relation, dst_type)
 );
+comment on table aiq.relation_types is
+    'The typed relations the graph admits, with their inverses and whether each is symmetric.';
 
 -- ...and on a database that already has the table, where `create table if not
 -- exists` above is a no-op and the column is still NOT NULL. Guarded for the
@@ -14133,6 +14887,8 @@ create table if not exists aiq.edges (
     last_recalled_at timestamptz,
     unique (src_id, dst_id, relation)
 );
+comment on table aiq.edges is
+    'A directed, typed, provenanced link between two nodes, valid over an interval, counting how often it has been recalled.';
 -- Forward and REVERSE both indexed: "what points at this?" is first-class,
 -- and the inverse edge is never stored (graph-identity.md "Edge table").
 create index if not exists idx_edges_src on aiq.edges (src_id);
@@ -14305,6 +15061,8 @@ create table if not exists aiq.edge_retractions (
     primary key (edge_id, retracted_at),
     check (revived_at > retracted_at)
 );
+comment on table aiq.edge_retractions is
+    'When an edge was withdrawn, and when it was revived, so a correction is a row rather than a deletion.';
 comment on table aiq.edge_retractions is
     'Retractions that were later undone: while [retracted_at, revived_at) the '
     'edge did not hold. Written by trg_record_edge_retraction on every path '
@@ -14622,6 +15380,8 @@ create table if not exists aiq.entity_registry (
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+comment on table aiq.entity_registry is
+    'How an ordinary table is projected into the graph: its key, summary, org and visibility expressions. Registering one is an insert, never a schema change.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.entity_registry holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -15169,6 +15929,8 @@ create table if not exists aiq.node_resolutions (
     -- again -- and every attempt stays on the record.
     constraint node_resolutions_no_self check (canonical_id <> merged_id)
 );
+comment on table aiq.node_resolutions is
+    'A decision that two nodes were the same thing, with the evidence, who decided, and whether it was undone.';
 
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
@@ -15603,6 +16365,8 @@ create table if not exists aiq.semantic_sources (
     embedding_col text not null default 'embedding',
     link_expr     text                 -- optional SQL expr -> owning node's entity_id
 );
+comment on table aiq.semantic_sources is
+    'Which column of which table carries a vector, and how a hit links back to the row.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.semantic_sources holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -16337,6 +17101,8 @@ create table if not exists aiq.embedding_models (
     notes       text,
     created_at  timestamptz not null default now()
 );
+comment on table aiq.embedding_models is
+    'A registered embedding model: its dimension, endpoint, credential and distance operator. A query names a space rather than a URL.';
 
 -- Exactly one default at a time. A partial unique index rather than a trigger:
 -- the database enforces it, so a bad deploy fails loudly instead of leaving
@@ -16470,6 +17236,8 @@ create table if not exists aiq.embedding_providers (
     method           text  not null default 'POST',
     notes            text
 );
+comment on table aiq.embedding_providers is
+    'How to call one provider''s embedding API, as request and response templates rather than code.';
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
 -- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
@@ -17388,6 +18156,8 @@ create table if not exists aiq.lexical_sources (
     content_col  text not null default 'content',
     regconfig    text not null default 'english'
 );
+comment on table aiq.lexical_sources is
+    'Which column of which table is full-text searchable, and which function searches it.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.lexical_sources holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -17787,6 +18557,8 @@ create table if not exists aiq.schema_facets (
     caller_scoped boolean not null default false,
     registered_at timestamptz not null default now()
 );
+comment on table aiq.schema_facets is
+    'The registry behind SCHEMA mode: each facet''s provider function, its description, and whether its answer is scoped to the caller.';
 
 -- Owner-only, and for the same reason workflow.register_step_function is: it
 -- decides what a `SCHEMA` query can cause to run.
@@ -17830,6 +18602,8 @@ create table if not exists aiq.schema_examples (
     ordinal   int  not null default 100,
     primary key (facet, label)
 );
+comment on table aiq.schema_examples is
+    'Worked examples attached to a facet, so the capability document shows rather than only describes.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.schema_examples holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -17929,6 +18703,8 @@ create table if not exists aiq.schema_revisions (
     captured_at timestamptz not null default now(),
     primary key (facet, revision)
 );
+comment on table aiq.schema_revisions is
+    'A hash of each facet''s answer over time, so drift in what the database says about itself is visible.';
 create index if not exists idx_schema_revisions_hash on aiq.schema_revisions (facet, hash);
 
 -- The one place a facet is produced, so hashing, scoping and the FROM
@@ -20643,6 +21419,8 @@ create table if not exists aiq.db_objects (
     reachable   boolean not null default false,
     grantees    text[] not null default '{}'
 );
+comment on table aiq.db_objects is
+    'This database''s own catalogue projected as graph nodes: every reachable object, its overloads and who may execute it.';
 
 -- AND THE SAME EXPRESSION ON A DATABASE THAT ALREADY HAS THE COLUMN, because
 -- the `create table if not exists` above does nothing there and the two would
@@ -21224,6 +22002,8 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+comment on table content.channels is
+    'Where content comes from — an upload endpoint, a feed, an API — with its configuration and how often to poll it.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. content.channels holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -21303,6 +22083,8 @@ create table if not exists content.files (
     created_at   timestamptz not null default now(),
     unique (bucket, object_key)
 );
+comment on table content.files is
+    'Stored bytes, addressed by checksum and object key, shared by every resource that has the same content.';
 
 -- ------------------------------------------------------------
 -- 3. Resources — the unit of ingested content.
@@ -21347,6 +22129,8 @@ create table if not exists content.resources (
     updated_at   timestamptz not null default now(),
     unique (channel_id, external_id)
 );
+comment on table content.resources is
+    'The unit of ingested content: one uploaded document, fetched page or post, pointing at its channel and its bytes.';
 create index if not exists idx_resources_channel on content.resources (channel_id, ingested_at desc);
 create index if not exists idx_resources_org on content.resources (org_id);
 -- Partial on the states worth hunting for. 'stored' joins 'ready' in the
@@ -21399,6 +22183,8 @@ create table if not exists content.resource_chunks (
     created_at   timestamptz not null default now(),
     unique (resource_id, ordinal)
 );
+comment on table content.resource_chunks is
+    'A resource split for retrieval: a located, searchable span with its offsets and token count.';
 create index if not exists idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
 
 -- ------------------------------------------------------------
@@ -22247,6 +23033,8 @@ create table if not exists content.datasets (
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now()
 );
+comment on table content.datasets is
+    'A tabular dataset in object storage — its format, columns, partitioning and row count — queryable through LAKE.';
 
 -- NULLS NOT DISTINCT, and it is the whole of whether `mode: append` works.
 --
@@ -22324,6 +23112,8 @@ create table if not exists content.dataset_files (
     added_at    timestamptz not null default now(),
     primary key (dataset_id, resource_id)
 );
+comment on table content.dataset_files is
+    'Which resources make up a dataset, with each file''s object key and row count. The join, not a copy of either side.';
 
 -- `create or replace`, matching the `if not exists` on the table above: this
 -- section is written to be re-applicable, because a deployment that already
@@ -22439,6 +23229,57 @@ returns text as $$
     order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;
+
+-- ============================================================
+-- MOVED HERE FROM specs/research-platform/schema.sql, 21 September 2026.
+--
+-- A snapshot is a content table: it references content.resources and
+-- content.files and nothing in research. It was declared in the research
+-- platform's file because pinned evidence is what first needed it.
+-- specs/packages/rows-not-schema.md §7 step 2; dev/owns-its-schema.py refuses
+-- the next one. Nothing changed but the file.
+-- ============================================================
+
+-- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
+-- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
+-- later fetch change what an old revision appears to rely on. A snapshot records the resource, the exact
+-- retained file and its hash, and who captured it, together, taken from the resource row as it stood.
+--
+-- Readable exactly when its resource is (the policy below asks the resource, under the caller's own row
+-- security), rather than carrying copies of owner, org and visibility that could drift from the row they
+-- describe -- aiq.node_keys inherits from aiq.nodes for the same reason. The resource cannot be deleted while
+-- a snapshot pins it. The bytes go only through content.remove_snapshot_bytes, which leaves a tombstone that
+-- keeps the checksum: an endorsement never silently becomes an endorsement of replacement bytes.
+create table if not exists content.resource_snapshots (
+    id             uuid primary key default uuidv7(),
+    resource_id    uuid not null references content.resources(id),
+    file_id        uuid references content.files(id),
+    checksum       text not null,
+    size_bytes     bigint not null check (size_bytes >= 0),
+    content_type   text,
+    uri            text,
+    captured_by    uuid not null references rbac.users(id),
+    actor_kind     text not null check (actor_kind in ('person', 'agent', 'platform')),
+    credential_id  uuid references rbac.api_keys(id),
+    captured_at    timestamptz not null default now(),
+    removed_at     timestamptz,
+    removed_by     uuid references rbac.users(id),
+    removed_reason text,
+    constraint resource_snapshots_removal_says_why check ((removed_at is null) = (removed_reason is null)),
+    constraint resource_snapshots_bytes_until_removed check ((removed_at is null) = (file_id is not null))
+);
+comment on table content.resource_snapshots is
+    'An exact capture of a resource as it stood, with its checksum and who captured it, so a citation cannot be changed by a later fetch.';
+create index if not exists idx_resource_snapshots_file on content.resource_snapshots (file_id);
+create index if not exists idx_resource_snapshots_resource on content.resource_snapshots (resource_id);
+
+-- A snapshot is readable exactly when its resource is: the subquery runs under the caller's own row security on
+-- content.resources, so there is one tenancy fact and it lives on the resource (REM-153).
+alter table content.resource_snapshots enable row level security;
+drop policy if exists resource_snapshots_via_resource on content.resource_snapshots;
+create policy resource_snapshots_via_resource on content.resource_snapshots for select
+    using (exists (select 1 from content.resources r where r.id = resource_snapshots.resource_id));
+grant select on content.resource_snapshots to authenticated;
 
 
 -- ============================================================
@@ -23318,6 +24159,8 @@ create table if not exists agentic.tool_servers (
     created_at      timestamptz not null default now(),
     updated_at      timestamptz not null default now()
 );
+comment on table agentic.tool_servers is
+    'An OpenAPI or MCP endpoint an agent may call, with the credential it is reached by and the tools it last advertised.';
 
 -- The one thing default_headers must never become. A secret in a header is
 -- the same secret in a row that credential_ref exists to keep out, and it
@@ -23417,6 +24260,8 @@ create table if not exists agentic.agents (
     created_at               timestamptz not null default now(),
     updated_at               timestamptz not null default now()
 );
+comment on table agentic.agents is
+    'An agent as a row: its prompt, model, tools, skills and output schema. There is no agent that is code.';
 
 -- One specialist per (source, doctype). A second registration is a conflict to
 -- resolve, not a fallback to pick between at runtime.
@@ -23610,6 +24455,8 @@ create table if not exists agentic.skills (
     constraint skill_listing_is_bounded
         check (length(description) + coalesce(length(when_to_use), 0) <= 1536)
 );
+comment on table agentic.skills is
+    'A procedure written in markdown that an agent loads by name or finds by similarity, with what it needs and when to use it.';
 
 create index if not exists idx_skills_audience on agentic.skills (audience)
     where audience = 'user';
@@ -23689,6 +24536,8 @@ create table if not exists agentic.plugins (
     installed_at timestamptz not null default now(),
     updated_at   timestamptz not null default now()
 );
+comment on table agentic.plugins is
+    'The named bundle that tool servers, skills and agents install and uninstall as, with the manifest it was installed from.';
 
 create or replace trigger trg_plugins_updated
     before update on agentic.plugins
@@ -23745,6 +24594,8 @@ create table if not exists agentic.sessions (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
+comment on table agentic.sessions is
+    'A conversation thread owned by a person, which runs attach to.';
 
 -- ...and on a database that already has the table, where `create table if not
 -- exists` above is a no-op and the column is still called user_id. Guarded,
@@ -23814,6 +24665,8 @@ create table if not exists agentic.runs (
     constraint child_runs_are_deeper_than_their_parent
         check (parent_run_id is null or depth > 0)
 );
+comment on table agentic.runs is
+    'One agent turn, with the session and agent it belongs to, what triggered it, and the run it was delegated by.';
 
 create index if not exists runs_session_id_created_at_idx on agentic.runs (session_id, created_at);
 create index if not exists runs_parent_run_id_idx on agentic.runs (parent_run_id);
@@ -23859,6 +24712,8 @@ create table if not exists agentic.messages (
     constraint only_assistants_carry_citations
         check (role = 'assistant' or citations = '[]'::jsonb)
 );
+comment on table agentic.messages is
+    'The conversation itself, in order: what each side said, the tool calls made and the citations returned.';
 
 -- One summary per session, enforced by the database rather than by the
 -- application remembering to update instead of insert (§3).
@@ -26103,6 +26958,8 @@ create table if not exists aiq.graph_vocabulary (
     description    text,
     registered_at  timestamptz not null default now()
 );
+comment on table aiq.graph_vocabulary is
+    'The relation names an extractor may emit, and how much weight a machine-made one starts with.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -26370,6 +27227,8 @@ create table if not exists aiq.soft_nodes (
     -- how the candidate node is evicted -- see aiq.promote_soft_node.
     resolved_node_id uuid references aiq.nodes(id)
 );
+comment on table aiq.soft_nodes is
+    'A thing an extractor named but could not resolve, held until it resolves to a real node or is discarded.';
 
 -- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail --
 -- the same lesson node_keys learned. org_id IS NULL means shared reference
@@ -26452,6 +27311,8 @@ create table if not exists aiq.lake_nodes (
     first_seen_at timestamptz not null default now(),
     last_seen_at  timestamptz not null default now()
 );
+comment on table aiq.lake_nodes is
+    'A row from the lake given a graph identity, so a DuckDB result can be walked with everything else.';
 -- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
 -- idx_soft_nodes_key above states in full.
 create unique index if not exists idx_lake_nodes_key
@@ -28393,6 +29254,8 @@ create table if not exists content.source_state (
     last_page_at timestamptz,
     last_completed_at timestamptz
 );
+comment on table content.source_state is
+    'Everything a resumable pull needs and a reader does not: watermark, next page, what has been visited, and the task currently claiming the source.';
 create table if not exists content.source_records (
     source_id uuid not null references content.channels(id) on delete cascade,
     external_id text not null,
@@ -28403,6 +29266,8 @@ create table if not exists content.source_records (
     updated_at timestamptz not null default now(),
     primary key(source_id,external_id)
 );
+comment on table content.source_records is
+    'One record as a pulling source returned it, raw and parsed, keyed by the source''s own identifier.';
 alter table content.source_state enable row level security;
 alter table content.source_records enable row level security;
 drop policy if exists source_read on content.source_state;
@@ -29288,18 +30153,6 @@ select aiq.register_schema_example('lake', 'lake-aggregate', 'p8ql',
 -- ------------------------------------------------------------
 -- 1. One access decision (§2)
 -- ------------------------------------------------------------
--- Extends permission_kinds rather than building a second capability table.
--- human_only: an agent or a platform job is refused even with a grant.
--- every_person: any active person holds it without a role (reading and
--- writing their own research); roles still decide everything else.
--- delegable: a human_only kind a person may hand to one of their own
--- credentials, in one org, through rbac.delegate. A live delegation is the only
--- thing that lets an agent past human_only, and it never stands in for the
--- person's grant (agents-and-workflows.md, "Delegated publication").
-
-alter table rbac.permission_kinds add column if not exists human_only boolean not null default false;
-alter table rbac.permission_kinds add column if not exists every_person boolean not null default false;
-alter table rbac.permission_kinds add column if not exists delegable boolean not null default false;
 
 insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person) values
     ('research',   'select',   'function research.get_package',          false, true),
@@ -29315,647 +30168,18 @@ on conflict (resource, action) do update
     set checked_by = excluded.checked_by,
         human_only = excluded.human_only,
         every_person = excluded.every_person;
--- Publishing is the one core kind a person may delegate. Endorsing, commenting and moderating are not.
-update rbac.permission_kinds set delegable = true
- where resource = 'research' and action = 'publish' and not delegable;
--- Only something a person must do needs delegating; delegable on any other kind would be a grant by another name.
-alter table rbac.permission_kinds drop constraint if exists permission_kinds_delegable_is_human_only;
-alter table rbac.permission_kinds add constraint permission_kinds_delegable_is_human_only
-    check (not delegable or human_only);
-
--- The ledger behind user_roles: who granted a role, on what basis, and how it
--- ended. user_roles stays the effective set every existing policy reads;
--- grant_with_basis and revoke_grant keep the two in step.
-create table if not exists rbac.grants (
-    id            uuid primary key default uuidv7(),
-    user_id       uuid not null references rbac.users(id) on delete cascade,
-    role          text not null references rbac.roles(name),
-    application   text not null default 'percolate',
-    org_id        uuid not null default rbac.shared_org_id() references rbac.orgs(id),
-    granted_by    uuid references rbac.users(id),
-    basis         text not null check (basis in ('installation', 'operator', 'invitation', 'recommendation', 'contribution')),
-    evidence_ref  text,
-    created_at    timestamptz not null default now(),
-    revoked_at    timestamptz,
-    revoked_by    uuid references rbac.users(id),
-    revoke_reason text,
-    constraint grants_revocation_says_why check ((revoked_at is null) = (revoke_reason is null))
-);
-create index if not exists grants_active on rbac.grants (user_id, role) where revoked_at is null;
-
--- EVERY ROLE A PERSON HOLDS SAYS HOW IT WAS GIVEN (REM-171). grant_with_basis, grant_application_role and grant_role
--- write the grant before the role; any other writer -- an installation step, bootstrap_admin, a fixture -- gets an
--- 'installation' grant here. rbac.decide then counts a role only through an active grant, so a role row nobody
--- recorded, and one whose grant was revoked, grant nothing.
-create or replace function rbac.record_role_grant() returns trigger
-language plpgsql security definer set search_path = pg_catalog, public as $$
-begin
-    if not exists (select 1 from rbac.grants g
-                    where g.user_id = new.user_id and g.role = new.role and g.revoked_at is null) then
-        insert into rbac.grants (user_id, role, granted_by, basis)
-        values (new.user_id, new.role, rbac.current_user_id(), 'installation');
-    end if;
-    return new;
-end;
-$$;
-revoke execute on function rbac.record_role_grant() from public;
-create or replace trigger trg_user_roles_record_grant after insert on rbac.user_roles
-    for each row execute function rbac.record_role_grant();
-
--- Roles held before the ledger existed, recorded once. Idempotent: a role with an active grant is left alone.
-insert into rbac.grants (user_id, role, basis)
-select ur.user_id, ur.role, 'installation'
-  from rbac.user_roles ur
- where not exists (select 1 from rbac.grants g
-                    where g.user_id = ur.user_id and g.role = ur.role and g.revoked_at is null);
-
--- A DELEGATION: one person hands one delegable capability to one of their own credentials, in one org. The row is
--- the record of who gave it, to which credential, when, and how it ended. rbac.delegate writes it,
--- rbac.revoke_delegation ends it, and rbac.decision reads it. Revoking the credential ends every use of it.
-create table if not exists rbac.delegations (
-    id            uuid primary key default uuidv7(),
-    credential_id uuid not null references rbac.api_keys(id) on delete cascade,
-    user_id       uuid not null references rbac.users(id) on delete cascade,
-    resource      text not null,
-    action        text not null,
-    org_id        uuid not null references rbac.orgs(id) on delete cascade,
-    created_at    timestamptz not null default now(),
-    revoked_at    timestamptz,
-    revoke_reason text,
-    constraint delegations_revocation_says_why check ((revoked_at is null) = (revoke_reason is null)),
-    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
-);
-create unique index if not exists delegations_one_live on rbac.delegations (credential_id, resource, action, org_id)
-    where revoked_at is null;
-select rbac.adopt_shared_org('rbac.delegations');
-
--- An application (the writing hub) declares its own qualified capabilities.
-create table if not exists rbac.applications (
-    name        text primary key,
-    version     text not null,
-    declared_at timestamptz not null default now()
-);
-
--- Credential scopes that predate canonical capabilities keep their narrow
--- meaning: neither package scope lists research.
-create table if not exists rbac.scope_aliases (
-    scope    text not null,
-    resource text not null,
-    action   text not null,
-    primary key (scope, resource, action),
-    foreign key (resource, action) references rbac.permission_kinds (resource, action) on delete cascade
-);
+-- The scopes an existing credential carries, aliased onto the kinds above. A
+-- foreign key ties each to a permission_kinds row this file inserts, so the
+-- rows live here and the table lives in user-rbac/schema.sql.
 insert into rbac.scope_aliases (scope, resource, action) values
     ('packages:read-own',       'research', 'select'),
     ('packages:create-private', 'research', 'select'),
     ('packages:create-private', 'research', 'insert')
 on conflict do nothing;
 
-create or replace function rbac.request_claims() returns jsonb
-language sql stable set search_path = pg_catalog, public as $$
-    select coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb);
-$$;
-
-create or replace function rbac.current_credential_id() returns uuid
-language sql stable set search_path = pg_catalog, public as $$
-    select case when v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then v::uuid end
-      from (select rbac.request_claims()->>'api_key_id') as t(v);
-$$;
-
--- The trusted boundary mints the claims. A credential makes the caller an
--- agent unless the boundary says platform: nothing a caller can leave out
--- turns an agent back into a person.
-create or replace function rbac.current_actor() returns text
-language sql stable set search_path = pg_catalog, public as $$
-    select case
-        when rbac.request_claims()->>'actor' = 'platform' then 'platform'
-        when rbac.request_claims()->>'actor' = 'agent' or rbac.current_credential_id() is not null then 'agent'
-        else 'person'
-    end;
-$$;
-
--- WHICH APPLICATION'S GRANTS COUNT FOR A CAPABILITY: a platform grant, the calling application's own, or the
--- application a qualified capability names (hub.publication -> hub). One copy, because rbac.decide and
--- rbac.decide_in_org both ask it, and two copies of an authorization rule are how they come to disagree.
--- Internal: nothing but those two calls it.
-create or replace function rbac.grant_application_applies(p_application text, p_resource text) returns boolean
-language sql stable set search_path = pg_catalog, public as $$
-    select p_application = 'percolate'
-        or p_application = rbac.request_claims()->>'application'
-        or (position('.' in p_resource) > 0 and p_application = split_part(p_resource, '.', 1));
-$$;
-revoke execute on function rbac.grant_application_applies(text, text) from public;
-
--- THE decision. Every protected operation below asks it, and the access
--- snapshot reports it, so the two cannot disagree. Order of refusal:
--- unknown capability, anonymous, inactive, human-only, credential, grant.
---
--- p_org is the one org a delegation may be held in: rbac.decide passes the org its claims are narrowed to, and
--- rbac.decide_in_org passes the org it decides in. A live delegation of this kind to this credential in that org
--- lets the agent past human_only and stands for the scope; the credential must still be live, and the person's
--- grant is still asked below. Internal: rbac.decide and rbac.decide_in_org are its only callers.
-create or replace function rbac.decision(p_resource text, p_action text, p_org uuid) returns jsonb
-language plpgsql stable set search_path = pg_catalog, public as $$
-declare
-    v_user      uuid := rbac.current_user_id();
-    v_key       uuid := rbac.current_credential_id();
-    v_kind      rbac.permission_kinds;
-    v_delegated boolean;
-    v_scopes    text[];
-    v_reason    text;
-begin
-    select * into v_kind from rbac.permission_kinds where resource = p_resource and action = p_action;
-    v_delegated := coalesce(v_kind.delegable, false) and v_key is not null and p_org is not null
-        and rbac.current_actor() = 'agent' and exists (
-            select 1 from rbac.delegations d
-             where d.credential_id = v_key and d.user_id = v_user and d.resource = p_resource
-               and d.action = p_action and d.org_id = p_org and d.revoked_at is null);
-    v_reason := case
-        when v_kind.resource is null then 'unknown_capability'
-        when v_user is null then 'anonymous'
-        when not exists (select 1 from rbac.users where id = v_user and status = 'active') then 'inactive'
-        when v_kind.human_only and rbac.current_actor() <> 'person' and not v_delegated then 'human_only'
-        when rbac.request_claims() ? 'api_key_id' and v_key is null then 'credential_invalid'
-        when rbac.current_actor() = 'agent' and v_key is null then 'credential_required'
-    end;
-    if v_reason is null and v_key is not null then
-        select scopes into v_scopes from rbac.api_keys
-         where id = v_key and user_id = v_user and revoked_at is null;
-        if not found then
-            v_reason := 'credential_revoked';
-        elsif not (v_delegated or p_resource || ':' || p_action = any (v_scopes)
-                   or exists (select 1 from rbac.scope_aliases a
-                               where a.scope = any (v_scopes) and a.resource = p_resource and a.action = p_action)) then
-            v_reason := 'scope_missing';
-        end if;
-    end if;
-    if v_reason is null and not (v_kind.every_person or exists (
-        select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
-         where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
-           -- Only an active, matching grant counts (REM-171). Every role row has one: the writers record it, and
-           -- trg_user_roles_record_grant records the rest, so there is no pre-ledger role left to honour.
-           and exists (
-               select 1 from rbac.grants g
-                where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
-                  and rbac.grant_application_applies(g.application, p_resource)
-                  and (g.org_id = rbac.shared_org_id()
-                       or (g.org_id::text = rbac.request_claims()->>'org_id'
-                           and g.org_id in (select rbac.current_org_ids())))
-           )
-    )) then
-        v_reason := 'no_grant';
-    end if;
-    return jsonb_build_object('resource', p_resource, 'action', p_action,
-                              'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
-end;
-$$;
-revoke execute on function rbac.decision(text, text, uuid) from public;
-
-create or replace function rbac.decide(p_resource text, p_action text) returns jsonb
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
-declare
-    v_org text := rbac.request_claims()->>'org_id';
-begin
-    return rbac.decision(p_resource, p_action,
-        case when v_org ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-                  and rbac.current_user_id() is not null then v_org::uuid end);
-end;
-$$;
-
-create or replace function rbac.may(p_resource text, p_action text) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select (rbac.decide(p_resource, p_action)->>'allowed')::boolean;
-$$;
-
--- Raise unless allowed; return the caller. The reason code travels as the hint.
-create or replace function rbac.require(p_resource text, p_action text) returns uuid
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
-declare v jsonb := rbac.decide(p_resource, p_action);
-begin
-    if not (v->>'allowed')::boolean then
-        raise insufficient_privilege
-            using message = 'Not allowed: ' || p_resource || ':' || p_action, hint = v->>'reason';
-    end if;
-    return rbac.current_user_id();
-end;
-$$;
-
--- A DECISION IN EXACTLY ONE ORG (REM-255). rbac.decide counts a grant held in the shared org inside any org's
--- scope. That is right for what it answers, "may this caller do this", and wrong for a question about one org
--- alone: one shared-org hub.publication:publish grant would open every publication (REM-249), so an application
--- had to add its own org-only query beside every such call. This asks decide's person, credential and scope checks
--- unchanged, then counts only an active grant held in p_org, and only for a member of p_org. A capability every
--- person holds is not a grant, and passes for any member. rbac.decide itself does not change. A delegation counts
--- here only when it is held in p_org, whatever org the claims name.
-create or replace function rbac.decide_in_org(p_resource text, p_action text, p_org uuid) returns jsonb
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
-declare
-    v        jsonb := rbac.decision(p_resource, p_action, p_org);
-    v_user   uuid := rbac.current_user_id();
-    v_every  boolean;
-    v_reason text;
-begin
-    -- Refused before the grant question (unknown, anonymous, inactive, human-only, credential): that answer stands.
-    if v->>'reason' not in ('allowed', 'no_grant') then
-        return v || jsonb_build_object('org_id', p_org);
-    end if;
-    select every_person into v_every from rbac.permission_kinds where resource = p_resource and action = p_action;
-    v_reason := case
-        when p_org is null or rbac.is_shared_org(p_org) then 'org_required'
-        when p_org not in (select rbac.current_org_ids()) then 'not_a_member'
-        when v_every then null
-        when exists (
-            select 1 from rbac.user_roles ur
-              join rbac.role_permissions rp on rp.role = ur.role
-              join rbac.grants g on g.user_id = ur.user_id and g.role = ur.role
-             where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
-               and g.revoked_at is null and g.org_id = p_org
-               and rbac.grant_application_applies(g.application, p_resource)) then null
-        else 'no_grant'
-    end;
-    return jsonb_build_object('resource', p_resource, 'action', p_action, 'org_id', p_org,
-                              'allowed', v_reason is null, 'reason', coalesce(v_reason, 'allowed'));
-end;
-$$;
-
-create or replace function rbac.may_in_org(p_resource text, p_action text, p_org uuid) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select (rbac.decide_in_org(p_resource, p_action, p_org)->>'allowed')::boolean;
-$$;
-
--- A PERSON HANDS ONE HUMAN-ONLY CAPABILITY TO ONE OF THEIR OWN CREDENTIALS, IN ONE ORG. Only a person, never the
--- agent it is for. The kind must be delegable, the credential the caller's own and live, and the caller allowed
--- the capability in that org now, so a delegation never reaches further than the grant behind it; rbac.decision
--- asks that grant again on every use. Returns the live delegation; asking again returns the same one.
-create or replace function rbac.delegate(p_credential uuid, p_resource text, p_action text, p_org uuid) returns uuid
-language plpgsql security definer set search_path = pg_catalog, public as $$
-declare
-    v_user     uuid := rbac.current_user_id();
-    v_decision jsonb;
-    v_id       uuid;
-begin
-    if rbac.current_actor() <> 'person' then
-        raise insufficient_privilege using message = 'Only a person delegates', hint = 'human_only';
-    end if;
-    if not exists (select 1 from rbac.permission_kinds
-                    where resource = p_resource and action = p_action and delegable) then
-        raise insufficient_privilege using message = 'This capability cannot be delegated', hint = 'not_delegable';
-    end if;
-    if not exists (select 1 from rbac.api_keys where id = p_credential and user_id = v_user and revoked_at is null) then
-        raise no_data_found using message = 'Credential not found';
-    end if;
-    v_decision := rbac.decide_in_org(p_resource, p_action, p_org);
-    if not (v_decision->>'allowed')::boolean then
-        raise insufficient_privilege using message = 'A delegation needs the capability in that org',
-                                           hint = v_decision->>'reason';
-    end if;
-    insert into rbac.delegations (credential_id, user_id, resource, action, org_id)
-    values (p_credential, v_user, p_resource, p_action, p_org)
-    on conflict (credential_id, resource, action, org_id) where revoked_at is null do nothing
-    returning id into v_id;
-    return coalesce(v_id, (select id from rbac.delegations
-                            where credential_id = p_credential and resource = p_resource and action = p_action
-                              and org_id = p_org and revoked_at is null));
-end;
-$$;
-
--- A person ends a delegation they gave, with a reason. The credential keeps everything else it may do. True when a
--- live delegation ended; somebody else's is not found.
-create or replace function rbac.revoke_delegation(p_delegation uuid, p_reason text) returns boolean
-language plpgsql security definer set search_path = pg_catalog, public as $$
-begin
-    if rbac.current_actor() <> 'person' then
-        raise insufficient_privilege using message = 'Only a person revokes a delegation', hint = 'human_only';
-    end if;
-    if coalesce(p_reason, '') = '' then
-        raise invalid_parameter_value using message = 'A revocation says why';
-    end if;
-    update rbac.delegations set revoked_at = now(), revoke_reason = p_reason
-     where id = p_delegation and user_id = rbac.current_user_id() and revoked_at is null;
-    return found;
-end;
-$$;
-
-create or replace function rbac.grant_with_basis(
-    p_user uuid, p_role text, p_basis text, p_evidence text default null,
-    p_application text default 'percolate', p_org uuid default null)
-returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
-declare v_id uuid; v_by uuid := rbac.current_user_id();
-begin
-    if not rbac.is_operator() then
-        if rbac.current_actor() <> 'person' then
-            raise insufficient_privilege using message = 'Only a person grants a role';
-        end if;
-        perform rbac.require('users', 'admin');
-    end if;
-    insert into rbac.grants (user_id, role, application, org_id, granted_by, basis, evidence_ref)
-    values (p_user, p_role, p_application, coalesce(p_org, rbac.shared_org_id()), v_by, p_basis, p_evidence)
-    returning id into v_id;
-    insert into rbac.user_roles (user_id, role) values (p_user, p_role) on conflict do nothing;
-    insert into rbac.auth_events (user_id, event_type, detail)
-    values (p_user, 'role_granted', jsonb_build_object('role', p_role, 'by', v_by, 'grant_id', v_id, 'basis', p_basis));
-    return v_id;
-end;
-$$;
-
-create or replace function rbac.revoke_grant(p_grant uuid, p_reason text) returns void
-language plpgsql security definer set search_path = pg_catalog, public as $$
-declare g rbac.grants; v_by uuid := rbac.current_user_id();
-begin
-    if coalesce(p_reason, '') = '' then
-        raise invalid_parameter_value using message = 'A revocation says why';
-    end if;
-    if not rbac.is_operator() then
-        if rbac.current_actor() <> 'person' then
-            raise insufficient_privilege using message = 'Only a person revokes a role';
-        end if;
-        perform rbac.require('users', 'admin');
-    end if;
-    update rbac.grants set revoked_at = now(), revoked_by = v_by, revoke_reason = p_reason
-     where id = p_grant and revoked_at is null
-    returning * into g;
-    if not found then
-        return;
-    end if;
-    if not exists (select 1 from rbac.grants where user_id = g.user_id and role = g.role and revoked_at is null) then
-        delete from rbac.user_roles where user_id = g.user_id and role = g.role;
-    end if;
-end;
-$$;
-
-create or replace function rbac.declare_application(p_name text, p_version text, p_capabilities jsonb)
-returns void language plpgsql security definer set search_path = pg_catalog, public as $$
-declare c jsonb;
-begin
-    if not rbac.is_operator() then
-        raise insufficient_privilege using message = 'Only an installation step declares an application';
-    end if;
-    if p_name !~ '^[a-z][a-z0-9_-]{1,40}$' then
-        raise invalid_parameter_value using message = 'An application name is a lower-case word';
-    end if;
-    insert into rbac.applications (name, version) values (p_name, p_version)
-    on conflict (name) do update set version = excluded.version, declared_at = now();
-    for c in select value from jsonb_array_elements(coalesce(p_capabilities, '[]'::jsonb)) loop
-        insert into rbac.permission_kinds (resource, action, checked_by, human_only, every_person, delegable)
-        values (p_name || '.' || (c->>'resource'), c->>'action', 'application ' || p_name,
-                coalesce((c->>'human_only')::boolean, false), coalesce((c->>'every_person')::boolean, false),
-                coalesce((c->>'delegable')::boolean, false))
-        on conflict (resource, action) do update
-            set checked_by = excluded.checked_by,
-                human_only = excluded.human_only,
-                every_person = excluded.every_person,
-                delegable = excluded.delegable;
-    end loop;
-end;
-$$;
-
-
--- ------------------------------------------------------------
--- 2. Plans and usage (§3)
--- ------------------------------------------------------------
--- No row in plan_limits is UNSET; 'unlimited' and 'finite' are rows. A
--- required resource with no policy refuses; an optional one allows.
--- The default plan is unlimited for model tokens so a self-hosted install
--- keeps working: nobody chose a number, and this file does not choose one.
-
-create table if not exists rbac.plans (
-    name        text primary key,
-    description text not null,
-    version     int  not null default 1
-);
-
-create table if not exists rbac.resource_kinds (
-    name        text primary key,
-    description text not null,
-    required    boolean not null default false
-);
-
-create table if not exists rbac.plan_limits (
-    plan          text not null references rbac.plans(name) on delete cascade,
-    resource_kind text not null references rbac.resource_kinds(name),
-    mode          text not null check (mode in ('unlimited', 'finite')),
-    amount        bigint check (amount is null or amount >= 0),
-    period        interval not null default interval '1 month',
-    -- true on the rows this file ships, so a dump carries only the deployment's
-    -- (contract/schema.sql §4, the seeded tables).
-    shipped       boolean not null default false,
-    primary key (plan, resource_kind),
-    constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
-);
-
--- Earlier 0.2.1 development installs already have this table.
-alter table rbac.plan_limits add column if not exists shipped boolean not null default false;
-
-create table if not exists rbac.plan_assignments (
-    user_id     uuid primary key references rbac.users(id) on delete cascade,
-    plan        text not null references rbac.plans(name),
-    assigned_at timestamptz not null default now(),
-    assigned_by uuid references rbac.users(id)
-);
-
--- One budget per person, shared by every agent acting for them. A
--- reservation holds capacity; consume settles it; release returns it. The
--- operation id makes a retry charge once, and a failed transaction takes its
--- reservation with it.
-create table if not exists rbac.usage_ledger (
-    id            uuid primary key default uuidv7(),
-    user_id       uuid not null references rbac.users(id) on delete cascade,
-    resource_kind text not null references rbac.resource_kinds(name),
-    operation_id  text not null,
-    amount        bigint not null check (amount >= 0),
-    state         text not null check (state in ('reserved', 'consumed', 'released')),
-    actor         text not null check (actor in ('person', 'agent', 'platform')),
-    created_at    timestamptz not null default now(),
-    expires_at    timestamptz,
-    unique (user_id, resource_kind, operation_id)
-);
-
-insert into rbac.plans (name, description) values
-    ('default', 'Every account without an assigned plan')
-on conflict (name) do nothing;
-insert into rbac.resource_kinds (name, description, required) values
-    ('llm_tokens', 'Model tokens a run spends through the agent runtime', true)
-on conflict (name) do nothing;
-insert into rbac.plan_limits (plan, resource_kind, mode, shipped) values
-    ('default', 'llm_tokens', 'unlimited', true)
-on conflict (plan, resource_kind) do update set shipped = true;
-
--- SAVED EVIDENCE IS LIMITED BY BYTES, AND ONLY BY BYTES (REM-242). Optional rather than required, so a plan that
--- says nothing about it allows saving; the default plan ships a finite daily cap, because unlike model tokens
--- this is spent on a deployment's own storage by anybody who may write research. 100 MB a day is a hundred
--- long articles or a dozen papers: generous for a person, and a ceiling on a script. A deployment changes it
--- with its own plan_limits row.
-insert into rbac.resource_kinds (name, description, required) values
-    ('evidence_bytes', 'Bytes of public pages a person keeps as research evidence (content.register_evidence)', false)
-on conflict (name) do nothing;
-insert into rbac.plan_limits (plan, resource_kind, mode, amount, period, shipped) values
-    ('default', 'evidence_bytes', 'finite', 104857600, interval '1 day', true)
-on conflict (plan, resource_kind) do update set shipped = true;
-
-create or replace function rbac.plan_of(p_user uuid) returns text
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select coalesce((select plan from rbac.plan_assignments where user_id = p_user), 'default');
-$$;
-
-create or replace function rbac.limit_state(p_user uuid, p_kind text) returns jsonb
-language plpgsql stable security definer set search_path = pg_catalog, public as $$
-declare k rbac.resource_kinds; l rbac.plan_limits; v_used bigint;
-begin
-    if p_user is distinct from rbac.current_user_id() and not rbac.is_operator() then
-        return jsonb_build_object('resource_kind', p_kind, 'status', 'unknown', 'remaining', null);
-    end if;
-    select * into k from rbac.resource_kinds where name = p_kind;
-    if not found then
-        return jsonb_build_object('resource_kind', p_kind, 'status', 'unknown', 'remaining', null);
-    end if;
-    select * into l from rbac.plan_limits where plan = rbac.plan_of(p_user) and resource_kind = p_kind;
-    if not found then
-        return jsonb_build_object('resource_kind', p_kind, 'status', 'unset', 'required', k.required, 'remaining', null,
-                                  'reason', case when k.required then 'no budget is configured' else 'no limit is configured' end);
-    end if;
-    select coalesce(sum(amount), 0) into v_used from rbac.usage_ledger
-     where user_id = p_user and resource_kind = p_kind and created_at > now() - l.period
-       and (state = 'consumed' or (state = 'reserved' and expires_at > now()));
-    if l.mode = 'unlimited' then
-        return jsonb_build_object('resource_kind', p_kind, 'status', 'unlimited', 'used', v_used,
-                                  'remaining', null, 'period', l.period::text);
-    end if;
-    return jsonb_build_object('resource_kind', p_kind,
-        'status', case when v_used >= l.amount then 'exhausted' else 'finite' end,
-        'limit', l.amount, 'used', v_used, 'remaining', greatest(l.amount - v_used, 0), 'period', l.period::text);
-end;
-$$;
-
--- The runtime's existing entry point (percolate-core repository.py). A run
--- with no person has no personal budget to charge: model spend on platform
--- jobs is a provider concern, not an account quota.
-create or replace function rbac.has_quota_remaining(p_user uuid, p_kind text) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select case
-        when p_user is null then true
-        else case rbac.limit_state(p_user, p_kind)->>'status'
-            when 'unlimited' then true
-            when 'finite' then true
-            when 'unset' then not coalesce((select required from rbac.resource_kinds where name = p_kind), true)
-            else false
-        end
-    end;
-$$;
-
-create or replace function rbac.reserve_usage(p_kind text, p_amount bigint, p_operation_id text,
-                                              p_ttl interval default interval '15 minutes')
-returns jsonb language plpgsql volatile security definer set search_path = pg_catalog, public as $$
-declare v_user uuid := rbac.current_user_id(); s jsonb; held rbac.usage_ledger;
-begin
-    if v_user is null then
-        raise insufficient_privilege using message = 'Usage belongs to a signed-in person';
-    end if;
-    if p_amount is null or p_amount < 0 or coalesce(p_operation_id, '') = '' then
-        raise invalid_parameter_value using message = 'A reservation needs an amount and an operation id';
-    end if;
-    if p_ttl is null or p_ttl <= interval '0' then
-        raise invalid_parameter_value using message = 'A reservation needs a positive time to live';
-    end if;
-    perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
-    select * into held from rbac.usage_ledger
-     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
-    if found then
-        -- A retry keeps the operation's one row. Settled or returned, it holds nothing and must not run again.
-        if held.state in ('consumed', 'released') then
-            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
-                                      'retry', true, 'reason', held.state);
-        end if;
-        if held.expires_at > now() then
-            return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', held.state,
-                                      'retry', true);
-        end if;
-        -- Expired (REM-189): limit_state no longer counts it, so its capacity may have gone to another
-        -- operation. Reacquire the recorded amount under this lock only if it is still there.
-        s := rbac.limit_state(v_user, p_kind);
-        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
-           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < held.amount) then
-            return jsonb_build_object('reserved', false, 'operation_id', p_operation_id, 'state', held.state,
-                                      'retry', true, 'reason', 'expired', 'limit', s);
-        end if;
-        update rbac.usage_ledger set expires_at = now() + p_ttl where id = held.id;
-        return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', 'reserved',
-                                  'retry', true, 'reacquired', true, 'limit', rbac.limit_state(v_user, p_kind));
-    end if;
-    s := rbac.limit_state(v_user, p_kind);
-    if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean) then
-        return jsonb_build_object('reserved', false, 'reason', 'no_policy', 'limit', s);
-    end if;
-    if s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < p_amount then
-        return jsonb_build_object('reserved', false, 'reason', 'quota_exceeded', 'limit', s);
-    end if;
-    insert into rbac.usage_ledger (user_id, resource_kind, operation_id, amount, state, actor, expires_at)
-    values (v_user, p_kind, p_operation_id, p_amount, 'reserved', rbac.current_actor(), now() + p_ttl);
-    return jsonb_build_object('reserved', true, 'operation_id', p_operation_id, 'state', 'reserved',
-                              'limit', rbac.limit_state(v_user, p_kind));
-end;
-$$;
-
-create or replace function rbac.consume_usage(p_kind text, p_operation_id text, p_actual bigint default null)
-returns jsonb language plpgsql volatile security definer set search_path = pg_catalog, public as $$
-declare v_user uuid := rbac.current_user_id(); row rbac.usage_ledger; s jsonb; v_amount bigint;
-begin
-    if v_user is not null then
-        perform pg_advisory_xact_lock(hashtextextended(v_user::text || '/' || p_kind, 0));
-    end if;
-    select * into row from rbac.usage_ledger
-     where user_id = v_user and resource_kind = p_kind and operation_id = p_operation_id;
-    -- Settled or returned already: a settlement retry answers with the receipt it has.
-    if not found or row.state <> 'reserved' then
-        return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
-                                  'consumed', coalesce(row.state = 'consumed', false), 'retry', found);
-    end if;
-    v_amount := coalesce(p_actual, row.amount);
-    -- An expired reservation's capacity may have gone to another operation (REM-189): settle it only if
-    -- the amount is still there, so a late settlement cannot spend a budget twice.
-    if row.expires_at is null or row.expires_at <= now() then
-        s := rbac.limit_state(v_user, p_kind);
-        if s->>'status' = 'unknown' or (s->>'status' = 'unset' and (s->>'required')::boolean)
-           or (s->>'status' in ('finite', 'exhausted') and (s->>'remaining')::bigint < v_amount) then
-            return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
-                                      'consumed', false, 'reason', 'expired', 'limit', s);
-        end if;
-    end if;
-    update rbac.usage_ledger set state = 'consumed', amount = v_amount where id = row.id returning * into row;
-    return jsonb_build_object('operation_id', p_operation_id, 'state', row.state, 'amount', row.amount,
-                              'consumed', true);
-end;
-$$;
-
-create or replace function rbac.release_usage(p_kind text, p_operation_id text)
-returns void language sql volatile security definer set search_path = pg_catalog, public as $$
-    update rbac.usage_ledger set state = 'released'
-     where user_id = rbac.current_user_id() and resource_kind = p_kind
-       and operation_id = p_operation_id and state = 'reserved';
-$$;
-
--- Explanatory, not reusable: every mutation rechecks in its own transaction.
-create or replace function rbac.access_snapshot(p_application text default null) returns jsonb
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select jsonb_build_object(
-        'version', 1,
-        'principal', rbac.current_user_id(),
-        'actor', rbac.current_actor(),
-        'credential_id', rbac.current_credential_id(),
-        'roles', coalesce((select jsonb_agg(role order by role) from rbac.user_roles
-                            where user_id = rbac.current_user_id()), '[]'::jsonb),
-        'capabilities', coalesce((
-            select jsonb_agg(rbac.decide(k.resource, k.action) || jsonb_build_object('human_only', k.human_only)
-                             order by k.resource, k.action)
-              from rbac.permission_kinds k
-             where k.resource in ('research', 'engagement')
-                or (p_application is not null and k.resource like p_application || '.%')), '[]'::jsonb),
-        'plan', case when rbac.current_user_id() is not null then rbac.plan_of(rbac.current_user_id()) end,
-        'limits', coalesce((select jsonb_agg(rbac.limit_state(rbac.current_user_id(), r.name) order by r.name)
-                              from rbac.resource_kinds r
-                             where rbac.current_user_id() is not null), '[]'::jsonb));
-$$;
-
-
+-- Publishing is the one core kind a person may delegate. Endorsing, commenting and moderating are not.
+update rbac.permission_kinds set delegable = true
+ where resource = 'research' and action = 'publish' and not delegable;
 -- ------------------------------------------------------------
 -- 3. Research: works, immutable revisions, heads, idempotency (§4)
 -- ------------------------------------------------------------
@@ -29975,6 +30199,8 @@ create table if not exists research.works (
     listed_at     timestamptz,
     created_at    timestamptz not null default now()
 );
+comment on table research.works is
+    'A piece of research as a durable thing: a public id, an owner, an org and a visibility. Its content lives in revisions.';
 
 create table if not exists research.revisions (
     id             uuid primary key default uuidv7(),
@@ -29992,6 +30218,8 @@ create table if not exists research.revisions (
     unique (work_id, number),
     unique (work_id, label)
 );
+comment on table research.revisions is
+    'An immutable version of a work, with its document, content hash, predecessor, and who wrote it as which kind of actor.';
 
 -- WHAT A REVISION'S HASH WAS COMPUTED OVER, kept on the row (REM-151, specs/tables/schema.md §3). The
 -- digest is sha256 over the jsonb text Postgres prints for the document. A later canonical form is a new
@@ -30037,6 +30265,8 @@ create table if not exists research.heads (
     revision_id uuid not null references research.revisions(id),
     updated_at  timestamptz not null default now()
 );
+comment on table research.heads is
+    'Which revision is currently the head of each work.';
 create index if not exists heads_by_revision on research.heads (revision_id);
 
 create table if not exists research.operations (
@@ -30048,6 +30278,8 @@ create table if not exists research.operations (
     created_at  timestamptz not null default now(),
     primary key (owner_id, key)
 );
+comment on table research.operations is
+    'The idempotency record: an owner''s operation key and body hash mapped to the revision it produced, so a retry returns the first receipt.';
 create index if not exists operations_by_work on research.operations (work_id);
 
 create table if not exists research.claims (
@@ -30059,6 +30291,8 @@ create table if not exists research.claims (
     locator     text not null default '',
     unique (revision_id, claim_key)
 );
+comment on table research.claims is
+    'A claim as it occurs in one revision: its local key, kind, text and where in the document it sits.';
 
 create table if not exists research.sources (
     id          uuid primary key,
@@ -30071,6 +30305,8 @@ create table if not exists research.sources (
     locator     text not null,
     unique (revision_id, source_key)
 );
+comment on table research.sources is
+    'A source a revision cites, with its origin, status and the capture that pinned it.';
 -- Sources citing one origin, across packages (REM-219), without reading every source (specs/research-platform/scale.md §2).
 create index if not exists sources_by_origin on research.sources (origin) where origin <> '';
 
@@ -30082,6 +30318,8 @@ create table if not exists research.citations (
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade,
     foreign key (revision_id, source_key) references research.sources (revision_id, source_key) on delete cascade
 );
+comment on table research.citations is
+    'Which claim in a revision rests on which source. A claim with no row here is uncited, which the trust read reports.';
 
 create table if not exists research.argument_edges (
     revision_id      uuid not null,
@@ -30092,6 +30330,8 @@ create table if not exists research.argument_edges (
     foreign key (revision_id, source_claim_key) references research.claims (revision_id, claim_key) on delete cascade,
     foreign key (revision_id, target_claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table research.argument_edges is
+    'How one claim in a revision bears on another — supports, challenges, qualifies — so the argument is data rather than prose.';
 
 -- SEARCH OVER CLAIMS AND SOURCES, SCOPED BY THE ROWS THEMSELVES (REM-152, specs/tables/schema.md §3). Lexical
 -- sources rather than entity projections: revision_readable decides what a search returns, and a package
@@ -30101,40 +30341,10 @@ create table if not exists research.argument_edges (
 select aiq.register_lexical_source('research_claims', 'research.claims', 'text');
 select aiq.register_lexical_source('research_sources', 'research.sources', 'title');
 -- Both are searched through their definer searches, research.search_claims and research.search_sources
+
 -- (REM-519): as the caller, the policy ran on every row before the index, 7 minutes at 960 K claims.
 update aiq.lexical_sources set search_with = 'research.search_claims'  where name = 'research_claims';
 update aiq.lexical_sources set search_with = 'research.search_sources' where name = 'research_sources';
-
--- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
--- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
--- later fetch change what an old revision appears to rely on. A snapshot records the resource, the exact
--- retained file and its hash, and who captured it, together, taken from the resource row as it stood.
---
--- Readable exactly when its resource is (the policy below asks the resource, under the caller's own row
--- security), rather than carrying copies of owner, org and visibility that could drift from the row they
--- describe -- aiq.node_keys inherits from aiq.nodes for the same reason. The resource cannot be deleted while
--- a snapshot pins it. The bytes go only through content.remove_snapshot_bytes, which leaves a tombstone that
--- keeps the checksum: an endorsement never silently becomes an endorsement of replacement bytes.
-create table if not exists content.resource_snapshots (
-    id             uuid primary key default uuidv7(),
-    resource_id    uuid not null references content.resources(id),
-    file_id        uuid references content.files(id),
-    checksum       text not null,
-    size_bytes     bigint not null check (size_bytes >= 0),
-    content_type   text,
-    uri            text,
-    captured_by    uuid not null references rbac.users(id),
-    actor_kind     text not null check (actor_kind in ('person', 'agent', 'platform')),
-    credential_id  uuid references rbac.api_keys(id),
-    captured_at    timestamptz not null default now(),
-    removed_at     timestamptz,
-    removed_by     uuid references rbac.users(id),
-    removed_reason text,
-    constraint resource_snapshots_removal_says_why check ((removed_at is null) = (removed_reason is null)),
-    constraint resource_snapshots_bytes_until_removed check ((removed_at is null) = (file_id is not null))
-);
-create index if not exists idx_resource_snapshots_file on content.resource_snapshots (file_id);
-create index if not exists idx_resource_snapshots_resource on content.resource_snapshots (resource_id);
 
 -- A source may pin a capture. Null is the explicit "declared, not captured" state; a later capture is a new
 -- revision, never an update to this one (clients hold no update on projections).
@@ -30150,6 +30360,8 @@ create table if not exists research.revision_files (
     purpose      text not null default '',
     primary key (revision_id, artifact_key)
 );
+comment on table research.revision_files is
+    'The artifacts a revision carries — images, attachments — each pinned to a capture.';
 
 -- research.resolve_image finds the revisions that pin an image by its snapshot (REM-309).
 create index if not exists idx_revision_files_snapshot on research.revision_files (snapshot_id);
@@ -30194,6 +30406,8 @@ create table if not exists research.endorsements (
     withdraw_reason text,
     constraint endorsements_withdrawal_says_why check ((withdrawn_at is null) = (withdraw_reason is null))
 );
+comment on table research.endorsements is
+    'What a person checked in an exact revision, at what scope. Not a finding that a claim is true, and a correction does not inherit it.';
 create unique index if not exists endorsements_one_active
     on research.endorsements (revision_id, endorser_id) where withdrawn_at is null;
 -- A revision's endorsements, withdrawn ones included: trust reads them all, and a partial index answers
@@ -30216,6 +30430,8 @@ create table if not exists research.endorsement_claims (
     primary key (endorsement_id, claim_key),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key)
 );
+comment on table research.endorsement_claims is
+    'Which exact claims an endorsement covers, when it is scoped to claims rather than the whole revision.';
 -- Erasing a claim checks this reference; without the index each deleted claim scanned the table.
 create index if not exists endorsement_claims_by_claim on research.endorsement_claims (revision_id, claim_key);
 -- The FK that reaches through the endorsement is dropped before the unique key it needs, and added after it,
@@ -30235,6 +30451,8 @@ create table if not exists research.endorsement_withdrawals (
     reason         text not null,
     withdrawn_at   timestamptz not null default now()
 );
+comment on table research.endorsement_withdrawals is
+    'The withdrawal of an endorsement as its own event: who withdrew, why and when.';
 -- Withdrawals from before the event table, carried over once: only the endorser could ever withdraw, so the
 -- endorser is who withdrew. Replay-safe, and a no-op on a fresh install.
 insert into research.endorsement_withdrawals (endorsement_id, withdrawn_by, reason, withdrawn_at)
@@ -30254,6 +30472,8 @@ create table if not exists research.exposures (
     exposed_by  uuid references rbac.users(id),
     exposed_at  timestamptz not null default now()
 );
+comment on table research.exposures is
+    'That a revision was made readable beyond its owner, and by whom.';
 create index if not exists exposures_by_work on research.exposures (work_id);
 -- The listing walks exposures newest first (research.list_listed).
 create index if not exists exposures_newest on research.exposures (exposed_at desc, revision_id);
@@ -30276,6 +30496,8 @@ create table if not exists research.publication_exposures (
     exposed_at  timestamptz not null default now(),
     primary key (revision_id, publication)
 );
+comment on table research.publication_exposures is
+    'That an exact revision was added to a named publication in an org, and through what route.';
 -- exposed_via: the credential that acted, when an agent published through a delegation; null when the person did.
 alter table research.publication_exposures add column if not exists exposed_via uuid references rbac.api_keys(id) on delete set null;
 create index if not exists publication_exposures_by_work on research.publication_exposures (work_id);
@@ -30298,6 +30520,8 @@ create table if not exists research.visibility_changes (
     changed_by uuid references rbac.users(id),
     changed_at timestamptz not null default now()
 );
+comment on table research.visibility_changes is
+    'Every change to a work''s visibility, so what was public when is answerable later.';
 create index if not exists visibility_changes_by_work on research.visibility_changes (work_id, changed_at);
 insert into research.visibility_changes (work_id, changed_to, changed_at)
 select w.id, w.visibility, case when w.visibility = 'public' then coalesce(w.listed_at, now()) else now() end
@@ -30316,6 +30540,8 @@ create table if not exists research.publication_withdrawals (
     withdrawn_by uuid references rbac.users(id),
     withdrawn_at timestamptz not null default now()
 );
+comment on table research.publication_withdrawals is
+    'A publication exposure that ended: the row as it stood, and who ended it when.';
 create index if not exists publication_withdrawals_by_work on research.publication_withdrawals (work_id);
 
 -- ERASURE IS THE ONE WAY HISTORY LEAVES (specs/tables/schema.md §3: "a documented privileged lifecycle"). The row
@@ -30332,6 +30558,8 @@ create table if not exists research.erasures (
     erased_at  timestamptz not null default now(),
     xact       xid8 not null default pg_current_xact_id()
 );
+comment on table research.erasures is
+    'The tombstone left when a work is erased: what it was and why, keeping no text.';
 -- Every org_id column defaults to the shared org (specs/identity/spec.md). The functions below always name the
 -- publication's org, and rbac.decide_in_org refuses the shared org, so the default is never what a row holds.
 select rbac.adopt_shared_org('research.publication_exposures');
@@ -31232,6 +31460,8 @@ create table if not exists engagement.saves (
     created_at timestamptz not null default now(),
     primary key (user_id, work_id)
 );
+comment on table engagement.saves is
+    'That a person kept a work. Private, idempotent, and it follows the work across revisions.';
 create index if not exists saves_by_work on engagement.saves (work_id);
 
 create table if not exists engagement.follows (
@@ -31242,6 +31472,8 @@ create table if not exists engagement.follows (
     created_at    timestamptz not null default now(),
     primary key (user_id, target_org_id)
 );
+comment on table engagement.follows is
+    'That a person follows an org, which is how a publication is followed.';
 
 -- Preserve follows when applying this schema over the original platform slice.
 do $$
@@ -31259,6 +31491,8 @@ create table if not exists engagement.votes (
     created_at   timestamptz not null default now(),
     withdrawn_at timestamptz
 );
+comment on table engagement.votes is
+    'That a person found an exact revision useful. One live vote each, self-votes refused, withdrawals kept.';
 create unique index if not exists votes_one_active on engagement.votes (user_id, revision_id) where withdrawn_at is null;
 -- A revision's votes: revision_signals counts them, and erasure deletes them, withdrawn ones too, which a
 -- partial index cannot serve (specs/research-platform/scale.md §2).
@@ -31272,6 +31506,8 @@ create table if not exists engagement.valuations (
     currency     text not null check (currency ~ '^[A-Z]{3}$'),
     created_at   timestamptz not null default now()
 );
+comment on table engagement.valuations is
+    'What a person privately thought a revision was worth, in its own currency. Never part of a public signal.';
 create index if not exists valuations_by_revision on engagement.valuations (revision_id);
 
 create table if not exists engagement.comments (
@@ -31289,6 +31525,8 @@ create table if not exists engagement.comments (
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key),
     constraint comments_withdrawal_says_why check ((withdrawn_at is null) = (withdraw_reason is null))
 );
+comment on table engagement.comments is
+    'A person''s comment on a revision, optionally anchored to one claim, with its moderation and withdrawal state.';
 
 create table if not exists engagement.comment_versions (
     comment_id uuid not null references engagement.comments(id) on delete cascade,
@@ -31297,6 +31535,8 @@ create table if not exists engagement.comment_versions (
     created_at timestamptz not null default now(),
     primary key (comment_id, version)
 );
+comment on table engagement.comment_versions is
+    'Each earlier body of an edited comment, so a reader can see what changed.';
 
 create table if not exists engagement.comment_likes (
     id           uuid primary key default uuidv7(),
@@ -31305,6 +31545,8 @@ create table if not exists engagement.comment_likes (
     created_at   timestamptz not null default now(),
     withdrawn_at timestamptz
 );
+comment on table engagement.comment_likes is
+    'That a person liked a comment, withdrawable.';
 create unique index if not exists comment_likes_one_active on engagement.comment_likes (comment_id, user_id) where withdrawn_at is null;
 
 -- Discussions (REM-507). A comment is a post in a thread: it may answer another
@@ -31701,23 +31943,6 @@ $$;
 -- 6. Row security and grants
 -- ------------------------------------------------------------
 
-alter table rbac.grants enable row level security;
-drop policy if exists grants_self_or_admin on rbac.grants;
-create policy grants_self_or_admin on rbac.grants for select
-    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
-
-alter table rbac.delegations enable row level security;
-drop policy if exists delegations_self_or_admin on rbac.delegations;
-create policy delegations_self_or_admin on rbac.delegations for select
-    using (user_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin'));
-
-alter table rbac.plan_assignments enable row level security;
-drop policy if exists plan_assignments_self on rbac.plan_assignments;
-create policy plan_assignments_self on rbac.plan_assignments for select using (user_id = rbac.current_user_id());
-
-alter table rbac.usage_ledger enable row level security;
-drop policy if exists usage_ledger_self on rbac.usage_ledger;
-create policy usage_ledger_self on rbac.usage_ledger for select using (user_id = rbac.current_user_id());
 
 -- The generated scope policy: rbac/02 requires it of any table carrying the
 -- scope columns, so the tenancy rule has one home.
@@ -31995,8 +32220,6 @@ create policy comment_likes_self on engagement.comment_likes for select
 -- Signed-in callers only. No definer here is granted to web_anon (rbac/04);
 -- an anonymous reader reaches listed research through an application.
 grant usage on schema research, engagement to authenticated;
-grant select on rbac.grants, rbac.delegations, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
-                rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
 grant select on research.works, research.revisions, research.heads, research.exposures, research.publication_exposures,
                 research.claims, research.sources,
                 research.citations, research.argument_edges, research.endorsements to authenticated;
@@ -32029,16 +32252,10 @@ grant select on research.operations to authenticated;
 grant select on engagement.saves, engagement.follows, engagement.votes, engagement.valuations, engagement.comments,
                 engagement.comment_versions, engagement.comment_likes to authenticated;
 
--- A snapshot is readable exactly when its resource is: the subquery runs under the caller's own row security on
--- content.resources, so there is one tenancy fact and it lives on the resource (REM-153).
-alter table content.resource_snapshots enable row level security;
-drop policy if exists resource_snapshots_via_resource on content.resource_snapshots;
-create policy resource_snapshots_via_resource on content.resource_snapshots for select
-    using (exists (select 1 from content.resources r where r.id = resource_snapshots.resource_id));
 alter table research.revision_files enable row level security;
 drop policy if exists revision_files_readable on research.revision_files;
 create policy revision_files_readable on research.revision_files for select using (research.revision_readable(revision_id));
-grant select on content.resource_snapshots, research.revision_files to authenticated;
+grant select on research.revision_files to authenticated;
 
 grant execute on function
     rbac.request_claims(), rbac.current_credential_id(), rbac.current_actor(),
@@ -32294,6 +32511,8 @@ create table if not exists claims.tx (
     reason        text not null check (length(reason) > 0),
     check (actor_kind = 'platform' or actor_id is not null)
 );
+comment on table claims.tx is
+    'One append to the claims graph: who asserted, as what kind of actor, from which revision and why. Every assertion carries its tx.';
 
 -- ------------------------------------------------------------
 -- 2. Claims. A proposition with an identity and nothing else: its text is whatever its occurrences say.
@@ -32302,6 +32521,8 @@ create table if not exists claims.claims (
     id uuid primary key default uuidv7(),
     tx bigint not null references claims.tx(id)
 );
+comment on table claims.claims is
+    'A claim''s identity, minted once. Everything said about it is an assertion elsewhere that names it.';
 
 -- ------------------------------------------------------------
 -- 3. expresses: occurrence (and part) -> claim, one row per statement, never updated.
@@ -32324,6 +32545,8 @@ create table if not exists claims.expresses (
     tx          bigint not null references claims.tx(id),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.expresses is
+    'That an occurrence in a revision expresses a claim, by which method, at what review status. Never updated; a change is a later row.';
 -- The spike's index (meta/spikes/2026-09-18-claims-graph, "added after the first 1.1M run"): every read by revision
 -- and the projection's own "is this occurrence linked" check use it.
 create index if not exists expresses_occurrence on claims.expresses (revision_id, claim_key, part, id desc);
@@ -32607,6 +32830,8 @@ create table if not exists claims.predicates (
     is_symmetric  boolean not null,
     requires     text not null
 );
+comment on table claims.predicates is
+    'The predicates an assertion may use, with the kinds they relate and whether each is transitive or symmetric.';
 insert into claims.predicates (name, kind, subject_kind, object_kind, is_transitive, is_symmetric, requires) values
  ('expresses',            'identity',    'occurrence', 'claim',    false, false, 'platform or owner; written by claims.link_revision'),
  ('same_as',              'identity',    'claim',      'claim',    true,  true,  'evidence on both sides (REM-478)'),
@@ -32660,6 +32885,8 @@ create table if not exists claims.relations (
     check (src <> dst),
     check (evidence2 is null or evidence2 <> evidence)
 );
+comment on table claims.relations is
+    'A typed assertion between two claims, with its predicate, review status, evidence and the spans it rests on.';
 create index if not exists relations_src on claims.relations (src, predicate, dst, id desc);
 create index if not exists relations_dst on claims.relations (dst, predicate);
 create index if not exists relations_evidence on claims.relations (evidence);
@@ -32965,6 +33192,8 @@ create table if not exists claims.frames (
     primary key (revision_id, claim_key),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.frames is
+    'A claim''s comparable slots — subject, outcome, population, setting, period, comparator, direction, magnitude — which is what makes agreement checkable.';
 
 create table if not exists claims.questions (
     id          uuid primary key default uuidv7(),
@@ -32976,6 +33205,8 @@ create table if not exists claims.questions (
     tx          bigint not null references claims.tx(id),
     check ((refinements = '{}'::jsonb) = (refines is null))
 );
+comment on table claims.questions is
+    'The question two claims must share before they can be compared, minted from a frame''s subject and outcome.';
 create index if not exists questions_refines on claims.questions (refines) where refines is not null;
 
 create table if not exists claims.answered (
@@ -32989,6 +33220,8 @@ create table if not exists claims.answered (
     claim_key   text not null,
     tx          bigint not null references claims.tx(id)
 );
+comment on table claims.answered is
+    'The stance a claim takes on a question: computed from its frame when a revision is projected, or recorded when a person answers whether a reworded claim is still the same one.';
 create index if not exists answered_question on claims.answered (question_id, claim_id, id desc);
 create index if not exists answered_claim on claims.answered (claim_id);
 create index if not exists answered_evidence on claims.answered (evidence);
@@ -33140,6 +33373,8 @@ create table if not exists claims.origins (
     label text not null,
     tx    bigint not null references claims.tx(id)
 );
+comment on table claims.origins is
+    'A source resolved to a canonical origin, so two citations of the same thing are one origin.';
 
 create table if not exists claims.cites (
     id          bigint generated always as identity primary key,
@@ -33152,6 +33387,8 @@ create table if not exists claims.cites (
     unique (revision_id, claim_key, source_key, via),
     foreign key (revision_id, claim_key) references research.claims (revision_id, claim_key) on delete cascade
 );
+comment on table claims.cites is
+    'That a revision''s claim cites a source, resolved to its origin, which is what makes attribution derivable without a column for it.';
 create index if not exists cites_origin on claims.cites (origin_id);
 
 -- Two origins that name one study. `a` and `b` are ordered (a < b), so one pair is one statement.
@@ -33166,6 +33403,8 @@ create table if not exists claims.origin_links (
     tx          bigint not null references claims.tx(id),
     check (a < b)
 );
+comment on table claims.origin_links is
+    'Two origins the platform derived as one study, from a claim that cites the same source by both key and URL. Written confirmed by claims.project_cites and by nothing else, so the proposed and disputed the status column admits are unreachable.';
 create index if not exists origin_links_a on claims.origin_links (a);
 create index if not exists origin_links_b on claims.origin_links (b);
 
@@ -33293,6 +33532,8 @@ create table if not exists claims.resolutions (
     tx           bigint not null references claims.tx(id),
     check (restates is null or restates < id)
 );
+comment on table claims.resolutions is
+    'Whether a claim held, failed, partly held or could not be resolved, settled by a citable event, with the date it was checked, the method and its review status.';
 create index if not exists resolutions_claim on claims.resolutions (claim_id, id desc);
 create index if not exists resolutions_restates on claims.resolutions (restates) where restates is not null;
 
@@ -33385,6 +33626,8 @@ create table if not exists claims.consensus (
     check (restates is null or restates < id),
     check (restates is not null or status = 'proposed')
 );
+comment on table claims.consensus is
+    'What a body of studies is asserted to hold on a claim, with what it rests on and its review status.';
 create index if not exists consensus_claim on claims.consensus (claim_id, id desc);
 create index if not exists consensus_restates on claims.consensus (restates) where restates is not null;
 
@@ -33525,6 +33768,8 @@ create table if not exists claims.erasures (
     counts      jsonb not null check (jsonb_typeof(counts) = 'object'),
     at          timestamptz not null default now()
 );
+comment on table claims.erasures is
+    'The tombstone for what an erasure removed from the graph: counts, no text.';
 
 -- What of the claims graph rests on these revisions, counted before they go.
 create or replace function claims.graph_counts(p_revisions uuid[]) returns jsonb
@@ -34158,6 +34403,8 @@ create table if not exists claims.execution_receipts (
     recorded_at timestamptz not null default now(),
     check ((kind='workflow') = (run_id is not null))
 );
+comment on table claims.execution_receipts is
+    'Which run, task, step and attempt produced a transaction, and by what method at what version.';
 alter table claims.execution_receipts enable row level security;
 -- Result attachment and erasure find one task attempt, rather than scanning the assertion history.
 create index if not exists execution_receipts_task on claims.execution_receipts(task_id,attempt) where task_id is not null;
@@ -34167,6 +34414,8 @@ create table if not exists claims.execution_inputs (
     content_hash text not null,
     primary key(tx,revision_id)
 );
+comment on table claims.execution_inputs is
+    'The exact revision content a machine assertion ran over, by hash.';
 alter table claims.execution_inputs enable row level security;
 create or replace function claims.capture_execution() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
@@ -34238,6 +34487,8 @@ create table if not exists claims.execution_results (
     recorded_at timestamptz not null default now(),
     primary key(task_id,attempt,agent_run_id)
 );
+comment on table claims.execution_results is
+    'What a machine extraction actually cost and used: model, version, usage and the evaluation it was scored against.';
 alter table claims.execution_results enable row level security;
 -- Only the trusted runtime/worker can attach provider metadata. A caller can name neither a model nor usage
 -- on an assertion; a stale dispatch attempt cannot attach a result to the worker that replaced it.
@@ -34412,6 +34663,8 @@ create table if not exists research.programmes (
     bounds     jsonb not null default '{}'::jsonb check (jsonb_typeof(bounds) = 'object'),
     created_at timestamptz not null default now()
 );
+comment on table research.programmes is
+    'A research programme: the question it asks, its objective and the bounds it works within.';
 
 create table if not exists research.protocols (
     id                uuid primary key default uuidv7(),
@@ -34426,6 +34679,8 @@ create table if not exists research.protocols (
     created_at        timestamptz not null default now(),
     unique (programme_id, number)
 );
+comment on table research.protocols is
+    'A numbered, hashed method for a programme, amending an earlier one, naming the corpus it runs over.';
 
 create table if not exists research.protocol_freezes (
     id           uuid primary key default uuidv7(),
@@ -34434,6 +34689,8 @@ create table if not exists research.protocol_freezes (
     frozen_by    uuid references rbac.users(id),
     frozen_at    timestamptz not null default now()
 );
+comment on table research.protocol_freezes is
+    'That a protocol was frozen, once. A run may only start on a frozen protocol.';
 
 create table if not exists research.programme_runs (
     id           uuid primary key default uuidv7(),
@@ -34448,6 +34705,8 @@ create table if not exists research.programme_runs (
     started_at   timestamptz not null default now(),
     unique (protocol_id, run_key)
 );
+comment on table research.programme_runs is
+    'One execution of a frozen protocol, keyed so the same inputs are a retry rather than a second run.';
 
 create table if not exists research.run_results (
     id           uuid primary key default uuidv7(),
@@ -34461,6 +34720,8 @@ create table if not exists research.run_results (
     recorded_by  uuid references rbac.users(id),
     recorded_at  timestamptz not null default now()
 );
+comment on table research.run_results is
+    'What a run produced: its state, outputs, failures, usage and a hash of the result.';
 
 create table if not exists research.run_evaluations (
     id            uuid primary key default uuidv7(),
@@ -34474,6 +34735,8 @@ create table if not exists research.run_evaluations (
     recorded_by   uuid references rbac.users(id),
     recorded_at   timestamptz not null default now()
 );
+comment on table research.run_evaluations is
+    'How a run was judged, by which evaluator and method, including where judges disagreed and what stayed uncertain.';
 
 create table if not exists research.run_decisions (
     id           uuid primary key default uuidv7(),
@@ -34486,6 +34749,8 @@ create table if not exists research.run_decisions (
     reopen_when  text,
     decided_at   timestamptz not null default now()
 );
+comment on table research.run_decisions is
+    'The verdict taken on a run, what it cited, what to check next and what would reopen it.';
 
 create index if not exists protocols_by_programme on research.protocols (programme_id, number);
 create index if not exists runs_by_programme on research.programme_runs (programme_id);
@@ -34870,6 +35135,8 @@ create table if not exists percolate.types (
     why          text,
     constraint schema_is_an_object check (jsonb_typeof(schema) = 'object')
 );
+comment on table percolate.types is
+    'The published payload shapes a client can fetch, with who owns each and who consumes it.';
 
 comment on table percolate.types is
     'Payload shapes that cannot be derived from the catalog, because a jsonb '

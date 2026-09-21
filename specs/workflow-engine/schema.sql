@@ -99,6 +99,8 @@ create table if not exists workflow.lifecycle_states (
     is_success  boolean not null default false,
     note        text not null
 );
+comment on table workflow.lifecycle_states is
+    'The closed vocabulary of run and task states, saying which are terminal and which count as success.';
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
 -- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
@@ -173,6 +175,8 @@ create table if not exists workflow.definitions (
     deleted_at  timestamptz,
     unique (name, version)
 );
+comment on table workflow.definitions is
+    'A workflow as authored: a name, a version and the YAML spec its tasks are compiled from.';
 
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. workflow.definitions holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
@@ -432,6 +436,8 @@ create table if not exists workflow.runs (
     updated_at       timestamptz not null default now(),
     completed_at     timestamptz
 );
+comment on table workflow.runs is
+    'One execution of a definition, with its input, its status and the compensation state of its saga.';
 
 -- ------------------------------------------------------------
 -- 3. Tasks
@@ -510,6 +516,8 @@ create table if not exists workflow.tasks (
     updated_at       timestamptz not null default now(),
     unique (run_id, step_key)
 );
+comment on table workflow.tasks is
+    'The unit of work and the queue itself. A worker claims a row with SKIP LOCKED; status, attempts, dependencies and lease live here.';
 
 create or replace trigger trg_workflow_runs_touch before update on workflow.runs
     for each row execute function public.touch_updated_at();
@@ -565,6 +573,8 @@ create table if not exists workflow.task_dependencies (
     depends_on_task_id  uuid not null references workflow.tasks(id) on delete cascade,
     primary key (task_id, depends_on_task_id)
 );
+comment on table workflow.task_dependencies is
+    'Which task waits on which, so a fan-out''s join is a row rather than a controller holding a plan.';
 create index if not exists idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
 
 -- ------------------------------------------------------------
@@ -598,6 +608,8 @@ create table if not exists workflow.queue_config (
     stale_timeout  interval not null default workflow.stale_timeout_default(),
     rate_lookahead int not null default 20
 );
+comment on table workflow.queue_config is
+    'Per-queue settings the claim path reads: how long a lease may go stale and how far ahead to look for rate limits.';
 
 -- AND ON A DATABASE THAT ALREADY HAS THE TABLE, which is every deployment.
 -- `create table if not exists` is a no-op there, so the default above would
@@ -652,6 +664,8 @@ create table if not exists workflow.rate_limits (
     refill_rate numeric not null,
     updated_at  timestamptz not null default now()
 );
+comment on table workflow.rate_limits is
+    'A token bucket by key, which login throttling and outbound calls both draw from.';
 
 -- THE BUCKET'S INVARIANTS, WHERE THEY CAN BE REFUSED RATHER THAN INTENDED.
 --
@@ -734,6 +748,8 @@ create table if not exists workflow.task_events (
     detail         jsonb,
     at             timestamptz not null default now()
 );
+comment on table workflow.task_events is
+    'Every status transition a task made, with the input it saw, which is the saga log.';
 create index if not exists idx_task_events_run on workflow.task_events (run_id, at);
 
 create or replace function workflow.log_task_transition() returns trigger as $$
@@ -2547,6 +2563,8 @@ create table if not exists workflow.step_functions (
     description   text,
     registered_at timestamptz not null default now()
 );
+comment on table workflow.step_functions is
+    'The step kinds a definition may name, each bound to the function that executes it and a timeout.';
 
 -- ON THE TABLE, NOT IN THE FUNCTION THAT WRITES IT, and the move is the point.
 -- These three checks used to live in the body of register_step_function() --
@@ -3599,6 +3617,8 @@ create table if not exists workflow.schedules (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
+comment on table workflow.schedules is
+    'A workflow that runs on a cron expression, with its overlap policy and what the last tick did.';
 create index if not exists idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
 create index if not exists idx_schedules_org on workflow.schedules (org_id);
 

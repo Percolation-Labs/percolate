@@ -37,7 +37,19 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SCHEMAS = ("aiq", "workflow", "rbac", "content", "agentic", "wm")
+# Every schema the extension owns. `claims`, `research`, `engagement` and
+# Every schema the extension owns. `percolate`, `research`, `engagement` and
+# `claims` were missing until 22 September, so `select claims.rebuild(...)` in an
+# error message resolved against nothing and this said so about no schema at all
+# -- which is the whole claims graph and all of the memory half. Widened after
+# 116 `comment on table` sentences went into the extension and the question
+# "what checks these" had no answer for four of the ten schemas. `wm` stays
+# because it is what `content` used to be called and an old string may say it.
+#
+# Widening found nothing, which is the result: no shipped remedy in those four
+# was broken. It covers them from here.
+SCHEMAS = ("aiq", "workflow", "rbac", "content", "agentic", "percolate",
+           "research", "engagement", "claims", "wm")
 
 # `select foo.bar(` / `call foo.bar(` / `perform foo.bar(` -- the spellings a
 # message uses when it is telling somebody what to type. A bare mention like

@@ -50,6 +50,8 @@ create table if not exists aiq.db_objects (
     reachable   boolean not null default false,
     grantees    text[] not null default '{}'
 );
+comment on table aiq.db_objects is
+    'This database''s own catalogue projected as graph nodes: every reachable object, its overloads and who may execute it.';
 
 -- AND THE SAME EXPRESSION ON A DATABASE THAT ALREADY HAS THE COLUMN, because
 -- the `create table if not exists` above does nothing there and the two would

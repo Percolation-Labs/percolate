@@ -267,16 +267,16 @@ REPLAYED_DML = {
         (1, "the research and engagement pairs, shipped, do update"),
     ("research-platform/schema.sql", "update rbac.permission_kinds"):
         (1, "research:publish is delegable; a core kind is the extension's row, not the deployment's"),
-    ("research-platform/schema.sql", "insert rbac.grants"):
+    ("user-rbac/schema.sql", "insert rbac.grants"):
         (1, "records a held role in the grant ledger where it has no active grant; the role "
             "is held either way, so this changes what is recorded, not what is allowed"),
     ("research-platform/schema.sql", "insert rbac.scope_aliases"):
         (1, "the shipped credential scopes"),
-    ("research-platform/schema.sql", "insert rbac.plans"):
+    ("user-rbac/schema.sql", "insert rbac.plans"):
         (1, "the default plan, do nothing"),
-    ("research-platform/schema.sql", "insert rbac.resource_kinds"):
+    ("user-rbac/schema.sql", "insert rbac.resource_kinds"):
         (2, "the metered resources, shipped"),
-    ("research-platform/schema.sql", "insert rbac.plan_limits"):
+    ("user-rbac/schema.sql", "insert rbac.plan_limits"):
         (2, "the default plan's shipped limits, do nothing, so a deployment's change stands"),
     ("research-platform/schema.sql", "update aiq.lexical_sources"):
         (2, "points the two shipped research sources at their definer searches (REM-519)"),

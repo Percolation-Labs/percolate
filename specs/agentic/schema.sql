@@ -93,6 +93,8 @@ create table if not exists agentic.tool_servers (
     created_at      timestamptz not null default now(),
     updated_at      timestamptz not null default now()
 );
+comment on table agentic.tool_servers is
+    'An OpenAPI or MCP endpoint an agent may call, with the credential it is reached by and the tools it last advertised.';
 
 -- The one thing default_headers must never become. A secret in a header is
 -- the same secret in a row that credential_ref exists to keep out, and it
@@ -192,6 +194,8 @@ create table if not exists agentic.agents (
     created_at               timestamptz not null default now(),
     updated_at               timestamptz not null default now()
 );
+comment on table agentic.agents is
+    'An agent as a row: its prompt, model, tools, skills and output schema. There is no agent that is code.';
 
 -- One specialist per (source, doctype). A second registration is a conflict to
 -- resolve, not a fallback to pick between at runtime.
@@ -385,6 +389,8 @@ create table if not exists agentic.skills (
     constraint skill_listing_is_bounded
         check (length(description) + coalesce(length(when_to_use), 0) <= 1536)
 );
+comment on table agentic.skills is
+    'A procedure written in markdown that an agent loads by name or finds by similarity, with what it needs and when to use it.';
 
 create index if not exists idx_skills_audience on agentic.skills (audience)
     where audience = 'user';
@@ -464,6 +470,8 @@ create table if not exists agentic.plugins (
     installed_at timestamptz not null default now(),
     updated_at   timestamptz not null default now()
 );
+comment on table agentic.plugins is
+    'The named bundle that tool servers, skills and agents install and uninstall as, with the manifest it was installed from.';
 
 create or replace trigger trg_plugins_updated
     before update on agentic.plugins
@@ -520,6 +528,8 @@ create table if not exists agentic.sessions (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
+comment on table agentic.sessions is
+    'A conversation thread owned by a person, which runs attach to.';
 
 -- ...and on a database that already has the table, where `create table if not
 -- exists` above is a no-op and the column is still called user_id. Guarded,
@@ -589,6 +599,8 @@ create table if not exists agentic.runs (
     constraint child_runs_are_deeper_than_their_parent
         check (parent_run_id is null or depth > 0)
 );
+comment on table agentic.runs is
+    'One agent turn, with the session and agent it belongs to, what triggered it, and the run it was delegated by.';
 
 create index if not exists runs_session_id_created_at_idx on agentic.runs (session_id, created_at);
 create index if not exists runs_parent_run_id_idx on agentic.runs (parent_run_id);
@@ -634,6 +646,8 @@ create table if not exists agentic.messages (
     constraint only_assistants_carry_citations
         check (role = 'assistant' or citations = '[]'::jsonb)
 );
+comment on table agentic.messages is
+    'The conversation itself, in order: what each side said, the tool calls made and the citations returned.';
 
 -- One summary per session, enforced by the database rather than by the
 -- application remembering to update instead of insert (§3).
