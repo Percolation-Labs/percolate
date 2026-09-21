@@ -17571,7 +17571,27 @@ begin
              where exists (select 1 from pg_roles where rolname = r)
                and has_table_privilege(r, v_rel, 'select')
         loop
-            select string_agg(format('exists (select 1 from %s s where s.id = %I.chunk_id)',
+            -- `offset 0` IS THE WHOLE PERFORMANCE OF EVERY VECTOR SEARCH IN THE DEPLOYMENT, and it is not a
+            -- no-op even though it selects the same rows. Without it the planner rewrites each correlated
+            -- EXISTS into `chunk_id IN (select id from <source>)` and HASHES it, which reads the whole source
+            -- table once per query with that table's own row security evaluated per row. With it the subquery
+            -- stays correlated and each candidate vector costs one index probe.
+            --
+            -- Measured on p8cand, `emb_demo_quad_a` holding ELEVEN chunk vectors, a top-5 semantic query, after
+            -- research.claims (3,909 rows, function-based RLS) joined the registered sources:
+            --
+            --     as written before this line   443 ms    (216 ms of it a seq scan of research.claims)
+            --     with `offset 0`               0.41 ms
+            --
+            -- The cost does not belong to the space being searched: it is paid on spaces holding no rows of the
+            -- expensive source at all, because every registered source is a branch of every space's policy. So
+            -- it scales with the LARGEST registered corpus and with the number of sources, and the deployment
+            -- that notices first is the one whose content table is big -- which is every deployment.
+            --
+            -- Alphabetical order buys nothing here, and it was worth measuring rather than assuming: a hashed
+            -- subplan is built whether or not an earlier branch would have matched, so `chunks` sorting before
+            -- `claims` does not spare the content read path.
+            select string_agg(format('exists (select 1 from %s s where s.id = %I.chunk_id offset 0)',
                                      src.rel, v_tbl), ' or ' order by src.name)
               into v_using
               from (select s.name, to_regclass(s.source_table) as rel
@@ -33888,6 +33908,193 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     select distinct claim from ids;
 $$;
 
+-- Claim text is a metric space, and the extension says so rather than leaving each deployment to say it: a claim
+-- has a space by construction, aiq's orphan-vector triggers reach it when research.erase_work deletes a revision,
+-- and aiq.police_embedding_spaces writes research.claims' own read policy into the space, so a claim's vector is
+-- readable to exactly the callers who may read the claim. No lexical source: 3,299 sentences across 483 arXiv
+-- papers repeat no cross-paper phrase and a lexical blocker proposes 97.7% of pairs, so a tsvector column and a GIN
+-- index on every claim would buy nothing (graph.md §5 *Did you mean*).
+--
+-- WHAT THIS ROW WIDENS, and what holds it shut. police_embedding_spaces ORs one branch per registered source into
+-- every space's read policy, so from here `exists (select 1 from research.claims s where s.id = <space>.chunk_id)`
+-- is evaluated on emb_ tables holding no claims. A caller who could put a chosen id into research.claims could
+-- therefore read the vector of somebody's chunk or skill out of the content space. Two things stop it, and the
+-- order matters because only the first is a property of the TABLE:
+--
+--   1. No web-facing role can write it. `authenticated` holds SELECT and nothing else on research.claims; there is
+--      no insert grant to authenticated, api_viewer or web_anon; and exactly one function in the extension inserts
+--      into it -- research.project, security definer, reachable by none of the three.
+--   2. On that one path the id is percolate.uuidv5(revision, 'claim:' || claim_key), and content.resource_chunks
+--      and agentic.skills default theirs to uuidv7(). A version 5 uuid can never equal a version 7 one.
+--
+-- The second is the weaker leg and reads stronger: research.claims.id has NO DEFAULT, so it is the call site that
+-- makes ids version 5, not the column. An import path that carried an external id into research.claims, or a
+-- default added to the column, would leave only leg 1 -- so a change to either is a change to this policy.
+--
+-- WHAT THIS ROW COSTS, and it is not what the ordering suggests. Every registered source is a branch of every
+-- space's policy, and before REM-659 the planner hashed each branch -- reading the whole source table once per
+-- query, with that table's own RLS per row. Adding research.claims took a top-5 query on an eleven-vector chunk
+-- space from 0.4 ms to 443 ms, on a space holding no claims. `order by src.name` does not save the content path:
+-- a hashed subplan is built whether or not an earlier branch would have matched. The fix is in
+-- aiq.police_embedding_spaces -- `offset 0` on each branch keeps it correlated, so a candidate vector costs one
+-- index probe -- and it was found by exercising this registration at 3,909 claims rather than at fixture size.
+do $$
+begin
+    if to_regclass('aiq.semantic_sources') is not null then
+        insert into aiq.semantic_sources (name, source_table, content_col)
+        values ('claims', 'research.claims', 'text')
+        on conflict (name) do update
+           set source_table = excluded.source_table,
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 12a. Did you mean (graph.md §5 *Did you mean*, REM-659). The claims nearest an occurrence that the caller may
+--      read, so an agent or a person can be asked whether one of them is the same claim. Until this existed,
+--      sameness across works waited for somebody to already suspect a pair: `claims.rewordings` finds its one
+--      candidate by claim_key inside a work, and nothing looked across works at all.
+--
+-- DISTANCE RANKS AND NEVER DECIDES, which is aiq.node_resolutions' rule one schema along -- embedding proximity is
+-- legitimate for proposing a merge and forbidden as a scoring input. This returns a distance and no score, writes
+-- nothing, and asserts nothing; the answer is claims.assert_relation, where an agent's lands proposed and identity
+-- does not move until a person confirms. Measured over 483 arXiv papers and 3,909 claims: inside the retrieved
+-- band, distance cannot tell a relation from an unrelated pair (AUC 0.58 on 53 labelled pairs, interval spanning
+-- chance). It is good for "here are three to look at" and nothing else.
+--
+-- FOUR EXCLUSIONS, and each is a join or a predicate below.
+--   * The occurrence itself.
+--   * Its own work. That pair is the rewording question, which claims.rewordings already asks by claim_key.
+--   * Anything in a revision the caller may not read. research.claims carries that policy and this function is
+--     security invoker, so the horizon costs no predicate here -- identity is per visibility horizon (REM-434).
+--   * Any pair that already carries a relation, in either direction and at any status. Without it an answered
+--     challenge is asked again on every insert. A relation the caller cannot READ does not exclude, which is the
+--     same rule stated once more: a pair somebody else answered privately is still an open question for you.
+--
+-- A claim in the space that no claims.expresses row links to is dropped rather than returned with a null claim_id:
+-- the lateral is a cross join. An unprojected claim is therefore invisible here, which is the intent -- a claim
+-- with no identity cannot be said to be the same as anything -- and it filters before the LIMIT, so it costs the
+-- caller no rows.
+--
+-- WHY THIS READS THE SPACE RATHER THAN CALLING aiq.semantic_in. semantic_in takes a source, a vector and a limit
+-- and pushes no predicate down, so the exclusions would have to be applied to its result -- after its LIMIT. A
+-- caller asking for five would get however many of five survived, with nothing saying so, and an agent reading a
+-- big public corpus would often get none. The predicates and the ORDER BY belong in one query. The identifier is derived from
+-- aiq.embedding_models and never from an argument.
+--
+-- THE FLOOR HAS NO DEFAULT. A distance cut is meaningful only against the model that produced the vectors, and a
+-- default would be one model's number on another's scale. graph.md carries what a floor costs.
+-- ------------------------------------------------------------
+create or replace function claims.candidates(p_revision uuid, p_claim_key text, p_max_distance float8,
+                                             p_limit int default 5, p_embedding vector default null,
+                                             p_model text default null)
+returns table (claim_id uuid, claim_key text, revision_id uuid, text text, distance float8)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    m     aiq.embedding_models;
+    v_tbl text;
+    v_id  uuid;
+    v_cid uuid;
+    v_work uuid;
+    v_vec vector;
+begin
+    -- A null floor is the defect this whole function is written against, arriving through the front door: the
+    -- filter is `distance <= p_max_distance`, which is NULL for every row, so the caller receives nothing and
+    -- nothing says why. Refused rather than defaulted, because a distance cut is meaningful only against the model
+    -- that produced the vectors and there is no number to default it to. (REM-659, found in review by a reader of
+    -- the body rather than by the gate, which is now this function's own lesson applied to itself.)
+    if p_max_distance is null then
+        raise check_violation using
+            message = 'candidates needs a distance floor: a null one matches nothing and says nothing',
+            hint = 'specs/claims/graph.md §5 carries what a floor costs; the number is meaningful only '
+                   'against the model that produced the vectors';
+    end if;
+    select c.id, v.work_id into v_id, v_work
+      from research.claims c join research.revisions v on v.id = c.revision_id
+     where c.revision_id = p_revision and c.claim_key = p_claim_key;
+    if not found then
+        raise no_data_found using message = 'Claim not found in that revision';
+    end if;
+    select x.claim_id into v_cid from claims.expresses x
+     where x.revision_id = p_revision and x.claim_key = p_claim_key and x.part = 1 and x.op = 'assert'
+     order by x.id desc limit 1;
+
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+        if not found then
+            raise no_data_found using message = 'no default embedding model -- set one, or name a model explicitly';
+        end if;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+        if not found then
+            raise no_data_found using message = format('embedding model %s is not registered', p_model);
+        end if;
+    end if;
+    v_tbl := aiq.embedding_space_name(m.name);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise no_data_found using
+            message = format('embedding model %s is registered but its space does not exist', m.name),
+            hint = format('create it with aiq.register_embedding_space(%L)', m.name);
+    end if;
+
+    -- The vector arrives alongside, as it does for aiq.query: embedding is an external model call and this schema
+    -- makes none. An occurrence already in a space needs no argument; one being written passes its own.
+    v_vec := p_embedding;
+    if v_vec is null then
+        execute format('select embedding from aiq.%I where chunk_id = $1', v_tbl) into v_vec using v_id;
+    end if;
+    if v_vec is null then
+        raise no_data_found using
+            message = format('%s has no vector in %s and none was passed', p_claim_key, m.name),
+            hint = format('embed its text with %s and pass it as p_embedding', m.name);
+    end if;
+    if vector_dims(v_vec) <> m.dim then
+        raise check_violation using
+            message = format('the vector has %s dimensions and model %s expects %s -- embedded with the wrong model?',
+                             vector_dims(v_vec), m.name, m.dim);
+    end if;
+
+    -- THE OPPOSITE CHOICE FROM aiq.semantic_in, AND THE REASON IS THE QUESTION: this leaves hnsw.iterative_scan
+    -- alone.
+    -- semantic_in forces strict_order because an empty answer to a search looks like "there is nothing", and for
+    -- a tenant holding a small share of a large corpus that is wrong. Here an empty answer is the RIGHT answer
+    -- 99% of the time -- 41 of 3,909 claims had any neighbour at all -- and forcing the scan to resume means
+    -- walking the whole index to prove a negative, on every save.
+    --
+    -- Measured over 483 arXiv papers and 3,909 claims, one call for a claim with no neighbour:
+    --
+    --     forcing strict_order      232 ms      the whole corpus, 3,909 calls: 29 minutes
+    --     leaving it alone           13 ms      the whole corpus:               55 seconds
+    --
+    -- And it costs no recall at this scale, which was checked rather than assumed: at p_limit 10 the bounded scan
+    -- returns every pair an exhaustive one returns, and one more. At p_limit 3 the two differ by one pair in each
+    -- direction, and both are top-k truncation inside a dense cluster rather than a scan that stopped early.
+    --
+    -- What a caller gives up is the guarantee semantic_in buys: a neighbourhood crowded with claims this caller
+    -- may not read can hide a readable one past the scan's bound. They raise hnsw.iterative_scan themselves
+    -- through aiq.set_scan_order when they want that, and the floor already puts recall below one by design
+    -- (graph.md §5 *Did you mean*).
+
+    return query execute format($q$
+        select e2.claim_id, c.claim_key, c.revision_id, c.text, (s.embedding <=> $1)::float8
+          from aiq.%I s
+          join research.claims c on c.id = s.chunk_id
+          join research.revisions v on v.id = c.revision_id
+          cross join lateral (select x.claim_id from claims.expresses x
+                               where x.revision_id = c.revision_id and x.claim_key = c.claim_key
+                                 and x.part = 1 and x.op = 'assert'
+                               order by x.id desc limit 1) e2
+         where c.id <> $2 and v.work_id <> $3 and (s.embedding <=> $1) <= $4
+           and ($5::uuid is null or not exists (
+                   select 1 from claims.relations r
+                    where (r.src = $5 and r.dst = e2.claim_id) or (r.src = e2.claim_id and r.dst = $5)))
+         order by s.embedding <=> $1
+         limit $6$q$, v_tbl)
+      using v_vec, v_id, v_work, p_max_distance, v_cid, greatest(coalesce(p_limit, 5), 1);
+end;
+$$;
+
 -- A claim: the occurrences that expressed it at p_at, and its identity set over the confirmed same_as the caller
 -- may read (graph.md §5). Null when the caller may read no occurrence of it, so a private claim is not observable.
 create or replace function claims.claim(p_id uuid, p_at timestamptz default now()) returns jsonb
@@ -34353,6 +34560,7 @@ grant execute on function claims.relations_at(uuid, timestamptz), claims.claim(u
                           claims.identity_set(uuid, timestamptz),
                           claims.neighbourhood(uuid, text[], int, timestamptz), claims.rests_on(uuid, timestamptz),
                           claims.challenged_through(uuid, timestamptz), claims.history(uuid),
+                          claims.candidates(uuid, text, float8, int, vector, text),
                           claims.revision_diff(uuid, uuid) to authenticated;
 
 -- REM-590. Detached execution identity survives workflow retention. No prompts, credentials or raw SQL
@@ -36438,6 +36646,17 @@ declare
         'aiq.semantic_in(text,vector,text,integer)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
+        -- One identifier, and it is never a caller's. claims.candidates reads
+        -- the embedding space of a registered model, whose table name it takes
+        -- from aiq.embedding_space_name over a row in aiq.embedding_models and
+        -- passes through %I; every argument a caller supplies -- the revision,
+        -- the claim key, the floor, the limit and the vector -- is a bound
+        -- parameter of the executed statement and none of them is interpolated.
+        -- It is here because the exclusions and the ORDER BY have to be in one
+        -- query: applied to aiq.semantic_in's result they would run after its
+        -- LIMIT, and a caller asking for five would get however many of five
+        -- survived and no sign that it had (specs/claims/graph.md §5 *Did you mean*).
+        'claims.candidates(uuid,text,double precision,integer,vector,text)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant

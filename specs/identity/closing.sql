@@ -179,6 +179,17 @@ declare
         'aiq.semantic_in(text,vector,text,integer)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
+        -- One identifier, and it is never a caller's. claims.candidates reads
+        -- the embedding space of a registered model, whose table name it takes
+        -- from aiq.embedding_space_name over a row in aiq.embedding_models and
+        -- passes through %I; every argument a caller supplies -- the revision,
+        -- the claim key, the floor, the limit and the vector -- is a bound
+        -- parameter of the executed statement and none of them is interpolated.
+        -- It is here because the exclusions and the ORDER BY have to be in one
+        -- query: applied to aiq.semantic_in's result they would run after its
+        -- LIMIT, and a caller asking for five would get however many of five
+        -- survived and no sign that it had (specs/claims/graph.md §5 *Did you mean*).
+        'claims.candidates(uuid,text,double precision,integer,vector,text)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant

@@ -3070,7 +3070,27 @@ begin
              where exists (select 1 from pg_roles where rolname = r)
                and has_table_privilege(r, v_rel, 'select')
         loop
-            select string_agg(format('exists (select 1 from %s s where s.id = %I.chunk_id)',
+            -- `offset 0` IS THE WHOLE PERFORMANCE OF EVERY VECTOR SEARCH IN THE DEPLOYMENT, and it is not a
+            -- no-op even though it selects the same rows. Without it the planner rewrites each correlated
+            -- EXISTS into `chunk_id IN (select id from <source>)` and HASHES it, which reads the whole source
+            -- table once per query with that table's own row security evaluated per row. With it the subquery
+            -- stays correlated and each candidate vector costs one index probe.
+            --
+            -- Measured on p8cand, `emb_demo_quad_a` holding ELEVEN chunk vectors, a top-5 semantic query, after
+            -- research.claims (3,909 rows, function-based RLS) joined the registered sources:
+            --
+            --     as written before this line   443 ms    (216 ms of it a seq scan of research.claims)
+            --     with `offset 0`               0.41 ms
+            --
+            -- The cost does not belong to the space being searched: it is paid on spaces holding no rows of the
+            -- expensive source at all, because every registered source is a branch of every space's policy. So
+            -- it scales with the LARGEST registered corpus and with the number of sources, and the deployment
+            -- that notices first is the one whose content table is big -- which is every deployment.
+            --
+            -- Alphabetical order buys nothing here, and it was worth measuring rather than assuming: a hashed
+            -- subplan is built whether or not an earlier branch would have matched, so `chunks` sorting before
+            -- `claims` does not spare the content read path.
+            select string_agg(format('exists (select 1 from %s s where s.id = %I.chunk_id offset 0)',
                                      src.rel, v_tbl), ' or ' order by src.name)
               into v_using
               from (select s.name, to_regclass(s.source_table) as rel

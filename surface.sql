@@ -751,6 +751,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','function','claims.identity_set','uuid,timestamptz','specs/claims/graph.md §5: the claims joined by confirmed same_as the caller may read (REM-475)'),
 ('claims','function','claims.claim','uuid,timestamptz','specs/claims/graph.md §10: a claim, its occurrences and identity set; null when the caller may read no occurrence (REM-475)'),
 ('claims','function','claims.neighbourhood','uuid,text[],integer,timestamptz','specs/claims/graph.md §10: typed paths out of and into a claim, each hop an asserted relation (REM-475)'),
+('claims','function','claims.candidates','uuid,text,double precision,integer,vector,text','specs/claims/graph.md §5: the claims nearest an occurrence that the caller may read, to be asked about; a distance and no score (REM-659)'),
 ('claims','function','claims.rests_on','uuid,timestamptz','specs/claims/graph.md §6: what a claim depends on through confirmed supports and motivates, as paths (REM-475)'),
 ('claims','function','claims.challenged_through','uuid,timestamptz','specs/claims/graph.md §6: challenges aimed at what a claim rests on, as paths, never as a challenge to the claim (REM-475)'),
 ('claims','function','claims.history','uuid','specs/claims/graph.md §10: every statement about a claim the caller may read, oldest first (REM-475)'),
