@@ -300,7 +300,7 @@ begin
     -- Give the target the SAME edge the candidate has, so the repoint conflicts.
     select count(*) into v_before from aiq.edges where src_id = v_cand_node;
 
-    v_r := aiq.promote_soft_node(v_cand_soft, v_target);
+    v_r := aiq.promote_soft_node(v_cand_soft, v_target, 'test:10-graph-index', 'registry');
 
     -- The candidate's node is gone (inclusion predicate no longer satisfied)...
     if exists (select 1 from aiq.nodes where id = v_cand_node) then
@@ -320,6 +320,45 @@ begin
     if coalesce(v_srcs,0) < 2 then
         raise exception 'the conflicting edge did not merge both provenances (got %)', v_srcs;
     end if;
+
+    -- And the decision is on the record. graph-identity.md D11 offers the audit
+    -- `how much of this graph's identity rests on a model's guess?` as a GROUP BY
+    -- tier; a promotion that writes no row makes that answer quietly wrong, and
+    -- promotion is the path a resolver reaching into the staging area takes.
+    if not exists (
+        select 1 from aiq.node_resolutions
+         where canonical_id = v_target and merged_id = v_cand_node
+           and tier = 'registry' and decided_by = 'test:10-graph-index'
+           and evidence->>'via' = 'promote_soft_node'
+           and (evidence->>'edges_moved')::int >= 0) then
+        raise exception 'promotion wrote no resolution ledger row (receipt %)', v_r;
+    end if;
+    -- merged_id carries no foreign key so the row outlives the node step 4 evicted.
+    if exists (select 1 from aiq.nodes where id = v_cand_node) then
+        raise exception 'the candidate node came back';
+    end if;
+
+    -- A promotion's row is a record, not a reversal point: the edges moved and the
+    -- candidate is gone, so unresolve must refuse rather than set undone_at and
+    -- report success on a merge that is still in the graph.
+    begin
+        perform aiq.unresolve_node(
+            (select id from aiq.node_resolutions
+              where merged_id = v_cand_node and evidence->>'via' = 'promote_soft_node'), 'test');
+        raise exception 'unresolve_node accepted a promotion';
+    exception when others then
+        if sqlerrm not like '%cannot be undone%' then raise; end if;
+    end;
+
+    -- The decider is required: a promotion attributed to nobody reads as evidence
+    -- that somebody checked.
+    begin
+        perform aiq.promote_soft_node(v_cand_soft, v_target, '   ', 'registry');
+        raise exception 'promote_soft_node accepted a blank decider';
+    exception when others then
+        if sqlerrm not like '%needs p_decided_by%' then raise; end if;
+    end;
+    raise notice 'query/10: a promotion records who decided, and is not reversible';
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -356,7 +395,7 @@ begin
        set weight = excluded.weight, valid_from = excluded.valid_from,
            valid_to = excluded.valid_to, provenance = excluded.provenance;
 
-    perform aiq.promote_soft_node(v_cand, v_target);
+    perform aiq.promote_soft_node(v_cand, v_target, 'test:10-graph-index', 'registry');
 
     select weight, jsonb_array_length(provenance->'sources') as srcs into v_row
       from aiq.edges_current
@@ -396,7 +435,7 @@ begin
     on conflict (src_id, dst_id, relation) do update
        set weight = excluded.weight, valid_to = null, provenance = excluded.provenance;
 
-    perform aiq.promote_soft_node(v_cand, v_target);
+    perform aiq.promote_soft_node(v_cand, v_target, 'test:10-graph-index', 'registry');
 
     select weight, provenance into v_row
       from aiq.edges_current

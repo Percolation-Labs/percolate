@@ -16051,6 +16051,16 @@ begin
     if r.undone_at is not null then
         raise exception 'resolution % was already undone at %', p_resolution, r.undone_at;
     end if;
+    -- A promotion (world-model-ingestion/graph-index.md 4.5) repointed the candidate's
+    -- edges and evicted its node, so there is no row to give the name back to. Left to
+    -- run, the moved_keys loop below finds nothing, the insert writes nothing, undone_at
+    -- is set and the caller is told it worked -- the worst of the three outcomes, because
+    -- the ledger then says a merge was reversed that is still in the graph. A promotion's
+    -- row is a record, not a reversal point.
+    if r.evidence->>'via' = 'promote_soft_node' then
+        raise exception 'resolution % records a promotion and cannot be undone', p_resolution
+            using hint = 'The candidate node was evicted. Re-landing its document is the way back.';
+    end if;
 
     -- The survivor stops answering to the name it borrowed...
     delete from aiq.node_keys k
@@ -28128,11 +28138,23 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- promotion that fails on the unique constraint is an outage; one that drops
 -- the conflicting edge is silent loss. Merging is the only correct option.
 -- ------------------------------------------------------------
-create or replace function aiq.promote_soft_node(p_soft_id uuid, p_target_node_id uuid)
+-- The two-argument form recorded nothing about the decision (graph-index.md 4.5), so it is
+-- dropped rather than overloaded: two arities would let a caller keep writing promotions the
+-- ledger cannot see, which is the defect. `if exists` because the upgrade replays this body.
+drop function if exists aiq.promote_soft_node(uuid, uuid);
+
+create or replace function aiq.promote_soft_node(p_soft_id uuid, p_target_node_id uuid,
+                                                 p_decided_by text, p_tier text,
+                                                 p_evidence jsonb default '{}'::jsonb)
 returns jsonb as $$
 declare
-    v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int;
+    v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int; v_res uuid;
 begin
+    -- No default for either: a promotion attributed to nobody reads as evidence that
+    -- somebody checked. tier is the column the audit groups by (graph-identity.md D11).
+    if coalesce(btrim(p_decided_by), '') = '' then
+        raise exception 'promote_soft_node needs p_decided_by: the resolver version, agent id or user id';
+    end if;
     select id into v_cand from aiq.nodes where entity_type = 'soft' and entity_id = p_soft_id;
     if v_cand is null then
         raise exception 'soft node % has no registry node (already promoted?)', p_soft_id;
@@ -28228,8 +28250,20 @@ begin
     --    predicate and the projection's UPDATE eviction removes its node.
     update aiq.soft_nodes set resolved_node_id = p_target_node_id where id = p_soft_id;
 
-    return jsonb_build_object('moved', v_moved, 'merged', v_merged,
-                              'self_removed', v_self, 'target', p_target_node_id);
+    -- 5. And record that a decision was made. `merged_id` carries no foreign key precisely
+    --    so this row outlives the node step 4 just evicted -- the column's own comment calls
+    --    that "the one event that makes the record most worth having", and this is it.
+    --    `via` marks the row a promotion, which is what aiq.unresolve_node refuses on: the
+    --    edges moved and the candidate is gone, so there is nothing to restore.
+    insert into aiq.node_resolutions (canonical_id, merged_id, tier, decided_by, evidence, org_id)
+    values (p_target_node_id, v_cand, p_tier, p_decided_by,
+            p_evidence || jsonb_build_object('via', 'promote_soft_node', 'soft_id', p_soft_id,
+                                             'edges_moved', v_moved, 'edges_merged', v_merged),
+            (select org_id from aiq.nodes where id = p_target_node_id))
+    returning id into v_res;
+
+    return jsonb_build_object('moved', v_moved, 'merged', v_merged, 'self_removed', v_self,
+                              'target', p_target_node_id, 'resolution', v_res);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -28306,7 +28340,7 @@ select workflow.register_step_function(
 revoke execute on function aiq.upsert_graph(jsonb, jsonb)                  from public;
 revoke execute on function aiq.land_graph(jsonb, uuid)                     from public;
 revoke execute on function aiq.land_graph_fanout(uuid)                     from public;
-revoke execute on function aiq.promote_soft_node(uuid, uuid)               from public;
+revoke execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
 
@@ -28315,7 +28349,7 @@ grant execute on function aiq.land_graph(jsonb, uuid)         to worker;
 grant execute on function aiq.land_graph_fanout(uuid)         to worker;
 -- promote_soft_node is entity resolution's write path, which is background
 -- work, not a user action -- so it is worker-facing too.
-grant execute on function aiq.promote_soft_node(uuid, uuid)   to worker;
+grant execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) to worker;
 
 -- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
 -- their own policies and the grant is safe.

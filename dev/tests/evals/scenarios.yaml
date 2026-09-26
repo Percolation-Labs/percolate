@@ -2090,15 +2090,21 @@ scenarios:
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
         '39990000-0000-0000-0000-0000000000fb'::uuid);
       create temp table sn as select id from aiq.soft_nodes where key='hepatic injury';
+      -- The candidate's REGISTRY node, captured before the promotion evicts it. Edges
+      -- reference aiq.nodes(id); aiq.soft_nodes(id) is a separate key space, so a check
+      -- written against `sn` counts zero whatever the promotion did.
+      create temp table cand as select n.id from aiq.nodes n
+        where n.entity_type='soft' and n.entity_id=(select id from sn);
       select aiq.promote_soft_node((select id from sn),
              (select n.id from aiq.nodes n
                where n.entity_type='signal'
-                 and n.entity_id='56000000-0000-0000-0000-000000000001'));
+                 and n.entity_id='56000000-0000-0000-0000-000000000001'),
+             'user:app_owner', 'human');
     check:
-      - name: nothing still points at the evicted candidate
-        sql: "select count(*) from aiq.edges where src_id=(select id from sn) or dst_id=(select id from sn)"
+      - name: the candidate's registry node is gone
+        sql: "select count(*) from aiq.nodes where id=(select id from cand)"
         is: "0"
-        because: "an edge left pointing at a promoted candidate is a dangling half of the merge, invisible to every walk that goes through the real node"
+        because: "promotion is not a column write -- if the candidate survives, the graph answers to two names for one thing, which is the state promotion exists to end"
       - name: and the document now reaches the real signal
         sql: |
           select count(*) from aiq.edges e
@@ -2106,7 +2112,15 @@ scenarios:
           where d.entity_type='signal' and d.entity_id='56000000-0000-0000-0000-000000000001'
             and e.provenance->>'tier'='machine'
         gte: "1"
-        because: "promotion exists so a human decision about identity is applied once and every prior extraction inherits it"
+        because: "edges.src_id/dst_id are ON DELETE CASCADE, so evicting the candidate DELETES every edge the indexer wrote about it unless the repoint ran first. This is the assertion that can catch that: a check for edges still pointing AT the candidate cannot, because the cascade has already removed them whether the merge worked or destroyed the data"
+      - name: and the audit can say a human decided it
+        sql: |
+          select count(*) from aiq.node_resolutions
+          where evidence->>'soft_id'=(select id::text from sn)
+            and evidence->>'via'='promote_soft_node'
+            and tier='human' and decided_by='user:app_owner'
+        is: "1"
+        because: "`how much of this graph's identity rests on a model's guess?` is a GROUP BY tier, and it answers wrong if the write that evicts a candidate leaves no row"
 
   - id: f2g-10
     category: file-to-graph

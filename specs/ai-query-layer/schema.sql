@@ -1516,6 +1516,16 @@ begin
     if r.undone_at is not null then
         raise exception 'resolution % was already undone at %', p_resolution, r.undone_at;
     end if;
+    -- A promotion (world-model-ingestion/graph-index.md 4.5) repointed the candidate's
+    -- edges and evicted its node, so there is no row to give the name back to. Left to
+    -- run, the moved_keys loop below finds nothing, the insert writes nothing, undone_at
+    -- is set and the caller is told it worked -- the worst of the three outcomes, because
+    -- the ledger then says a merge was reversed that is still in the graph. A promotion's
+    -- row is a record, not a reversal point.
+    if r.evidence->>'via' = 'promote_soft_node' then
+        raise exception 'resolution % records a promotion and cannot be undone', p_resolution
+            using hint = 'The candidate node was evicted. Re-landing its document is the way back.';
+    end if;
 
     -- The survivor stops answering to the name it borrowed...
     delete from aiq.node_keys k
