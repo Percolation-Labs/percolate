@@ -338,6 +338,26 @@ begin
         raise exception 'the candidate node came back';
     end if;
 
+    -- The target answers to the candidate's name (graph-identity.md invariant 8), and
+    -- the ledger says which name moved, in resolve_nodes' shape. Without it the next
+    -- extraction of "Zephyr Haulage" was a new candidate, decided again from scratch.
+    if not exists (select 1 from aiq.node_keys
+                    where node_id = v_target and key = 'zephyr haulage' and kind = 'alias') then
+        raise exception 'promotion dropped the candidate''s name: no alias on the target';
+    end if;
+    if not exists (select 1 from aiq.node_resolutions
+                    where merged_id = v_cand_node
+                      and evidence->'moved_keys' @> '[{"key":"zephyr haulage","kind":"alias"}]'
+                      and evidence->'name'->>'kept' = 'true') then
+        raise exception 'the promotion''s record does not name the key it moved';
+    end if;
+    v_r := aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Zephyr Haulage"}], "edges": []}$g$::jsonb,
+                            '{"agent":"t"}'::jsonb);
+    if (v_r->'node_ids'->>0)::uuid is distinct from v_target then
+        raise exception 'the promoted name landed on % rather than the target %: receipt %',
+            v_r->'node_ids'->>0, v_target, v_r;
+    end if;
+
     -- A promotion's row is a record, not a reversal point: the edges moved and the
     -- candidate is gone, so unresolve must refuse rather than set undone_at and
     -- report success on a merge that is still in the graph.
@@ -359,6 +379,37 @@ begin
         if sqlerrm not like '%needs p_decided_by%' then raise; end if;
     end;
     raise notice 'query/10: a promotion records who decided, and is not reversible';
+end $$;
+
+-- A TENANT'S NAME DOES NOT MOVE ONTO A SHARED NODE. A key is visible to whoever
+-- can see its node (node_keys_via_node), so an alias on the shared target would
+-- show every reader of it the spelling a tenant's private document used. The
+-- promotion still happens; the name stays behind, and the record says why.
+insert into rbac.orgs (id, slug, name)
+    values ('cccc0000-0000-0000-0000-0000000010a1', 'graph-index-tenant', 'graph-index-tenant');
+do $$
+declare v_soft uuid; v_cand uuid; v_target uuid; v_r jsonb;
+begin
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Quietly Private Freight"}],
+                                 "edges": []}$g$::jsonb,
+                             '{"agent":"t","org_id":"cccc0000-0000-0000-0000-0000000010a1"}'::jsonb);
+    select s.id, n.id into v_soft, v_cand
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type = 'soft'
+     where s.key = 'quietly private freight';
+    select node_id into v_target from aiq.node_keys where key = 'northgate freight' and kind = 'canonical';
+    if (select org_id from aiq.nodes where id = v_cand)
+       is not distinct from (select org_id from aiq.nodes where id = v_target) then
+        raise exception 'fixture: the candidate and the target share an org, so this tests nothing';
+    end if;
+
+    v_r := aiq.promote_soft_node(v_soft, v_target, 'test:10-graph-index', 'registry');
+
+    if exists (select 1 from aiq.node_keys where key = 'quietly private freight') then
+        raise exception 'a tenant''s name was published as a key on a node in another org';
+    end if;
+    if v_r->'name'->>'kept' is distinct from 'false' then
+        raise exception 'the receipt does not say the name was kept back: %', v_r;
+    end if;
 end $$;
 
 -- ---------------------------------------------------------------------
