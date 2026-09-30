@@ -27998,6 +27998,8 @@ create or replace function aiq.promote_soft_node(p_soft_id uuid, p_target_node_i
 returns jsonb as $$
 declare
     v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int; v_res uuid;
+    v_key text; v_type text; v_same_org boolean; v_name jsonb;
+    v_moved_keys jsonb := '[]'::jsonb;
 begin
     -- No default for either: a promotion attributed to nobody reads as evidence that
     -- somebody checked. tier is the column the audit groups by (graph-identity.md D11).
@@ -28095,8 +28097,38 @@ begin
     delete from aiq.edges where src_id = p_target_node_id and dst_id = p_target_node_id;
     get diagnostics v_self = row_count;
 
-    -- 4. Only now: evict. The candidate stops satisfying the inclusion
-    --    predicate and the projection's UPDATE eviction removes its node.
+    -- 4a. The target answers to the candidate's name, as an alias -- graph-identity.md
+    --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The
+    --     candidate's name lives in aiq.soft_nodes, not node_keys, so eviction dropped it,
+    --     and the next extraction of the same name became a candidate again and was decided
+    --     again. Measured 30 Sept (meta/spikes/2026-09-30-jev-decisions): 45 promotions,
+    --     then aiq.resolve_mention found 0 of the 45 names.
+    --
+    --     ONLY WITHIN ONE ORG. A key is visible to whoever can see its node; its own
+    --     org_id is the uniqueness scope, not a read gate (node_keys_via_node). So a
+    --     tenant's candidate promoted onto a shared node would publish the tenant's
+    --     spelling to every reader of that node. Across orgs the name is not moved, and
+    --     the evidence says so rather than leaving the absence to be guessed at.
+    select s.key, cn.org_id is not distinct from tn.org_id, tn.entity_type
+      into v_key, v_same_org, v_type
+      from aiq.soft_nodes s, aiq.nodes cn, aiq.nodes tn
+     where s.id = p_soft_id and cn.id = v_cand and tn.id = p_target_node_id;
+    if not v_same_org then
+        v_name := jsonb_build_object('kept', false,
+                                     'why', 'candidate and target are in different orgs');
+    elsif exists (select 1 from aiq.node_keys where node_id = p_target_node_id and key = v_key) then
+        v_name := jsonb_build_object('kept', true, 'already', true);
+    else
+        insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+        select p_target_node_id, v_type, v_key, 'alias', org_id
+          from aiq.nodes where id = p_target_node_id;
+        v_name := jsonb_build_object('kept', true);
+        v_moved_keys := jsonb_build_array(jsonb_build_object(
+                            'key', v_key, 'kind', 'alias', 'entity_type', v_type));
+    end if;
+
+    -- 4b. Only now: evict. The candidate stops satisfying the inclusion
+    --     predicate and the projection's UPDATE eviction removes its node.
     update aiq.soft_nodes set resolved_node_id = p_target_node_id where id = p_soft_id;
 
     -- 5. And record that a decision was made. `merged_id` carries no foreign key precisely
@@ -28106,13 +28138,16 @@ begin
     --    edges moved and the candidate is gone, so there is nothing to restore.
     insert into aiq.node_resolutions (canonical_id, merged_id, tier, decided_by, evidence, org_id)
     values (p_target_node_id, v_cand, p_tier, p_decided_by,
+            -- moved_keys has resolve_nodes' shape, so "which names does a model's decision
+            -- answer to" is one query over both kinds of merge, grouped by tier.
             p_evidence || jsonb_build_object('via', 'promote_soft_node', 'soft_id', p_soft_id,
-                                             'edges_moved', v_moved, 'edges_merged', v_merged),
+                                             'edges_moved', v_moved, 'edges_merged', v_merged,
+                                             'name', v_name, 'moved_keys', v_moved_keys),
             (select org_id from aiq.nodes where id = p_target_node_id))
     returning id into v_res;
 
     return jsonb_build_object('moved', v_moved, 'merged', v_merged, 'self_removed', v_self,
-                              'target', p_target_node_id, 'resolution', v_res);
+                              'target', p_target_node_id, 'resolution', v_res, 'name', v_name);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
