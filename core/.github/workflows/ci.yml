@@ -336,6 +336,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_provider_failures.py
 
+      # The Jev decision client sends typed questions to a pinned version, fails
+      # once on a refused key, waits out a rate limit, and keeps the key unbound
+      # until the operator binds it. The live cases skip without JEV_API_KEY.
+      - name: A Jev decision is typed, pinned and bound
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_decide.py
+
       # A runtime that cannot serve the database it is pointed at refuses at
       # STARTUP rather than inside the first turn. It used to fail in band --
       # AG-UI answers 200 with one RUN_ERROR in a well-formed stream, and
