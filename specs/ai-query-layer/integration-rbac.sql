@@ -71,6 +71,7 @@ select rbac.add_scope_policy ('aiq.nodes');
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
 alter table aiq.node_resolutions enable row level security;
+alter table aiq.node_distinctions enable row level security;
 
 -- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
 --
@@ -90,6 +91,7 @@ select rbac.adopt_shared_org('aiq.edges');
 -- way an edge does -- not for read gating, which the policy below takes from
 -- the node. Adopted so `org_id is null` cannot mean two things.
 select rbac.adopt_shared_org('aiq.node_resolutions');
+select rbac.adopt_shared_org('aiq.node_distinctions');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -140,6 +142,12 @@ create policy edge_retractions_via_edge on aiq.edge_retractions for select
 drop policy if exists node_resolutions_via_canonical on aiq.node_resolutions;
 create policy node_resolutions_via_canonical on aiq.node_resolutions for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_resolutions.canonical_id));
+-- A distinction names two nodes; like an edge it is visible only when both
+-- are, so it cannot reveal that an invisible node exists.
+drop policy if exists node_distinctions_via_both on aiq.node_distinctions;
+create policy node_distinctions_via_both on aiq.node_distinctions for select
+  using (exists (select 1 from aiq.nodes a where a.id = aiq.node_distinctions.a_id)
+     and exists (select 1 from aiq.nodes b where b.id = aiq.node_distinctions.b_id));
 
 -- ------------------------------------------------------------
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
@@ -163,7 +171,7 @@ create or replace view aiq.edges_api as
 
 grant usage on schema aiq to api_viewer, authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
-                aiq.node_resolutions, aiq.node_current to api_viewer;
+                aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -194,7 +202,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
-                aiq.node_resolutions, aiq.node_current to authenticated;
+                aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT

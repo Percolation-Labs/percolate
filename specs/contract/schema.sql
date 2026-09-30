@@ -547,6 +547,7 @@ declare
         'aiq.lake_nodes',
         'aiq.node_keys',
         'aiq.node_resolutions',
+        'aiq.node_distinctions',
         'aiq.nodes',
         'aiq.schema_revisions',
         'aiq.schema_examples',

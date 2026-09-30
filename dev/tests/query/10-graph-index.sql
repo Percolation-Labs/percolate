@@ -412,6 +412,73 @@ begin
     end if;
 end $$;
 
+-- "NOT THE SAME" IS A DECISION, AND IT BINDS. A resolver that judged a candidate
+-- against a node and said no records it; the pair then refuses both kinds of
+-- merge until the decision is undone, and the decision_model tier is accepted.
+do $$
+declare v_soft uuid; v_cand uuid; v_target uuid; v_north uuid; v_south uuid;
+        v_d uuid; v_again uuid; v_r jsonb;
+begin
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Northgate Freight Ltd"}],
+                                 "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    select s.id, n.id into v_soft, v_cand
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type = 'soft'
+     where s.key = 'northgate freight ltd';
+    select node_id into v_target from aiq.node_keys where key = 'northgate freight' and kind = 'canonical';
+
+    v_d := aiq.record_distinct(v_cand, v_target, 'test:10-graph-index', 'decision_model',
+                               '{"p": 0.06}'::jsonb);
+    if not aiq.decided_distinct(v_target, v_cand) then
+        raise exception 'a recorded distinction is not found with its arguments reversed';
+    end if;
+    v_again := aiq.record_distinct(v_target, v_cand, 'test:10-graph-index', 'decision_model');
+    if v_again <> v_d then
+        raise exception 'repeating a live distinction added a second row';
+    end if;
+
+    begin
+        perform aiq.promote_soft_node(v_soft, v_target, 'test:10-graph-index', 'decision_model');
+        raise exception 'promote_soft_node merged a pair recorded as two things';
+    exception when others then
+        if sqlerrm not like '%decided distinct%' then raise; end if;
+    end;
+
+    perform aiq.undo_distinct(v_d, 'test');
+    if aiq.decided_distinct(v_cand, v_target) then
+        raise exception 'an undone distinction still binds';
+    end if;
+    if not exists (select 1 from aiq.node_distinctions where id = v_d and undone_at is not null) then
+        raise exception 'undo deleted the distinction instead of marking it';
+    end if;
+    v_r := aiq.promote_soft_node(v_soft, v_target, 'test:10-graph-index', 'decision_model');
+    if not exists (select 1 from aiq.node_resolutions
+                    where id = (v_r->>'resolution')::uuid and tier = 'decision_model') then
+        raise exception 'the decision_model tier was not recorded';
+    end if;
+
+    -- The same refusal on the merge of two registered nodes.
+    select node_id into v_north from aiq.node_keys where key = 'ambi ltd (north)' and kind = 'canonical';
+    select node_id into v_south from aiq.node_keys where key = 'ambi ltd (south)' and kind = 'canonical';
+    perform aiq.record_distinct(v_north, v_south, 'test:10-graph-index', 'human');
+    begin
+        perform aiq.resolve_nodes(v_north, v_south, 'llm', 'test:10-graph-index');
+        raise exception 'resolve_nodes merged a pair recorded as two things';
+    exception when others then
+        if sqlerrm not like '%decided distinct%' then raise; end if;
+    end;
+
+    -- And the converse: a pair already resolved to one node cannot be called two.
+    -- Merged and then unresolved, so the fixture later sections read is unchanged.
+    v_d := aiq.resolve_nodes(v_north, v_target, 'human', 'test:10-graph-index');
+    begin
+        perform aiq.record_distinct(v_target, v_north, 'test:10-graph-index', 'decision_model');
+        raise exception 'record_distinct accepted a pair the ledger says is one node';
+    exception when others then
+        if sqlerrm not like '%resolved to the same node%' then raise; end if;
+    end;
+    perform aiq.unresolve_node(v_d, 'test');
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 10b. A MERGE COMBINES CURRENCY AND WEIGHT BY THE UPSERT'S RULES.
 --

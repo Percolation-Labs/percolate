@@ -290,6 +290,22 @@
     },
     {
       "admits": [
+        "registry",
+        "crosswalk",
+        "embedding",
+        "llm",
+        "decision_model",
+        "human"
+      ],
+      "column": "tier",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "node_distinctions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "canonical",
         "short",
         "alias"
@@ -307,6 +323,7 @@
         "crosswalk",
         "embedding",
         "llm",
+        "decision_model",
         "human"
       ],
       "column": "tier",

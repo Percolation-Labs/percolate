@@ -1211,6 +1211,10 @@ begin
     if not exists (select 1 from aiq.nodes where id = p_target_node_id) then
         raise exception 'target node % does not exist', p_target_node_id;
     end if;
+    if aiq.decided_distinct(v_cand, p_target_node_id) then
+        raise exception 'candidate % and node % were decided distinct', v_cand, p_target_node_id
+            using hint = 'aiq.undo_distinct the decision first if it was wrong.';
+    end if;
 
     -- 1/2. Repoint, merging on conflict.
     --
@@ -1350,6 +1354,69 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- 8b. "Not the same": the decision a resolver makes most often, recorded.
+--
+-- aiq.node_distinctions (ai-query-layer/schema.sql) holds it. A resolver that
+-- judged a candidate against a node and said no calls this, and before asking
+-- again filters its candidates on aiq.decided_distinct. Same attribution rules
+-- as a promotion: no default decider, tier required. A repeat of a live
+-- decision returns the existing row rather than adding a second.
+-- ------------------------------------------------------------
+create or replace function aiq.record_distinct(p_node uuid, p_other uuid,
+                                               p_decided_by text, p_tier text,
+                                               p_evidence jsonb default '{}'::jsonb)
+returns uuid as $$
+declare v_id uuid;
+begin
+    if coalesce(btrim(p_decided_by), '') = '' then
+        raise exception 'record_distinct needs p_decided_by: the resolver version, agent id or user id';
+    end if;
+    if p_node = p_other then
+        raise exception 'a node is not distinct from itself';
+    end if;
+    if not exists (select 1 from aiq.nodes where id = p_node)
+       or not exists (select 1 from aiq.nodes where id = p_other) then
+        raise exception 'both nodes must exist to be decided distinct';
+    end if;
+    -- Already one thing: saying they are two would contradict the ledger.
+    if (select current_id from aiq.node_current where node_id = p_node)
+       = (select current_id from aiq.node_current where node_id = p_other) then
+        raise exception 'nodes % and % are resolved to the same node', p_node, p_other
+            using hint = 'aiq.unresolve_node the merge first if it was wrong.';
+    end if;
+    select id into v_id from aiq.node_distinctions
+     where a_id = least(p_node, p_other) and b_id = greatest(p_node, p_other)
+       and undone_at is null;
+    if v_id is not null then
+        return v_id;
+    end if;
+    insert into aiq.node_distinctions (a_id, b_id, tier, decided_by, evidence, org_id)
+    values (least(p_node, p_other), greatest(p_node, p_other), p_tier, p_decided_by,
+            p_evidence || jsonb_build_object('node', p_node),
+            (select org_id from aiq.nodes where id = p_node))
+    returning id into v_id;
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Undone, never deleted: a "not the same" that turned out wrong is evidence
+-- about the resolver that made it.
+create or replace function aiq.undo_distinct(p_id uuid, p_by text)
+returns void as $$
+begin
+    if coalesce(btrim(p_by), '') = '' then
+        raise exception 'undo_distinct needs p_by';
+    end if;
+    update aiq.node_distinctions
+       set undone_at = now(), evidence = evidence || jsonb_build_object('undone_by', p_by)
+     where id = p_id and undone_at is null;
+    if not found then
+        raise exception 'no live distinction %', p_id;
+    end if;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 9. The default mapping agent -- data, not code.
 --
 -- Authored form, for the record (agentic/brief.md §6: the JSON Schema a
@@ -1423,6 +1490,8 @@ revoke execute on function aiq.upsert_graph(jsonb, jsonb)                  from 
 revoke execute on function aiq.land_graph(jsonb, uuid)                     from public;
 revoke execute on function aiq.land_graph_fanout(uuid)                     from public;
 revoke execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) from public;
+revoke execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) from public;
+revoke execute on function aiq.undo_distinct(uuid, text)                   from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
 
@@ -1432,6 +1501,9 @@ grant execute on function aiq.land_graph_fanout(uuid)         to worker;
 -- promote_soft_node is entity resolution's write path, which is background
 -- work, not a user action -- so it is worker-facing too.
 grant execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) to worker;
+-- Its other half, on the same reasoning.
+grant execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) to worker;
+grant execute on function aiq.undo_distinct(uuid, text)                   to worker;
 
 -- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
 -- their own policies and the grant is safe.

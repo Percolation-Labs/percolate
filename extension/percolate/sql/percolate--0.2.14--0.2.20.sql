@@ -15640,8 +15640,13 @@ create table if not exists aiq.node_resolutions (
     -- nodes would erase the record of a merge when the merged node is removed,
     -- which is the one event that makes the record most worth having.
     merged_id    uuid not null,
+    -- decision_model: one option from a declared set in a forward pass, with no
+    -- generation (Jev and its kind) -- neither an embedding score nor an LLM's
+    -- answer. graph-identity.md said to add it with its first caller; that is
+    -- meta/spikes/2026-09-30-jev-decisions.
     tier         text not null
-                     check (tier in ('registry','crosswalk','embedding','llm','human')),
+                     check (tier in ('registry','crosswalk','embedding','llm',
+                                     'decision_model','human')),
     -- The matched key, the score, the agent run. `moved_keys` under this is
     -- written by aiq.resolve_nodes and read by aiq.unresolve_node: reversing a
     -- merge needs to know which key rows moved, and re-deriving them later is
@@ -15659,6 +15664,12 @@ create table if not exists aiq.node_resolutions (
 comment on table aiq.node_resolutions is
     'A decision that two nodes were the same thing, with the evidence, who decided, and whether it was undone.';
 
+-- The replayed upgrade keeps an existing table as it is, so the widened tier
+-- list arrives by replacing the constraint, not through the create above.
+alter table aiq.node_resolutions drop constraint if exists node_resolutions_tier_check;
+alter table aiq.node_resolutions add constraint node_resolutions_tier_check
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','human'));
+
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
 create index if not exists idx_node_resolutions_canonical
@@ -15669,6 +15680,58 @@ comment on table aiq.node_resolutions is
     'unresolve is a supported operation rather than a repair, and `tier` says '
     'what KIND of assertion the merge was -- a registry match and a model''s '
     'guess are not interchangeable and a reader that ignores tier is unsound.';
+
+-- ------------------------------------------------------------
+-- The other half of the ledger: a decision that two nodes are NOT the same.
+--
+-- A resolver that judged a candidate against a registered node and said no
+-- had nowhere to put the answer, so the next landing of the same name asked
+-- the same question and paid for it again: in the 30 September entity
+-- resolution run, 323 of 1,000 names needed a decision the second time, most
+-- of them names already judged to match nothing. It is also a fact a later
+-- decision should have to reckon with -- the "cannot link" of record linkage
+-- -- so a live row here makes aiq.resolve_nodes and aiq.promote_soft_node
+-- refuse to merge the pair.
+--
+-- A SEPARATE TABLE, not a `relation` column on node_resolutions. Every reader
+-- of that table (node_current first) takes a row as a merge; a column they do
+-- not know to filter on would turn every "not the same" into a merge, silently.
+--
+-- The pair is stored ordered (a < b) because the relation is symmetric; no
+-- foreign keys, for merged_id's reason: a candidate is evicted when it is
+-- promoted elsewhere, and the record that it was judged is worth keeping.
+-- ------------------------------------------------------------
+create table if not exists aiq.node_distinctions (
+    id          uuid primary key default uuidv7(),
+    a_id        uuid not null,
+    b_id        uuid not null,
+    tier        text not null
+                    check (tier in ('registry','crosswalk','embedding','llm',
+                                    'decision_model','human')),
+    evidence    jsonb not null default '{}',
+    decided_by  text not null check (length(btrim(decided_by)) > 0),
+    undone_at   timestamptz,
+    -- The org of the node being resolved (the first argument to
+    -- aiq.record_distinct), for authoring and audit. Reads are gated by the
+    -- two nodes, as for an edge.
+    org_id      uuid,
+    at          timestamptz not null default now(),
+    constraint node_distinctions_ordered check (a_id < b_id)
+);
+comment on table aiq.node_distinctions is
+    'A decision that two nodes are different things, with the evidence, who decided, and whether it was undone.';
+create unique index if not exists idx_node_distinctions_live
+    on aiq.node_distinctions (a_id, b_id) where undone_at is null;
+create index if not exists idx_node_distinctions_b
+    on aiq.node_distinctions (b_id) where undone_at is null;
+
+-- Whether a live decision says these two are different. Either order.
+create or replace function aiq.decided_distinct(p_x uuid, p_y uuid)
+returns boolean language sql stable as $$
+    select exists (select 1 from aiq.node_distinctions
+                    where a_id = least(p_x, p_y) and b_id = greatest(p_x, p_y)
+                      and undone_at is null);
+$$;
 
 -- Resolution APPLIED, for readers that want it. Transitive, because a chain
 -- (a into b, b into c) is legal and a caller asking "what is this now" means c
@@ -15726,6 +15789,13 @@ begin
             'node % already resolves to % -- merging the other way would make a '
             'cycle. Unresolve first if the direction is wrong.',
             p_canonical, p_merged;
+    end if;
+
+    -- A recorded "these are different" stands until it is undone; merging over it
+    -- would leave the ledger asserting both.
+    if aiq.decided_distinct(p_canonical, p_merged) then
+        raise exception 'nodes % and % were decided distinct', p_canonical, p_merged
+            using hint = 'aiq.undo_distinct the decision first if it was wrong.';
     end if;
 
     select org_id into v_org from aiq.nodes where id = p_canonical;
@@ -19329,6 +19399,7 @@ select rbac.add_scope_policy ('aiq.nodes');
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
 alter table aiq.node_resolutions enable row level security;
+alter table aiq.node_distinctions enable row level security;
 
 -- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
 --
@@ -19348,6 +19419,7 @@ select rbac.adopt_shared_org('aiq.edges');
 -- way an edge does -- not for read gating, which the policy below takes from
 -- the node. Adopted so `org_id is null` cannot mean two things.
 select rbac.adopt_shared_org('aiq.node_resolutions');
+select rbac.adopt_shared_org('aiq.node_distinctions');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -19398,6 +19470,12 @@ create policy edge_retractions_via_edge on aiq.edge_retractions for select
 drop policy if exists node_resolutions_via_canonical on aiq.node_resolutions;
 create policy node_resolutions_via_canonical on aiq.node_resolutions for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_resolutions.canonical_id));
+-- A distinction names two nodes; like an edge it is visible only when both
+-- are, so it cannot reveal that an invisible node exists.
+drop policy if exists node_distinctions_via_both on aiq.node_distinctions;
+create policy node_distinctions_via_both on aiq.node_distinctions for select
+  using (exists (select 1 from aiq.nodes a where a.id = aiq.node_distinctions.a_id)
+     and exists (select 1 from aiq.nodes b where b.id = aiq.node_distinctions.b_id));
 
 -- ------------------------------------------------------------
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
@@ -19421,7 +19499,7 @@ create or replace view aiq.edges_api as
 
 grant usage on schema aiq to api_viewer, authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
-                aiq.node_resolutions, aiq.node_current to api_viewer;
+                aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -19452,7 +19530,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
-                aiq.node_resolutions, aiq.node_current to authenticated;
+                aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT
@@ -27891,6 +27969,10 @@ begin
     if not exists (select 1 from aiq.nodes where id = p_target_node_id) then
         raise exception 'target node % does not exist', p_target_node_id;
     end if;
+    if aiq.decided_distinct(v_cand, p_target_node_id) then
+        raise exception 'candidate % and node % were decided distinct', v_cand, p_target_node_id
+            using hint = 'aiq.undo_distinct the decision first if it was wrong.';
+    end if;
 
     -- 1/2. Repoint, merging on conflict.
     --
@@ -28030,6 +28112,69 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- 8b. "Not the same": the decision a resolver makes most often, recorded.
+--
+-- aiq.node_distinctions (ai-query-layer/schema.sql) holds it. A resolver that
+-- judged a candidate against a node and said no calls this, and before asking
+-- again filters its candidates on aiq.decided_distinct. Same attribution rules
+-- as a promotion: no default decider, tier required. A repeat of a live
+-- decision returns the existing row rather than adding a second.
+-- ------------------------------------------------------------
+create or replace function aiq.record_distinct(p_node uuid, p_other uuid,
+                                               p_decided_by text, p_tier text,
+                                               p_evidence jsonb default '{}'::jsonb)
+returns uuid as $$
+declare v_id uuid;
+begin
+    if coalesce(btrim(p_decided_by), '') = '' then
+        raise exception 'record_distinct needs p_decided_by: the resolver version, agent id or user id';
+    end if;
+    if p_node = p_other then
+        raise exception 'a node is not distinct from itself';
+    end if;
+    if not exists (select 1 from aiq.nodes where id = p_node)
+       or not exists (select 1 from aiq.nodes where id = p_other) then
+        raise exception 'both nodes must exist to be decided distinct';
+    end if;
+    -- Already one thing: saying they are two would contradict the ledger.
+    if (select current_id from aiq.node_current where node_id = p_node)
+       = (select current_id from aiq.node_current where node_id = p_other) then
+        raise exception 'nodes % and % are resolved to the same node', p_node, p_other
+            using hint = 'aiq.unresolve_node the merge first if it was wrong.';
+    end if;
+    select id into v_id from aiq.node_distinctions
+     where a_id = least(p_node, p_other) and b_id = greatest(p_node, p_other)
+       and undone_at is null;
+    if v_id is not null then
+        return v_id;
+    end if;
+    insert into aiq.node_distinctions (a_id, b_id, tier, decided_by, evidence, org_id)
+    values (least(p_node, p_other), greatest(p_node, p_other), p_tier, p_decided_by,
+            p_evidence || jsonb_build_object('node', p_node),
+            (select org_id from aiq.nodes where id = p_node))
+    returning id into v_id;
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Undone, never deleted: a "not the same" that turned out wrong is evidence
+-- about the resolver that made it.
+create or replace function aiq.undo_distinct(p_id uuid, p_by text)
+returns void as $$
+begin
+    if coalesce(btrim(p_by), '') = '' then
+        raise exception 'undo_distinct needs p_by';
+    end if;
+    update aiq.node_distinctions
+       set undone_at = now(), evidence = evidence || jsonb_build_object('undone_by', p_by)
+     where id = p_id and undone_at is null;
+    if not found then
+        raise exception 'no live distinction %', p_id;
+    end if;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 9. The default mapping agent -- data, not code.
 --
 -- Authored form, for the record (agentic/brief.md §6: the JSON Schema a
@@ -28103,6 +28248,8 @@ revoke execute on function aiq.upsert_graph(jsonb, jsonb)                  from 
 revoke execute on function aiq.land_graph(jsonb, uuid)                     from public;
 revoke execute on function aiq.land_graph_fanout(uuid)                     from public;
 revoke execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) from public;
+revoke execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) from public;
+revoke execute on function aiq.undo_distinct(uuid, text)                   from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
 
@@ -28112,6 +28259,9 @@ grant execute on function aiq.land_graph_fanout(uuid)         to worker;
 -- promote_soft_node is entity resolution's write path, which is background
 -- work, not a user action -- so it is worker-facing too.
 grant execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) to worker;
+-- Its other half, on the same reasoning.
+grant execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) to worker;
+grant execute on function aiq.undo_distinct(uuid, text)                   to worker;
 
 -- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
 -- their own policies and the grant is safe.
@@ -35592,6 +35742,7 @@ declare
         'aiq.lake_nodes',
         'aiq.node_keys',
         'aiq.node_resolutions',
+        'aiq.node_distinctions',
         'aiq.nodes',
         'aiq.schema_revisions',
         'aiq.schema_examples',
