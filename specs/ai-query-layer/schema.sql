@@ -1378,8 +1378,13 @@ create table if not exists aiq.node_resolutions (
     -- nodes would erase the record of a merge when the merged node is removed,
     -- which is the one event that makes the record most worth having.
     merged_id    uuid not null,
+    -- decision_model: one option from a declared set in a forward pass, with no
+    -- generation (Jev and its kind) -- neither an embedding score nor an LLM's
+    -- answer. graph-identity.md said to add it with its first caller; that is
+    -- meta/spikes/2026-09-30-jev-decisions.
     tier         text not null
-                     check (tier in ('registry','crosswalk','embedding','llm','human')),
+                     check (tier in ('registry','crosswalk','embedding','llm',
+                                     'decision_model','human')),
     -- The matched key, the score, the agent run. `moved_keys` under this is
     -- written by aiq.resolve_nodes and read by aiq.unresolve_node: reversing a
     -- merge needs to know which key rows moved, and re-deriving them later is
@@ -1397,6 +1402,12 @@ create table if not exists aiq.node_resolutions (
 comment on table aiq.node_resolutions is
     'A decision that two nodes were the same thing, with the evidence, who decided, and whether it was undone.';
 
+-- The replayed upgrade keeps an existing table as it is, so the widened tier
+-- list arrives by replacing the constraint, not through the create above.
+alter table aiq.node_resolutions drop constraint if exists node_resolutions_tier_check;
+alter table aiq.node_resolutions add constraint node_resolutions_tier_check
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','human'));
+
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
 create index if not exists idx_node_resolutions_canonical
@@ -1407,6 +1418,58 @@ comment on table aiq.node_resolutions is
     'unresolve is a supported operation rather than a repair, and `tier` says '
     'what KIND of assertion the merge was -- a registry match and a model''s '
     'guess are not interchangeable and a reader that ignores tier is unsound.';
+
+-- ------------------------------------------------------------
+-- The other half of the ledger: a decision that two nodes are NOT the same.
+--
+-- A resolver that judged a candidate against a registered node and said no
+-- had nowhere to put the answer, so the next landing of the same name asked
+-- the same question and paid for it again: in the 30 September entity
+-- resolution run, 323 of 1,000 names needed a decision the second time, most
+-- of them names already judged to match nothing. It is also a fact a later
+-- decision should have to reckon with -- the "cannot link" of record linkage
+-- -- so a live row here makes aiq.resolve_nodes and aiq.promote_soft_node
+-- refuse to merge the pair.
+--
+-- A SEPARATE TABLE, not a `relation` column on node_resolutions. Every reader
+-- of that table (node_current first) takes a row as a merge; a column they do
+-- not know to filter on would turn every "not the same" into a merge, silently.
+--
+-- The pair is stored ordered (a < b) because the relation is symmetric; no
+-- foreign keys, for merged_id's reason: a candidate is evicted when it is
+-- promoted elsewhere, and the record that it was judged is worth keeping.
+-- ------------------------------------------------------------
+create table if not exists aiq.node_distinctions (
+    id          uuid primary key default uuidv7(),
+    a_id        uuid not null,
+    b_id        uuid not null,
+    tier        text not null
+                    check (tier in ('registry','crosswalk','embedding','llm',
+                                    'decision_model','human')),
+    evidence    jsonb not null default '{}',
+    decided_by  text not null check (length(btrim(decided_by)) > 0),
+    undone_at   timestamptz,
+    -- The org of the node being resolved (the first argument to
+    -- aiq.record_distinct), for authoring and audit. Reads are gated by the
+    -- two nodes, as for an edge.
+    org_id      uuid,
+    at          timestamptz not null default now(),
+    constraint node_distinctions_ordered check (a_id < b_id)
+);
+comment on table aiq.node_distinctions is
+    'A decision that two nodes are different things, with the evidence, who decided, and whether it was undone.';
+create unique index if not exists idx_node_distinctions_live
+    on aiq.node_distinctions (a_id, b_id) where undone_at is null;
+create index if not exists idx_node_distinctions_b
+    on aiq.node_distinctions (b_id) where undone_at is null;
+
+-- Whether a live decision says these two are different. Either order.
+create or replace function aiq.decided_distinct(p_x uuid, p_y uuid)
+returns boolean language sql stable as $$
+    select exists (select 1 from aiq.node_distinctions
+                    where a_id = least(p_x, p_y) and b_id = greatest(p_x, p_y)
+                      and undone_at is null);
+$$;
 
 -- Resolution APPLIED, for readers that want it. Transitive, because a chain
 -- (a into b, b into c) is legal and a caller asking "what is this now" means c
@@ -1464,6 +1527,13 @@ begin
             'node % already resolves to % -- merging the other way would make a '
             'cycle. Unresolve first if the direction is wrong.',
             p_canonical, p_merged;
+    end if;
+
+    -- A recorded "these are different" stands until it is undone; merging over it
+    -- would leave the ledger asserting both.
+    if aiq.decided_distinct(p_canonical, p_merged) then
+        raise exception 'nodes % and % were decided distinct', p_canonical, p_merged
+            using hint = 'aiq.undo_distinct the decision first if it was wrong.';
     end if;
 
     select org_id into v_org from aiq.nodes where id = p_canonical;

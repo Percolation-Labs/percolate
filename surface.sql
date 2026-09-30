@@ -328,6 +328,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.extension_boundary','','§9b: every place the SQL half calls the compiled half, and whether it is there'),
 ('ai-query-layer','table','aiq.node_resolutions',null,
  'graph-identity.md D11: merges as records -- neither constituent deleted, tier says what kind of assertion it was, unresolve supported'),
+('ai-query-layer','table','aiq.node_distinctions',null,
+ 'graph-identity.md D11: decisions that two nodes are different things -- tier, decider, undone not deleted; visible only when both nodes are'),
 ('ai-query-layer','view','aiq.node_current',null,
  'graph-identity.md D11: every node and what it currently resolves to, following chains; an unmerged node maps to itself so it joins unconditionally'),
 ('ai-query-layer','function','aiq.resolve_nodes','uuid,uuid,text,text,jsonb','graph-identity.md D11: record a merge and move the merged node''s canonical keys onto the survivor as aliases'),
