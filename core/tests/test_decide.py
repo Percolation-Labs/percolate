@@ -68,6 +68,12 @@ class WireShape(unittest.TestCase):
         self.assertEqual((r["sim"].value, r["sim"].p), (1.99, 0.99))
         self.assertEqual((r.input_tokens, r.output_tokens), (475, 80))
 
+    def test_the_client_keeps_a_running_total_for_metering(self):
+        t = Recorder((200, OK), (200, OK))
+        jev = t.client()
+        run(jev.ask_many([("s", {"same": Noul("q")})] * 2))
+        self.assertEqual((jev.requests, jev.input_tokens, jev.output_tokens), (2, 950, 160))
+
     def test_a_noul_without_criteria_sends_none(self):
         self.assertNotIn("criteria", Noul("q").wire())
 

@@ -63,7 +63,16 @@ class Noul:
 
 @dataclass(frozen=True)
 class Choice:
-    """One of a closed set: option key -> description (None for none). At most 255."""
+    """One of a closed set: option key -> description (None for none). At most 255.
+
+    THE KEY IS READ, NOT JUST THE DESCRIPTION. Measured on our 276-pair claim
+    corpus (jev-1.13.0, 30 Sept): the same four descriptions under their
+    names (`same_claim`, `undecidable`, ...) and under `opt_a`..`opt_d` gave
+    different argmaxes on 114 of 276 pairs, and `undecidable` was chosen 0
+    times named against 108 times neutral. Binary gates moved on 2 of 186.
+    So name an option what its description says, and when a comparison has to
+    hold across wordings, run both and compare.
+    """
 
     instructions: Any
     options: Mapping[str, Any]
@@ -155,6 +164,9 @@ class Jev:
         self._gate = asyncio.Semaphore(concurrency)
         self._client = client
         self._timeout = timeout
+        # Running totals across every call on this client, for metering: Jev
+        # bills input tokens, and a join's cost is its candidate count.
+        self.requests = self.input_tokens = self.output_tokens = 0
 
     async def __aenter__(self) -> "Jev":
         return self
@@ -202,6 +214,9 @@ class Jev:
         if missing:
             raise TerminalError(f"Jev answered without {sorted(missing)}")
         usage = data.get("usage") or {}
+        self.requests += 1
+        self.input_tokens += usage.get("input_tokens", 0)
+        self.output_tokens += usage.get("output_tokens", 0)
         return Result(data["model"],
                       {qid: Answer.from_wire(a) for qid, a in data["answers"].items()},
                       usage.get("input_tokens", 0), usage.get("output_tokens", 0))
