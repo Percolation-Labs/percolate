@@ -25,21 +25,17 @@ extension:
   upgrade body converges on 18 (5,195 objects).
 - **REM-11 and REM-78 name `dev/Dockerfile.pg19` as their spec.**
 
-## What moving the published image to 18 takes
+## The published image stays on 19
 
-- **The release.** get-percolate's `image-postgres.yml` builds the image from
-  `dev/Dockerfile.pg19` and tags it `19-<version>`. It has to move in the same
-  step as this repository's Dockerfile, or the next release breaks.
-- **This repository.** The parser's default feature (`pg19` in
-  `extension/percolate_parser/Cargo.toml`), the runtime and builder Dockerfiles,
-  and the `19` spelled in `dev/docker-compose.yml`, `dev/ci-database.sh`'s
-  default image, the three scripts that start a published release
-  (`upgrade-from-every-release.sh`, `upgrade-with-data.sh`, `parser-upgrade.sh`)
-  and CI's pins.
-- **Production's data.** A PG19 beta data directory cannot be read by 18, and
-  `pg_upgrade` does not go backwards. Moving is upgrade the extension to 0.2.20
-  on 19 (which drops the property graph), `pg_dump` with the 19 client, and
-  restore into an 18 server.
+Decided 1 October 2026: the image stays on PostgreSQL 19 and moves to 19 GA
+when it ships. The point of removing SQL/PGQ was not to leave 19 but to stop
+depending on something 19 will not have. PG18 support is a measured fact, kept
+so that a deployment that cannot run 19 is not stuck, not a migration plan.
 
-PG19 GA would also work: the SQL needs nothing from it, and the parser builds
-with `--features pg19`. Staying on a beta has no reason left.
+If the image ever does move to 18, the build is on branch `amartey/pg18-image`
+(both Dockerfiles, the parser's default feature, no pg_cron patch), and three
+things move with it: get-percolate's `image-postgres.yml`, which builds from
+`dev/Dockerfile.pg19` and tags `19-<version>`; the `19` spelled in compose,
+`dev/ci-database.sh`'s default image and the scripts that start a published
+release; and production's data, since a 19 data directory cannot be read by 18
+and moving is a dump and restore.
