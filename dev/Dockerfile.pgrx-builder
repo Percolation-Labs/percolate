@@ -32,9 +32,15 @@ RUN [ -n "$PGRX_VERSION" ] || { \
       echo "which reads it, or pass --build-arg PGRX_VERSION=<that version>." >&2; \
       exit 1; }
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# THE HEADERS ARE PINNED TO THE SERVER IN THIS IMAGE, read from it rather than
+# written here. Unpinned, apt installs the newest postgresql-server-dev-19 the
+# PGDG repository carries: on 1 October 2026 that became beta4 while this base
+# stayed beta3, and the published 19-0.2.20 image's pgvector failed on first
+# boot with "index access method handler function did not return an
+# IndexAmRoutine struct" (get-percolate coldstart run, 1 October).
+RUN apt-get update && v=$(dpkg-query -W -f='${Version}' postgresql-19) && apt-get install -y --no-install-recommends \
     curl build-essential pkg-config libssl-dev clang libclang-dev \
-    git ca-certificates postgresql-server-dev-19 \
+    git ca-certificates "postgresql-server-dev-19=$v" \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
