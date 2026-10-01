@@ -28257,6 +28257,11 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- The target type defaults to the claimed kind, which is what upsert_graph
 -- records when a kind names a registered type and the name does not resolve.
 -- ------------------------------------------------------------
+-- The summary half of the proposal is served by this index; without it every
+-- candidate scans aiq.nodes.
+create index if not exists idx_nodes_summary_trgm
+    on aiq.nodes using gin (lower(summary) gin_trgm_ops);
+
 create or replace function aiq.resolution_candidates(
     p_claimed_kind text default null, p_entity_type text default null,
     p_after uuid default null, p_limit int default 50, p_k int default 5,
@@ -28283,17 +28288,31 @@ as $$
     select p.id, p.cand, p.label, p.attrs, m.node_id, m.key, m.entity_type, m.summary, m.sim
       from pending p
       left join lateral (
-        -- Best key per node first (a node answers to several), then the top p_k.
+        -- Best match per node first (a node answers to several keys, and to its
+        -- summary), then the top p_k.
+        --
+        -- THE SUMMARY TOO, because a key is not always a name. A document is
+        -- keyed by its URL and named only in its summary, so on production --
+        -- where documents were the one registered type -- matching keys alone
+        -- could never propose a document by its title (1 October 2026).
         select * from (
-            select distinct on (n.id) n.id as node_id, k.key, n.entity_type, n.summary,
-                   similarity(k.key, p.key) as sim
-              from aiq.node_keys k
-              join aiq.nodes n on n.id = k.node_id
-             where k.key % p.key
-               and n.entity_type = p.target
-               and n.org_id in (rbac.shared_org_id(), p.org_id)
-               and similarity(k.key, p.key) >= greatest(p_min_sim, 0.3)
-             order by n.id, similarity(k.key, p.key) desc) best
+            select distinct on (m.node_id) m.* from (
+                select n.id as node_id, k.key, n.entity_type, n.summary,
+                       similarity(k.key, p.key) as sim
+                  from aiq.node_keys k
+                  join aiq.nodes n on n.id = k.node_id
+                 where k.key % p.key
+                   and n.entity_type = p.target
+                   and n.org_id in (rbac.shared_org_id(), p.org_id)
+                union all
+                select n.id, null, n.entity_type, n.summary,
+                       similarity(lower(n.summary), p.key)
+                  from aiq.nodes n
+                 where lower(n.summary) % p.key
+                   and n.entity_type = p.target
+                   and n.org_id in (rbac.shared_org_id(), p.org_id)) m
+             where m.sim >= greatest(p_min_sim, 0.3)
+             order by m.node_id, m.sim desc) best
          order by best.sim desc
          limit greatest(p_k, 1)) m
         -- Decided pairs are dropped AFTER the top p_k is chosen, not before, so

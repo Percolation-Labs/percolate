@@ -544,6 +544,22 @@ begin
         raise exception 'deciding the top proposal slid the window to the next one';
     end if;
 
+    -- A node keyed by something that is not its name -- a document by its URL --
+    -- is proposed by its summary. Matching keys alone never proposed one.
+    create table demo_t_doc (id uuid primary key default uuidv7(), url text not null,
+                             title text not null, org_id uuid);
+    perform aiq.register_entity_table('ttype_doc', 'public.demo_t_doc', 'n.url', 'n.title', 'n.org_id');
+    perform aiq.register_graph_vocabulary();
+    insert into demo_t_doc (url, title) values
+        ('https://example.org/packages/rp-1', 'Sleep training trials find no lasting harm in babies');
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_doc","n":"Sleep training trials find no lasting harm"}],
+                                 "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    if not exists (select 1 from aiq.resolution_candidates('ttype_doc', null, null, 1000) r
+                     join aiq.nodes n on n.id = r.node_id
+                    where n.summary like 'Sleep training%') then
+        raise exception 'a document was not proposed by its title: keys alone cannot name it';
+    end if;
+
     -- Keyset: one candidate per page, and every unresolved candidate is reached.
     n := 0; v_last := null;
     loop
