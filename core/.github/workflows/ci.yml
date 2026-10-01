@@ -343,6 +343,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_decide.py
 
+      # The resolver turns Jev's answers into promote_soft_node, record_distinct
+      # or nothing, by thresholds the step must state; pages by keyset; a refused
+      # write does not stop the page.
+      - name: A resolver writes what its thresholds decide, and nothing else
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_resolve.py
+
       # A runtime that cannot serve the database it is pointed at refuses at
       # STARTUP rather than inside the first turn. It used to fail in band --
       # AG-UI answers 200 with one RUN_ERROR in a well-formed stream, and
