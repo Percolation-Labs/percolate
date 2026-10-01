@@ -479,6 +479,86 @@ begin
     perform aiq.unresolve_node(v_d, 'test');
 end $$;
 
+-- WHAT A RESOLVER IS ASKED. aiq.resolution_candidates proposes registered nodes
+-- of the claimed type for each unresolved candidate; never a pair decided
+-- distinct, never a node outside the candidate's org and the shared tier; a
+-- candidate with nothing to propose still comes back, once, with no node; and
+-- pages by keyset so such candidates cannot fill every page.
+do $$
+declare v_soft uuid; v_cand uuid; v_target uuid; v_tenant_node uuid; n int; v_last uuid;
+begin
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Northgate Freightways"},
+                                           {"k":"ttype_org","n":"Qqzx Unmatchable Vvwy"}],
+                                 "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    select s.id, n.id into v_soft, v_cand
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type = 'soft'
+     where s.key = 'northgate freightways';
+    select node_id into v_target from aiq.node_keys where key = 'northgate freight' and kind = 'canonical';
+
+    if not exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000)
+                    where soft_id = v_soft and node_id = v_target) then
+        raise exception 'resolution_candidates did not propose the near-identical registered name';
+    end if;
+    if not exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000) r
+                     join aiq.soft_nodes s on s.id = r.soft_id
+                    where s.key = 'qqzx unmatchable vvwy' and r.node_id is null) then
+        raise exception 'a candidate with nothing to propose did not come back with a null node';
+    end if;
+
+    -- Decided distinct: no longer proposed.
+    perform aiq.record_distinct(v_cand, v_target, 'test:10-graph-index', 'decision_model');
+    if exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000)
+                where soft_id = v_soft and node_id = v_target) then
+        raise exception 'a pair decided distinct was proposed again';
+    end if;
+
+    -- Another tenant's node with the same name is never proposed to a shared-tier candidate.
+    insert into demo_t_org (name, org_id) values ('Northgate Freightway', 'cccc0000-0000-0000-0000-0000000010a1');
+    select node_id into v_tenant_node from aiq.node_keys where key = 'northgate freightway' and kind = 'canonical';
+    if v_tenant_node is null then
+        raise exception 'fixture: the tenant''s company did not project to a node';
+    end if;
+    if exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000)
+                where soft_id = v_soft and node_id = v_tenant_node) then
+        raise exception 'resolution_candidates proposed another tenant''s node';
+    end if;
+
+    -- A decided top proposal is removed, not replaced. Two near-identical shared
+    -- companies, one proposal per name: once the first is decided distinct the
+    -- name has none, where excluding before choosing slid it to the second.
+    insert into demo_t_org (name) values ('Halvard Shipping'), ('Halvard Shipping Co');
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Halvard Shipping Lines"}],
+                                 "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    select s.id, n.id into v_soft, v_cand
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type = 'soft'
+     where s.key = 'halvard shipping lines';
+    select node_id into v_target from aiq.resolution_candidates('ttype_org', null, null, 1000, 1)
+     where soft_id = v_soft;
+    if v_target is null or (select count(*) from aiq.resolution_candidates('ttype_org', null, null, 1000, 2)
+                             where soft_id = v_soft and node_id is not null) <> 2 then
+        raise exception 'fixture: expected two proposals for the Halvard candidate';
+    end if;
+    perform aiq.record_distinct(v_cand, v_target, 'test:10-graph-index', 'decision_model');
+    if exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000, 1)
+                where soft_id = v_soft and node_id is not null) then
+        raise exception 'deciding the top proposal slid the window to the next one';
+    end if;
+
+    -- Keyset: one candidate per page, and every unresolved candidate is reached.
+    n := 0; v_last := null;
+    loop
+        select max(soft_id::text)::uuid into v_last
+          from aiq.resolution_candidates('ttype_org', null, v_last, 1);
+        exit when v_last is null;
+        n := n + 1;
+        exit when n > 10000;
+    end loop;
+    if n <> (select count(*) from aiq.soft_nodes
+              where claimed_kind = 'ttype_org' and resolved_node_id is null) then
+        raise exception 'paging one at a time reached % candidates, not all of them', n;
+    end if;
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 10b. A MERGE COMBINES CURRENCY AND WEIGHT BY THE UPSERT'S RULES.
 --
