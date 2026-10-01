@@ -28344,6 +28344,79 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- 8c. What a resolver is asked to decide: candidates and their proposals.
+--
+-- A resolver (percolate_core.resolve, `percolate resolve serve`) runs as
+-- `worker`, which holds no table grants, so the question it puts to a decision
+-- model has to come from here. Each row is one (candidate, registered node)
+-- pair: up to p_k nodes of the target type per unresolved candidate, by trigram
+-- similarity of their keys. A candidate with nothing to propose comes back once
+-- with a null node_id, so a page is never silently short.
+--
+-- PAGED BY KEYSET, p_after = the last soft_id of the previous page. soft_nodes
+-- ids are uuidv7, so this is also oldest first. An "oldest p_limit" window
+-- without it starves: candidates with nothing to propose stay unresolved, stay
+-- oldest, and fill every page.
+--
+-- PROPOSING IS LOOSE ON PURPOSE. 0.30 is far below resolve_mention's 0.62
+-- because this proposes and does not decide; the measured run that set it found
+-- the true company among the proposals for 279 of 285 candidates whose company
+-- existed (meta/spikes/2026-09-30-jev-decisions).
+--
+-- Two exclusions, both refusals rather than preferences:
+--   * a pair already decided distinct (aiq.decided_distinct) is not proposed
+--     again, which is the point of recording it;
+--   * a node outside the candidate's org and the shared tier is never
+--     proposed. This is SECURITY DEFINER, so it reads past row security, and a
+--     tenant's candidate matched against another tenant's company would hand
+--     the resolver -- and the model -- that company's name.
+-- The target type defaults to the claimed kind, which is what upsert_graph
+-- records when a kind names a registered type and the name does not resolve.
+-- ------------------------------------------------------------
+create or replace function aiq.resolution_candidates(
+    p_claimed_kind text default null, p_entity_type text default null,
+    p_after uuid default null, p_limit int default 50, p_k int default 5,
+    p_min_sim real default 0.3)
+returns table(soft_id uuid, candidate_node_id uuid, name text, attrs jsonb,
+              node_id uuid, node_key text, entity_type text, summary text, sim real)
+-- No `set pg_trgm.similarity_threshold` clause: an upgrade's ALTER EXTENSION is
+-- refused it ("permission denied to set parameter"), though a fresh install is
+-- not. `%` uses the session's threshold, 0.3 by default, which is also this
+-- function's floor; resolve_mention relies on the same default.
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    with pending as (
+        select s.id, cn.id as cand, s.key, coalesce(s.label, s.key) as label, s.attrs,
+               coalesce(p_entity_type, s.claimed_kind) as target, cn.org_id
+          from aiq.soft_nodes s
+          join aiq.nodes cn on cn.entity_type = 'soft' and cn.entity_id = s.id
+         where s.resolved_node_id is null
+           and (p_claimed_kind is null or s.claimed_kind = p_claimed_kind)
+           and (p_after is null or s.id > p_after)
+         order by s.id
+         limit greatest(p_limit, 0))
+    select p.id, p.cand, p.label, p.attrs, m.node_id, m.key, m.entity_type, m.summary, m.sim
+      from pending p
+      left join lateral (
+        -- Best key per node first (a node answers to several), then the top p_k.
+        select * from (
+            select distinct on (n.id) n.id as node_id, k.key, n.entity_type, n.summary,
+                   similarity(k.key, p.key) as sim
+              from aiq.node_keys k
+              join aiq.nodes n on n.id = k.node_id
+             where k.key % p.key
+               and n.entity_type = p.target
+               and n.org_id in (rbac.shared_org_id(), p.org_id)
+               and similarity(k.key, p.key) >= greatest(p_min_sim, 0.3)
+               and not aiq.decided_distinct(p.cand, n.id)
+             order by n.id, similarity(k.key, p.key) desc) best
+         order by best.sim desc
+         limit greatest(p_k, 1)) m on true
+     order by p.id, m.sim desc nulls last;
+$$;
+
+-- ------------------------------------------------------------
 -- 9. The default mapping agent -- data, not code.
 --
 -- Authored form, for the record (agentic/brief.md §6: the JSON Schema a
@@ -28419,6 +28492,7 @@ revoke execute on function aiq.land_graph_fanout(uuid)                     from 
 revoke execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) from public;
 revoke execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) from public;
 revoke execute on function aiq.undo_distinct(uuid, text)                   from public;
+revoke execute on function aiq.resolution_candidates(text, text, uuid, int, int, real) from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
 
@@ -28431,6 +28505,7 @@ grant execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) t
 -- Its other half, on the same reasoning.
 grant execute on function aiq.record_distinct(uuid, uuid, text, text, jsonb) to worker;
 grant execute on function aiq.undo_distinct(uuid, text)                   to worker;
+grant execute on function aiq.resolution_candidates(text, text, uuid, int, int, real) to worker;
 
 -- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
 -- their own policies and the grant is safe.
