@@ -14517,14 +14517,10 @@ revoke execute on function workflow.plan_probe(text, int)    from authenticated;
 --                       (takes a LIST of keys; each resolves independently)
 --   FUZZY LOOKUP     -> pg_trgm over node_keys ONLY, never the data plane
 --   SEMANTIC         -> pgvector over the embedding table for one entity type
---   GRAPH depth 1    -> GRAPH_TABLE over the property graph below
---   GRAPH depth n>1  -> WITH RECURSIVE over edges. PG19 has no quantified path
---                       patterns -- confirmed empirically, brief.md §3 -- but
---                       that is a narrower fact than "GRAPH_TABLE cannot do
---                       depth n": a FIXED-LENGTH chain works and carries the
---                       relations and weights (see graph_walk's note). The
---                       recursion is kept because the walk is depth-unbounded
---                       when called directly; the equivalence is asserted.
+--   GRAPH depth 1    -> a join over aiq.edges_current, both directions
+--   GRAPH depth n>1  -> WITH RECURSIVE over edges_current. No SQL/PGQ: it was
+--                       withdrawn from PostgreSQL 19 before GA, and the
+--                       extension runs on 18 (section 5 says what that cost).
 --   SEARCH           -> RRF fusion of the lexical and semantic ranks
 --   <ordinary SQL>   -> read-only passthrough, SECURITY INVOKER (brief.md §3);
 --                       no keyword, recognised by how the statement starts
@@ -14897,7 +14893,7 @@ create index if not exists idx_edges_relation on aiq.edges (relation);
 -- were four: this view said `valid_to is null or valid_to > now()`, catalogue,
 -- reliability, standing and the ingestion upsert said `valid_to is null`, the
 -- compiled traversals applied a window only when a caller passed `as_of`, and
--- graph_neighbors, graph_walk and the property graph applied none -- so a
+-- graph_neighbors, graph_walk and a since-removed property graph applied none -- so a
 -- retracted edge went on answering every walk and every GRAPH query while
 -- this view, the one place anybody looked, correctly hid it (REM-51).
 -- Immutable and SQL, so the planner inlines it and a view that calls it costs
@@ -15274,45 +15270,30 @@ create or replace trigger trg_check_edge_catalogue
     for each row execute function aiq.check_edge_catalogue();
 
 -- ------------------------------------------------------------
--- 5. The property graph (SQL/PGQ). Read-only catalog metadata over the
---    tables above -- no second copy of the graph, no writers (D8, invariant 7).
---    Hard-link junctions get added here as EDGE TABLES by each consumer that
---    wants them walkable; nothing about that is stored twice either.
--- ------------------------------------------------------------
--- Two PG19 syntax constraints, both found by the parser rejecting the
--- obvious form, and both worth stating because neither is guessable:
---   * KEY must precede SOURCE/DESTINATION in an edge table definition.
---   * SOURCE/DESTINATION ... REFERENCES takes the vertex table's ALIAS
---     (its unqualified name as declared above), never a schema-qualified
---     name -- `references aiq.nodes (id)` is a syntax error.
---   * The KEY column is NOT implicitly a property. Selecting a.id in a
---     GRAPH_TABLE COLUMNS clause fails with `property "id" does not exist`
---     unless id is also listed in PROPERTIES. Since every useful query needs
---     the node id to join back to the typed tables, id is declared twice
---     here by necessity, not redundancy.
--- Dropped first: PG19 accepts `drop property graph if exists` but has no
--- `create ... if not exists`, so this is the only idempotent spelling.
--- A property graph is a declaration over tables and holds no data of its
--- own, so recreating it costs nothing.
+-- 5. No property graph. There was one, aiq.knowledge_graph, a SQL/PGQ
+--    declaration over aiq.nodes and aiq.edges_current that graph_neighbors'
+--    depth 1 read through GRAPH_TABLE. SQL/PGQ was withdrawn from PostgreSQL
+--    19 before GA (October 2026), and nothing else in PostgreSQL has it, so
+--    an extension that declared one ran on one beta and nowhere else.
 --
--- OVER aiq.edges_current, NOT aiq.edges. Declared over the table, every
--- GRAPH_TABLE match -- graph_neighbors' depth 1 and any caller writing PGQ by
--- hand -- returned retracted edges, because the graph carried the history and
--- nothing in a MATCH filters it (REM-51). PG19 accepts a view as an element
--- table, and the view is security_invoker, so RLS still applies as the caller.
--- History stays reachable through aiq.edges; "what holds now" is what a graph
--- someone walks should mean.
-drop property graph if exists aiq.knowledge_graph;
-create property graph aiq.knowledge_graph
-    vertex tables (
-        aiq.nodes key (id) label node properties (id, entity_type, org_id, summary)
-    )
-    edge tables (
-        aiq.edges_current key (id)
-            source key (src_id) references nodes (id)
-            destination key (dst_id) references nodes (id)
-            label related properties (relation, weight, org_id)
-    );
+--    It cost little to lose. The graph was catalog metadata over the same
+--    two tables, never a second copy (D8, invariant 7), and every query
+--    through it joined back to aiq.edges_current for the columns it could not
+--    project; depth >1 never used it, because PG19 rejected path quantifiers.
+--    graph_neighbors now reads aiq.edges_current directly in both directions.
+--
+--    A database built on a PG19 beta still has the object, and its grant
+--    names it. Dropped here, through EXECUTE so a server without the syntax
+--    never parses it; the catalog check is version-proof where a
+--    server_version test would not be.
+-- ------------------------------------------------------------
+do $$
+begin
+    if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'aiq' and c.relname = 'knowledge_graph') then
+        execute 'drop property graph aiq.knowledge_graph';
+    end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- 6. Projection: keeping nodes/node_keys in sync with typed tables.
@@ -15844,7 +15825,7 @@ $$ language plpgsql;
 -- THREE PROPERTIES, and each one is the reason a column exists.
 --
 -- 1. A MERGE IS A RECORD, NOT AN INDEX BEHAVIOUR. Nothing here changes what
---    graph_neighbors, graph_walk or GRAPH_TABLE traverse. That is deliberate
+--    graph_neighbors or graph_walk traverse. That is deliberate
 --    and it is D11's own wording: resolution is a decision to be inspected and
 --    argued with, and a reader that wants it applied joins `aiq.node_current`
 --    below. Making it implicit would mean every existing traversal quietly
@@ -16221,7 +16202,7 @@ create or replace function aiq.lookup_many(
     left join lateral aiq.lookup(k.key_in, p_fuzzy, p_limit) l on true;
 $$ language sql stable;
 
--- GRAPH depth 1: native SQL/PGQ. Confirmed working on PG19 beta3.
+-- GRAPH depth 1: one hop each way over aiq.edges_current.
 -- The `key` column, and why it is not optional.
 --
 -- This function returned `neighbor_id` and `summary` and no key, and the
@@ -16247,16 +16228,12 @@ create or replace function aiq.graph_neighbors(
                 relation text, weight real, direction text) as $$
     select * from (
         select b.id, kb.key, b.entity_type, b.summary, e.relation, e.weight, 'out'::text
-        from graph_table (aiq.knowledge_graph
-            match (a is node) -[e is related]-> (b is node)
-            columns (a.id as a_id, b.id as b_id, e.relation as relation, e.weight as weight)
-        ) g
-        join aiq.nodes b on b.id = g.b_id
-        join aiq.edges_current e on e.src_id = g.a_id and e.dst_id = g.b_id and e.relation = g.relation
+        from aiq.edges_current e
+        join aiq.nodes b on b.id = e.dst_id
         left join lateral (select nk.key from aiq.node_keys nk
                             where nk.node_id = b.id and nk.kind = 'canonical'
                             limit 1) kb on true
-        where g.a_id = p_node_id and (p_relation is null or g.relation = p_relation)
+        where e.src_id = p_node_id and (p_relation is null or e.relation = p_relation)
         union all
         -- The reverse question is first-class: no inverse edge is stored, so
         -- it is answered by walking dst_id, and the label comes from the
@@ -16290,35 +16267,10 @@ $$ language sql stable;
 -- GRAPH depth n>1: WITH RECURSIVE. Depth- AND degree-capped, per
 -- graph-identity.md "Non-goals".
 --
--- THE REASON THIS IS NOT SQL/PGQ IS NARROWER THAN IT USED TO SAY, and the
--- distinction is worth keeping straight because "we have property graphs, use
--- them" is the right instinct. What PG19 rejects is a QUANTIFIER:
---
---     match (a is node) -[e is related]->{1,3} (b is node)
---     ERROR:  element pattern quantifier is not supported
---
--- A FIXED-LENGTH chain is accepted, and carries everything this function
--- accumulates -- both endpoints, each hop's relation and each hop's weight:
---
---     match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
---     columns (a.id, c.id, e1.relation, e2.relation, e1.weight, e2.weight)
---
--- So a BOUNDED walk is expressible as a union of N fixed-length patterns, and
--- the dialect's own ceiling is 5. What is not expressible that way is this
--- function's actual contract: it takes p_depth with no upper bound, for the
--- deliberate deep analytic walk the dialect refuses and sends here, and N
--- patterns cannot be written for an N nobody knows until the call. Generating
--- them as dynamic SQL would trade a readable recursion for an EXECUTE, and the
--- cycle guard -- `not nx.id = any(w.seen)` -- would become a quadratic pile of
--- pairwise inequalities per pattern.
---
--- The cost of keeping two mechanisms is that they must agree, which is
--- failure-modes.md §5's "a second mechanism for a solved problem" waiting to
--- happen: graph_neighbors answers depth 1 through GRAPH_TABLE and this answers
--- it through recursion, and nothing compared them. So the equivalence is now
--- ASSERTED rather than assumed -- `dev/tests/evals/scenarios.yaml` iter-01 and
--- iter-13 run the same bounded walk both ways and require the node sets to
--- match, which is the check that makes keeping both honest.
+-- Depth 1 here and graph_neighbors are two mechanisms over the same view, and
+-- failure-modes.md §5 says what two mechanisms owe: agreement, asserted.
+-- `dev/tests/evals/scenarios.yaml` iter-01 runs the same neighbourhood both
+-- ways and requires the node sets to match.
 drop function if exists aiq.graph_walk(uuid, int, text, int);
 create or replace function aiq.graph_walk(
     p_node_id uuid, p_depth int default 2, p_relation text default null,
@@ -16462,21 +16414,10 @@ drop function if exists aiq.semantic(text, vector, int);
 --          -> Index Scan using nodes_pkey on nodes
 --    This is the whole scale argument (10^9 KEYS stays O(log n)) and it holds.
 --
---  * SQL/PGQ is a rewriter onto ordinary joins, exactly as the standard
---    describes. An unfiltered GRAPH_TABLE plans as hash joins over
---    edges + nodes; there is no separate graph engine and no index-free
---    adjacency to hope for.
---
---  * Predicates push down THROUGH GRAPH_TABLE into the base-table indexes,
---    and -- the part worth knowing -- it does not matter whether the
---    predicate is written inside the MATCH pattern
---    (`match (a is node where a.id = $1)`) or applied to the GRAPH_TABLE
---    result (`where g.a_id = $1`). Both produce:
---        Index Only Scan using nodes_pkey  (seed)
---        Bitmap Index Scan on idx_edges_src (expand)
---    So callers need no special construction discipline, and the reverse
---    direction is served by idx_edges_dst the same way. This is a direct
---    consequence of PGQ being a rewriter: the ordinary planner optimises it.
+--  * (Two results here concerned SQL/PGQ: that GRAPH_TABLE planned as
+--    ordinary joins, and that predicates pushed through it into the edge
+--    indexes. Both stopped mattering when the property graph was removed;
+--    section 5.)
 --
 --  * Inclusion policy is enforced at projection time: with
 --    include_where = 'n.is_public', a private company got no node, no key and
@@ -16529,10 +16470,6 @@ drop function if exists aiq.semantic(text, vector, int);
 --    claim to be coherence-ranked, and applied its row cap to a uuid-ordered
 --    result.
 --
---  * SQL/PGQ is RLS-filtered through the property graph, which was worth
---    checking rather than assuming: a property graph is a separate privilege
---    object compiled to joins, and neither fact settles whether the base
---    tables' policies still apply. They do (dev/tests/query/06 §3).
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -19459,7 +19396,7 @@ select aiq.register_schema_example('p8ql', 'self', 'p8ql',
 -- is served as `verified: false` rather than as authority.
 select aiq.register_schema_example('graph', 'neighbours', 'p8ql',
     'GRAPH "ACME"',
-    'Depth 1 is native SQL/PGQ. Both directions come back; an inbound edge is '
+    'Depth 1 is one hop each way. Both directions come back; an inbound edge is '
     'labelled with the catalogue''s inverse label, and that label works as a '
     'TYPE filter too.', 10);
 select aiq.register_schema_example('graph', 'typed-walk', 'p8ql',
@@ -19771,13 +19708,6 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
                 aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to authenticated;
 
--- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
--- tables it is defined over. Granting SELECT on nodes and edges is NOT
--- sufficient: GRAPH mode fails with "permission denied for property graph
--- knowledge_graph" until this is granted too. Not guessable -- found by a
--- REST call failing after every table grant was already in place.
-grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
-
 -- Embedding spaces are created DYNAMICALLY by register_embedding_space(), so
 -- they cannot be listed here -- and a table created after this file runs
 -- inherits no grants, making every SEMANTIC/SEARCH call against a newly
@@ -19820,8 +19750,8 @@ grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 -- aiq.edges_current is security_invoker and calls this, so a reader of the
--- view needs it. Without the grant the view, and every GRAPH query through the
--- property graph over it, fails for exactly the roles it is granted to.
+-- view needs it. Without the grant the view, and every GRAPH query over it,
+-- fails for exactly the roles it is granted to.
 grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
     to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;

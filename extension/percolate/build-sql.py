@@ -143,10 +143,6 @@ def check_idempotent(path, text):
          "policy", "drop policy if exists {} "),
         (re.compile(r'add[ \t]+constraint[ \t]+([\w]+)', re.I),
          "constraint", "drop constraint if exists {}"),
-        # PG19 accepts `drop property graph if exists` and has no
-        # `create ... if not exists`, so this is the only idempotent spelling.
-        (re.compile(r'^[ \t]*create[ \t]+property[ \t]+graph[ \t]+([\w.]+)', re.I | re.M),
-         "property graph", "drop property graph if exists {};"),
     ]:
         for m in pat.finditer(text):
             if not live(m.start()):

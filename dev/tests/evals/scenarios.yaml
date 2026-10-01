@@ -613,8 +613,8 @@ scenarios:
   - id: iter-01
     category: iterated-query
     title: The two traversal mechanisms agree at depth 1
-    asks: "Depth 1 goes through the property graph and depth 2 does not. Do they agree?"
-    mechanism: "aiq.graph_neighbors (GRAPH_TABLE over aiq.knowledge_graph) vs aiq.graph_walk (WITH RECURSIVE)"
+    asks: "Depth 1 is a join and depth 2 is a recursion. Do they agree?"
+    mechanism: "aiq.graph_neighbors (a join over aiq.edges_current) vs aiq.graph_walk (WITH RECURSIVE)"
     catches: [second-mechanism, wrong-answer-not-error]
     role: app_owner
     check:
@@ -627,8 +627,8 @@ scenarios:
         is: "true"
         because: >-
           THIS IS THE CHECK THAT MAKES TWO MECHANISMS HONEST. `GRAPH DEPTH 1`
-          is answered by GRAPH_TABLE over the property graph; `DEPTH 2` and up
-          by WITH RECURSIVE. Two code paths that must agree about the same
+          is answered by a join over the current edges; `DEPTH 2` and up by
+          WITH RECURSIVE. Two code paths that must agree about the same
           question, agreeing only by coincidence, is failure-modes.md §5's
           "second mechanism for a solved problem" -- and nothing had ever
           compared them. Depth 1 is the overlap, so it is the place the
@@ -642,51 +642,6 @@ scenarios:
             union select inverse_label from aiq.relation_types)
         is: "0"
         because: "the relation a walk REPORTS has to be one the caller can write back as `TYPE`, or the result cannot be fed into the next query -- which was a real round-trip bug, not a hypothetical"
-
-  - id: iter-02
-    category: iterated-query
-    title: A bounded walk is expressible over the property graph, and matches
-    asks: "PG19 has no path quantifier. Does that mean SQL/PGQ cannot do two hops?"
-    mechanism: "GRAPH_TABLE fixed-length chain vs aiq.graph_walk -- schema.sql's note on graph_walk"
-    catches: [second-mechanism, version-skew]
-    role: app_owner
-    check:
-      - name: a quantifier is genuinely rejected
-        sql: |
-          select count(*) from graph_table (aiq.knowledge_graph
-            match (a is node) -[e is related]->{1,3} (b is node)
-            columns (a.id as a_id)) g
-        raises: "quantifier is not supported"
-        because: "this is the fact the implementation is built on, and it is worth re-asserting rather than trusting: if PG19 ever gains quantified paths, the recursion stops being the only option and this check says so"
-      - name: but a FIXED-LENGTH chain is not
-        sql: |
-          select count(*) > 0 from graph_table (aiq.knowledge_graph
-            match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
-            columns (a.id as a_id, c.id as c_id)) g
-        is: "true"
-        because: >-
-          The narrower true statement. "GRAPH_TABLE cannot do depth n" is what
-          the spec used to imply and it is wrong -- a bounded walk IS
-          expressible over the property graph, and the reason the recursion
-          stays is that graph_walk's contract is depth-unbounded, not that
-          SQL/PGQ cannot reach two hops.
-      - name: and it finds the same two-hop nodes the recursive walk does
-        sql: |
-          with pgq as (
-            select distinct kc.key
-            from graph_table (aiq.knowledge_graph
-              match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
-              columns (a.id as a_id, c.id as c_id)) g
-            join aiq.node_keys ka on ka.node_id = g.a_id and ka.kind = 'canonical'
-            join aiq.node_keys kc on kc.node_id = g.c_id and kc.kind = 'canonical'
-            where ka.key = 'sig-114 hepatic injury' and g.c_id <> g.a_id),
-          rec as (
-            select distinct w.key
-            from aiq.graph_walk((select node_id from aiq.lookup('sig-114')), 2) w)
-          select count(*) from (
-            select key from pgq except select key from rec) missing
-        is: "0"
-        because: "every node the property graph reaches in two hops must be in the recursive walk's answer; a node one mechanism finds and the other does not is the disagreement the pair exists to be checked for"
 
   - id: iter-03
     category: iterated-query

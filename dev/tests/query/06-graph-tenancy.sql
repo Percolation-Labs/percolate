@@ -10,8 +10,10 @@
 --   * a key is a second row that can outlive or out-see the node it names;
 --   * an edge has TWO endpoints and can disclose that an invisible node
 --     exists merely by being visible itself;
---   * GRAPH_TABLE is a separate privilege object, so every table grant can be
---     correct while the walk is still refused -- or, worse, still allowed.
+--   * the depth-1 read joins edges to nodes for the caller, so a mistake in
+--     that join, not in any policy, is enough to show one tenant another's
+--     edge. (It was a GRAPH_TABLE match over a property graph, a separate
+--     privilege object, until SQL/PGQ left PostgreSQL 19.)
 --
 -- Reads the committed sample (`dev/init/04-graph-sample.sql`), which carries
 -- two tenants, a shared tier, and one edge deliberately strung between the two
@@ -104,36 +106,30 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 3. GRAPH_TABLE IS RLS-FILTERED, NOT JUST THE TABLES UNDER IT.
+-- 3. DEPTH 1 IS RLS-FILTERED: IT RETURNS EXACTLY THE EDGES THE CALLER CAN SEE.
 --
--- A property graph is its own catalog object with its own privilege, and it
--- compiles to joins over the base tables -- so the question "do the base
--- tables' policies still apply through it" has an answer that is not
--- guessable from either fact. It is the one place where a graph could
--- silently become a privilege escalation: a pattern match that reads
--- unfiltered rows would leak every tenant to every caller, and would look
--- exactly like a correctly-working graph query.
+-- Every node the caller can see, walked one hop out, must give the same count
+-- as the caller's RLS-filtered view of the current edges. More would be a
+-- leak that looks exactly like a correctly working graph query.
 -- ---------------------------------------------------------------------
 do $$
-declare v_via_graph int; v_via_table int;
+declare v_via_fn int; v_via_table int;
 begin
-    select count(*) into v_via_graph from graph_table (aiq.knowledge_graph
-        match (a is node) -[e is related]-> (b is node)
-        columns (a.id as a_id, b.id as b_id));
-    select count(*) into v_via_table from aiq.edges;
+    select count(*) into v_via_fn
+      from aiq.nodes n, lateral aiq.graph_neighbors(n.id, null, 100000) g
+     where g.direction = 'out';
+    select count(*) into v_via_table from aiq.edges_current;
 
-    if v_via_graph <> v_via_table then
+    if v_via_fn <> v_via_table then
         raise exception
-            'GRAPH_TABLE returned % edges where the RLS-filtered table returns % '
-            '-- the property graph is not subject to the policies on the tables '
-            'it is defined over', v_via_graph, v_via_table;
+            'graph_neighbors returned % outbound edges where the RLS-filtered view '
+            'returns %', v_via_fn, v_via_table;
     end if;
-    if v_via_graph = 0 then
+    if v_via_fn = 0 then
         raise exception 'the caller can see no edges at all, so this assertion '
                         'proves nothing -- the fixture or the grants are wrong';
     end if;
-    raise notice 'query/06: GRAPH_TABLE is filtered by the same policies (% edges)',
-        v_via_graph;
+    raise notice 'query/06: depth 1 is filtered by the same policies (% edges)', v_via_fn;
 end $$;
 
 reset role;
