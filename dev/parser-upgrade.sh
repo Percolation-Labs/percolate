@@ -35,6 +35,9 @@ EXT=/usr/share/postgresql/19/extension
 cleanup() { docker rm -f -v "$C" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
+# Pulled first: a published tag can be rebuilt (19-0.2.20 was, on 1 October), and
+# `docker run` would start whatever copy this machine cached.
+docker pull -q "percolationlabs/percolate-postgres:19-$PREV" >/dev/null
 docker run -d --name "$C" -e POSTGRES_USER=p8 -e POSTGRES_PASSWORD=p8 \
     -e POSTGRES_DB=percolate "percolationlabs/percolate-postgres:19-$PREV" >/dev/null
 # TCP, for the reason dev/ci-database.sh spells out on its readiness loop.

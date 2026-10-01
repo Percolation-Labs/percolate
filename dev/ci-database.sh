@@ -86,6 +86,7 @@ if [ -n "${IMAGE:-}" ]; then
     # is the pair -- this tree's parser under this tree's schema -- in two
     # commands rather than none. CI passes nothing and gets the published
     # image, which is the run it is meant to be reporting on.
+    IMAGE_OVERRIDE=1
     echo "tree is $V, on $IMAGE (an image override; CI uses the published one)"
 else
     IMAGE="percolationlabs/percolate-postgres:19-${PUB:-}"
@@ -121,6 +122,11 @@ fi
 "$PY" extension/percolate/build-sql.py >/dev/null
 
 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+# PULLED, not just run, unless the image was named by hand. `docker run` uses
+# whatever a runner already holds under a tag, and a published tag can be
+# rebuilt: 19-0.2.20 was republished on 1 October because its first build could
+# not boot, and the runners went on starting the broken copy they had cached.
+[ -n "${IMAGE_OVERRIDE:-}" ] || docker pull -q "$IMAGE" >/dev/null
 # POSTGRES_DB is the TEST database, not `postgres`: the image bootstraps into
 # POSTGRES_DB, and pg_cron refuses `create extension` in any database other than
 # the one cron.database_name names, so the two settings have to agree or the
