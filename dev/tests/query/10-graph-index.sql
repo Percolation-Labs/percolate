@@ -523,6 +523,27 @@ begin
         raise exception 'resolution_candidates proposed another tenant''s node';
     end if;
 
+    -- A decided top proposal is removed, not replaced. Two near-identical shared
+    -- companies, one proposal per name: once the first is decided distinct the
+    -- name has none, where excluding before choosing slid it to the second.
+    insert into demo_t_org (name) values ('Halvard Shipping'), ('Halvard Shipping Co');
+    perform aiq.upsert_graph($g${"nodes": [{"k":"ttype_org","n":"Halvard Shipping Lines"}],
+                                 "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    select s.id, n.id into v_soft, v_cand
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type = 'soft'
+     where s.key = 'halvard shipping lines';
+    select node_id into v_target from aiq.resolution_candidates('ttype_org', null, null, 1000, 1)
+     where soft_id = v_soft;
+    if v_target is null or (select count(*) from aiq.resolution_candidates('ttype_org', null, null, 1000, 2)
+                             where soft_id = v_soft and node_id is not null) <> 2 then
+        raise exception 'fixture: expected two proposals for the Halvard candidate';
+    end if;
+    perform aiq.record_distinct(v_cand, v_target, 'test:10-graph-index', 'decision_model');
+    if exists (select 1 from aiq.resolution_candidates('ttype_org', null, null, 1000, 1)
+                where soft_id = v_soft and node_id is not null) then
+        raise exception 'deciding the top proposal slid the window to the next one';
+    end if;
+
     -- Keyset: one candidate per page, and every unresolved candidate is reached.
     n := 0; v_last := null;
     loop

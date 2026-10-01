@@ -1438,7 +1438,8 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --
 -- Two exclusions, both refusals rather than preferences:
 --   * a pair already decided distinct (aiq.decided_distinct) is not proposed
---     again, which is the point of recording it;
+--     again, which is the point of recording it -- and it is removed from the
+--     top p_k, not replaced by the next proposal;
 --   * a node outside the candidate's org and the shared tier is never
 --     proposed. This is SECURITY DEFINER, so it reads past row security, and a
 --     tenant's candidate matched against another tenant's company would hand
@@ -1482,10 +1483,14 @@ as $$
                and n.entity_type = p.target
                and n.org_id in (rbac.shared_org_id(), p.org_id)
                and similarity(k.key, p.key) >= greatest(p_min_sim, 0.3)
-               and not aiq.decided_distinct(p.cand, n.id)
              order by n.id, similarity(k.key, p.key) desc) best
          order by best.sim desc
-         limit greatest(p_k, 1)) m on true
+         limit greatest(p_k, 1)) m
+        -- Decided pairs are dropped AFTER the top p_k is chosen, not before, so
+        -- a re-run proposes nothing new unless the registry changed. Dropping
+        -- them first made each pass slide to the next p_k: 259 more pairs on a
+        -- second pass over unchanged data, for one more match. Recall is p_k's.
+        on not aiq.decided_distinct(p.cand, m.node_id)
      order by p.id, m.sim desc nulls last;
 $$;
 
