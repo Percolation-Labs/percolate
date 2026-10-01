@@ -43,7 +43,9 @@ q() { docker exec -i "$CONTAINER" psql -U p8 -d "$1" -tAqc "$2"; }
 # target as ORPHAN. The script and control file go into the image's extension
 # directory, which is what dev/reload.sh already does to this container.
 echo "==> building a pristine reference database from $(basename "$SCRIPT")"
-EXT=/usr/share/postgresql/19/extension
+# Asked of the container, not spelled with a major version (it was 19's path
+# while the image was 19, and wrong the day it became 18).
+EXT="$(docker exec "$CONTAINER" pg_config --sharedir)/extension"
 docker cp "$SCRIPT" "$CONTAINER:$EXT/" >/dev/null
 docker cp "$HERE/../extension/percolate/percolate.control" "$CONTAINER:$EXT/" >/dev/null
 docker exec "$CONTAINER" psql -U p8 -d postgres -q \

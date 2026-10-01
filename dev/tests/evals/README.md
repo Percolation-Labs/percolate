@@ -140,10 +140,9 @@ depth — `is: "18"` — which is fixture arithmetic, not a specified guarantee:
 extra edge in the fixture turns it red for no reason anyone cares about. Those
 scenarios now assert what the spec actually promises (one row per node at its
 shortest depth, `path_weight` as the product along the path, the refusals) and,
-in `iter-01` and `iter-02`, that the **property graph** and the recursive walk
-answer the same question the same way. PG19 rejects a path *quantifier* but
-accepts a fixed-length chain — so "GRAPH_TABLE cannot do depth n" was too
-strong, and `schema.sql` now says the narrower true thing.
+in `iter-01`, that depth 1 and the recursive walk answer the same question the
+same way. (`iter-02` asserted what SQL/PGQ could and could not express; it went
+with the property graph when SQL/PGQ left PostgreSQL 19.)
 
 **And sixteen that came from making it a gate (REM-75, 2026-09-12).** The first
 run after the harness was repaired had 16 red scenarios, and they sorted into

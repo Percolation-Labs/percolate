@@ -109,7 +109,7 @@ create temporary table expected (
                   'schema', 'table', 'view', 'column', 'function', 'extension',
                   'yaml_feature', 'registration', 'agent', 'skill',
                   'skill_binding', 'tool_server', 'entity_type',
-                  'graph_example', 'property_graph', 'corpus',
+                  'graph_example', 'corpus',
                   'embedding_space', 'channel')),
     name      text,
     detail    text,
@@ -367,10 +367,6 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- forbids writing node_keys directly, so the absence of this function meant
 -- those branches could only be reached by breaking the rule the schema states.
 ('ai-query-layer','function','aiq.add_node_key','text,text,text','graph-identity.md "Keys": the named exception to invariant 5'),
--- The graph itself is a catalog object with its own privilege, separate from
--- the tables it reads. An audit that checks the tables and not this one passes
--- clean against a deployment where GRAPH mode returns "permission denied".
-('ai-query-layer','property_graph','aiq.knowledge_graph',null,'graph-identity.md D8: SQL/PGQ is the read-only overlay'),
 
 -- Embedding a CORPUS, which is a different function from embedding a query and
 -- was missing until the pipeline was run. A deployment with expand_embed_steps
@@ -907,13 +903,6 @@ select e.*,
     -- The registry row AND the generated storage table it promises.
     when 'embedding_space' then exists (select 1 from aiq.embedding_models where name = e.name)
                             and to_regclass('aiq.emb_' || replace(e.name,'-','_')) is not null
-    -- PG19 puts property graphs in pg_class with their own relkind ('g'),
-    -- which is why they cannot be found by the 'table' branch above.
-    when 'property_graph' then exists (
-        select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-        where n.nspname = split_part(e.name, '.', 1)
-          and c.relname = split_part(e.name, '.', 2)
-          and c.relkind = 'g')
     -- A channel is a row, and this one has to be both present and INERT: an
     -- ingest_workflow on the artifacts channel would start an ingestion run
     -- every time a step offloaded its output. Checking existence alone would

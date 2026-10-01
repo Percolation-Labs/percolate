@@ -4,7 +4,7 @@
 -- and the places disagreeing.
 --
 --   REM-51  "does this edge hold now" had four spellings, and graph_neighbors,
---           graph_walk, the property graph and the compiled traversals used
+--           graph_walk, the (since removed) property graph and the compiled traversals used
 --           none -- so a retracted edge went on answering. A rename made with
 --           the projection triggers off survived the rebuild meant to repair
 --           it, because the rebuild carried its own copy of the projection.
@@ -114,11 +114,6 @@ begin
     if n <> 0 then raise exception 'graph_neighbors (in) returned a retracted edge'; end if;
     select count(*) into n from aiq.graph_walk(v_acme, 1, 'competes_with') w where w.node_id = v_ndlr;
     if n <> 0 then raise exception 'graph_walk crossed a retracted edge'; end if;
-    select count(*) into n from graph_table (aiq.knowledge_graph
-        match (a is node) -[e is related]-> (b is node)
-        columns (a.id as a_id, b.id as b_id, e.relation as rel)) g
-     where g.a_id = v_acme and g.b_id = v_ndlr and g.rel = 'competes_with';
-    if n <> 0 then raise exception 'a GRAPH_TABLE match returned a retracted edge'; end if;
     select count(*) into n from jsonb_array_elements(aiq.query('GRAPH "acme"')->'rows') r
      where r->>'key' = 'ndlr' and r->>'relation' = 'competes_with';
     if n <> 0 then raise exception 'p8ql GRAPH returned a retracted edge'; end if;

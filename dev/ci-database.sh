@@ -175,6 +175,12 @@ done
 # would leave the old extension row pointing at a new .so -- the two halves
 # disagreeing in the one direction nothing detects, since dev/tests/run.sh reads
 # the VERSION to decide what to defer.
+# Where this image keeps extensions, asked of the image rather than spelled
+# with a major version: the paths were /usr/{lib,share}/postgresql/19/... while
+# the image was 19, and every one of them was wrong the day it became 18.
+EXTDIR="$(docker exec "$CONTAINER" pg_config --sharedir)/extension"
+LIBDIR="$(docker exec "$CONTAINER" pg_config --pkglibdir)"
+
 if [ -n "${PARSER_DIST:-}" ]; then
     [ -d "$PARSER_DIST" ] || { echo "PARSER_DIST=$PARSER_DIST is not a directory" >&2; exit 1; }
     PV=$(sed -n "s/^default_version = '\(.*\)'/\1/p" "$PARSER_DIST/percolate_parser.control")
@@ -185,21 +191,21 @@ if [ -n "${PARSER_DIST:-}" ]; then
     [ -f "$PARSER_DIST/percolate_parser.so" ] || {
         echo "$PARSER_DIST has no percolate_parser.so" >&2; exit 1; }
     docker cp "$PARSER_DIST/percolate_parser.so" \
-              "$CONTAINER:/usr/lib/postgresql/19/lib/" >/dev/null
+              "$CONTAINER:$LIBDIR/" >/dev/null
     # The old script is REMOVED, not left beside the new one. Two installable
     # versions of an extension is not an error Postgres reports -- it is an
     # offer, and build-image.sh carries the same rm for the same reason.
-    docker exec "$CONTAINER" bash -c \
-        'rm -f /usr/share/postgresql/19/extension/percolate_parser--*.sql'
+    docker exec -e EXTDIR="$EXTDIR" "$CONTAINER" bash -c \
+        'rm -f "$EXTDIR"/percolate_parser--*.sql'
     docker cp "$PARSER_DIST/percolate_parser--$PV.sql" \
-              "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+              "$CONTAINER:$EXTDIR/" >/dev/null
     # And the upgrade paths to it, committed rather than built (write-upgrades.py, REM-192), so the
     # image under test offers what a released one will.
     for up in extension/percolate_parser/sql/percolate_parser--*--"$PV".sql; do
-        [ -e "$up" ] && docker cp "$up" "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+        [ -e "$up" ] && docker cp "$up" "$CONTAINER:$EXTDIR/" >/dev/null
     done
     docker cp "$PARSER_DIST/percolate_parser.control" \
-              "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+              "$CONTAINER:$EXTDIR/" >/dev/null
     POFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \
         "select default_version from pg_available_extensions where name='percolate_parser'")
     [ "$POFFERED" = "$PV" ] || {
@@ -212,9 +218,9 @@ fi
 # only the script installs the image's version and reports a green run against
 # code you did not write. reload.sh learned this the expensive way.
 docker cp "extension/percolate/sql/percolate--$V.sql" \
-          "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+          "$CONTAINER:$EXTDIR/" >/dev/null
 docker cp extension/percolate/percolate.control \
-          "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+          "$CONTAINER:$EXTDIR/" >/dev/null
 OFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \
     "select default_version from pg_available_extensions where name='percolate'")
 [ "$OFFERED" = "$V" ] || { echo "image offers percolate $OFFERED, tree is $V" >&2; exit 1; }

@@ -204,13 +204,6 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
                 aiq.node_resolutions, aiq.node_distinctions, aiq.node_current to authenticated;
 
--- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
--- tables it is defined over. Granting SELECT on nodes and edges is NOT
--- sufficient: GRAPH mode fails with "permission denied for property graph
--- knowledge_graph" until this is granted too. Not guessable -- found by a
--- REST call failing after every table grant was already in place.
-grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
-
 -- Embedding spaces are created DYNAMICALLY by register_embedding_space(), so
 -- they cannot be listed here -- and a table created after this file runs
 -- inherits no grants, making every SEMANTIC/SEARCH call against a newly
@@ -253,8 +246,8 @@ grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 -- aiq.edges_current is security_invoker and calls this, so a reader of the
--- view needs it. Without the grant the view, and every GRAPH query through the
--- property graph over it, fails for exactly the roles it is granted to.
+-- view needs it. Without the grant the view, and every GRAPH query over it,
+-- fails for exactly the roles it is granted to.
 grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
     to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;

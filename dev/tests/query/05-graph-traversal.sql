@@ -31,50 +31,46 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 1. DEPTH 1 IS NATIVE SQL/PGQ, AND IT AGREES WITH THE TABLE IT READS.
+-- 1. DEPTH 1 AGREES WITH THE TABLE IT READS, AND THERE IS NO SECOND COPY.
 --
--- graph-identity.md verification, last bullet: "A PGQ MATCH on the authored
--- relation and a CTE walk on edges return the same id pairs for a fixture."
--- D8/invariant 7 say the property graph is a read-only view over those same
--- rows -- so any disagreement means it has become a second copy, which is the
--- one thing the whole design refuses. The rows are aiq.edges_current's: the
--- graph is declared over the edges that hold (REM-51), not the history.
+-- graph-identity.md verification: depth 1 and the edge table return the same
+-- id pairs for a fixture. Depth 1 was a GRAPH_TABLE match over a property
+-- graph until SQL/PGQ left PostgreSQL 19 (schema.sql section 5); it is a join
+-- over aiq.edges_current now, and what is asserted is the function a caller
+-- uses, over every node, rather than the mechanism under it.
 -- ---------------------------------------------------------------------
 do $$
-declare v_pgq int; v_tbl int;
+declare v_fn int; v_tbl int;
 begin
-    select count(*) into v_pgq from (
-        select a_id, b_id from graph_table (aiq.knowledge_graph
-            match (a is node) -[e is related]-> (b is node)
-            columns (a.id as a_id, b.id as b_id))
+    select count(*) into v_fn from (
+        select n.id, g.neighbor_id from aiq.nodes n,
+               lateral aiq.graph_neighbors(n.id, null, 100000) g
+         where g.direction = 'out'
         except
         select src_id, dst_id from aiq.edges_current) x;
     select count(*) into v_tbl from (
         select src_id, dst_id from aiq.edges_current
         except
-        select a_id, b_id from graph_table (aiq.knowledge_graph
-            match (a is node) -[e is related]-> (b is node)
-            columns (a.id as a_id, b.id as b_id))) y;
-    if v_pgq <> 0 or v_tbl <> 0 then
+        select n.id, g.neighbor_id from aiq.nodes n,
+               lateral aiq.graph_neighbors(n.id, null, 100000) g
+         where g.direction = 'out') y;
+    if v_fn <> 0 or v_tbl <> 0 then
         raise exception
-            'GRAPH_TABLE and aiq.edges_current disagree (% pairs only in the graph, % '
-            'only in the view) -- the property graph has stopped being a view '
-            'over the current edges', v_pgq, v_tbl;
+            'graph_neighbors and aiq.edges_current disagree (% pairs only from the '
+            'function, % only in the view)', v_fn, v_tbl;
     end if;
-    raise notice 'query/05: the property graph and aiq.edges_current return the same pairs';
+    raise notice 'query/05: graph_neighbors depth 1 returns exactly the current edges';
 end $$;
 
--- The property graph has no writers, ever (invariant 7). It is catalog
--- metadata, not a relation, and Postgres enforces that for us -- asserted
--- because the day it becomes writable is the day dual-write becomes possible.
+-- No property graph survives in aiq: a database built on a PG19 beta had
+-- aiq.knowledge_graph, and the upgrade drops it. relkind 'g' exists only on
+-- servers that had SQL/PGQ, so on any other the count is trivially zero.
 do $$
 begin
-    begin
-        execute 'insert into aiq.knowledge_graph values (1)';
-        raise exception 'the property graph accepted a write (invariant 7)';
-    exception when others then null;
-    end;
-    raise notice 'query/05: the property graph refuses writes';
+    if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'aiq' and c.relkind = 'g') then
+        raise exception 'a property graph is still declared in aiq';
+    end if;
 end $$;
 
 -- ---------------------------------------------------------------------

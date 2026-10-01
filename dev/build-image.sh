@@ -13,7 +13,7 @@ ROOT="$(cd .. && pwd)"
 # this crate builds by default; every other spelling of 19 in this script -- the
 # image tag, the `cargo pgrx init` flag, the `--features` flag, the path the
 # compiled .so is copied out of -- was an independent copy of that one decision,
-# and `specs/ai-query-layer/pg17-compat.md` is a live spec for changing it. A
+# and `specs/postgres-versions.md` says what changing it takes. A
 # major bump that misses one of them produces a .so built for one server and
 # installed into another's library directory, which is not a thing a test
 # catches: it is a load error on a user's machine.

@@ -168,7 +168,9 @@ docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/d
 # run ALTER EXTENSION UPDATE, which is what the second database now does too.
 # The files go into the extension directory the way dev/upgrade-from-every-
 # release.sh puts them there, the old one from the tag.
-EXT=/usr/share/postgresql/19/extension
+# Asked of the container, not spelled with a major version (it was 19's path
+# while the image was 19, and wrong the day it became 18).
+EXT="$(docker exec "$CONTAINER" pg_config --sharedir)/extension"
 chmod 644 "$OLD_SQL"   # mktemp makes it 0600 and docker cp keeps the mode
 docker cp "$OLD_SQL" "$CONTAINER:$EXT/percolate--$FROM.sql" >/dev/null
 docker cp "$NEW_SQL" "$CONTAINER:$EXT/" >/dev/null
