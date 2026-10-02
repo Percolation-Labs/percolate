@@ -331,10 +331,10 @@ images would be separate builds of the same base and separate tags to keep in
 step. `ENTRYPOINT ["percolate"]`, and the command selects the service:
 
 ```yaml
-content: { image: percolationlabs/percolate-core:0.2.4, command: ["content","serve"] }
-agent:   { image: percolationlabs/percolate-core:0.2.4, command: ["agent","serve"] }
-gateway: { image: percolationlabs/percolate-core:0.2.4, command: ["agent","gateway"] }
-worker:  { image: percolationlabs/percolate-core:0.2.4, command: ["worker","--queue","http"] }
+content: { image: percolationlabs/percolate-core:0.2.5, command: ["content","serve"] }
+agent:   { image: percolationlabs/percolate-core:0.2.5, command: ["agent","serve"] }
+gateway: { image: percolationlabs/percolate-core:0.2.5, command: ["agent","gateway"] }
+worker:  { image: percolationlabs/percolate-core:0.2.5, command: ["worker","--queue","http"] }
 ```
 
 Neither delegation nor scheduled runs need the gateway. `agent serve` answers
