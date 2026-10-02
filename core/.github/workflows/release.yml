@@ -498,7 +498,14 @@ jobs:
           branch="percolate-core-$V"
           git checkout -q -b "$branch"
           sed -i "s/^core = \"[0-9.]*\"/core = \"$V\"/" versions.toml
-          git grep -l -E "percolate-core:[0-9]+\.[0-9]+\.[0-9]+" -- . | while read -r f; do
+          # PINS, NOT RECORDS. A card log, a dated probe or a demo says what was true
+          # when it was written; moving the version inside it makes it false. The
+          # list is p8-subsystems' own (the gate that refuses such a rewrite prints
+          # it), so this sweep and that gate cannot disagree. Without it the 0.2.4
+          # and 0.2.5 pin PRs rewrote nine cards, a probe and the demo, and failed
+          # that gate (2 October).
+          mapfile -t records < <(python3 dev/a-sweep-moves-pins-not-records.py --record-paths | sed 's|^|:(exclude)|')
+          git grep -l -E "percolate-core:[0-9]+\.[0-9]+\.[0-9]+" -- . "${records[@]}" | while read -r f; do
             sed -i -E "s/percolate-core:[0-9]+\.[0-9]+\.[0-9]+/percolate-core:$V/g" "$f"
           done
           git diff --quiet && { echo "p8-subsystems already pins $V"; exit 0; }
