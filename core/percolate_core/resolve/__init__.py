@@ -45,7 +45,6 @@ back the page, and a slow model holds no locks.
 
 from __future__ import annotations
 
-import json
 from collections import OrderedDict
 from typing import Any
 
@@ -85,7 +84,13 @@ async def _page(spec: dict, after: str | None) -> "OrderedDict[str, dict]":
 
 
 async def _write(sql: str, *args: Any) -> bool:
-    """One decision, one transaction. False when the database refused it."""
+    """One decision, one transaction. False when the database refused it.
+
+    Evidence goes in as a dict. The pool's jsonb codec encodes it (core
+    identity.py); a string already encoded is encoded again, and the first live
+    run on production wrote every ledger row's evidence as a JSON string inside
+    an array, where `evidence->'p'` finds nothing.
+    """
     try:
         async with as_service() as conn:
             await conn.execute(sql, *args)
@@ -133,7 +138,7 @@ async def resolve(spec: dict, ctx: dict | None = None, jev: Jev | None = None) -
                 if above:
                     ok = await _write(
                         "select aiq.promote_soft_node($1::uuid, $2::uuid, $3, $4, $5::jsonb)",
-                        sid, above[0][1], decided_by, TIER, json.dumps(evidence))
+                        sid, above[0][1], decided_by, TIER, evidence)
                     receipt["promoted" if ok else "not_written"] += 1
                     continue
                 noes = [k for k, v in p.items() if v < reject]
@@ -141,7 +146,7 @@ async def resolve(spec: dict, ctx: dict | None = None, jev: Jev | None = None) -
                     ok = await _write(
                         "select aiq.record_distinct($1::uuid, $2::uuid, $3, $4, $5::jsonb)",
                         c["candidate_node_id"], node, decided_by, TIER,
-                        json.dumps({**evidence, "p": p[node]}))
+                        {**evidence, "p": p[node]})
                     receipt["distinct" if ok else "not_written"] += 1
                 if len(noes) < len(p):
                     receipt["undecided"] += 1
