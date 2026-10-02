@@ -47,7 +47,11 @@ class Conn:
         return self.pages.pop(0) if self.pages else []
 
     async def execute(self, sql, *args):
-        if any(a in self.refuse for a in args):
+        # The pool's jsonb codec json.dumps whatever it is given, so evidence
+        # must arrive as a mapping: a string here is encoded twice in production.
+        if not isinstance(args[-1], dict):
+            raise TypeError(f"evidence must be a dict, got {type(args[-1]).__name__}")
+        if any(a in self.refuse for a in args if isinstance(a, str)):
             raise RuntimeError("refused")
         self.calls.append((sql.split("(")[0].replace("select ", ""), args))
 
@@ -95,7 +99,7 @@ class Policy(unittest.TestCase):
                 continue
             self.assertEqual(args[2], "percolate-core:resolve:jev-test")
             self.assertEqual(args[3], "decision_model")
-            ev = json.loads(args[4])
+            ev = args[4]
             self.assertEqual((ev["model"], ev["question"], ev["accept"]), ("jev-test", "Same company?", 0.8))
 
     def test_pages_by_keyset_until_empty(self):
