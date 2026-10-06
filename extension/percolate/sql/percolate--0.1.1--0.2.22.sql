@@ -33465,8 +33465,8 @@ comment on table claims.frames is
 
 create table if not exists claims.questions (
     id          uuid primary key default uuidv7(),
-    subject     text not null check (length(subject) > 0),
-    outcome     text not null check (length(outcome) > 0),
+    subject     text check (length(subject) > 0),
+    outcome     text check (length(outcome) > 0),
     refinements jsonb not null default '{}'::jsonb check (jsonb_typeof(refinements) = 'object'),
     refines     uuid references claims.questions(id),
     key         text not null unique,
@@ -33474,8 +33474,25 @@ create table if not exists claims.questions (
     check ((refinements = '{}'::jsonb) = (refines is null))
 );
 comment on table claims.questions is
-    'The question two claims must share before they can be compared, minted from a frame''s subject and outcome.';
+    'The question two claims must share before they can be compared, minted from a frame''s subject and outcome, or from a phrasing alone (graph.md §7).';
 create index if not exists questions_refines on claims.questions (refines) where refines is not null;
+-- A question minted from a phrasing (specs/build-knit-dream/coalescing.md): a polar question in plain words, with no
+-- frame yet. A database installed before carries subject and outcome as required columns, so they are relaxed here
+-- and the rule moves to a check: a question has a frame (subject and outcome) or a phrasing, and a phrased question
+-- is keyed by its normalised words.
+alter table claims.questions add column if not exists phrasing text;
+alter table claims.questions alter column subject drop not null;
+alter table claims.questions alter column outcome drop not null;
+do $$
+begin
+    if not exists (select 1 from pg_constraint where conname = 'questions_framed_or_phrased'
+                                               and conrelid = 'claims.questions'::regclass) then
+        alter table claims.questions add constraint questions_framed_or_phrased check (
+            (subject is not null and outcome is not null)
+            or (phrasing is not null and length(phrasing) between 10 and 200 and right(phrasing, 1) = '?'
+                and key = 'q:' || claims.normalised(phrasing)));
+    end if;
+end $$;
 
 create table if not exists claims.answered (
     id          bigint generated always as identity primary key,
@@ -33486,10 +33503,13 @@ create table if not exists claims.answered (
     op          text not null default 'assert' check (op in ('assert', 'retract')),
     evidence    uuid not null references research.revisions(id) on delete cascade,
     claim_key   text not null,
-    tx          bigint not null references claims.tx(id)
+    tx          bigint not null references claims.tx(id),
+    p           real check (p between 0 and 1)
 );
 comment on table claims.answered is
     'The stance a claim takes on a question: computed from its frame when a revision is projected, or recorded when a person answers whether a reworded claim is still the same one.';
+-- The judge's probability for a proposed stance (coalescing.md §5.4), when a model proposed it; null otherwise.
+alter table claims.answered add column if not exists p real check (p between 0 and 1);
 create index if not exists answered_question on claims.answered (question_id, claim_id, id desc);
 create index if not exists answered_claim on claims.answered (claim_id);
 create index if not exists answered_evidence on claims.answered (evidence);
@@ -33609,6 +33629,153 @@ create policy questions_readable on claims.questions for select using (claims.qu
 grant execute on function claims.question_readable(uuid) to authenticated;
 grant select on claims.frames, claims.questions, claims.answered to authenticated;
 revoke all on function claims.question_for(text, text, jsonb, bigint), claims.project_frames(uuid) from public;
+
+-- ------------------------------------------------------------
+-- 10a. Coalescing (specs/build-knit-dream/coalescing.md §5). A question minted from a phrasing, a stance an agent
+--      proposes and the writer confirms, its withdrawal, and the web of questions that more than one work answers.
+--      Coalescing never merges claims: it joins them through the questions they answer.
+-- ------------------------------------------------------------
+
+-- The question a polar phrasing names, minted when none has those normalised words. Anyone who may write research
+-- may pose one. A posed question is readable only once a readable claim answers it (claims.question_readable), so
+-- the id this returns says that the words exist as a question and nothing about who answers it.
+create or replace function claims.pose_question(p_phrasing text, p_reason text default null) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    v_text text := regexp_replace(btrim(coalesce(p_phrasing, '')), '\s+', ' ', 'g');
+    k      text;
+    q      uuid;
+    t      bigint;
+begin
+    if length(v_text) not between 10 and 200 or right(v_text, 1) <> '?' then
+        raise check_violation using
+            message = 'A question is one sentence of 10 to 200 characters that ends in a question mark';
+    end if;
+    k := 'q:' || claims.normalised(v_text);
+    select id into q from claims.questions where key = k;
+    if found then
+        return q;
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), coalesce(nullif(p_reason, ''), 'posed'))
+    returning id into t;
+    insert into claims.questions (phrasing, key, tx) values (v_text, k, t)
+    on conflict (key) do nothing
+    returning id into q;
+    if q is null then
+        select id into q from claims.questions where key = k;
+    end if;
+    return q;
+end;
+$$;
+
+-- A claim's stance on a question, from a revision the caller may read. A stance is a reading of what the writer
+-- meant, so an agent's or another reader's lands `proposed`, and the writer's own, as a person, lands `confirmed`
+-- (coalescing.md §7). p is the judge's probability when a model proposed it.
+create or replace function claims.propose_answer(p_revision uuid, p_claim_key text, p_question uuid, p_stance text,
+                                                 p_p real default null, p_reason text default null) returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user  uuid := rbac.require('research', 'insert');
+    v_actor text := rbac.current_actor();
+    v_claim uuid;
+    v_own   boolean;
+    t       bigint;
+    v_id    bigint;
+begin
+    if p_stance is null or p_stance not in ('yes', 'no', 'depends') then
+        raise check_violation using message = 'A stance is yes, no or depends';
+    end if;
+    if not research.revision_readable(p_revision) then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    if not exists (select 1 from claims.questions where id = p_question) then
+        raise no_data_found using message = 'Question not found';
+    end if;
+    select x.claim_id into v_claim from claims.expresses x
+     where x.revision_id = p_revision and x.claim_key = p_claim_key and x.part = 1 order by x.id desc limit 1;
+    if v_claim is null then
+        raise foreign_key_violation using message = 'The claim must be an occurrence in its evidence revision',
+            detail = coalesce(p_claim_key, '');
+    end if;
+    v_own := exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                      where v.id = p_revision and w.owner_id = v_user);
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, v_actor, rbac.current_credential_id(), p_revision, coalesce(nullif(p_reason, ''), 'answered'))
+    returning id into t;
+    insert into claims.answered (claim_id, question_id, stance, status, evidence, claim_key, tx, p)
+    values (v_claim, p_question, p_stance, case when v_actor = 'person' and v_own then 'confirmed' else 'proposed' end,
+            p_revision, p_claim_key, t, p_p)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- Take a stance back: a retraction row after the answer, which leaves the earlier rows in place. The caller must have
+-- made the stance being withdrawn, or own the work it was made from. A nightly run withdraws what it no longer finds.
+create or replace function claims.withdraw_answer(p_revision uuid, p_claim_key text, p_question uuid,
+                                                  p_reason text default null) returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    v_last claims.answered;
+    t      bigint;
+    v_id   bigint;
+begin
+    select a.* into v_last from claims.answered a
+     where a.evidence = p_revision and a.claim_key = p_claim_key and a.question_id = p_question
+     order by a.id desc limit 1;
+    if v_last.id is null or v_last.op = 'retract' then
+        raise no_data_found using message = 'No stance to withdraw';
+    end if;
+    if not exists (select 1 from claims.tx x where x.id = v_last.tx and x.actor_id = v_user)
+       and not exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                        where v.id = p_revision and w.owner_id = v_user) then
+        raise insufficient_privilege using message = 'Only whoever made a stance, or the work''s owner, withdraws it',
+            hint = 'no_grant';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), p_revision,
+            coalesce(nullif(p_reason, ''), 'withdrawn'))
+    returning id into t;
+    insert into claims.answered (claim_id, question_id, stance, status, op, evidence, claim_key, tx)
+    values (v_last.claim_id, v_last.question_id, v_last.stance, v_last.status, 'retract', p_revision, p_claim_key, t)
+    returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- The questions the caller can see answered from at least p_min_works works, each with its answers: one per claim,
+-- the latest assertion as of p_at, stance unknown left out. Invoker: row security decides every row.
+create or replace function claims.question_web(p_at timestamptz default now(), p_min_works int default 2)
+returns table (question uuid, phrasing text, subject text, outcome text, works int, answers jsonb)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with latest as (
+        select distinct on (a.claim_id, a.question_id)
+               a.claim_id, a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key, a.p
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where t.at <= p_at
+         order by a.claim_id, a.question_id, t.at desc, a.id desc),
+    live as (
+        select l.*, w.public_id as work
+          from latest l
+          join research.revisions v on v.id = l.evidence
+          join research.works w on w.id = v.work_id
+         where l.op = 'assert' and l.stance <> 'unknown')
+    select q.id, q.phrasing, q.subject, q.outcome, count(distinct live.work)::int,
+           jsonb_agg(jsonb_build_object('claim', live.claim_id, 'work', live.work, 'revision_id', live.evidence,
+                                        'claim_key', live.claim_key, 'stance', live.stance,
+                                        'status', live.status, 'p', live.p)
+                     order by live.work, live.claim_key)
+      from live join claims.questions q on q.id = live.question_id
+     group by q.id, q.phrasing, q.subject, q.outcome
+    having count(distinct live.work) >= greatest(coalesce(p_min_works, 2), 1)
+     order by count(distinct live.work) desc, q.id;
+$$;
+grant execute on function claims.pose_question(text, text), claims.propose_answer(uuid, text, uuid, text, real, text),
+                          claims.withdraw_answer(uuid, text, uuid, text), claims.question_web(timestamptz, int)
+    to authenticated;
 
 -- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
