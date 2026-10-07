@@ -240,6 +240,8 @@ insert into t14_declared (fn, mechanism, why) values
  'the work''s owner only: the answers recorded for their revision, with the credential an agent used (REM-622)'),
 ('claims.question_readable(uuid)', 'research.revision_readable',
  'the questions policy: true only when a revision the caller may read answers the question or one refining it (REM-476)'),
+('claims.question_web(timestamp with time zone,integer)', 'research.revision_readable',
+ 'the web of questions: only answers whose revision the caller may read, asked once per revision rather than per row under row security'),
 ('claims.pose_question(text,text)', 'rbac.require',
  'mints a question from a phrasing for a research writer; it reads and writes no claim, and the question stays unreadable until a readable claim answers it (coalescing.md §5)'),
 ('claims.propose_answer(uuid,text,uuid,text,real,text)', 'research.revision_readable',

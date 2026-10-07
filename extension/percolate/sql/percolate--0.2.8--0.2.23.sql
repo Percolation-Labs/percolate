@@ -33474,14 +33474,23 @@ end;
 $$;
 
 -- The questions the caller can see answered from at least p_min_works works, each with its answers: one per claim,
--- the latest assertion as of p_at, stance unknown left out. Invoker: row security decides every row.
+-- the latest assertion as of p_at, stance unknown left out.
+--
+-- A definer that asks research.revision_readable once per revision. It was an invoker, and row security then asked it
+-- once per answered row and again through claims.tx's policy, which re-reads claims.answered: on the dev instance
+-- (25,567 answers from 4,463 revisions) a caller waited 3.3 s where the owner took 24 ms, and under load the
+-- authenticator's 30 s timeout failed search_research. Nothing else changes what a caller sees: an answer's tx is
+-- readable because the answer is (tx_readable), its revision and work rows are readable because the revision is,
+-- and its question is readable because a readable revision answers it (question_readable).
 create or replace function claims.question_web(p_at timestamptz default now(), p_min_works int default 2)
 returns table (question uuid, phrasing text, subject text, outcome text, works int, answers jsonb)
-language sql stable security invoker set search_path = pg_catalog, public as $$
-    with latest as (
+language sql stable security definer set search_path = pg_catalog, public as $$
+    with revisions as materialized (select distinct a.evidence from claims.answered a),
+    readable as materialized (select r.evidence from revisions r where research.revision_readable(r.evidence)),
+    latest as (
         select distinct on (a.claim_id, a.question_id)
                a.claim_id, a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key, a.p
-          from claims.answered a join claims.tx t on t.id = a.tx
+          from claims.answered a join readable using (evidence) join claims.tx t on t.id = a.tx
          where t.at <= p_at
          order by a.claim_id, a.question_id, t.at desc, a.id desc),
     live as (
