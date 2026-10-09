@@ -1,4 +1,5 @@
-> **Percolate has moved to [get-percolate](https://github.com/Percolation-Labs/get-percolate)**, where it has evolved into a Postgres extension for AI workflows.
+> [!WARNING]
+> **This repository is no longer maintained.** Percolate has moved to **[get-percolate](https://github.com/Percolation-Labs/get-percolate)**, where it is now a Postgres extension for AI workflows. Use that instead: this code gets no new features, and only security reports may be fixed here.
 
 <img src=".assets/images/proj_header.png"  />
 
