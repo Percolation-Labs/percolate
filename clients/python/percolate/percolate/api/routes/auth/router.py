@@ -90,7 +90,7 @@ async def login_via_google(request: Request, redirect_uri: typing.Optional[str] 
     request.session["sync_files"] = sync_files
     
     # Log all session data for debugging
-    logger.info(f"LOGIN: Session after storing redirect URI: {dict(request.session)}")
+    logger.info(f"LOGIN: Session keys after storing redirect URI: {list(request.session.keys())}")
     
     # IMPORTANT: There are two different redirect URIs involved
     # 1. oauth_callback_url: The URL registered with Google (MUST match exactly in both OAuth steps)
@@ -126,9 +126,6 @@ async def login_via_google(request: Request, redirect_uri: typing.Optional[str] 
     logger.info(f"Using OAuth callback URL: {oauth_callback_url}")
     logger.info(f"Client app redirect URI: {request.session.get('app_redirect_uri')}")
     
-    # Log session cookie for debugging
-    logger.info(f"Current session cookie: {request.cookies.get('session')}")
-
     # Log current session state for debugging
     logger.info(f"Session keys before OAuth redirect: {list(request.session.keys())}")
     
@@ -189,7 +186,6 @@ async def google_auth_callback(request: Request, token:str=None):
     
     # Use app-provided redirect_uri (custom scheme) if previously stored
     logger.info(f"CALLBACK: All session keys: {list(request.session.keys())}")
-    logger.info(f"CALLBACK: Full session data: {dict(request.session)}")
     
     if request.session.get('app_redirect_uri'):
         """we just write back to the expected callback and rewrite the token however we like - for now a relay"""
@@ -205,24 +201,7 @@ async def google_auth_callback(request: Request, token:str=None):
         
     # Log session state at callback
     logger.info(f"Session keys at callback start: {list(request.session.keys())}")
-    logger.info(f"Query params: state={request.query_params.get('state')}, code={request.query_params.get('code')}")
-    
-    # Log raw cookie data for debugging
-    if 'session' in request.cookies:
-        cookie_value = request.cookies.get('session')
-        # Try to decode the base64 part of the cookie to see what's inside
-        try:
-            # The cookie format is typically: value.timestamp.signature
-            # The value is base64 encoded
-            if '.' in cookie_value:
-                base64_part = cookie_value.split('.')[0]
-                try:
-                    decoded = base64.b64decode(base64_part).decode('utf-8')
-                    logger.info(f"Decoded cookie content: {decoded}")
-                except:
-                    logger.error(f"Failed to decode cookie content")
-        except Exception as e:
-            logger.error(f"Error examining cookie: {e}")
+    logger.info(f"Query params: state={request.query_params.get('state')}, code present={bool(request.query_params.get('code'))}")
     
     # Get the authorization code and state from the request
     code = request.query_params.get('code')
@@ -387,7 +366,7 @@ async def google_auth_callback(request: Request, token:str=None):
             token_expiry=extract_token_expiry(token_data),
             oauth_provider='google'
         )
-        logger.info(f"Stored/updated user: {user.email} with session: {session_id}")
+        logger.info(f"Stored/updated user: {user.email}")
         
         # Store user information in the session for easy retrieval
         request.session['user_id'] = str(user.id)
