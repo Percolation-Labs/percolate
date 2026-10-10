@@ -2,7 +2,8 @@
 -- private resource on the evidence budget; only PNG, JPEG and WebP up to 2 MB are kept; once a listed revision pins
 -- it as an image, a stranger and a signed-out reader resolve its bytes through that revision, while the resource
 -- itself stays unreadable to them; and nothing else resolves this way -- a table's pinned evidence page, or a
--- picture only a private work shows.
+-- picture only a private work shows. Its uploader reads an image no revision cites yet (REM-813: a picture shown
+-- before it is cited, such as a reviewer's portrait); nobody else does.
 --
 -- One transaction, rolled back. Claims are set before each role switch.
 
@@ -24,7 +25,7 @@ set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000309a1"}'
 set local role authenticated;
 do $$
 declare me uuid := '00000000-0000-4000-8000-0000000309a1'; img uuid; again uuid; page uuid; kept uuid;
-        snap uuid; page_snap uuid; kept_snap uuid;
+        snap uuid; page_snap uuid; kept_snap uuid; loose uuid; loose_snap uuid;
 begin
     assert not content.may_upload(null), 'the writer holds no resources:create';
     img := content.register_research_image('img-sum-1', 'bucket', 'objects/im/img-sum-1', 40000, 'image/png', 'Three cycles');
@@ -71,6 +72,11 @@ begin
     assert exists (select 1 from research.resolve_image(snap) where object_key = 'objects/im/img-sum-1'),
         'the writer resolves the listed work''s image';
     assert exists (select 1 from research.resolve_image(kept_snap)), 'and their private work''s';
+
+    loose := content.register_research_image('img-sum-6', 'bucket', 'objects/im/img-sum-6', 30000, 'image/webp', 'A portrait');
+    loose_snap := content.capture_snapshot(loose);
+    assert exists (select 1 from research.resolve_image(loose_snap) where object_key = 'objects/im/img-sum-6'),
+        'the uploader reads an image no revision cites yet (REM-813)';
 end $$;
 reset role;
 
@@ -81,6 +87,8 @@ do $$ begin
                                     where f.checksum = 'img-sum-5'), true);
     perform set_config('im.page', (select s.id::text from content.resource_snapshots s join content.files f on f.id = s.file_id
                                     where f.checksum = 'img-page-1'), true);
+    perform set_config('im.loose', (select s.id::text from content.resource_snapshots s join content.files f on f.id = s.file_id
+                                    where f.checksum = 'img-sum-6'), true);
 end $$;
 
 
@@ -92,6 +100,7 @@ declare
     snap uuid := current_setting('im.snap')::uuid;
     page uuid := current_setting('im.page')::uuid;
     kept uuid := current_setting('im.kept')::uuid;
+    loose uuid := current_setting('im.loose')::uuid;
 begin
     foreach c in array claims loop
         perform set_config('request.jwt.claims', c, true);
@@ -106,6 +115,8 @@ begin
             'a picture only a private work shows does not resolve: ' || c;
         assert not exists (select 1 from research.resolve_image(page)),
             'a table''s pinned evidence page is not served as an image: ' || c;
+        assert not exists (select 1 from research.resolve_image(loose)),
+            'an image nobody cites stays its uploader''s alone: ' || c;
         execute 'reset role';
     end loop;
 end $$;

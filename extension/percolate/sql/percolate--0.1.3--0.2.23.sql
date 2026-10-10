@@ -31136,7 +31136,8 @@ $$;
 -- evidence_bytes budget and the research_evidence channel, for the same reasons given there. The Content Server
 -- checks the bytes themselves (magic number, 600 x 400 at least) because only it has them; this refuses every
 -- type the spec does not name and anything over 2 MB, so a second caller of this function cannot skip the rule.
--- The copy is private to its uploader; readers reach it only through a revision that pins it (resolve_image).
+-- The copy is private to its uploader, who reads it through resolve_image at once; others only through a revision
+-- that pins it (resolve_image, REM-813).
 create or replace function content.register_research_image(
     p_checksum     text,
     p_bucket       text,
@@ -31202,7 +31203,9 @@ $$;
 -- (data-model.md, hosted artifacts). Keyed by the snapshot alone, so one stored image has one address whichever
 -- revision or work shows it, and the article's document can carry that address. Only purpose 'image' and only
 -- image types: a table's pinned evidence page is never served through this path. One answer for "not yours" and
--- "not there", as resolve_snapshot gives.
+-- "not there", as resolve_snapshot gives. Its UPLOADER also reads it before any revision cites it (REM-813): a
+-- picture is shown before it is cited (the upload's own preview, a reviewer's portrait, which is private to its
+-- owner), and without this nobody could read their own upload. Nobody else gains anything.
 create or replace function research.resolve_image(p_snapshot uuid)
 returns table(bucket text, object_key text, content_type text, size_bytes bigint, checksum text)
 language sql stable security definer set search_path = pg_catalog, public as $$
@@ -31211,9 +31214,10 @@ language sql stable security definer set search_path = pg_catalog, public as $$
       join content.files f on f.id = s.file_id
      where s.id = p_snapshot and s.removed_at is null
        and s.content_type in ('image/png', 'image/jpeg', 'image/webp')
-       and exists (select 1 from research.revision_files rf
-                    where rf.snapshot_id = p_snapshot and rf.purpose = 'image'
-                      and research.revision_readable(rf.revision_id));
+       and (s.captured_by = rbac.current_user_id()
+            or exists (select 1 from research.revision_files rf
+                        where rf.snapshot_id = p_snapshot and rf.purpose = 'image'
+                          and research.revision_readable(rf.revision_id)));
 $$;
 
 -- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153, schema.md §4). Operator-only: nothing grants it. The
