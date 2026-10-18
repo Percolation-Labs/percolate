@@ -33,7 +33,8 @@ from typing import Literal
 Stage = Literal["question", "result", "values", "walk"]
 Severity = Literal["error", "warning", "positive"]
 
-__all__ = ["Kind", "KINDS", "by_code", "judged", "Stage", "Severity"]
+__all__ = ["Kind", "KINDS", "by_code", "judged", "Stage", "Severity", "LIMIT_PROMPT",
+           "CAPABILITY_WORDS"]
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,12 @@ class Kind:
     # criteria say what the decision is about.
     yes: str | None = None
     no: str | None = None
+    # What the remedy needs the caller to be able to do. A repository that
+    # cannot (no SQL over the source, say) still raises the kind, but shows it
+    # as a LIMIT -- answer what you can and say it may be incomplete -- and
+    # never refuses on it: traffic run 1 showed advice the tool could not act on
+    # made searchers give up sooner, not search better.
+    requires: tuple[str, ...] = ()
 
     @property
     def judged(self) -> bool:
@@ -454,6 +461,22 @@ MEASURED = {
 }
 KINDS = tuple(replace(k, threshold=MEASURED[k.code][0], on=MEASURED[k.code][1])
               if k.code in MEASURED else k for k in KINDS)
+
+# WHAT EACH REMEDY NEEDS. "sql": an exact pass over the whole source -- a
+# filter, a sort, a count, a complement -- which a ranked search cannot give.
+# Read off the prompts, one capability, kept to the kinds whose remedy is
+# impossible without it; "search again differently" needs nothing.
+REQUIRES = {
+    "NEGATION": ("sql",), "SUPERLATIVE": ("sql",), "COUNT": ("sql",),
+    "EXHAUSTIVE": ("sql",), "ARITHMETIC": ("sql",), "KNOWN_VS_HAPPENED": ("sql",),
+    "RELATIVE_TIME": ("sql",),
+}
+KINDS = tuple(replace(k, requires=REQUIRES[k.code]) if k.code in REQUIRES else k for k in KINDS)
+
+# The line a kind shows when its remedy is out of reach.
+LIMIT_PROMPT = ("Answering this exactly needs {needs}, which this search cannot do. Answer from "
+                "what the searches return and say plainly that it may be incomplete.")
+CAPABILITY_WORDS = {"sql": "a pass over every record (a filter, sort, count or exclusion)"}
 
 # A QUESTION-STAGE ERROR IS A REFUSAL, so it needs the precision to deserve one.
 # Users in the navigation test were refused "the last box shipped on the

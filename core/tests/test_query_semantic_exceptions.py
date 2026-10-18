@@ -41,6 +41,10 @@ from percolate_core.semantic_exceptions.query import hits_of, question_of
 from test_query_mcp import FakePostgrest
 
 SEARCH = 'SEARCH "entries that never mention Renfield" FROM diary'
+# What SCHEMA "sql" FROM diary says to a caller who may read the source's relation.
+SQL_READABLE = {"mode": "SCHEMA", "schema": {"doc": {"derived": {
+    "relations": [{"schema": "sx", "name": "diary", "kind": "table"}], "relation_count": 1}}}}
+
 SEARCH_DOC = {"mode": "SEARCH",
               "plan": {"mode": "SEARCH", "arg": "entries that never mention Renfield",
                        "source": "diary", "limit": 10},
@@ -91,8 +95,11 @@ class BrokenLog(ListLog):
 
 
 class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
-    def start(self, mode: str, jev=None, log=None, status=200):
-        pg = FakePostgrest(status=status, answers={("query", SEARCH): (200, SEARCH_DOC)})
+    def start(self, mode: str, jev=None, log=None, status=200, sql=True):
+        answers = {("query", SEARCH): (200, SEARCH_DOC)}
+        if sql:
+            answers[("query", 'SCHEMA "sql" FROM diary')] = (200, SQL_READABLE)
+        pg = FakePostgrest(status=status, answers=answers)
         self.addCleanup(pg.close)
         sx = Exceptions(mode, jev_factory=(lambda: jev) if jev is not None else None, log=log)
         mcp = build_server("127.0.0.1", 0, pg.url, exceptions=sx)
@@ -167,6 +174,24 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_kind, "tool_error")
         self.assertIn("NEGATION", str(result.content))
         self.assertNotIn("Patient still better", str(result.content))
+
+    async def test_without_sql_a_negation_is_a_limit_not_a_refusal(self):
+        log = ListLog()
+        server = self.start("strict", StubJev({"NEGATION": 0.99}), log, sql=False)
+        result = await self.call(server, {"query": SEARCH})
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content["rows"], SEARCH_DOC["rows"])
+        [r] = result.content["semantic_exceptions"]["raised"]
+        self.assertTrue(r["limit"])
+        self.assertIsNone(r["action"])
+        self.assertIn("may be incomplete", r["prompt"])
+        self.assertFalse(log.events[0].refused)
+
+    async def test_with_sql_the_negation_names_the_query_tools_own_move(self):
+        result = await self.call(self.start("on", StubJev({"NEGATION": 0.99})), {"query": SEARCH})
+        [r] = result.content["semantic_exceptions"]["raised"]
+        self.assertNotIn("limit", r)
+        self.assertIn('SCHEMA "sql"', r["action"])
 
     async def test_strict_lets_a_warning_through(self):
         server = self.start("strict", StubJev({"CAUSAL_WHY": 0.99}))
