@@ -27,7 +27,7 @@ store's vocabulary wait for the integration that has them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 Stage = Literal["question", "result", "values", "walk"]
@@ -49,6 +49,8 @@ class Kind:
     acts: Literal["model", "person"] = "model"
     # A judged kind asked only when the caller supplied this state key.
     needs: str | None = None
+    # Off by default when the eval found it below the bar; a caller can enable it.
+    on: bool = True
 
     @property
     def judged(self) -> bool:
@@ -338,6 +340,59 @@ KINDS: tuple[Kind, ...] = (
     _s("ORPHANED_QUESTIONS", "walk", "warning",
        "Questions were opened and never answered. Name them in the answer as open."),
 )
+
+
+# MEASURED, not chosen: (threshold, on by default) for each judged kind, from
+# evals/semantic_exceptions (RESULTS.md; jev-1.13.0, 18 Oct 2026). The threshold
+# is the train-half F1 optimum; a kind is on when its held-out F1 >= 0.6 with at
+# least 5 positives, the bar committed before the run. Regenerate this table
+# from out/scores.json whenever an instruction is reworded.
+MEASURED = {
+    "DECOMPOSITION_REQUIRED": (0.95, True),  # F1 0.76, 12 test positives, on
+    "TWO_QUESTIONS": (0.65, False),  # F1 0.80, 4 test positives, unmeasured
+    "NEGATION": (0.95, True),  # F1 0.95, 11 test positives, on
+    "SUPERLATIVE": (0.90, True),  # F1 0.63, 6 test positives, on
+    "COUNT": (0.95, True),  # F1 0.80, 12 test positives, on
+    "COMPARISON": (0.95, True),  # F1 0.96, 11 test positives, on
+    "CONJUNCTION": (0.95, True),  # F1 0.63, 6 test positives, on
+    "COUNTERFACTUAL": (0.90, False),  # F1 1.00, 4 test positives, unmeasured
+    "CAUSAL_WHY": (0.95, True),  # F1 0.89, 8 test positives, on
+    "EXHAUSTIVE": (0.95, True),  # F1 0.92, 7 test positives, on
+    "PROCEDURAL": (0.90, True),  # F1 0.60, 6 test positives, on
+    "YES_NO_CLAIM": (0.95, True),  # F1 0.88, 16 test positives, on
+    "EXPLORATORY": (0.80, True),  # F1 0.86, 7 test positives, on
+    "MISSING_REFERENT": (0.95, True),  # F1 0.75, 10 test positives, on
+    "ALIAS": (0.90, False),  # F1 0.53, 7 test positives, off
+    "ROLE_NOT_NAME": (0.85, True),  # F1 0.61, 5 test positives, on
+    "TIME_UNSPECIFIED": (0.95, False),  # F1 0.00, 6 test positives, off
+    "RELATIVE_TIME": (0.80, True),  # F1 1.00, 8 test positives, on
+    "KNOWN_VS_HAPPENED": (0.90, True),  # F1 0.88, 8 test positives, on
+    "PREDICTION": (0.55, False),  # F1 0.89, 4 test positives, unmeasured
+    "PRESUPPOSITION": (0.95, False),  # F1 0.00, 5 test positives, off
+    "LEADING": (0.80, False),  # F1 0.60, 3 test positives, unmeasured
+    "OPINION": (0.90, True),  # F1 1.00, 8 test positives, on
+    "ANSWER_EMBEDDED": (0.90, True),  # F1 0.71, 10 test positives, on
+    "META_QUESTION": (0.90, True),  # F1 0.67, 7 test positives, on
+    "OUT_OF_DOMAIN": (0.90, True),  # F1 0.86, 7 test positives, on
+    "EXACT_MATCH": (0.85, True),  # F1 0.96, 14 test positives, on
+    "ARITHMETIC": (0.85, True),  # F1 0.63, 9 test positives, on
+    "SPATIAL": (0.85, False),  # F1 0.50, 6 test positives, off
+    "PATH": (0.95, False),  # F1 0.80, 4 test positives, unmeasured
+    "FILTERS_EXTRACTABLE": (0.90, False),  # F1 0.57, 30 test positives, off
+    "VAGUE_TERM": (0.80, False),  # F1 0.50, 6 test positives, off
+    "INSTRUCTIONS_MIXED_IN": (0.95, True),  # F1 0.89, 5 test positives, on
+    "UNDERSPECIFIED": (0.90, False),  # F1 0.86, 3 test positives, unmeasured
+    "POINTER": (0.95, True),  # F1 1.00, 7 test positives, on
+    "HEARSAY": (0.90, True),  # F1 0.92, 6 test positives, on
+    "SPECULATIVE": (0.85, True),  # F1 0.83, 5 test positives, on
+    "INJECTION": (0.95, True),  # F1 0.86, 6 test positives, on
+    "OFF_QUESTION": (0.55, True),  # F1 0.88, 7 test positives, on
+    "PARTIAL_ANSWER": (0.90, False),  # F1 0.55, 6 test positives, off
+    "TRUNCATED": (0.95, True),  # F1 0.93, 8 test positives, on
+    "CONFLICT": (0.90, True),  # F1 0.78, 11 test positives, on
+}
+KINDS = tuple(replace(k, threshold=MEASURED[k.code][0], on=MEASURED[k.code][1])
+              if k.code in MEASURED else k for k in KINDS)
 
 _BY_CODE = {k.code: k for k in KINDS}
 assert len(_BY_CODE) == len(KINDS), "kind codes must be unique"

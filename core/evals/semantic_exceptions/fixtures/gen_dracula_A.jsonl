@@ -1,0 +1,142 @@
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "Where was Jonathan Harker when Lucy started sleepwalking again, and what was Mina doing in Whitby at the time?"}
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "What did Van Helsing prescribe for Lucy, and which of the men gave blood for her transfusions?"}
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "Which boxes of earth were delivered to Carfax and where did the rest of them end up?"}
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "How did the Demeter's crew vanish during the voyage and what did the coastguard find aboard once she ran aground?"}
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "What was Seward's view of Renfield in the days just after the Russian schooner came into Whitby?"}
+{"domain": "dracula", "target": "DECOMPOSITION_REQUIRED", "question": "trace renfield's behaviour on the nights the count visited mina"}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "What is the name of the hotel Jonathan stays at in Bistritz? Also, how old is Lucy?"}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "When does Jonathan reach the castle, and separately, what flowers does Van Helsing hang in Lucy's room?"}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "Who signed the telegram sent from Amsterdam — and by the way, what kind of dog jumped off the ship at Whitby?"}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "what was mina's maiden name; what drug does seward record taking to sleep"}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "Find the letter where Lucy describes her three proposals, then give me the date the Czarina Catherine sailed from London."}
+{"domain": "dracula", "target": "TWO_QUESTIONS", "question": "How long was Jonathan in the hospital in Buda-Pesth, and what does old Mr Swales say about the gravestones in the churchyard?"}
+{"domain": "dracula", "target": "NEGATION", "question": "Which of Mina's journal entries don't mention Jonathan at all?"}
+{"domain": "dracula", "target": "NEGATION", "question": "Letters from Lucy that make no reference to her sleepwalking"}
+{"domain": "dracula", "target": "NEGATION", "question": "Show me the entries in Seward's diary that aren't about Renfield."}
+{"domain": "dracula", "target": "NEGATION", "question": "Days in the Demeter's log where no crew member is reported missing"}
+{"domain": "dracula", "target": "NEGATION", "question": "Who among the band of hunters never actually laid eyes on the Count?"}
+{"domain": "dracula", "target": "NEGATION", "question": "documents written after Lucy's death that leave Van Helsing out entirely"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "What is the earliest dated document in the collection?"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "last entry in the Demeter log"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "Who wrote the most letters to Lucy Westenra?"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "Where is the longest gap between two of Jonathan's journal entries?"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "When did Mina first notice the little red marks on Lucy's throat?"}
+{"domain": "dracula", "target": "SUPERLATIVE", "question": "Which of Lucy's donors gave her the smallest amount of blood?"}
+{"domain": "dracula", "target": "COUNT", "question": "How many boxes of earth did the Count ship to England?"}
+{"domain": "dracula", "target": "COUNT", "question": "How many transfusions did Lucy receive in total?"}
+{"domain": "dracula", "target": "COUNT", "question": "number of crew lost from the Demeter before it reached Whitby"}
+{"domain": "dracula", "target": "COUNT", "question": "How often does Seward record Renfield catching flies?"}
+{"domain": "dracula", "target": "COUNT", "question": "how many men proposed to lucy on the same day"}
+{"domain": "dracula", "target": "COUNT", "question": "Tally up the telegrams Van Helsing sent to Dr Seward."}
+{"domain": "dracula", "target": "COMPARISON", "question": "How do Seward's and Van Helsing's explanations of Lucy's illness differ?"}
+{"domain": "dracula", "target": "COMPARISON", "question": "Compare how Mina and Lucy each describe Whitby in their writing."}
+{"domain": "dracula", "target": "COMPARISON", "question": "In what ways is Quincey Morris unlike Arthur Holmwood as a suitor?"}
+{"domain": "dracula", "target": "COMPARISON", "question": "Does the Westminster Gazette's story of the 'bloofer lady' line up with what Seward's diary says about the same nights?"}
+{"domain": "dracula", "target": "COMPARISON", "question": "How did Jonathan's attitude to his host shift between his first and his last days at the castle?"}
+{"domain": "dracula", "target": "COMPARISON", "question": "garlic vs the sacred wafer: which worked better against the vampire?"}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "Entries written at Whitby that also describe the storm coming in"}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "Letters from Arthur sent while his father was dying"}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "Find passages where both Mina and Van Helsing are present and the Count's plans are discussed."}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "telegrams from Van Helsing in Amsterdam addressed to Seward"}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "Newspaper cuttings about Hampstead Heath that mention missing children"}
+{"domain": "dracula", "target": "CONJUNCTION", "question": "Diary entries in which Mina is hypnotised at sunrise while the party is travelling by boat"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "What would have happened if Van Helsing had arrived a day earlier to treat Lucy?"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "If the men hadn't shut Mina out of their plans, would the Count still have got to her?"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "Suppose the Demeter had docked in London instead of Whitby. Would Lucy have been attacked at all?"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "Would Jonathan have been spared if he'd listened to the landlady at Bistritz and not gone on?"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "Had Mrs Westenra left the garlic flowers in place, could Lucy have lived?"}
+{"domain": "dracula", "target": "COUNTERFACTUAL", "question": "what if quincey had actually hit the bat when he fired at the window"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "Why did Lucy's mother die?"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "What caused the Demeter to run aground at Whitby?"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "Why does Renfield beg Seward to let him leave the asylum that night?"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "why did the count buy a house in london in the first place"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "What turned Jonathan's hair white?"}
+{"domain": "dracula", "target": "CAUSAL_WHY", "question": "The reason the hunters stopped telling Mina what they were doing"}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "List every place the Count hid his boxes of earth."}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "all telegrams in the collection"}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "Give me every entry where Lucy is found sleepwalking."}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "Name each person who gave Lucy blood, without leaving anyone out."}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "a complete list of the creatures Renfield kept, in order"}
+{"domain": "dracula", "target": "EXHAUSTIVE", "question": "Show me the newspaper cuttings, all of them, from first to last."}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "How do you destroy a vampire, according to Van Helsing?"}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "What steps did the men take to sterilise the boxes of earth?"}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "How did Van Helsing go about hypnotising Mina?"}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "how to do the blood transfusion van helsing performed on lucy"}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "Walk me through how they sealed Lucy's tomb so she couldn't get back in."}
+{"domain": "dracula", "target": "PROCEDURAL", "question": "By what method did Mina work out which route the Count would take home?"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "Did Lucy ever marry Arthur Holmwood?"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "Is it true the Count can't cross running water by himself?"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "Was Jonathan Harker a qualified solicitor by the end?"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "did renfield die in the asylum"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "The dog seen leaping from the Demeter was really the Count — right?"}
+{"domain": "dracula", "target": "YES_NO_CLAIM", "question": "Quincey Morris came from Texas, didn't he?"}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "Tell me about superstition in Transylvania as Jonathan saw it."}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "what's in here about whitby"}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "Explore the theme of blood across the documents."}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "I'm curious how the newspapers covered all the strange goings-on. Anything interesting?"}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "Give me an overview of the medical thinking Seward and Van Helsing bring to the case."}
+{"domain": "dracula", "target": "EXPLORATORY", "question": "Looking into how women are portrayed in these papers, where should I start?"}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "What did he say to her after the wedding?"}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "When was the meeting at the asylum?"}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "who was in the room when it happened"}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "Find the letter she wrote right after that."}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "What did they do with the box once they'd opened it?"}
+{"domain": "dracula", "target": "MISSING_REFERENT", "question": "Where did the ship sail to next?"}
+{"domain": "dracula", "target": "ALIAS", "question": "What did the 'bloofer lady' do to the children on Hampstead Heath?"}
+{"domain": "dracula", "target": "ALIAS", "question": "What did the professor from Amsterdam write to Seward about Lucy?"}
+{"domain": "dracula", "target": "ALIAS", "question": "entries about the zoophagous patient"}
+{"domain": "dracula", "target": "ALIAS", "question": "What did Lord Godalming do in the weeks after his fiancee died?"}
+{"domain": "dracula", "target": "ALIAS", "question": "What happened to the Texan at the very end?"}
+{"domain": "dracula", "target": "ALIAS", "question": "Where did the three weird sisters at the castle come from?"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "What did the asylum superintendent make of Lucy's symptoms?"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "What did the ship's captain write in his final days at sea?"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "what did the coastguard report"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "What did the keeper at the Zoological Gardens say about the escaped wolf?"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "What did the undertaker notice when preparing the body?"}
+{"domain": "dracula", "target": "ROLE_NOT_NAME", "question": "Did the carrier who hauled the boxes from King's Cross remember anything odd?"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "Where is Jonathan Harker?"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "What is Lucy's health like?"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "Is Mina engaged?"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "how many boxes of earth are left at carfax"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "What does Renfield eat?"}
+{"domain": "dracula", "target": "TIME_UNSPECIFIED", "question": "Who owns the house at Carfax?"}
+{"domain": "dracula", "target": "NONE", "question": "What is the date of Jonathan Harker's first journal entry?"}
+{"domain": "dracula", "target": "NONE", "question": "What dish did Jonathan eat at the hotel in Klausenburg?"}
+{"domain": "dracula", "target": "NONE", "question": "What did the Count tell Jonathan about the Szekelys?"}
+{"domain": "dracula", "target": "NONE", "question": "Text of the cutting from the Dailygraph about the storm at Whitby"}
+{"domain": "dracula", "target": "NONE", "question": "What cargo was the Demeter carrying?"}
+{"domain": "dracula", "target": "NONE", "question": "Lucy's letter to Mina describing Quincey Morris's proposal"}
+{"domain": "dracula", "target": "NONE", "question": "What is the name of the asylum's attendant who watches Renfield?"}
+{"domain": "dracula", "target": "NONE", "question": "Which port did the Demeter sail from?"}
+{"domain": "dracula", "target": "NONE", "question": "What crucifix did the old woman at the inn give Jonathan?"}
+{"domain": "dracula", "target": "NONE", "question": "Seward's phonograph entry describing Renfield's theory of eating lives"}
+{"domain": "dracula", "target": "NONE", "question": "What was written in Van Helsing's memorandum left for Seward the night Lucy's mother died?"}
+{"domain": "dracula", "target": "NONE", "question": "Where is the Westenra family tomb?"}
+{"domain": "dracula", "target": "NONE", "question": "What did the Pall Mall Gazette report about the escaped wolf Bersicker?"}
+{"domain": "dracula", "target": "NONE", "question": "What address did the Count buy in Piccadilly?"}
+{"domain": "dracula", "target": "NONE", "question": "Mina's journal entry about seeing Lucy on the seat in the churchyard at night"}
+{"domain": "dracula", "target": "NONE", "question": "What does Sister Agatha's letter to Mina say about Jonathan's condition?"}
+{"domain": "dracula", "target": "NONE", "question": "Who is Mr Hawkins?"}
+{"domain": "dracula", "target": "NONE", "question": "What did Jonathan see the Count doing on the castle wall?"}
+{"domain": "dracula", "target": "NONE", "question": "the name of the firm that moved the boxes from Whitby to London"}
+{"domain": "dracula", "target": "NONE", "question": "What does Arthur's telegram to Seward about his father say?"}
+{"domain": "dracula", "target": "NONE", "question": "What is the name of the ship the Count escapes England on?"}
+{"domain": "dracula", "target": "NONE", "question": "Quincey Morris's letter inviting Arthur to a campfire supper"}
+{"domain": "dracula", "target": "NONE", "question": "Where did Jonathan and Mina get married?"}
+{"domain": "dracula", "target": "NONE", "question": "What did Mina write in her shorthand diary on the train to Exeter?"}
+{"domain": "dracula", "target": "NONE", "question": "What does Van Helsing say about the Count's brain being a child's brain?"}
+{"domain": "dracula", "target": "NONE", "question": "Which pass does the coach take into the Carpathians?"}
+{"domain": "dracula", "target": "NONE", "question": "Seward's account of opening Lucy's coffin and finding it empty"}
+{"domain": "dracula", "target": "NONE", "question": "What languages did the Count say he wanted to practise with Jonathan?"}
+{"domain": "dracula", "target": "NONE", "question": "What was the name of the Demeter's first mate?"}
+{"domain": "dracula", "target": "NONE", "question": "What did the coroner's inquest at Whitby conclude about the captain?"}
+{"domain": "dracula", "target": "NONE", "question": "the letter from Samuel F. Billington, solicitor, about the consignment of boxes"}
+{"domain": "dracula", "target": "NONE", "question": "What did Renfield say to Mina when she visited him?"}
+{"domain": "dracula", "target": "NONE", "question": "Where did Jonathan first see the Count in Piccadilly after returning to England?"}
+{"domain": "dracula", "target": "NONE", "question": "What was the mark the Host left on Mina's forehead?"}
+{"domain": "dracula", "target": "NONE", "question": "What does Mr Swales say about the suicide's grave at Whitby?"}
+{"domain": "dracula", "target": "NONE", "question": "Van Helsing's letter accepting Seward's request to come and see Lucy"}
+{"domain": "dracula", "target": "NONE", "question": "What river do the gipsies carry the box along in the final chase?"}
+{"domain": "dracula", "target": "NONE", "question": "What did Jonathan find in the Count's library on his first evening?"}
+{"domain": "dracula", "target": "NONE", "question": "Note at the end describing the visit to Transylvania seven years later"}
+{"domain": "dracula", "target": "NONE", "question": "What did Lucy write in the memorandum she left the night the wolf broke in?"}

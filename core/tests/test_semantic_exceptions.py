@@ -59,6 +59,10 @@ class Catalogue(unittest.TestCase):
                 if k.needs:
                     self.assertIn(f"`{k.needs}`", k.instruction, k.code)
 
+    def test_every_judged_kind_was_measured(self):
+        from percolate_core.semantic_exceptions.catalogue import MEASURED
+        self.assertEqual({k.code for k in KINDS if k.judged}, set(MEASURED))
+
     def test_every_kind_tells_the_model_what_to_do(self):
         for k in KINDS:
             self.assertGreater(len(k.prompt.split()), 4, k.code)
@@ -67,22 +71,30 @@ class Catalogue(unittest.TestCase):
 
 class Before(unittest.TestCase):
     def test_one_request_carries_every_question_kind(self):
-        jev = StubJev({"NEGATION": 0.9, "COUNT": 0.2})
+        jev = StubJev({"NEGATION": 0.99, "COUNT": 0.2})
         rep = run(SemanticExceptions(jev).before("Which entries don't mention Lucy?"))
         self.assertEqual(len(jev.sent), 1)
         state, qs = jev.sent[0]
         self.assertEqual(state, {"question": "Which entries don't mention Lucy?"})
-        expected = {k.code for k in judged("question") if k.needs is None}
+        expected = {k.code for k in judged("question") if k.needs is None and k.on}
         self.assertEqual(set(qs), expected)
         self.assertEqual(rep.codes, {"NEGATION"})
         self.assertEqual(rep.jev_requests, 1)
 
     def test_out_of_domain_is_asked_only_when_the_store_is_described(self):
-        jev = StubJev({"OUT_OF_DOMAIN": 0.9})
+        jev = StubJev({"OUT_OF_DOMAIN": 0.99})
         self.assertEqual(run(SemanticExceptions(jev).before("q")).codes, set())
         rep = run(SemanticExceptions(jev, store="Bram Stoker's Dracula").before("q"))
         self.assertEqual(jev.sent[-1][0]["store"], "Bram Stoker's Dracula")
         self.assertEqual(rep.codes, {"OUT_OF_DOMAIN"})
+
+    def test_a_kind_the_eval_left_off_is_not_asked_unless_enabled(self):
+        jev = StubJev({"PRESUPPOSITION": 0.99})
+        self.assertFalse(by_code("PRESUPPOSITION").on)
+        self.assertEqual(run(SemanticExceptions(jev).before("q")).codes, set())
+        self.assertNotIn("PRESUPPOSITION", jev.sent[-1][1])
+        rep = run(SemanticExceptions(jev, enable=["PRESUPPOSITION"]).before("q"))
+        self.assertEqual(rep.codes, {"PRESUPPOSITION"})
 
     def test_thresholds_and_disable(self):
         jev = StubJev({"NEGATION": 0.6, "COUNT": 0.6})
@@ -101,10 +113,10 @@ class Values(unittest.TestCase):
 
     def test_one_request_per_hit_and_conflicts_with_the_next(self):
         def pointer(state, qid):
-            return 0.9 if state["passage"] == "passage 1" else 0.1
+            return 0.99 if state["passage"] == "passage 1" else 0.1
 
         def conflict(state, qid):
-            return 0.95 if state["passage"] == "passage 0" and qid == "CONFLICT:2" else 0.0
+            return 0.99 if state["passage"] == "passage 0" and qid == "CONFLICT:2" else 0.0
         jev = StubJev({"POINTER": pointer, "CONFLICT:1": conflict, "CONFLICT:2": conflict})
         rep = run(SemanticExceptions(jev, values_top=3, conflict_top=3)
                   .values("q", self.HITS))
@@ -252,7 +264,7 @@ class Walk(unittest.TestCase):
 
 class ReportAndGuard(unittest.TestCase):
     def test_prompt_puts_errors_first_and_counts_what_it_leaves_out(self):
-        jev = StubJev({"NEGATION": 0.9, "COMPARISON": 0.99, "ALIAS": 0.8, "CAUSAL_WHY": 0.7})
+        jev = StubJev({"NEGATION": 0.96, "COMPARISON": 0.99, "EXACT_MATCH": 0.97, "CAUSAL_WHY": 0.98})
         rep = run(SemanticExceptions(jev).before("q"))
         text = rep.to_prompt(show=2)
         lines = text.splitlines()
@@ -282,7 +294,7 @@ class ReportAndGuard(unittest.TestCase):
     def test_lenient_guard_searches_and_reports_both_stages(self):
         async def search(question, limit=10):
             return [{"id": i, "score": 1 - i / 10} for i in range(limit)]
-        jev = StubJev({"COUNT": 0.9})
+        jev = StubJev({"COUNT": 0.99})
         hits, rep = run(SemanticExceptions(jev).guard(search)("How many?", limit=3))
         self.assertEqual(len(hits), 3)
         self.assertEqual(rep.codes, {"COUNT", "TRUNCATED_AT_LIMIT"})

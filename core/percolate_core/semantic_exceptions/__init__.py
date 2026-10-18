@@ -117,17 +117,20 @@ class SemanticExceptions:
     without one, only the structural stages run.
 
     `thresholds` overrides a judged kind's measured threshold by code; `disable`
-    turns kinds off by code; `store` is a sentence describing what the store
-    holds, which switches on OUT_OF_DOMAIN."""
+    turns kinds off by code and `enable` turns on one the eval left off; `store`
+    is a sentence describing what the store holds, which switches on
+    OUT_OF_DOMAIN."""
 
     def __init__(self, jev: Any = None, *, kinds: Sequence[Kind] = KINDS,
                  limits: Limits = Limits(), thresholds: Mapping[str, float] | None = None,
-                 disable: Sequence[str] = (), store: str | None = None,
+                 disable: Sequence[str] = (), enable: Sequence[str] = (),
+                 store: str | None = None,
                  text_key: str = "content", values_top: int = 5, conflict_top: int = 3):
         self.jev, self.limits, self.store = jev, limits, store
         self.text_key, self.values_top, self.conflict_top = text_key, values_top, conflict_top
-        off = set(disable)
-        self.kinds = {k.code: k for k in kinds if k.code not in off}
+        off, extra = set(disable), set(enable)
+        self.kinds = {k.code: k for k in kinds
+                      if (k.on or k.code in extra) and k.code not in off}
         self.thresholds = {c: k.threshold for c, k in self.kinds.items() if k.judged}
         self.thresholds.update(thresholds or {})
 
@@ -159,10 +162,10 @@ class SemanticExceptions:
                       for c, p in ps.items() if p >= self.thresholds[c]]
         return rep
 
-    async def values(self, question: str, hits: Sequence[Mapping[str, Any]]) -> Report:
-        """Exceptions in what the top hits say: one Jev request per hit, concurrently.
-        Each request also asks whether this hit and each of the next
-        `conflict_top` hits answer the question differently."""
+    async def value_probabilities(self, question: str, hits: Sequence[Mapping[str, Any]]
+                                  ) -> tuple[list[dict[str, float]], list, Report]:
+        """P(yes) per kind for each of the top hits, unthresholded, with the hits
+        read. A conflict is keyed `CONFLICT:<j>`, j the other hit's index."""
         self._need_jev()
         top = [h for h in hits if h.get(self.text_key)][: self.values_top]
         kinds = self._judged("values", {"question": 1, "passage": 1})
@@ -178,12 +181,21 @@ class SemanticExceptions:
             requests.append(({"question": question, "passage": h[self.text_key]}, qs))
         results = await asyncio.gather(*(self.jev.ask(s, q) for s, q in requests))
         rep = Report(jev_requests=len(results))
-        for i, (h, res) in enumerate(zip(top, results)):
+        probs = []
+        for (_, qs), res in zip(requests, results):
             rep.model = getattr(res, "model", rep.model)
             rep.input_tokens += getattr(res, "input_tokens", 0)
-            for qid in requests[i][1]:
+            probs.append({qid: res[qid].p for qid in qs})
+        return probs, top, rep
+
+    async def values(self, question: str, hits: Sequence[Mapping[str, Any]]) -> Report:
+        """Exceptions in what the top hits say: one Jev request per hit, concurrently.
+        Each request also asks whether this hit and each of the next
+        `conflict_top` hits answer the question differently."""
+        probs, top, rep = await self.value_probabilities(question, hits)
+        for h, ps in zip(top, probs):
+            for qid, p in ps.items():
                 code, _, j = qid.partition(":")
-                p = res[qid].p
                 if p >= self.thresholds[code]:
                     ev = {"id": h.get("id")}
                     if j:

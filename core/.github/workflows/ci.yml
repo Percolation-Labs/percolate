@@ -350,6 +350,14 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_resolve.py
 
+      # Semantic exceptions: one Jev request judges the whole question, one per
+      # hit read; every structural detector raises on a planted result and stays
+      # silent on its clean twin; a strict guard refuses before searching. The
+      # live case skips without JEV_API_KEY.
+      - name: The store raises semantic exceptions at the measured thresholds
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_semantic_exceptions.py
+
       # A runtime that cannot serve the database it is pointed at refuses at
       # STARTUP rather than inside the first turn. It used to fail in band --
       # AG-UI answers 200 with one RUN_ERROR in a well-formed stream, and
