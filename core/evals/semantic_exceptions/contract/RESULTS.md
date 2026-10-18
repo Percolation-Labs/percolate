@@ -69,6 +69,12 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
 
 The query log (`../traffic`) caught MISSING_REFERENT refusing on real queries, and none of its three firings there was a real missing referent: "Which letters never mention Arthur?" (0.80 with a thin store description), "Check how TEXT matches terms" (0.70), and earlier "the garlic for Lucy's room". Real dangling references ("What did he decide after that?") sit at 0.96–0.97 under either description. Its threshold moves from 0.70 to 0.90. On the labelled eval that is precision 1.00 (0 false positives) at recall 0.45, against 0.87 at 0.65; a refusing kind trades recall for precision, as the contract's own bar says. Both contract sets are unchanged at the new threshold: held-out 97.7%, 0 wrong refusals, guidance 57/59 (`final-ho-r3.json`); calibration 94.1%, guidance 54/55 (`final-cal-r3.json`).
 
+## Round 7: OUT_OF_DOMAIN from real traffic (18 Oct)
+
+Through the query tool, OUT_OF_DOMAIN fired on ten distinct questions, and every one was in the book ("What was newly installed on the summit of the East Cliff at Whitby?", 0.85–0.90). One agent stopped looking for an answer the store held. The threshold moves from 0.85 to 0.92. On the labelled eval that keeps 10 of 12 positives with 0 false positives, and all ten real firings fall silent. Held-out drops from 97.7% to 96.2% (`final-ho-r4.json`), still above the 95% bar, with 0 wrong refusals. The one real loss is "Who played the Count in the 1931 Universal film?", which scores 0.91–0.92, right at the line. The extra ALIAS on a second case is run-to-run noise in a kind this change did not touch. Calibration is unchanged at 94.1% (`final-cal-r4.json`).
+
+**What it shows.** The question alone cannot separate "outside the store" (0.91–0.92) from "an obscure detail inside it" (0.85–0.90). Whether the store holds something is a fact about the store, so the fix belongs to a statistics probe: how near the nearest passage lies to the question (catalogue P4, SPARSE NEIGHBOURHOOD), not a judgement of the wording.
+
 ## What surprised us
 
 - **The deployment condition was not the measured one.** Every measurement passed a store description to Jev; the query tool did not. The same question then scored above a refusal threshold. The contract now runs both ways.

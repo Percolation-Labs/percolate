@@ -1,0 +1,1580 @@
+{
+ "summary": {
+  "cases": 85,
+  "passed": 80,
+  "pass_rate": 0.941,
+  "wrong_refusals": 0,
+  "guidance": "55/56"
+ },
+ "results": [
+  {
+   "case": "What did Harker see from the castle window on 12 May?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Van Helsing put around Lucy's neck?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Where was the Demeter wrecked?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What is Renfield's diet in Seward's diary?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Who signed the letter from Billington's firm?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What caused the payments-api outage on 3 March 2024?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "Who owns the billing service?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What does the ledger-sync job do?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which database does the search service use?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the INC-2231 postmortem recommend?",
+   "stage": "question",
+   "codes": [
+    "EXACT_MATCH"
+   ],
+   "p": {
+    "EXACT_MATCH": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.9
+  },
+  {
+   "case": "How many boxes did the Count ship, and where did they all end up?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.9
+   },
+   "fail": [
+    "missing DECOMPOSITION_REQUIRED"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.69
+  },
+  {
+   "case": "What did Mina think of Van Helsing, and when did Harker first meet the Count?",
+   "stage": "question",
+   "codes": [
+    "DECOMPOSITION_REQUIRED"
+   ],
+   "p": {
+    "DECOMPOSITION_REQUIRED": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "Why did the cache fail and who approved the rollback?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY",
+    "DECOMPOSITION_REQUIRED"
+   ],
+   "p": {
+    "DECOMPOSITION_REQUIRED": 0.96,
+    "CAUSAL_WHY": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.91
+  },
+  {
+   "case": "What did Lucy write to Mina about her three proposals?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What changed between version 2 and version 3 of the rate limiter design?",
+   "stage": "question",
+   "codes": [
+    "COMPARISON"
+   ],
+   "p": {
+    "COMPARISON": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.77
+  },
+  {
+   "case": "Who was with Lucy when she died?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which of Seward's entries never mention Renfield?",
+   "stage": "question",
+   "codes": [
+    "NEGATION"
+   ],
+   "p": {
+    "NEGATION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.66
+  },
+  {
+   "case": "Which incidents had no postmortem written?",
+   "stage": "question",
+   "codes": [
+    "NEGATION"
+   ],
+   "p": {
+    "NEGATION": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.81
+  },
+  {
+   "case": "Which letters don't mention Lucy at all?",
+   "stage": "question",
+   "codes": [
+    "NEGATION"
+   ],
+   "p": {
+    "NEGATION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.66
+  },
+  {
+   "case": "What did Lucy say when she could not sleep?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Why did the deploy not roll back automatically?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.83
+  },
+  {
+   "case": "What did Van Helsing refuse to tell Seward?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "When is Lucy's sleepwalking first mentioned?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing SUPERLATIVE"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which narrator wrote the most entries?",
+   "stage": "question",
+   "codes": [
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.99
+   },
+   "fail": [
+    "missing COUNT"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.52
+  },
+  {
+   "case": "What was the longest outage last year?",
+   "stage": "question",
+   "codes": [
+    "ARITHMETIC",
+    "RELATIVE_TIME",
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.99,
+    "RELATIVE_TIME": 0.96,
+    "ARITHMETIC": 0.9
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.72
+  },
+  {
+   "case": "What did Harker write in his first letter home?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing SUPERLATIVE"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What happened at the last meeting in Seward's study on 30 September?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the final report of the migration project conclude?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "How many entries did Seward write in September?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.81
+  },
+  {
+   "case": "How many incidents did the payments team have in 2024?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.78
+  },
+  {
+   "case": "How many boxes of earth were on the Demeter?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "What did the Count count when he looked at the boxes?",
+   "stage": "question",
+   "codes": [
+    "ALIAS",
+    "ROLE_NOT_NAME"
+   ],
+   "p": {
+    "ALIAS": 0.93,
+    "ROLE_NOT_NAME": 0.86
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.73
+  },
+  {
+   "case": "How did Seward's and Van Helsing's views of Lucy's illness differ?",
+   "stage": "question",
+   "codes": [
+    "COMPARISON"
+   ],
+   "p": {
+    "COMPARISON": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "How does the new queue design compare with the old one?",
+   "stage": "question",
+   "codes": [
+    "COMPARISON"
+   ],
+   "p": {
+    "COMPARISON": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "What did Seward think of Lucy's illness?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "List every place the Count's boxes were taken.",
+   "stage": "question",
+   "codes": [
+    "EXHAUSTIVE"
+   ],
+   "p": {
+    "EXHAUSTIVE": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.73
+  },
+  {
+   "case": "Give me all the services that depend on the auth service.",
+   "stage": "question",
+   "codes": [
+    "EXHAUSTIVE"
+   ],
+   "p": {
+    "EXHAUSTIVE": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "Name a place where the boxes were taken.",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Why did Lucy grow so weak in August?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.92
+  },
+  {
+   "case": "Why did latency spike after the 4 June release?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "When did Lucy grow weak?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did he decide after that?",
+   "stage": "question",
+   "codes": [
+    "MISSING_REFERENT"
+   ],
+   "p": {
+    "MISSING_REFERENT": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.75
+  },
+  {
+   "case": "Did they fix it in the end?",
+   "stage": "question",
+   "codes": [
+    "MISSING_REFERENT"
+   ],
+   "p": {
+    "MISSING_REFERENT": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "What did Harker decide after the Count left him at the castle?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Van Helsing say about his own past?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Why did the on-call engineer page the database team during INC-2231?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY",
+    "EXACT_MATCH",
+    "ROLE_NOT_NAME"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99,
+    "ROLE_NOT_NAME": 0.92,
+    "EXACT_MATCH": 0.93
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.78
+  },
+  {
+   "case": "What broke in the billing service last week?",
+   "stage": "question",
+   "codes": [
+    "RELATIVE_TIME"
+   ],
+   "p": {
+    "RELATIVE_TIME": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "What happened to Lucy two days after the storm?",
+   "stage": "question",
+   "codes": [
+    "RELATIVE_TIME"
+   ],
+   "p": {
+    "RELATIVE_TIME": 0.86
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "When did the group first learn that Lucy was a vampire, as opposed to when she became one?",
+   "stage": "question",
+   "codes": [
+    "KNOWN_VS_HAPPENED"
+   ],
+   "p": {
+    "KNOWN_VS_HAPPENED": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.87
+  },
+  {
+   "case": "When was the outage first reported?",
+   "stage": "question",
+   "codes": [
+    "KNOWN_VS_HAPPENED"
+   ],
+   "p": {
+    "KNOWN_VS_HAPPENED": 0.91
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "What happened on 10 August?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Was Van Helsing right to keep the truth from Arthur?",
+   "stage": "question",
+   "codes": [
+    "OPINION"
+   ],
+   "p": {
+    "OPINION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "Is it true that Lucy was staked by Arthur?",
+   "stage": "question",
+   "codes": [
+    "YES_NO_CLAIM"
+   ],
+   "p": {
+    "YES_NO_CLAIM": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "Lucy died on 20 September, didn't she?",
+   "stage": "question",
+   "codes": [
+    "ANSWER_EMBEDDED",
+    "YES_NO_CLAIM"
+   ],
+   "p": {
+    "YES_NO_CLAIM": 0.97,
+    "ANSWER_EMBEDDED": 0.94
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "What do you have on the Demeter?",
+   "stage": "question",
+   "codes": [
+    "META_QUESTION"
+   ],
+   "p": {
+    "META_QUESTION": 0.87
+   },
+   "fail": [
+    "missing EXPLORATORY"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.78
+  },
+  {
+   "case": "What did Victor Frankenstein build in his laboratory?",
+   "stage": "question",
+   "codes": [
+    "OUT_OF_DOMAIN"
+   ],
+   "p": {
+    "OUT_OF_DOMAIN": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.74
+  },
+  {
+   "case": "What is the capital of Peru?",
+   "stage": "question",
+   "codes": [
+    "OUT_OF_DOMAIN"
+   ],
+   "p": {
+    "OUT_OF_DOMAIN": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.79
+  },
+  {
+   "case": "What did Lucy write about Arthur?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Where does the phrase \"children of the night\" appear?",
+   "stage": "question",
+   "codes": [
+    "EXACT_MATCH"
+   ],
+   "p": {
+    "EXACT_MATCH": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "What is ticket PAY-4412 about?",
+   "stage": "question",
+   "codes": [
+    "EXACT_MATCH"
+   ],
+   "p": {
+    "EXACT_MATCH": 0.95
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "How many days passed between Lucy's death and her staking?",
+   "stage": "question",
+   "codes": [
+    "ARITHMETIC"
+   ],
+   "p": {
+    "ARITHMETIC": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.83
+  },
+  {
+   "case": "What day did Lucy die?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Summarise in three bullet points what Mina wrote on 30 September.",
+   "stage": "question",
+   "codes": [
+    "INSTRUCTIONS_MIXED_IN"
+   ],
+   "p": {
+    "INSTRUCTIONS_MIXED_IN": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.77
+  },
+  {
+   "case": "How do I rotate the database credentials?",
+   "stage": "question",
+   "codes": [
+    "PROCEDURAL"
+   ],
+   "p": {
+    "PROCEDURAL": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.9
+  },
+  {
+   "case": "Tell me about the crew of the Demeter.",
+   "stage": "question",
+   "codes": [
+    "EXPLORATORY"
+   ],
+   "p": {
+    "EXPLORATORY": 0.84
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "Where did the boxes go?",
+   "stage": "values",
+   "codes": [
+    "OFF_QUESTION",
+    "POINTER"
+   ],
+   "p": {
+    "POINTER": 0.97,
+    "OFF_QUESTION": 0.6
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.73
+  },
+  {
+   "case": "What killed the Demeter's crew?",
+   "stage": "values",
+   "codes": [
+    "HEARSAY",
+    "OFF_QUESTION",
+    "SPECULATIVE"
+   ],
+   "p": {
+    "HEARSAY": 0.96,
+    "SPECULATIVE": 0.91,
+    "OFF_QUESTION": 0.74
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "What is attacking Lucy?",
+   "stage": "values",
+   "codes": [
+    "SPECULATIVE"
+   ],
+   "p": {
+    "SPECULATIVE": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "What did Seward note on 4 September?",
+   "stage": "values",
+   "codes": [
+    "INJECTION"
+   ],
+   "p": {
+    "INJECTION": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "What did Harker eat at Bistritz?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Harker see from the window?",
+   "stage": "values",
+   "codes": [
+    "TRUNCATED"
+   ],
+   "p": {
+    "TRUNCATED": 0.95
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "On what date did Lucy die?",
+   "stage": "values",
+   "codes": [
+    "CONFLICT"
+   ],
+   "p": {
+    "CONFLICT": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 2
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "On what date did Lucy die?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 2
+   }
+  },
+  {
+   "case": "Who gave Lucy blood on 10 September?",
+   "stage": "values",
+   "codes": [
+    "OFF_QUESTION"
+   ],
+   "p": {
+    "OFF_QUESTION": 0.61
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.38
+  },
+  {
+   "case": "empty result",
+   "stage": "result",
+   "codes": [
+    "EMPTY"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "ranked search filling its limit, total unknown",
+   "stage": "result",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   }
+  },
+  {
+   "case": "exact filter matched 40, showed 8",
+   "stage": "result",
+   "codes": [
+    "TRUNCATED_AT_LIMIT"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.81
+  },
+  {
+   "case": "tiny gap is not a standout",
+   "stage": "result",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   }
+  },
+  {
+   "case": "one passage far above the rest",
+   "stage": "result",
+   "codes": [
+    "STRONG_SINGLE_HIT"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "a retracted record",
+   "stage": "result",
+   "codes": [
+    "RETRACTED"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "superseded",
+   "stage": "result",
+   "codes": [
+    "SUPERSEDED"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.83
+  },
+  {
+   "case": "passage continues",
+   "stage": "result",
+   "codes": [
+    "CONTINUES"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "result"
+    ],
+    "checked": 20,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "loop",
+   "stage": "walk",
+   "codes": [
+    "LOOP"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "walk"
+    ],
+    "checked": 7,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.77
+  },
+  {
+   "case": "converged",
+   "stage": "walk",
+   "codes": [
+    "CONVERGED"
+   ],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": null,
+    "stages": [
+     "walk"
+    ],
+    "checked": 7,
+    "jev_requests": 0
+   },
+   "guidance_p": 0.95
+  },
+  {
+   "case": "Where did the garlic for Lucy's room come from?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 23,
+    "jev_requests": 1
+   }
+  }
+ ]
+}
