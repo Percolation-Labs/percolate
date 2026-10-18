@@ -1,0 +1,192 @@
+[
+ {
+  "n": 1,
+  "set": "c043",
+  "compound": "Find me who the second guest is, besides Arthur, invited to Quincey Morris's camp-fire dinner, plus the name of the wolf that the keeper locks in a cage, plus what the white figure carried at its breast as it advanced down the avenue of yews.",
+  "parts": [
+   "e0030.1",
+   "e0109.8",
+   "e0146.5"
+  ]
+ },
+ {
+  "n": 2,
+  "set": "c033",
+  "compound": "I'd like to know which three places were ringed on the atlas map of England in the Count's library, and also what was newly installed on the summit of the East Cliff at Whitby, and what word the attendant swore Renfield called out loudly before the sound of falling.",
+  "parts": [
+   "e0007.8",
+   "e0048.3",
+   "e0180.2"
+  ]
+ },
+ {
+  "n": 3,
+  "set": "c046",
+  "compound": "What is the name of the wolf that the keeper locks in a cage, what did the white figure carry at its breast as it advanced down the avenue of yews, and what did Seward find on Renfield's pillow on 20 July?",
+  "parts": [
+   "e0109.8",
+   "e0146.5",
+   "e0041.1"
+  ]
+ },
+ {
+  "n": 4,
+  "set": "c011",
+  "compound": "Tell me what tool Van Helsing used to open the coffin's lead casing, and how many boxes form the consignment to be delivered to Carfax.",
+  "parts": [
+   "e0141.5",
+   "e0071.1"
+  ]
+ },
+ {
+  "n": 5,
+  "set": "c012",
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, and also what machine was included in Mrs. Harker's luggage at the station.",
+  "parts": [
+   "e0048.4",
+   "e0148.2"
+  ]
+ },
+ {
+  "n": 6,
+  "set": "c028",
+  "compound": "Which three places were ringed on the atlas map of England in the Count's library, and what is the name of the wolf that the keeper locks in a cage?",
+  "parts": [
+   "e0007.8",
+   "e0109.8"
+  ]
+ },
+ {
+  "n": 7,
+  "set": "c040",
+  "compound": "Where on their bodies were the missing children found wounded? Also, what did the woman in the courtyard demand from the Count, and what strong-smelling plant does Lucy say she never liked before but finds delightful tonight?",
+  "parts": [
+   "e0128.2",
+   "e0021.3",
+   "e0106.1"
+  ]
+ },
+ {
+  "n": 8,
+  "set": "c026",
+  "compound": "Which kind of moth does Van Helsing name when Renfield describes the large moths with skull markings? Also, what reason does Jonathan give for believing the Count was hurried when undressing him?",
+  "parts": [
+   "e0015.1",
+   "e0178.8"
+  ]
+ },
+ {
+  "n": 9,
+  "set": "c001",
+  "compound": "I'd like to know the escaped wolf's name as spotted by Mr. Bilder, and also what reason Jonathan gives for believing the Count was hurried when undressing him.",
+  "parts": [
+   "e0109.7",
+   "e0015.1"
+  ]
+ },
+ {
+  "n": 10,
+  "set": "c038",
+  "compound": "What household chore did Jonathan Harker see Count Dracula doing in his bedroom, what was newly installed on the summit of the East Cliff at Whitby, and where on their bodies were the missing children found wounded?",
+  "parts": [
+   "e0009.2",
+   "e0048.3",
+   "e0128.2"
+  ]
+ },
+ {
+  "n": 11,
+  "set": "c015",
+  "compound": "Find me which three places were ringed on the atlas map of England in the Count's library, plus what the woman in the courtyard demanded from the Count.",
+  "parts": [
+   "e0007.8",
+   "e0021.3"
+  ]
+ },
+ {
+  "n": 12,
+  "set": "c007",
+  "compound": "What date did the Count tell Jonathan to put on the first letter? Also, what is the name of the wolf that the keeper locks in a cage?",
+  "parts": [
+   "e0017.1",
+   "e0109.8"
+  ]
+ },
+ {
+  "n": 13,
+  "set": "c005",
+  "compound": "Which logical errors does Renfield say lunatic asylum inmates tend toward, and what is the name of the wolf that the keeper locks in a cage?",
+  "parts": [
+   "e0160.3",
+   "e0109.8"
+  ]
+ },
+ {
+  "n": 14,
+  "set": "c041",
+  "compound": "I'd like to know from which direction the wind was blowing more steadily as the party waited in the rocky shelter, and also the name of the wolf that the keeper locks in a cage, and who objects to taking Mina into the Count's death-trap.",
+  "parts": [
+   "e0241.5",
+   "e0109.8",
+   "e0220.4"
+  ]
+ },
+ {
+  "n": 15,
+  "set": "c030",
+  "compound": "What was newly installed on the summit of the East Cliff at Whitby, what word did the attendant swear Renfield called out loudly before the sound of falling, and what did the white figure carry at its breast as it advanced down the avenue of yews?",
+  "parts": [
+   "e0048.3",
+   "e0180.2",
+   "e0146.5"
+  ]
+ },
+ {
+  "n": 16,
+  "set": "c003",
+  "compound": "Find me where on their bodies the missing children were found wounded, plus what the white figure carried at its breast as it advanced down the avenue of yews.",
+  "parts": [
+   "e0128.2",
+   "e0146.5"
+  ]
+ },
+ {
+  "n": 17,
+  "set": "c037",
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, what the woman in the courtyard demanded from the Count, and also what Van Helsing showed Lucy from the big parcel that arrived from abroad.",
+  "parts": [
+   "e0048.4",
+   "e0021.3",
+   "e0105.1"
+  ]
+ },
+ {
+  "n": 18,
+  "set": "c049",
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, and also which firm sold the Piccadilly house and would not name the buyer, and the name of the wolf that the keeper locks in a cage.",
+  "parts": [
+   "e0048.4",
+   "e0171.6",
+   "e0109.8"
+  ]
+ },
+ {
+  "n": 19,
+  "set": "c042",
+  "compound": "Where on their bodies were the missing children found wounded, what did the woman in the courtyard demand from the Count, and what did Van Helsing show Lucy from the big parcel that arrived from abroad?",
+  "parts": [
+   "e0128.2",
+   "e0021.3",
+   "e0105.1"
+  ]
+ },
+ {
+  "n": 20,
+  "set": "c017",
+  "compound": "I'd like to know during what hours Renfield stays quiet over three nights according to Seward's diary, and also what name the straying Hampstead children give to the lady who lured them away.",
+  "parts": [
+   "e0082.2",
+   "e0128.1"
+  ]
+ }
+]
