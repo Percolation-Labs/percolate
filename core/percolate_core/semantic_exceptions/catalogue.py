@@ -170,11 +170,20 @@ KINDS: tuple[Kind, ...] = (
        "Resolve the role to the person who held it at the time asked about, then "
        "search for them."),
     # ---- time -----------------------------------------------------------------
+    # Reworded 18 Oct (variant-5): the old wording fired on 155 of 487 labelled
+    # questions at p >= 0.8, since nearly anything "could have changed". This
+    # one fires on 13 (18 at its threshold). Still off: 6 held-out positives
+    # cannot carry a precision.
     _q("TIME_UNSPECIFIED", "warning",
-       "Does `question` ask about something that could have changed over time, without "
-       "saying as of when?",
+       "Does `question` ask for the state of something that changes over the span "
+       "`store` covers (who holds it, where it is, what its setting or status is) "
+       "without saying as of when?",
        "The answer may have changed over time. Answer as of a stated date and say "
-       "which, or ask the person which time they mean.", acts="person"),
+       "which, or ask the person which time they mean.", acts="person",
+       yes="the answer is a state that was different at different times in the records, "
+           "and `question` names no time",
+       no="it asks about an event, a cause, a document or a fixed fact, or it names the "
+          "time it means"),
     _q("RELATIVE_TIME", "warning",
        "Does `question` use a relative time such as 'last week', 'recently' or 'two "
        "days ago'?",
@@ -416,7 +425,7 @@ MEASURED = {
     "MISSING_REFERENT": (0.70, True, 0.86),  # F1 0.71, 10 test positives, on
     "ALIAS": (0.90, True, 0.46),  # F1 0.60, 7 test positives, on
     "ROLE_NOT_NAME": (0.85, True, 0.50),  # F1 0.61, 5 test positives, on
-    "TIME_UNSPECIFIED": (0.95, False, 0.00),  # F1 0.00, 6 test positives, off
+    "TIME_UNSPECIFIED": (0.75, False, 0.38),  # F1 0.43, 6 test positives, off (out/v5m)
     "RELATIVE_TIME": (0.80, True, 1.00),  # F1 1.00, 8 test positives, on
     "KNOWN_VS_HAPPENED": (0.90, True, 0.88),  # F1 0.88, 8 test positives, on
     "PREDICTION": (0.55, False, 0.80),  # F1 0.89, 4 test positives, unmeasured
