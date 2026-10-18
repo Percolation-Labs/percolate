@@ -1,0 +1,246 @@
+{"set": "in", "group": 0, "question": "Who did Dr. Seward see entering the room where Lucy lay after Van Helsing went to his room?", "top1": 0.7072, "top5_mean": 0.6904, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "What had Van Helsing found among Lucy's belongings besides letters and memoranda?", "top1": 0.7338, "top5_mean": 0.7091, "ood_p": 0.21}
+{"set": "in", "group": 0, "question": "Where was the master mariner Edward Spencelagh said to have been murdered by pirates?", "top1": 0.7673, "top5_mean": 0.6307, "ood_p": 0.22}
+{"set": "in", "group": 0, "question": "What did Van Helsing hold toward the Count to make him cower back?", "top1": 0.684, "top5_mean": 0.6748, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "What did Mina find when she felt for Lucy in the bed after waking at night?", "top1": 0.7481, "top5_mean": 0.7254, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "Where will the captain's body be buried after the funeral procession of boats?", "top1": 0.6854, "top5_mean": 0.6283, "ood_p": 0.4}
+{"set": "in", "group": 0, "question": "Why did Van Helsing say he came to see Mina Harker?", "top1": 0.6923, "top5_mean": 0.6818, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What does Van Helsing carry back with him to operate on Renfield?", "top1": 0.7319, "top5_mean": 0.6828, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "What did Van Helsing say about Arthur's blood making defibrination unnecessary?", "top1": 0.7594, "top5_mean": 0.7422, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "How many miles remained to travel after the narrator reached Veresti at noon?", "top1": 0.6851, "top5_mean": 0.6817, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "Who was to perform the transfusion operation on Lucy this time, instead of Van Helsing?", "top1": 0.6621, "top5_mean": 0.6526, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "What object did Seward's typed papers on the table remind Mina to point toward?", "top1": 0.6696, "top5_mean": 0.6567, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What did Van Helsing plan to tell Mina about her role in the council?", "top1": 0.7006, "top5_mean": 0.6738, "ood_p": 0.19}
+{"set": "in", "group": 0, "question": "Who arrived earlier than expected while Dr. Seward was out with Jonathan?", "top1": 0.6692, "top5_mean": 0.6511, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "What did Van Helsing's letter say he would pledge on the truth of Jonathan's diary?", "top1": 0.7016, "top5_mean": 0.6954, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "How did Lord Godalming arrange to learn each day whether the Czarina Catherine was reported?", "top1": 0.6924, "top5_mean": 0.6607, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "What did Mrs. Harker report hearing in her hypnotic state about the ship?", "top1": 0.6995, "top5_mean": 0.6844, "ood_p": 0.67}
+{"set": "in", "group": 0, "question": "Where does Thomas Bilder live, as described in the Pall Mall Gazette interview?", "top1": 0.6256, "top5_mean": 0.5673, "ood_p": 0.6}
+{"set": "in", "group": 0, "question": "What did Thomas Bilder say was his explanation for why the wolf escaped?", "top1": 0.7564, "top5_mean": 0.7241, "ood_p": 0.57}
+{"set": "in", "group": 0, "question": "What exclamation did Van Helsing make on seeing Lucy in the morning light?", "top1": 0.7159, "top5_mean": 0.6911, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "How many strong men's blood had Quincey estimated had been put into Lucy within ten days?", "top1": 0.7169, "top5_mean": 0.6847, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What was Mina doing as Jonathan wrote in his diary on the afternoon of 5 October?", "top1": 0.7095, "top5_mean": 0.6912, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "Where did Van Helsing say the key to the situation probably lay?", "top1": 0.721, "top5_mean": 0.7099, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "Which headland did the mate see when the fog lifted on 2 August?", "top1": 0.7187, "top5_mean": 0.6801, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What flew in circles between Mina and the moonlight at the window?", "top1": 0.6132, "top5_mean": 0.6009, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What device did Mina decide to use to begin transcribing Jonathan's record?", "top1": 0.615, "top5_mean": 0.6092, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "Whose voice woke Van Helsing from the sleep-like fascination in the tomb?", "top1": 0.685, "top5_mean": 0.6624, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "Whom did Seward go to the station to meet?", "top1": 0.706, "top5_mean": 0.6754, "ood_p": 0.21}
+{"set": "in", "group": 0, "question": "What did the narrator say Van Helsing's hypnosis revealed at dawn on 2 November?", "top1": 0.6908, "top5_mean": 0.681, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What name did the child say he wanted to play with?", "top1": 0.6435, "top5_mean": 0.6298, "ood_p": 0.7}
+{"set": "in", "group": 0, "question": "Why did Van Helsing say the Count would sleep late?", "top1": 0.7234, "top5_mean": 0.6952, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What did Van Helsing say was stronger than memory?", "top1": 0.7393, "top5_mean": 0.7189, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What type of weapons did Quincey bring for use against possible wolves?", "top1": 0.6979, "top5_mean": 0.6729, "ood_p": 0.22}
+{"set": "in", "group": 0, "question": "What did Renfield keep murmuring after he grew quiet when the moon rose?", "top1": 0.7214, "top5_mean": 0.7013, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What did Van Helsing make to put around Lucy's neck?", "top1": 0.7089, "top5_mean": 0.6909, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "What drug did Van Helsing inject to keep Lucy asleep during the second transfusion?", "top1": 0.7192, "top5_mean": 0.691, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "Where was Van Helsing heading back to after examining Lucy at Hillingham?", "top1": 0.6723, "top5_mean": 0.6406, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Which scientists did Mina say would classify the Count as a criminal type?", "top1": 0.6091, "top5_mean": 0.5896, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "Whom does Dr. Seward address in his diary as he laments working without hope after losing his love?", "top1": 0.7115, "top5_mean": 0.6988, "ood_p": 0.34}
+{"set": "in", "group": 0, "question": "What does Van Helsing say he will drive through Lucy's body to destroy the Un-Dead?", "top1": 0.724, "top5_mean": 0.7056, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "On which date did Seward sit up all night with Lucy after the operation?", "top1": 0.6855, "top5_mean": 0.6356, "ood_p": 0.25}
+{"set": "in", "group": 0, "question": "What does Mina ask the men to promise they will do to her should the time come?", "top1": 0.7113, "top5_mean": 0.6956, "ood_p": 0.06}
+{"set": "in", "group": 0, "question": "Which religious service does Jonathan read aloud to the kneeling friends around Mina?", "top1": 0.6048, "top5_mean": 0.5955, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Whose death had greatly upset Jonathan Harker, according to Mina's reply to Van Helsing?", "top1": 0.6721, "top5_mean": 0.6512, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "At which London station did Seward meet Van Helsing on 7 September?", "top1": 0.6361, "top5_mean": 0.6156, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "Which two kinds of cargo did the ship's captain finish loading on 6 July?", "top1": 0.7231, "top5_mean": 0.672, "ood_p": 0.17}
+{"set": "in", "group": 0, "question": "At which house did Seward arrive tired on 9 September to watch over Lucy?", "top1": 0.6255, "top5_mean": 0.6155, "ood_p": 0.17}
+{"set": "in", "group": 0, "question": "What explanation did Seward suggest for Lucy's coffin being empty?", "top1": 0.7467, "top5_mean": 0.7097, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "What marital status does Van Helsing jokingly claim for himself because his wife is insane but alive by Church's law?", "top1": 0.6621, "top5_mean": 0.6517, "ood_p": 0.17}
+{"set": "in", "group": 0, "question": "What nationality are the ship's crewmen, as opposed to the mate who is Roumanian?", "top1": 0.6453, "top5_mean": 0.6306, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "What sounds did Mrs. Harker say she could hear far off while in the hypnotic trance at sunset?", "top1": 0.7201, "top5_mean": 0.6698, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "What did Lucy press close to herself whenever she became conscious?", "top1": 0.7239, "top5_mean": 0.7167, "ood_p": 0.28}
+{"set": "in", "group": 0, "question": "Which animal's cage did the keeper find broken and empty before midnight?", "top1": 0.6426, "top5_mean": 0.6352, "ood_p": 0.21}
+{"set": "in", "group": 0, "question": "What animal does Van Helsing imply bit Lucy, which Seward reacts to with shock?", "top1": 0.6889, "top5_mean": 0.6693, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "What small item does Lord Godalming hold up as an antidote to rats?", "top1": 0.761, "top5_mean": 0.6994, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "Where is the restrained Renfield chained after the struggle?", "top1": 0.6911, "top5_mean": 0.673, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "What did the attendant think was broken in Renfield when he was found on the floor?", "top1": 0.7392, "top5_mean": 0.7045, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What did Renfield say about the girl the doctor wanted to marry that made him doubt Mrs. Harker was her?", "top1": 0.7877, "top5_mean": 0.6744, "ood_p": 0.18}
+{"set": "in", "group": 0, "question": "What large creature did Lucy see buffeting its wings against her window on 17 September?", "top1": 0.6062, "top5_mean": 0.5895, "ood_p": 0.29}
+{"set": "in", "group": 0, "question": "What did the invoice for the Count's consignment say the fifty cases contained?", "top1": 0.6745, "top5_mean": 0.6419, "ood_p": 0.27}
+{"set": "in", "group": 0, "question": "Who would have had no claim on the property if Lucy had died intestate, according to the solicitor?", "top1": 0.6309, "top5_mean": 0.6227, "ood_p": 0.65}
+{"set": "in", "group": 0, "question": "What does Van Helsing ask permission to cut off from dead Miss Lucy?", "top1": 0.7468, "top5_mean": 0.7087, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "What dish, made of bacon, onion and beef, did Jonathan Harker dine on at Bistritz?", "top1": 0.5754, "top5_mean": 0.5318, "ood_p": 0.06}
+{"set": "in", "group": 0, "question": "Which carrier company's central office did Harker visit on 30 September to trace the boxes?", "top1": 0.6199, "top5_mean": 0.604, "ood_p": 0.41}
+{"set": "in", "group": 0, "question": "What colour are Van Helsing's eyes as Mina describes them when he arrives?", "top1": 0.6678, "top5_mean": 0.6524, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "What does Van Helsing say he has learned not to think little of, regardless of how strange?", "top1": 0.7339, "top5_mean": 0.679, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "Who arrived at Hillingham because of a telegram from Holmwood and volunteered his blood?", "top1": 0.6544, "top5_mean": 0.6419, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "What did Renfield swallow while tidying his room before Mrs. Harker entered?", "top1": 0.6818, "top5_mean": 0.6502, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "At what time did the telegram say Dracula left Carfax hurriedly?", "top1": 0.6776, "top5_mean": 0.6594, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What did Van Helsing give to Lucy as her physician and friend, not as her lover?", "top1": 0.7325, "top5_mean": 0.7157, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "What did Arthur kiss on Lucy's body before leaving her bedside?", "top1": 0.7526, "top5_mean": 0.7297, "ood_p": 0.28}
+{"set": "in", "group": 0, "question": "According to Mina's inquiry, between which times is Count Dracula confined to his wooden box?", "top1": 0.7275, "top5_mean": 0.6863, "ood_p": 0.17}
+{"set": "in", "group": 0, "question": "What visible mark on Mina's forehead stops Jonathan from disbelieving the danger?", "top1": 0.6595, "top5_mean": 0.6404, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Where were the group to meet to decide on their course of action on 5 October?", "top1": 0.667, "top5_mean": 0.6488, "ood_p": 0.35}
+{"set": "in", "group": 0, "question": "How many earth-boxes remained, with only the Count knowing where it was?", "top1": 0.6616, "top5_mean": 0.6215, "ood_p": 0.29}
+{"set": "in", "group": 0, "question": "What idiom about buying something unseen does Arthur use to resist promising in the dark?", "top1": 0.6859, "top5_mean": 0.67, "ood_p": 0.24}
+{"set": "in", "group": 0, "question": "What household chore did Jonathan Harker see Count Dracula doing in his bedroom?", "top1": 0.6337, "top5_mean": 0.6162, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "What new classification does Dr. Seward invent for his patient Renfield?", "top1": 0.6562, "top5_mean": 0.6416, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "With what did Mina seal the wrapped book on her wedding day?", "top1": 0.6324, "top5_mean": 0.6051, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "What medical procedure does Van Helsing say Lucy needs immediately?", "top1": 0.7456, "top5_mean": 0.7158, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Where on Lucy's body did Seward find two punctures?", "top1": 0.6779, "top5_mean": 0.6699, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Where did Seward fall asleep after the transfusion?", "top1": 0.6826, "top5_mean": 0.6723, "ood_p": 0.21}
+{"set": "in", "group": 0, "question": "How did the mate of the Demeter end his life?", "top1": 0.6614, "top5_mean": 0.6518, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "What object does Van Helsing say was stolen in the night and recovered?", "top1": 0.7603, "top5_mean": 0.7118, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "When will the group meet again to decide on a course of action?", "top1": 0.6487, "top5_mean": 0.6324, "ood_p": 0.48}
+{"set": "in", "group": 0, "question": "At which hotel does Van Helsing ask Seward to book rooms for him?", "top1": 0.6505, "top5_mean": 0.6319, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What firm is Jonathan Harker junior partner of, according to Mina's letter?", "top1": 0.5389, "top5_mean": 0.5343, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "What was the escaped wolf's name, as spotted by Mr. Bilder?", "top1": 0.7441, "top5_mean": 0.6886, "ood_p": 0.55}
+{"set": "in", "group": 0, "question": "What reason does Jonathan give for believing the Count was hurried when undressing him?", "top1": 0.7029, "top5_mean": 0.6905, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "What happened to Renfield, according to Arthur's account of the asylum study?", "top1": 0.7076, "top5_mean": 0.6966, "ood_p": 0.23}
+{"set": "in", "group": 0, "question": "Who drove the stake into Lucy's heart?", "top1": 0.7151, "top5_mean": 0.682, "ood_p": 0.6}
+{"set": "in", "group": 0, "question": "What does Van Helsing say the vampire throws or makes in a mirror that is absent?", "top1": 0.7133, "top5_mean": 0.7004, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "Which three places were ringed on the atlas map of England in the Count's library?", "top1": 0.6366, "top5_mean": 0.61, "ood_p": 0.45}
+{"set": "in", "group": 0, "question": "What did Van Helsing take from his bag first when preparing in the tomb?", "top1": 0.7161, "top5_mean": 0.7069, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "From which direction was the wind blowing more steadily as the party waited in the rocky shelter?", "top1": 0.696, "top5_mean": 0.6165, "ood_p": 0.33}
+{"set": "in", "group": 0, "question": "Where is Lucy buried?", "top1": 0.6254, "top5_mean": 0.618, "ood_p": 0.18}
+{"set": "in", "group": 0, "question": "Which logical errors does Renfield say lunatic asylum inmates tend toward?", "top1": 0.7087, "top5_mean": 0.6943, "ood_p": 0.16}
+{"set": "in", "group": 0, "question": "What animal sprang from the schooner onto the sand upon impact?", "top1": 0.6415, "top5_mean": 0.6181, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What was newly installed on the summit of the East Cliff at Whitby?", "top1": 0.6507, "top5_mean": 0.6288, "ood_p": 0.77}
+{"set": "in", "group": 0, "question": "Name the ship that would not sail as expected because of a fog.", "top1": 0.7339, "top5_mean": 0.7256, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What did Van Helsing ask Seward to fetch urgently when he found Lucy still alive?", "top1": 0.7415, "top5_mean": 0.7084, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "Who knows the train timetables well, having made them up at home in Exeter?", "top1": 0.7092, "top5_mean": 0.6612, "ood_p": 0.27}
+{"set": "in", "group": 0, "question": "From which dealer did the zoo buy three grey wolves from Norway?", "top1": 0.6068, "top5_mean": 0.5657, "ood_p": 0.87}
+{"set": "in", "group": 0, "question": "Who was mortally wounded and pressing his hand to his side?", "top1": 0.6542, "top5_mean": 0.6457, "ood_p": 0.29}
+{"set": "in", "group": 0, "question": "What kind of band did Lucy wear round her throat, buckled with a diamond buckle?", "top1": 0.5243, "top5_mean": 0.5141, "ood_p": 0.26}
+{"set": "in", "group": 0, "question": "What kind of rifles does Quincey Morris propose adding to the group's weapons?", "top1": 0.6171, "top5_mean": 0.5926, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "What does the Count call the wolves howling outside?", "top1": 0.6733, "top5_mean": 0.6533, "ood_p": 0.19}
+{"set": "in", "group": 0, "question": "Where on their bodies were the missing children found wounded?", "top1": 0.6795, "top5_mean": 0.6245, "ood_p": 0.25}
+{"set": "in", "group": 0, "question": "What tool did Van Helsing use to open the coffin's lead casing?", "top1": 0.7174, "top5_mean": 0.6582, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What animal does Renfield beg Seward to give him on 19 July?", "top1": 0.691, "top5_mean": 0.6726, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "Where will the group leave for in the morning, according to Van Helsing?", "top1": 0.6946, "top5_mean": 0.6731, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "What date did the Count tell Jonathan to put on the first letter?", "top1": 0.7288, "top5_mean": 0.6846, "ood_p": 0.06}
+{"set": "in", "group": 0, "question": "What did the woman in the courtyard demand from the Count?", "top1": 0.6703, "top5_mean": 0.6607, "ood_p": 0.32}
+{"set": "in", "group": 0, "question": "What lay on a table in the hall of the Carfax house, each labelled?", "top1": 0.6716, "top5_mean": 0.6078, "ood_p": 0.18}
+{"set": "in", "group": 0, "question": "Which firm sold the Piccadilly house and would not name the buyer?", "top1": 0.6568, "top5_mean": 0.6049, "ood_p": 0.69}
+{"set": "in", "group": 0, "question": "What nationality did the coastguard think the strange ship was?", "top1": 0.6818, "top5_mean": 0.6479, "ood_p": 0.3}
+{"set": "in", "group": 0, "question": "Where did Seward and Van Helsing leave the rescued child?", "top1": 0.6754, "top5_mean": 0.6396, "ood_p": 0.31}
+{"set": "in", "group": 0, "question": "Where did Jonathan travel to, as Mina watched him leave on 30 September?", "top1": 0.6502, "top5_mean": 0.6334, "ood_p": 0.3}
+{"set": "in", "group": 0, "question": "What did Madam Mina do when Van Helsing invited her to come over to the fire?", "top1": 0.6998, "top5_mean": 0.6672, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "What sound did Mina hear while hypnotised, besides creaking wood?", "top1": 0.7088, "top5_mean": 0.6874, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "Who died suddenly, as reported in Mina's letter of 18 September?", "top1": 0.6605, "top5_mean": 0.6535, "ood_p": 0.07}
+{"set": "in", "group": 0, "question": "Who is left alone with Mina Harker after Mr. Morris quietly leaves the room?", "top1": 0.6395, "top5_mean": 0.6232, "ood_p": 0.2}
+{"set": "in", "group": 0, "question": "To which churchyard does Van Helsing ask Arthur to come secretly with him?", "top1": 0.7114, "top5_mean": 0.7032, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "Which elderly man does Mina see approaching her as the storm threatens at Whitby?", "top1": 0.6084, "top5_mean": 0.6031, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "Who is the second guest, besides Arthur, invited to Quincey Morris's camp-fire dinner?", "top1": 0.6092, "top5_mean": 0.5589, "ood_p": 0.21}
+{"set": "in", "group": 0, "question": "Who takes the first night watch over Mrs. Harker?", "top1": 0.6574, "top5_mean": 0.6327, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "How many boxes form the consignment to be delivered to Carfax?", "top1": 0.6322, "top5_mean": 0.5859, "ood_p": 0.64}
+{"set": "in", "group": 0, "question": "What is the name of the wolf that the keeper locks in a cage?", "top1": 0.6521, "top5_mean": 0.6117, "ood_p": 0.31}
+{"set": "in", "group": 0, "question": "During what hours does Renfield stay quiet over three nights, according to Seward's diary?", "top1": 0.7103, "top5_mean": 0.7038, "ood_p": 0.06}
+{"set": "in", "group": 0, "question": "What kind of moth does Van Helsing name when Renfield describes the large moths with skull markings?", "top1": 0.6534, "top5_mean": 0.6162, "ood_p": 0.13}
+{"set": "in", "group": 0, "question": "Who asked Seward to note down the events of the evening of 11 October?", "top1": 0.6954, "top5_mean": 0.6827, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "What name do the straying Hampstead children give to the lady who lured them away?", "top1": 0.6675, "top5_mean": 0.6163, "ood_p": 0.51}
+{"set": "in", "group": 0, "question": "What does Seward order the night attendant to do with Renfield once he is quiet?", "top1": 0.7307, "top5_mean": 0.711, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What did Van Helsing do to the castle entrances before leaving, so the Count cannot return?", "top1": 0.6988, "top5_mean": 0.6786, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "On what does Renfield sit in the middle of the floor when Seward enters?", "top1": 0.6926, "top5_mean": 0.6704, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "Where does Jonathan Harker rest so as not to disturb his sleeping wife?", "top1": 0.6758, "top5_mean": 0.6396, "ood_p": 0.31}
+{"set": "in", "group": 0, "question": "What word did the attendant swear Renfield called out loudly before the sound of falling?", "top1": 0.6827, "top5_mean": 0.6676, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "Who is the agent at Varna to whom the box will be given?", "top1": 0.6498, "top5_mean": 0.6197, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "To which place will the Count's carriage take Jonathan to meet the diligence from Bukovina?", "top1": 0.6548, "top5_mean": 0.6371, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "How does Jonathan see the Count move down the castle wall?", "top1": 0.7236, "top5_mean": 0.6741, "ood_p": 0.3}
+{"set": "in", "group": 0, "question": "What religious object was held between the dead man's hand and the wheel of the derelict ship?", "top1": 0.6643, "top5_mean": 0.6342, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "What sound makes Count Dracula jump to his feet at dawn?", "top1": 0.6563, "top5_mean": 0.6407, "ood_p": 0.44}
+{"set": "in", "group": 0, "question": "Where had Mina seemed to see the red eyes in the sunset on the windows?", "top1": 0.5837, "top5_mean": 0.5765, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "Whom does Mina expect Dr. Van Helsing to tell her about when he visits?", "top1": 0.7008, "top5_mean": 0.6838, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What extra item does Renfield ask Seward to give him for the flies?", "top1": 0.7457, "top5_mean": 0.7122, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "What did the white figure carry at its breast as it advanced down the avenue of yews?", "top1": 0.6429, "top5_mean": 0.5841, "ood_p": 0.23}
+{"set": "in", "group": 0, "question": "What does Dr. Seward say he keeps in the phonograph cylinders that makes it awkward to share?", "top1": 0.7093, "top5_mean": 0.6913, "ood_p": 0.14}
+{"set": "in", "group": 0, "question": "What term does Van Helsing use to say Lucy might be, if not dead?", "top1": 0.7488, "top5_mean": 0.7307, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "What did Seward find on Renfield's pillow on 20 July?", "top1": 0.696, "top5_mean": 0.6656, "ood_p": 0.09}
+{"set": "in", "group": 0, "question": "What is the name of the man who might know about the dusty job at Purfleet?", "top1": 0.6109, "top5_mean": 0.5812, "ood_p": 0.17}
+{"set": "in", "group": 0, "question": "What mark on Mina's throat makes Van Helsing say time is now to be dreaded?", "top1": 0.7266, "top5_mean": 0.7068, "ood_p": 0.06}
+{"set": "in", "group": 0, "question": "What machine was included in Mrs. Harker's luggage at the station?", "top1": 0.6166, "top5_mean": 0.6044, "ood_p": 0.15}
+{"set": "in", "group": 0, "question": "What was Renfield folding a scrap of paper into when Seward and Van Helsing visited?", "top1": 0.6353, "top5_mean": 0.6305, "ood_p": 0.18}
+{"set": "in", "group": 0, "question": "Who gave Van Helsing the authority to read Lucy's letters and papers?", "top1": 0.684, "top5_mean": 0.6804, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "What did the traveller's companion exclaim, meaning \"God's seat\", on seeing the snowy peak?", "top1": 0.6448, "top5_mean": 0.6407, "ood_p": 0.49}
+{"set": "in", "group": 0, "question": "What strong-smelling plant does Lucy say she never liked before but finds delightful tonight?", "top1": 0.6638, "top5_mean": 0.6514, "ood_p": 0.45}
+{"set": "in", "group": 0, "question": "What did Van Helsing show Lucy from the big parcel that arrived from abroad?", "top1": 0.6721, "top5_mean": 0.6592, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What was the name of the ship expected to arrive in the morning?", "top1": 0.7195, "top5_mean": 0.6961, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "Who objects to taking Mina into the Count's death-trap?", "top1": 0.6851, "top5_mean": 0.6734, "ood_p": 0.08}
+{"set": "in", "group": 0, "question": "Where do the hundreds of steps in Whitby lead up to?", "top1": 0.6928, "top5_mean": 0.6053, "ood_p": 0.56}
+{"set": "in", "group": 0, "question": "Who is asked to act as secretary at the committee meeting in Dr. Seward's study?", "top1": 0.6361, "top5_mean": 0.6099, "ood_p": 0.11}
+{"set": "in", "group": 0, "question": "Which attendant had a finger broken in the struggle with Renfield?", "top1": 0.6655, "top5_mean": 0.6519, "ood_p": 0.1}
+{"set": "in", "group": 0, "question": "What will Van Helsing and Seward do to the Count if he is found in the box?", "top1": 0.6902, "top5_mean": 0.6798, "ood_p": 0.18}
+{"set": "in", "group": 0, "question": "What does Van Helsing give the horses so they can find the road through the snow?", "top1": 0.6648, "top5_mean": 0.6493, "ood_p": 0.37}
+{"set": "in", "group": 0, "question": "Whose mercy in Lucy's case does Mina remind Van Helsing of when asking for her own release?", "top1": 0.6962, "top5_mean": 0.6858, "ood_p": 0.12}
+{"set": "in", "group": 0, "question": "Where does Jonathan decide to sleep despite the Count's warning?", "top1": 0.7081, "top5_mean": 0.6857, "ood_p": 0.13}
+{"set": "out", "group": 1, "question": "Who played Count Dracula in the 1931 Universal film adaptation of Dracula?", "top1": 0.5485, "top5_mean": 0.5175, "ood_p": 0.96}
+{"set": "out", "group": 1, "question": "Which director made the 1922 film Nosferatu and why was it sued?", "top1": 0.4765, "top5_mean": 0.4663, "ood_p": 0.89}
+{"set": "out", "group": 1, "question": "What scenes did Francis Ford Coppola add to his 1992 Dracula film that Stoker never wrote?", "top1": 0.5854, "top5_mean": 0.5464, "ood_p": 0.92}
+{"set": "out", "group": 1, "question": "Who composed the score for the 1992 Bram Stoker's Dracula film?", "top1": 0.5854, "top5_mean": 0.5359, "ood_p": 0.97}
+{"set": "out", "group": 1, "question": "How did Christopher Lee's Dracula differ from the Count in the Hammer film series?", "top1": 0.5975, "top5_mean": 0.5878, "ood_p": 0.95}
+{"set": "out", "group": 1, "question": "Which actress played Mina Harker in the 1979 John Badham Dracula film?", "top1": 0.4713, "top5_mean": 0.4592, "ood_p": 0.95}
+{"set": "out", "group": 1, "question": "Who wrote the 1924 stage adaptation of Dracula by Hamilton Deane?", "top1": 0.5892, "top5_mean": 0.5631, "ood_p": 0.92}
+{"set": "out", "group": 1, "question": "Which BBC television series adapted Dracula in 2020 and who wrote it?", "top1": 0.5038, "top5_mean": 0.4956, "ood_p": 0.95}
+{"set": "out", "group": 1, "question": "What was Bela Lugosi's salary for starring in the Dracula film?", "top1": 0.5241, "top5_mean": 0.5052, "ood_p": 0.95}
+{"set": "out", "group": 1, "question": "Which Broadway actor played Dracula in the 1977 stage revival with sets by Edward Gorey?", "top1": 0.5428, "top5_mean": 0.5034, "ood_p": 0.96}
+{"set": "out", "group": 2, "question": "Where was Bram Stoker born and what illnesses did he have as a child?", "top1": 0.5799, "top5_mean": 0.5473, "ood_p": 0.91}
+{"set": "out", "group": 2, "question": "Who published the first edition of Dracula in 1897 and how many copies were printed?", "top1": 0.6082, "top5_mean": 0.5878, "ood_p": 0.75}
+{"set": "out", "group": 2, "question": "What was Bram Stoker's job at the Lyceum Theatre under Henry Irving?", "top1": 0.5445, "top5_mean": 0.5268, "ood_p": 0.73}
+{"set": "out", "group": 2, "question": "Which other novels did Bram Stoker write after Dracula, such as The Lair of the White Worm?", "top1": 0.542, "top5_mean": 0.534, "ood_p": 0.94}
+{"set": "out", "group": 2, "question": "What did Bram Stoker write in his surviving letters to Walt Whitman?", "top1": 0.6536, "top5_mean": 0.6338, "ood_p": 0.9}
+{"set": "out", "group": 2, "question": "How much money did Bram Stoker earn from Dracula during his lifetime?", "top1": 0.6034, "top5_mean": 0.5828, "ood_p": 0.75}
+{"set": "out", "group": 2, "question": "Which university did Bram Stoker attend in Dublin and what did he study?", "top1": 0.5249, "top5_mean": 0.5023, "ood_p": 0.92}
+{"set": "out", "group": 2, "question": "Where did Bram Stoker die and what was the cause of his death?", "top1": 0.5956, "top5_mean": 0.5787, "ood_p": 0.92}
+{"set": "out", "group": 2, "question": "What was the working title of Dracula in Stoker's notes before publication?", "top1": 0.6627, "top5_mean": 0.6461, "ood_p": 0.56}
+{"set": "out", "group": 2, "question": "Who was Stoker's wife Florence Balcombe and what did she do after his death?", "top1": 0.5617, "top5_mean": 0.5427, "ood_p": 0.83}
+{"set": "out", "group": 3, "question": "Who was Vlad III the Impaler and how many people did he have killed?", "top1": 0.5862, "top5_mean": 0.5801, "ood_p": 0.51}
+{"set": "out", "group": 3, "question": "How do I get from Bucharest to Bran Castle by train today?", "top1": 0.6598, "top5_mean": 0.6278, "ood_p": 0.98}
+{"set": "out", "group": 3, "question": "What is there to see in modern Whitby for a Dracula fan?", "top1": 0.6388, "top5_mean": 0.6174, "ood_p": 0.78}
+{"set": "out", "group": 3, "question": "When does the Whitby Goth Weekend take place each year?", "top1": 0.6139, "top5_mean": 0.5748, "ood_p": 0.97}
+{"set": "out", "group": 3, "question": "Which museum in Romania displays artifacts related to Vlad Tepes?", "top1": 0.5267, "top5_mean": 0.5006, "ood_p": 0.91}
+{"set": "out", "group": 3, "question": "What is the ticket price to enter Bran Castle for visitors now?", "top1": 0.5901, "top5_mean": 0.5716, "ood_p": 0.98}
+{"set": "out", "group": 3, "question": "How long does the train from Munich to Vienna take today?", "top1": 0.6724, "top5_mean": 0.6178, "ood_p": 0.98}
+{"set": "out", "group": 3, "question": "Where is Vlad the Impaler buried according to historians?", "top1": 0.5864, "top5_mean": 0.5696, "ood_p": 0.89}
+{"set": "out", "group": 3, "question": "What happened to Carfax Abbey's real-life model Purfleet estate in the twentieth century?", "top1": 0.6383, "top5_mean": 0.5455, "ood_p": 0.94}
+{"set": "out", "group": 3, "question": "How many tourists visit Transylvania each year?", "top1": 0.6466, "top5_mean": 0.5844, "ood_p": 0.97}
+{"set": "out", "group": 4, "question": "Who is the villain of Sheridan Le Fanu's novella Carmilla?", "top1": 0.5542, "top5_mean": 0.5477, "ood_p": 0.94}
+{"set": "out", "group": 4, "question": "Who wrote the vampire story The Vampyre in 1819 and what inspired it?", "top1": 0.6073, "top5_mean": 0.5909, "ood_p": 0.92}
+{"set": "out", "group": 4, "question": "What is the plot of the penny dreadful Varney the Vampire?", "top1": 0.5679, "top5_mean": 0.5557, "ood_p": 0.94}
+{"set": "out", "group": 4, "question": "How do Anne Rice's vampires in Interview with the Vampire differ from Stoker's Count?", "top1": 0.6388, "top5_mean": 0.6203, "ood_p": 0.92}
+{"set": "out", "group": 4, "question": "What is the strigoi in Romanian folklore and how is it destroyed?", "top1": 0.611, "top5_mean": 0.5917, "ood_p": 0.58}
+{"set": "out", "group": 4, "question": "Where did the Serbian vampire legend of Arnold Paole originate?", "top1": 0.574, "top5_mean": 0.562, "ood_p": 0.62}
+{"set": "out", "group": 4, "question": "Which Slavic myths describe the upir and how does it differ from Western vampires?", "top1": 0.6047, "top5_mean": 0.5922, "ood_p": 0.84}
+{"set": "out", "group": 4, "question": "What happens in Stephenie Meyer's Twilight when Edward meets Bella?", "top1": 0.5972, "top5_mean": 0.5846, "ood_p": 0.98}
+{"set": "out", "group": 4, "question": "What is the vrykolakas of Greek tradition and how is it laid to rest?", "top1": 0.5721, "top5_mean": 0.5585, "ood_p": 0.74}
+{"set": "out", "group": 4, "question": "How did Stoker's contemporaries like Florence Marryat portray vampires in The Blood of the Vampire?", "top1": 0.5516, "top5_mean": 0.5271, "ood_p": 0.95}
+{"set": "out", "group": 5, "question": "How have feminist critics interpreted Lucy Westenra's transformation in Dracula?", "top1": 0.6512, "top5_mean": 0.6258, "ood_p": 0.86}
+{"set": "out", "group": 5, "question": "What did Franco Moretti argue about Dracula and capitalism?", "top1": 0.6256, "top5_mean": 0.6093, "ood_p": 0.84}
+{"set": "out", "group": 5, "question": "How did Victorian reviewers receive Dracula when it was first published?", "top1": 0.6624, "top5_mean": 0.6353, "ood_p": 0.84}
+{"set": "out", "group": 5, "question": "What are the main differences between the 1897 and 1901 abridged editions of Dracula?", "top1": 0.5854, "top5_mean": 0.5588, "ood_p": 0.82}
+{"set": "out", "group": 5, "question": "How many copies has Dracula sold worldwide since 1897?", "top1": 0.5859, "top5_mean": 0.5708, "ood_p": 0.94}
+{"set": "out", "group": 5, "question": "What do scholars say about the theme of reverse colonization in Dracula?", "top1": 0.7031, "top5_mean": 0.6767, "ood_p": 0.85}
+{"set": "out", "group": 5, "question": "Which critic first read Dracula as an allegory of Victorian sexuality?", "top1": 0.6027, "top5_mean": 0.5397, "ood_p": 0.94}
+{"set": "out", "group": 5, "question": "What is the Norton Critical Edition of Dracula and who edited it?", "top1": 0.6178, "top5_mean": 0.5964, "ood_p": 0.9}
+{"set": "out", "group": 5, "question": "How has postcolonial theory shaped readings of Dracula's Eastern European setting?", "top1": 0.6671, "top5_mean": 0.6585, "ood_p": 0.85}
+{"set": "out", "group": 5, "question": "Which academic journals have published essays on Dracula and gender anxiety?", "top1": 0.614, "top5_mean": 0.5861, "ood_p": 0.95}
+{"set": "out", "group": 6, "question": "What did Mina Harker eat for breakfast on 1 September in Whitby?", "top1": 0.6375, "top5_mean": 0.6102, "ood_p": 0.25}
+{"set": "out", "group": 6, "question": "What was Count Dracula's favourite composer or piece of music?", "top1": 0.6067, "top5_mean": 0.585, "ood_p": 0.77}
+{"set": "out", "group": 6, "question": "What was Lucy Westenra's middle name?", "top1": 0.5722, "top5_mean": 0.5477, "ood_p": 0.28}
+{"set": "out", "group": 6, "question": "What was the weather in Exeter on the day Jonathan Harker passed through?", "top1": 0.6586, "top5_mean": 0.6299, "ood_p": 0.53}
+{"set": "out", "group": 6, "question": "What is Professor Van Helsing's first name and where was he born?", "top1": 0.6012, "top5_mean": 0.5963, "ood_p": 0.66}
+{"set": "out", "group": 6, "question": "What colour were Renfield's eyes and what did his mother call him?", "top1": 0.671, "top5_mean": 0.6502, "ood_p": 0.24}
+{"set": "out", "group": 6, "question": "How much did Jonathan Harker pay for his train ticket from Munich?", "top1": 0.5985, "top5_mean": 0.5937, "ood_p": 0.25}
+{"set": "out", "group": 6, "question": "What brand of typewriter did Mina use for her transcriptions?", "top1": 0.5616, "top5_mean": 0.5597, "ood_p": 0.75}
+{"set": "out", "group": 6, "question": "What was the name of Dr Seward's childhood home?", "top1": 0.5941, "top5_mean": 0.5845, "ood_p": 0.56}
+{"set": "out", "group": 6, "question": "What was the Count's favourite wine at the castle dinner table?", "top1": 0.5814, "top5_mean": 0.573, "ood_p": 0.46}
+{"set": "out", "group": 7, "question": "How did Victorian doctors perform blood transfusions before blood groups were discovered?", "top1": 0.5883, "top5_mean": 0.5739, "ood_p": 0.83}
+{"set": "out", "group": 7, "question": "What was the legal age of consent in England in 1890?", "top1": 0.598, "top5_mean": 0.5844, "ood_p": 0.84}
+{"set": "out", "group": 7, "question": "How was chloral hydrate prescribed for insomnia in the late nineteenth century?", "top1": 0.621, "top5_mean": 0.6133, "ood_p": 0.72}
+{"set": "out", "group": 7, "question": "What was the Victorian legal process for committing someone to an asylum?", "top1": 0.6301, "top5_mean": 0.6201, "ood_p": 0.76}
+{"set": "out", "group": 7, "question": "How did phonograph cylinders record sound in the 1890s?", "top1": 0.5749, "top5_mean": 0.5499, "ood_p": 0.93}
+{"set": "out", "group": 7, "question": "What causes rabies and how was it treated in 1890?", "top1": 0.6018, "top5_mean": 0.5853, "ood_p": 0.79}
+{"set": "out", "group": 7, "question": "How did Jean-Martin Charcot use hypnosis at the Salpetriere hospital?", "top1": 0.6035, "top5_mean": 0.5837, "ood_p": 0.94}
+{"set": "out", "group": 7, "question": "What were the inheritance laws for women in Victorian England?", "top1": 0.6586, "top5_mean": 0.5968, "ood_p": 0.87}
+{"set": "out", "group": 7, "question": "How did Victorian lawyers handle the conveyance of property to foreign nobles?", "top1": 0.6485, "top5_mean": 0.638, "ood_p": 0.74}
+{"set": "out", "group": 7, "question": "What did Cesare Lombroso claim about criminal physiognomy?", "top1": 0.6299, "top5_mean": 0.582, "ood_p": 0.93}
+{"set": "out", "group": 8, "question": "What did Quincey Harker do when he grew up?", "top1": 0.5875, "top5_mean": 0.5815, "ood_p": 0.43}
+{"set": "out", "group": 8, "question": "Did Mina and Jonathan Harker have more children after Quincey?", "top1": 0.5509, "top5_mean": 0.5416, "ood_p": 0.59}
+{"set": "out", "group": 8, "question": "Where did Dr Seward live after the Count's death?", "top1": 0.6516, "top5_mean": 0.6218, "ood_p": 0.46}
+{"set": "out", "group": 8, "question": "What career did Arthur Holmwood pursue after he became Lord Godalming?", "top1": 0.5999, "top5_mean": 0.5718, "ood_p": 0.35}
+{"set": "out", "group": 8, "question": "Where did Professor Van Helsing spend his remaining years?", "top1": 0.6531, "top5_mean": 0.64, "ood_p": 0.75}
+{"set": "out", "group": 8, "question": "Did Quincey Harker ever return to Transylvania as an adult?", "top1": 0.6056, "top5_mean": 0.5836, "ood_p": 0.61}
+{"set": "out", "group": 8, "question": "What happened to Jonathan Harker's law practice in Exeter after 1890?", "top1": 0.6558, "top5_mean": 0.6041, "ood_p": 0.67}
+{"set": "out", "group": 8, "question": "Whom did Dr Seward marry after the events of the novel?", "top1": 0.6968, "top5_mean": 0.6527, "ood_p": 0.53}
+{"set": "out", "group": 8, "question": "What became of Hawkins' estate after his death?", "top1": 0.6731, "top5_mean": 0.6429, "ood_p": 0.55}
+{"set": "out", "group": 8, "question": "How did Mina Harker spend her old age?", "top1": 0.5921, "top5_mean": 0.5774, "ood_p": 0.85}

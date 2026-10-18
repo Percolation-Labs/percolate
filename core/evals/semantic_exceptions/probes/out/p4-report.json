@@ -1,0 +1,27 @@
+{
+ "in_domain": 166,
+ "out_of_domain": 80,
+ "auc_top1": 0.896,
+ "auc_top5_mean": 0.897,
+ "auc_jev_question_only": 0.972,
+ "auc_combined": 0.981,
+ "top1_threshold_at_5pct_false_alarms": 0.6091,
+ "out_of_domain_caught_by_group": {
+  "1": "10/10",
+  "2": "8/10",
+  "3": "4/10",
+  "4": "8/10",
+  "5": "3/10",
+  "6": "7/10",
+  "7": "5/10",
+  "8": "5/10"
+ },
+ "jev_at_0.92": {
+  "in_domain_flagged": 0,
+  "out_of_domain_flagged": 30
+ },
+ "median_top1": {
+  "in": 0.685,
+  "out": 0.601
+ }
+}
