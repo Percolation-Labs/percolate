@@ -1,0 +1,86 @@
+{
+ "queries": 205,
+ "arms": {
+  "shadow": {
+   "queries": 97,
+   "paired": 68,
+   "fire_rate": 0.32,
+   "retry_given_raised": 0.286,
+   "retry_given_silent": 0.574,
+   "lift": 0.5,
+   "follows": 0.429,
+   "gain_given_raised": 0.868,
+   "gain_given_silent": 0.714,
+   "refused": 0
+  },
+  "on": {
+   "queries": 108,
+   "paired": 78,
+   "fire_rate": 0.38,
+   "retry_given_raised": 0.5,
+   "retry_given_silent": 0.708,
+   "lift": 0.71,
+   "follows": 0.6,
+   "gain_given_raised": 0.651,
+   "gain_given_silent": 0.631,
+   "refused": 0
+  }
+ },
+ "codes": {
+  "EMPTY": {
+   "fired": 22,
+   "paired": 21,
+   "retry_after": 0.238
+  },
+  "DECOMPOSITION_REQUIRED": {
+   "fired": 15,
+   "paired": 6,
+   "retry_after": 0.667
+  },
+  "CONJUNCTION": {
+   "fired": 14,
+   "paired": 9,
+   "retry_after": 0.778
+  },
+  "META_QUESTION": {
+   "fired": 11,
+   "paired": 11,
+   "retry_after": 0.182
+  },
+  "SUPERLATIVE": {
+   "fired": 8,
+   "paired": 4,
+   "retry_after": 1.0
+  },
+  "COUNT": {
+   "fired": 6,
+   "paired": 5,
+   "retry_after": 0.2
+  },
+  "EXACT_MATCH": {
+   "fired": 6,
+   "paired": 3,
+   "retry_after": 0.667
+  },
+  "NEGATION": {
+   "fired": 4,
+   "paired": 2,
+   "retry_after": 0.0
+  },
+  "ANSWER_EMBEDDED": {
+   "fired": 1,
+   "paired": 1,
+   "retry_after": 0.0
+  },
+  "MISSING_REFERENT": {
+   "fired": 1,
+   "paired": 1,
+   "retry_after": 0.0
+  },
+  "EXPLORATORY": {
+   "fired": 1,
+   "paired": 0,
+   "retry_after": null
+  }
+ }
+}

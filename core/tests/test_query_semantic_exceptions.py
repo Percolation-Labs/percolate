@@ -33,7 +33,8 @@ from percolate_core.agentic.contracts import CanonicalTool, ToolInvocation, Tool
 from percolate_core.agentic.contracts.tools import InvocationTarget
 from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
-from percolate_core.query.mcp import Exceptions, PercolateLog, QueryEmbedder, build_server
+from percolate_core.query.mcp import (Exceptions, PercolateLog, QueryEmbedder, build_server,
+                                      hydrate_semantic)
 from percolate_core.semantic_exceptions.log import (
     JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
@@ -191,7 +192,9 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         result = await self.call(self.start("on", StubJev({"NEGATION": 0.99})), {"query": SEARCH})
         [r] = result.content["semantic_exceptions"]["raised"]
         self.assertNotIn("limit", r)
-        self.assertIn('SCHEMA "sql"', r["action"])
+        # the source's own table, not a lookup command (run 2: `SCHEMA "sql"
+        # FROM <source>` listed nothing and a user gave up on SQL)
+        self.assertIn("SQL over sx.diary", r["action"])
 
     async def test_strict_lets_a_warning_through(self):
         server = self.start("strict", StubJev({"CAUSAL_WHY": 0.99}))
@@ -378,6 +381,40 @@ class Probe(unittest.TestCase):
 
     def test_nothing_readable_is_no_sql(self):
         self.assertFalse(Exceptions._sql_readable(self.Up([]), None, "dracula"))
+
+
+class SemanticText(unittest.TestCase):
+    ID = "1898b9fd-b962-5817-8f74-92196812463a"
+
+    class Up:
+        def __init__(self, table="sx.passages", col="content"):
+            self.table, self.col, self.sql = table, col, []
+
+        def read(self, path, authorization=None, profile="aiq"):
+            return [{"source_table": self.table, "content_col": self.col}], None
+
+        def rpc(self, fn, payload, authorization=None, profile="aiq"):
+            self.sql.append(payload["p_statement"])
+            return [{"id": SemanticText.ID, "content": "Listen to them"}], None
+
+    def doc(self):
+        return {"mode": "SEMANTIC", "plan": {"source": "dracula"},
+                "rows": [{"chunk_id": self.ID, "distance": 0.2}]}
+
+    def test_each_hit_comes_back_with_its_text(self):
+        up = self.Up()
+        out = hydrate_semantic(up, self.doc(), "Bearer t")
+        self.assertEqual(out["rows"][0]["content"], "Listen to them")
+        self.assertIn('from "sx"."passages"', up.sql[0])
+
+    def test_a_registry_name_that_is_not_an_identifier_is_not_used(self):
+        up = self.Up(table="sx.passages; drop table x")
+        self.assertEqual(hydrate_semantic(up, self.doc(), None), self.doc())
+        self.assertEqual(up.sql, [])
+
+    def test_other_modes_are_left_alone(self):
+        d = {**self.doc(), "mode": "TEXT"}
+        self.assertEqual(hydrate_semantic(self.Up(), d, None), d)
 
 
 class Embedding(unittest.TestCase):
