@@ -117,6 +117,8 @@ insert into t14_declared (fn, mechanism, why) values
  'the resource''s own read rule; the claimless arm is the worker''s embed fan-out, and no request over PostgREST is claimless'),
 ('content.may_upload(uuid)', 'rbac.has_permission',
  'a predicate about the caller: may act in the org, and holds resources:create'),
+('content.record_query(jsonb)', 'owner',
+ 'refuses a caller with no user; writes only a private resource the caller owns, on the shipped query_log channel in the shared org, keyed by the caller and the event id. It records the caller''s own act (a query they ran) and grants nothing, so no permission beyond being signed in is asked; the size cap keeps it a record of a query, not a store for documents'),
 ('content.record_chunks(uuid,jsonb)', 'rbac.may_write',
  'the resource''s own write rule, read off the resource rather than taken as an argument'),
 ('content.register_evidence(text,text,text,text,bigint,text,text)', 'rbac.require',

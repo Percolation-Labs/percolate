@@ -1,0 +1,80 @@
+name: content.query_event
+title: One query a caller ran through the query layer, as content.record_query stores it
+owner: world-model-ingestion
+
+consumed_by:
+  - percolate_core.semantic_exceptions.log.QueryEvent
+  - content.record_query
+
+why: >-
+  The query layer is measured on its own traffic: whether a semantic exception
+  met a search where it struggled, and whether the caller's next query found
+  anything new. That needs every query recorded with what was asked, what came
+  back and what the caller was shown, and the record is a stored row on the
+  query_log channel whose metadata is this object (rows, not schema).
+
+  The writer is a query tool in percolate-core, and a deployment may run
+  another, so the shape cannot live only in that tool's Python: a reader of
+  the log must be able to learn what an event holds from the database itself.
+  content.record_query checks only what storing needs (an id, the query, the
+  size); everything else is declared here and read by whoever analyses the log.
+
+  `raised` holds every exception COMPUTED, and `shown_codes` the ones the caller
+  actually read. They differ under shadow (computed, nothing shown) and when a
+  session has already been shown a kind. Collapsing them would make a control
+  arm indistinguishable from a treated one.
+
+  Open to new keys on purpose (no additionalProperties: false): the log is an
+  experiment's record and grows a field per experiment, and an event written
+  by an older tool must still be readable. `v` says which shape wrote it.
+
+schema:
+  type: object
+  required: [id, query]
+  properties:
+    id: {type: string, description: "unique per event; with the caller, the row's external id"}
+    v: {type: integer, description: "the event shape's version"}
+    at: {type: number, description: "when the query ran, seconds since the epoch"}
+    query: {type: string, description: "the p8ql statement as sent"}
+    question: {type: [string, "null"], description: "what the caller said it was trying to find out"}
+    mode: {type: [string, "null"], description: "the plan's retrieval mode"}
+    source: {type: [string, "null"]}
+    limit: {type: [integer, "null"]}
+    session_id: {type: [string, "null"]}
+    run_id: {type: [string, "null"]}
+    user_id: {type: [string, "null"]}
+    exceptions_mode:
+      enum: ["off", "shadow", "on", "strict"]
+      description: "off: none computed; shadow: computed, none shown; on: shown; strict: shown, and an error refuses"
+    shown: {type: boolean, description: "the caller was shown the exceptions"}
+    shown_codes: {type: array, items: {type: string}, description: "the codes the caller read (not yet seen this session)"}
+    refused: {type: boolean, description: "strict withheld the rows"}
+    error: {type: [string, "null"], description: "the query's own failure, if it failed"}
+    latency_ms: {type: [integer, "null"]}
+    stats:
+      type: object
+      description: "what the result looked like"
+      properties:
+        rows: {type: integer}
+        empty: {type: boolean}
+        with_content: {type: integer}
+        sources: {type: integer}
+        score_max: {type: number}
+        score_min: {type: number}
+        distance_min: {type: number}
+        distance_max: {type: number}
+        ids: {type: array, items: {type: string}, maxItems: 50, description: "the records that came back, first 50"}
+    raised:
+      type: array
+      description: "every exception computed, worst first"
+      items:
+        type: object
+        required: [code]
+        properties:
+          code: {type: string}
+          stage: {type: string}
+          severity: {enum: ["error", "warning", "positive"]}
+          p: {type: [number, "null"]}
+    receipt:
+      type: object
+      description: "what the judge ran: ran, model, stages, checked, jev_requests, or ran false and error"

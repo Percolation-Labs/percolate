@@ -23823,6 +23823,91 @@ end $$;
 -- already exists.
 revoke execute on function workflow.register_artifact(uuid, text, text, text, bigint, text, text, uuid) from public;
 
+-- ------------------------------------------------------------
+-- THE QUERY LOG: one stored row per query a caller ran, so the query layer can
+-- be measured on its own traffic (percolate-core semantic_exceptions/log.py).
+--
+-- A query tool records what it was asked and what came back -- the p8ql string,
+-- the caller's question, the plan, result statistics and row ids, the semantic
+-- exceptions computed and which of them the caller was shown -- and the next
+-- query in the same run is that query's outcome. The shape is declared as
+-- percolate.types `content.query_event`; this file stores it, and checks only
+-- what storing needs.
+--
+-- ROWS, NOT SCHEMA (specs/packages/rows-not-schema.md): a query event is a
+-- content.resources row on a shipped channel, `stored` because there is nothing
+-- to chunk, with the event as its metadata. `stored` and not `pending`, which
+-- is what register_fetched would leave and check_drift would report forever,
+-- and not `ready`, which integration.sql projects into the graph: these are
+-- machine-generated data-plane rows, which graph-identity.md's inclusion policy
+-- keeps out of aiq.nodes.
+--
+-- THE RECORD IS KEPT APART FROM WHAT IT DESCRIBES. A query event says what a
+-- caller asked and saw; it changes no fact, no edge and no weight. Whatever
+-- later learns from the log (a path that answered stored as a link, a much-used
+-- question promoted) is its own write with its own provenance, so it can be
+-- inspected, replayed or undone without touching this record.
+-- ------------------------------------------------------------
+insert into content.channels (name, kind, config, visibility)
+select 'query_log', 'manual',
+       jsonb_build_object('description',
+           'one stored row per query run through the query layer, private to the caller (content.record_query)'),
+       'public'
+where not exists (select 1 from content.channels
+                   where name = 'query_log' and org_id = rbac.shared_org_id());
+update content.channels
+   set shipped = true, visibility = 'public'
+ where name = 'query_log' and org_id = rbac.shared_org_id()
+   and (not shipped or visibility is distinct from 'public');
+
+-- RECORD ONE QUERY AS THE PERSON WHO RAN IT. Owner: the caller must be signed
+-- in, and the row is theirs and private, in the shared org, so nobody else
+-- reads their queries and no org permission is asked or needed -- it records
+-- the caller's own act and grants nothing. The event's `id` is the external id,
+-- so a retried write is the same row (on conflict do nothing) and the first
+-- record of an event stands. 64 KB is far above any event the query tool
+-- writes (row ids are capped at 50) and keeps one caller from storing documents
+-- here under the name of a query.
+create or replace function content.record_query(p_event jsonb) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user    uuid := rbac.current_user_id();
+    v_channel uuid;
+    v_res     uuid;
+begin
+    if v_user is null then
+        raise insufficient_privilege using message = 'Only a signed-in caller can record a query';
+    end if;
+    if jsonb_typeof(p_event) is distinct from 'object'
+       or coalesce(p_event->>'id', '') = '' or coalesce(p_event->>'query', '') = '' then
+        raise invalid_parameter_value
+            using message = 'A query event is an object with an id and the query it records';
+    end if;
+    if octet_length(p_event::text) > 65536 then
+        raise check_violation using message = 'A query event is at most 64 KB';
+    end if;
+    select id into v_channel from content.channels
+     where name = 'query_log' and org_id = rbac.shared_org_id();
+    if v_channel is null then
+        raise no_data_found using message = 'The query_log channel is missing from this installation';
+    end if;
+    insert into content.resources (channel_id, external_id, title, status, org_id, owner_id,
+                                   visibility, metadata)
+    values (v_channel, v_user::text || ':' || (p_event->>'id'),
+            left(coalesce(nullif(p_event->>'question', ''), p_event->>'query'), 200),
+            'stored', rbac.shared_org_id(), v_user, 'private', p_event)
+    on conflict (channel_id, external_id) do nothing
+    returning id into v_res;
+    if v_res is null then
+        select id into v_res from content.resources
+         where channel_id = v_channel and external_id = v_user::text || ':' || (p_event->>'id');
+    end if;
+    return v_res;
+end;
+$$;
+revoke execute on function content.record_query(jsonb) from public;
+grant execute on function content.record_query(jsonb) to authenticated;
+
 
 -- ============================================================
 -- agentic/schema.sql
@@ -36637,6 +36722,13 @@ It also records a real disagreement rather than hiding it. The trigger admits ei
      'THE CLEAREST CASE OF THE TRAP THIS CONTRACT EXISTS TO CLOSE. This policy is stored in the database -- content.channels.config.ingest_policy and content.resources.metadata.ingest_policy -- merged by a SQL function, and read back by SQL (content.record_ingest stores `mode` into metadata.ingest.mode). But its only specification is a pydantic model in percolate-core, and percolate-core is one service instance among however many a deployment runs. A user pointing their own worker at this database has no way to learn what an ingest policy may contain, because the answer lives in somebody else''s Python.
 So the vocabulary is enforced nowhere the database can see: `mode` is a Literal in Python and an unvalidated `p_outcome->>''mode''` in SQL, and `parser` is checked against a dict of installed readers at PARSE time -- long after the write that named a reader this deployment does not have.
 `additionalProperties: false` is not tidiness here. The pydantic model is strict on purpose ("a policy with a misspelled key is refused by name rather than silently ignored, because a silently-ignored override is a chunking strategy that the uploader believes is in force and is not"), and that strictness has to survive the trip through the database to be worth anything.'),
+    ('content.query_event', 'One query a caller ran through the query layer, as content.record_query stores it', 'world-model-ingestion', array['percolate_core.semantic_exceptions.log.QueryEvent', 'content.record_query']::text[],
+     '{"properties": {"at": {"description": "when the query ran, seconds since the epoch", "type": "number"}, "error": {"description": "the query''s own failure, if it failed", "type": ["string", "null"]}, "exceptions_mode": {"description": "off: none computed; shadow: computed, none shown; on: shown; strict: shown, and an error refuses", "enum": ["off", "shadow", "on", "strict"]}, "id": {"description": "unique per event; with the caller, the row''s external id", "type": "string"}, "latency_ms": {"type": ["integer", "null"]}, "limit": {"type": ["integer", "null"]}, "mode": {"description": "the plan''s retrieval mode", "type": ["string", "null"]}, "query": {"description": "the p8ql statement as sent", "type": "string"}, "question": {"description": "what the caller said it was trying to find out", "type": ["string", "null"]}, "raised": {"description": "every exception computed, worst first", "items": {"properties": {"code": {"type": "string"}, "p": {"type": ["number", "null"]}, "severity": {"enum": ["error", "warning", "positive"]}, "stage": {"type": "string"}}, "required": ["code"], "type": "object"}, "type": "array"}, "receipt": {"description": "what the judge ran: ran, model, stages, checked, jev_requests, or ran false and error", "type": "object"}, "refused": {"description": "strict withheld the rows", "type": "boolean"}, "run_id": {"type": ["string", "null"]}, "session_id": {"type": ["string", "null"]}, "shown": {"description": "the caller was shown the exceptions", "type": "boolean"}, "shown_codes": {"description": "the codes the caller read (not yet seen this session)", "items": {"type": "string"}, "type": "array"}, "source": {"type": ["string", "null"]}, "stats": {"description": "what the result looked like", "properties": {"distance_max": {"type": "number"}, "distance_min": {"type": "number"}, "empty": {"type": "boolean"}, "ids": {"description": "the records that came back, first 50", "items": {"type": "string"}, "maxItems": 50, "type": "array"}, "rows": {"type": "integer"}, "score_max": {"type": "number"}, "score_min": {"type": "number"}, "sources": {"type": "integer"}, "with_content": {"type": "integer"}}, "type": "object"}, "user_id": {"type": ["string", "null"]}, "v": {"description": "the event shape''s version", "type": "integer"}}, "required": ["id", "query"], "type": "object"}'::jsonb,
+     null,
+     'The query layer is measured on its own traffic: whether a semantic exception met a search where it struggled, and whether the caller''s next query found anything new. That needs every query recorded with what was asked, what came back and what the caller was shown, and the record is a stored row on the query_log channel whose metadata is this object (rows, not schema).
+The writer is a query tool in percolate-core, and a deployment may run another, so the shape cannot live only in that tool''s Python: a reader of the log must be able to learn what an event holds from the database itself. content.record_query checks only what storing needs (an id, the query, the size); everything else is declared here and read by whoever analyses the log.
+`raised` holds every exception COMPUTED, and `shown_codes` the ones the caller actually read. They differ under shadow (computed, nothing shown) and when a session has already been shown a kind. Collapsing them would make a control arm indistinguishable from a treated one.
+Open to new keys on purpose (no additionalProperties: false): the log is an experiment''s record and grows a field per experiment, and an event written by an older tool must still be readable. `v` says which shape wrote it.'),
     ('workflow.http_call.input', 'The input JSON of a kind=''http_call'' task', 'workflow-engine', array['percolate_core.worker.http.build_request', 'percolate_core.worker.http.http_call']::text[],
      '{"additionalProperties": false, "properties": {"auth_scheme": {"default": "Bearer", "type": "string"}, "body": {"description": "An object or array is JSON-encoded and sent with Content-Type application/json; anything else is str()''d and sent raw.", "type": ["object", "array", "string", "number", "boolean", "null"]}, "credential_ref": {"description": "A NAME resolved from the worker''s environment, never material. The database stores only the reference, so a dump of workflow.tasks never contains a secret and a task stays inspectable and replayable.", "type": "string"}, "headers": {"additionalProperties": {"type": "string"}, "type": "object"}, "jsonpath": {"description": "Dotted path extracted from the response, so a step hands the NEXT step a clean value instead of a provider envelope whose shape the next template must know. Matching nothing is a terminal failure, not a null.", "type": "string"}, "method": {"default": "GET", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "type": "string"}, "mode": {"default": "sync", "description": "async sends the request as sync does, then does not complete the task: the worker holds it `running`, heartbeating, until the callee completes or fails it through complete_task/fail_task, or until wait_ms passes. The task is not parked in waiting_external, because the lease fence refuses completion of a parked task (workflow-engine/spec.md). The hold occupies the worker for its length.", "enum": ["sync", "async"], "type": "string"}, "timeout_ms": {"default": 30000, "minimum": 1, "type": "integer"}, "url": {"pattern": "^https?://", "type": "string"}, "wait_ms": {"default": 900000, "description": "How long an async step''s worker holds the task for its callee after a 2xx dispatch. Past it the worker fails the task terminally, since a retry would re-dispatch work that may still be running. Ignored by a sync step. Default 15 minutes (percolate-core#46).", "minimum": 1, "type": "integer"}}, "required": ["url"], "type": "object"}'::jsonb,
      null,

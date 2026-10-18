@@ -817,6 +817,20 @@
     },
     {
       "admits": [
+        "off",
+        "on",
+        "shadow",
+        "strict"
+      ],
+      "column": "exceptions_mode",
+      "enforced_by": "type",
+      "members": "shipped",
+      "schema": "content",
+      "table": "content.query_event",
+      "vocabulary": "content.query_event"
+    },
+    {
+      "admits": [
         "parquet",
         "iceberg"
       ],
@@ -1837,6 +1851,195 @@
         "type": "object"
       },
       "title": "What to do with an uploaded file"
+    },
+    {
+      "consumed_by": [
+        "percolate_core.semantic_exceptions.log.QueryEvent",
+        "content.record_query"
+      ],
+      "implemented": null,
+      "name": "content.query_event",
+      "owner": "world-model-ingestion",
+      "schema": {
+        "properties": {
+          "at": {
+            "description": "when the query ran, seconds since the epoch",
+            "type": "number"
+          },
+          "error": {
+            "description": "the query's own failure, if it failed",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exceptions_mode": {
+            "description": "off: none computed; shadow: computed, none shown; on: shown; strict: shown, and an error refuses",
+            "enum": [
+              "off",
+              "shadow",
+              "on",
+              "strict"
+            ]
+          },
+          "id": {
+            "description": "unique per event; with the caller, the row's external id",
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "description": "the plan's retrieval mode",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "the p8ql statement as sent",
+            "type": "string"
+          },
+          "question": {
+            "description": "what the caller said it was trying to find out",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "raised": {
+            "description": "every exception computed, worst first",
+            "items": {
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "p": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "severity": {
+                  "enum": [
+                    "error",
+                    "warning",
+                    "positive"
+                  ]
+                },
+                "stage": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "receipt": {
+            "description": "what the judge ran: ran, model, stages, checked, jev_requests, or ran false and error",
+            "type": "object"
+          },
+          "refused": {
+            "description": "strict withheld the rows",
+            "type": "boolean"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shown": {
+            "description": "the caller was shown the exceptions",
+            "type": "boolean"
+          },
+          "shown_codes": {
+            "description": "the codes the caller read (not yet seen this session)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stats": {
+            "description": "what the result looked like",
+            "properties": {
+              "distance_max": {
+                "type": "number"
+              },
+              "distance_min": {
+                "type": "number"
+              },
+              "empty": {
+                "type": "boolean"
+              },
+              "ids": {
+                "description": "the records that came back, first 50",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "rows": {
+                "type": "integer"
+              },
+              "score_max": {
+                "type": "number"
+              },
+              "score_min": {
+                "type": "number"
+              },
+              "sources": {
+                "type": "integer"
+              },
+              "with_content": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "v": {
+            "description": "the event shape's version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "query"
+        ],
+        "type": "object"
+      },
+      "title": "One query a caller ran through the query layer, as content.record_query stores it"
     },
     {
       "consumed_by": [

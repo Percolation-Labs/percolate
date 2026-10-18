@@ -401,6 +401,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','function','content.register_upload',
      'text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text','brief.md §3.5: upload registers AND starts ingestion'),
 ('world-model-ingestion','function','content.register_fetched','text,text,text,text,uuid,jsonb','brief.md §2: pulled sources'),
+('world-model-ingestion','function','content.record_query','jsonb','integration.sql, the query log: one stored row per query a caller ran, private to them, so the query layer is measured on its own traffic (percolate.types content.query_event)'),
 ('world-model-ingestion','function','content.register_text','text,text,jsonb,text,text,uuid,jsonb,text','REM-628: an application registers text it already holds -- a published article, a package frame -- as chunks, in one transaction, and the paced embed run starts with them'),
 ('world-model-ingestion','function','content.resolve_file','uuid','brief.md §3.5: proxied reads'),
 ('world-model-ingestion','function','content.record_chunks','uuid,jsonb','brief.md §3: chunking writes back'),

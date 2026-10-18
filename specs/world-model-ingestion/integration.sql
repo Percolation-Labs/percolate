@@ -768,3 +768,88 @@ end $$;
 -- registration half, and a revoke can only be written where the signature
 -- already exists.
 revoke execute on function workflow.register_artifact(uuid, text, text, text, bigint, text, text, uuid) from public;
+
+-- ------------------------------------------------------------
+-- THE QUERY LOG: one stored row per query a caller ran, so the query layer can
+-- be measured on its own traffic (percolate-core semantic_exceptions/log.py).
+--
+-- A query tool records what it was asked and what came back -- the p8ql string,
+-- the caller's question, the plan, result statistics and row ids, the semantic
+-- exceptions computed and which of them the caller was shown -- and the next
+-- query in the same run is that query's outcome. The shape is declared as
+-- percolate.types `content.query_event`; this file stores it, and checks only
+-- what storing needs.
+--
+-- ROWS, NOT SCHEMA (specs/packages/rows-not-schema.md): a query event is a
+-- content.resources row on a shipped channel, `stored` because there is nothing
+-- to chunk, with the event as its metadata. `stored` and not `pending`, which
+-- is what register_fetched would leave and check_drift would report forever,
+-- and not `ready`, which integration.sql projects into the graph: these are
+-- machine-generated data-plane rows, which graph-identity.md's inclusion policy
+-- keeps out of aiq.nodes.
+--
+-- THE RECORD IS KEPT APART FROM WHAT IT DESCRIBES. A query event says what a
+-- caller asked and saw; it changes no fact, no edge and no weight. Whatever
+-- later learns from the log (a path that answered stored as a link, a much-used
+-- question promoted) is its own write with its own provenance, so it can be
+-- inspected, replayed or undone without touching this record.
+-- ------------------------------------------------------------
+insert into content.channels (name, kind, config, visibility)
+select 'query_log', 'manual',
+       jsonb_build_object('description',
+           'one stored row per query run through the query layer, private to the caller (content.record_query)'),
+       'public'
+where not exists (select 1 from content.channels
+                   where name = 'query_log' and org_id = rbac.shared_org_id());
+update content.channels
+   set shipped = true, visibility = 'public'
+ where name = 'query_log' and org_id = rbac.shared_org_id()
+   and (not shipped or visibility is distinct from 'public');
+
+-- RECORD ONE QUERY AS THE PERSON WHO RAN IT. Owner: the caller must be signed
+-- in, and the row is theirs and private, in the shared org, so nobody else
+-- reads their queries and no org permission is asked or needed -- it records
+-- the caller's own act and grants nothing. The event's `id` is the external id,
+-- so a retried write is the same row (on conflict do nothing) and the first
+-- record of an event stands. 64 KB is far above any event the query tool
+-- writes (row ids are capped at 50) and keeps one caller from storing documents
+-- here under the name of a query.
+create or replace function content.record_query(p_event jsonb) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user    uuid := rbac.current_user_id();
+    v_channel uuid;
+    v_res     uuid;
+begin
+    if v_user is null then
+        raise insufficient_privilege using message = 'Only a signed-in caller can record a query';
+    end if;
+    if jsonb_typeof(p_event) is distinct from 'object'
+       or coalesce(p_event->>'id', '') = '' or coalesce(p_event->>'query', '') = '' then
+        raise invalid_parameter_value
+            using message = 'A query event is an object with an id and the query it records';
+    end if;
+    if octet_length(p_event::text) > 65536 then
+        raise check_violation using message = 'A query event is at most 64 KB';
+    end if;
+    select id into v_channel from content.channels
+     where name = 'query_log' and org_id = rbac.shared_org_id();
+    if v_channel is null then
+        raise no_data_found using message = 'The query_log channel is missing from this installation';
+    end if;
+    insert into content.resources (channel_id, external_id, title, status, org_id, owner_id,
+                                   visibility, metadata)
+    values (v_channel, v_user::text || ':' || (p_event->>'id'),
+            left(coalesce(nullif(p_event->>'question', ''), p_event->>'query'), 200),
+            'stored', rbac.shared_org_id(), v_user, 'private', p_event)
+    on conflict (channel_id, external_id) do nothing
+    returning id into v_res;
+    if v_res is null then
+        select id into v_res from content.resources
+         where channel_id = v_channel and external_id = v_user::text || ':' || (p_event->>'id');
+    end if;
+    return v_res;
+end;
+$$;
+revoke execute on function content.record_query(jsonb) from public;
+grant execute on function content.record_query(jsonb) to authenticated;

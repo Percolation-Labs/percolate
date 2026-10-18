@@ -253,9 +253,10 @@ REPLAYED_DML = {
     ("world-model-ingestion/integration.sql", "insert aiq.relation_types"):
         (1, "the shipped relation vocabulary"),
     ("world-model-ingestion/integration.sql", "insert content.channels"):
-        (1, "the shipped workflow_artifacts channel, where not exists"),
+        (2, "the shipped workflow_artifacts and query_log channels, where not exists"),
     ("world-model-ingestion/integration.sql", "update content.channels"):
-        (1, "marks that one shipped channel shipped and public, which register_upload needs"),
+        (2, "marks those two shipped channels shipped and public, which register_upload "
+            "and record_query need"),
     ("agentic/schema.sql", "update agentic.agents"):
         (1, "canonicalises a model spelling the trigger would canonicalise on any write; "
             "touches only rows whose spelling changes"),
