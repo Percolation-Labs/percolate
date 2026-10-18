@@ -65,6 +65,10 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
 - **PRESUPPOSITION does not separate.** Every question assumes something. Wording has not found the line between an ordinary premise and a doubtful one, and five held-out positives are too few to fit one.
 - **A false alarm of my own.** The shipped catalogue raises 0.30 kinds of any severity per plain question, up from 0.23. The bar is on error-severity kinds, which stay at 0.0. Of the 24 warnings, 16 are EXACT_MATCH on a ticket id or a commit hash: key lookups, which is the right advice for a question the generator called plain.
 
+## Round 6: MISSING_REFERENT from real traffic (18 Oct)
+
+The query log (`../traffic`) caught MISSING_REFERENT refusing on real queries, and none of its three firings there was a real missing referent: "Which letters never mention Arthur?" (0.80 with a thin store description), "Check how TEXT matches terms" (0.70), and earlier "the garlic for Lucy's room". Real dangling references ("What did he decide after that?") sit at 0.96–0.97 under either description. Its threshold moves from 0.70 to 0.90. On the labelled eval that is precision 1.00 (0 false positives) at recall 0.45, against 0.87 at 0.65; a refusing kind trades recall for precision, as the contract's own bar says. Both contract sets are unchanged at the new threshold: held-out 97.7%, 0 wrong refusals, guidance 57/59 (`final-ho-r3.json`); calibration 94.1%, guidance 54/55 (`final-cal-r3.json`).
+
 ## What surprised us
 
 - **The deployment condition was not the measured one.** Every measurement passed a store description to Jev; the query tool did not. The same question then scored above a refusal threshold. The contract now runs both ways.
