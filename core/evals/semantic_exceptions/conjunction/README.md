@@ -27,3 +27,13 @@
 If a prediction fails, that is reported, not tuned.
 
 **One amendment, made before any compound was measured.** The cuts were registered as 0.55 and 0.75. No pair of kept passages falls below 0.55: passages from one book under bge-small have cosine 0.64 at the 5th percentile, 0.75 at the median and 0.86 at the 99th, across 990 pairs. The cuts are now the 10th and 90th percentiles of that distribution, 0.66 and 0.82. The distribution says nothing about recall, so the change cannot favour a prediction.
+
+## The fresh set: is the detector real? (registered 18 Oct, before the set existed)
+
+The "parts unrelated" question was added after P3 failed, so it is post hoc until it holds on compounds it has never seen. The fresh set is built the same way from 90 passages none of the first set used (`fresh/`), with the same cuts, writers' instructions and code (`CONJ_SET=fresh python measure.py ...`), and the detector's wording and its 0.5 threshold unchanged.
+
+- **F1.** "Parts unrelated" at p ≥ 0.5 fires on at least 80% of orthogonal compounds and at most 45% of related ones.
+- **F2.** The mean recall gain where it fires is at least 0.30, and where it is silent at most 0.10.
+- **F3.** The part count is right on at least 85% of compounds.
+
+If F1 and F2 hold, the detector replaces DECOMPOSITION_REQUIRED's wording in the catalogue, as a warning. If not, it is reported and does not ship.

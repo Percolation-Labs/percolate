@@ -40,3 +40,40 @@ Splitting is never a refusal: it almost never loses recall, and its cost is extr
 ## Not yet shown
 
 Step 5 of the README, an agent following the exception and getting better results end to end, has not been run. Neither has the detector on a fresh set of compounds, or on a second store.
+
+## The fresh set (registered bars in README.md, commit da1b529)
+
+There are 90 new passages (54 sub-questions kept) and 72 new compounds (30 orthogonal pairs, 20 triples, 22 related pairs). The code, cuts, writer instructions and detector wording are the same as in the first set. The numbers are in `fresh/out/`.
+
+**The effect replicates.**
+
+| group | compound recall | decomposed, same budget | gain |
+|---|---|---|---|
+| orthogonal pairs | 0.43 | 0.87 | +0.43 |
+| orthogonal triples | 0.20 | 0.87 | +0.67 |
+| related pairs | 0.71 | 0.86 | +0.16 |
+
+**The detector, against its bars:**
+
+| bar | needed | fresh set | |
+|---|---|---|---|
+| F1: fires on orthogonal | ≥ 80% | 42/50 (84%) | holds |
+| F1: fires on related | ≤ 45% | 9/22 (41%) | holds |
+| F2: gain where it fires | ≥ 0.30 | +0.49 | holds |
+| F2: gain where silent | ≤ 0.10 | +0.24 | **fails** |
+| F3: parts counted right | ≥ 85% | 70/72 (97%) | holds |
+
+It misses 8 orthogonal compounds that gain a lot from splitting, so it fails F2 and, as registered, it does not ship.
+
+## Which policy to ship, measured on both sets
+
+| policy | recall, first | recall, fresh | extra queries, first / fresh |
+|---|---|---|---|
+| never split | 0.57 | 0.45 | 0 / 0 |
+| split only if "unrelated" ≥ 0.5 | 0.90 | 0.80 | 82 / 70 |
+| split 3+ parts or "unrelated" | 0.90 | 0.82 | 82 / 74 |
+| **split any compound** | **0.92** | **0.87** | 100 / 92 |
+
+**The calibration question dissolves.** Splitting almost never loses recall, and even related parts gain from it (+0.13 first set, +0.16 fresh). So the best policy for recall is to split every compound, and the relatedness detector only trades recall for fewer queries. The exception that earns its place is the one already shipped. DECOMPOSITION_REQUIRED fired on 149 of 152 compounds across both sets, and agents that follow it should recover about 0.4 of recall on two-part questions and about 0.7 on three-part ones, at one extra query per extra part.
+
+**Still to show:** an agent shown the exception actually splits, and gets that recall end to end.

@@ -1,0 +1,2210 @@
+[
+ {
+  "set": "c000",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What happened to Renfield, according to Arthur's account of the asylum study, and what was newly installed on the summit of the East Cliff at Whitby?",
+  "gold_cos": [
+   0.651
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   16,
+   140
+  ],
+  "rank_alone": [
+   9,
+   3
+  ],
+  "cos_compound": [
+   0.619,
+   0.569
+  ],
+  "cos_alone": [
+   0.67,
+   0.635
+  ]
+ },
+ {
+  "set": "c001",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know the escaped wolf's name as spotted by Mr. Bilder, and also what reason Jonathan gives for believing the Count was hurried when undressing him.",
+  "gold_cos": [
+   0.654
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   8,
+   32
+  ],
+  "rank_alone": [
+   2,
+   4
+  ],
+  "cos_compound": [
+   0.735,
+   0.703
+  ],
+  "cos_alone": [
+   0.725,
+   0.687
+  ]
+ },
+ {
+  "set": "c002",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What is the name of the wolf that the keeper locks in a cage? Also, what name do the straying Hampstead children give to the lady who lured them away?",
+  "gold_cos": [
+   0.552
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   8,
+   4
+  ],
+  "rank_alone": [
+   2,
+   1
+  ],
+  "cos_compound": [
+   0.64,
+   0.658
+  ],
+  "cos_alone": [
+   0.619,
+   0.668
+  ]
+ },
+ {
+  "set": "c003",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me where on their bodies the missing children were found wounded, plus what the white figure carried at its breast as it advanced down the avenue of yews.",
+  "gold_cos": [
+   0.576
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   2,
+   3
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.593,
+   0.58
+  ],
+  "cos_alone": [
+   0.679,
+   0.643
+  ]
+ },
+ {
+  "set": "c004",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What was newly installed on the summit of the East Cliff at Whitby, and who is the second guest, besides Arthur, invited to Quincey Morris's camp-fire dinner?",
+  "gold_cos": [
+   0.644
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   86,
+   1
+  ],
+  "rank_alone": [
+   3,
+   1
+  ],
+  "cos_compound": [
+   0.513,
+   0.587
+  ],
+  "cos_alone": [
+   0.635,
+   0.609
+  ]
+ },
+ {
+  "set": "c005",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Which logical errors does Renfield say lunatic asylum inmates tend toward, and what is the name of the wolf that the keeper locks in a cage?",
+  "gold_cos": [
+   0.64
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   12,
+   2
+  ],
+  "rank_alone": [
+   4,
+   2
+  ],
+  "cos_compound": [
+   0.652,
+   0.669
+  ],
+  "cos_alone": [
+   0.688,
+   0.619
+  ]
+ },
+ {
+  "set": "c006",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know which three places were ringed on the atlas map of England in the Count's library, and also what nationality the coastguard thought the strange ship was.",
+  "gold_cos": [
+   0.645
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   46,
+   43
+  ],
+  "rank_alone": [
+   8,
+   1
+  ],
+  "cos_compound": [
+   0.671,
+   0.674
+  ],
+  "cos_alone": [
+   0.585,
+   0.682
+  ]
+ },
+ {
+  "set": "c007",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What date did the Count tell Jonathan to put on the first letter? Also, what is the name of the wolf that the keeper locks in a cage?",
+  "gold_cos": [
+   0.629
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   6,
+   46
+  ],
+  "rank_alone": [
+   1,
+   2
+  ],
+  "cos_compound": [
+   0.695,
+   0.651
+  ],
+  "cos_alone": [
+   0.729,
+   0.619
+  ]
+ },
+ {
+  "set": "c008",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Who takes the first night watch over Mrs. Harker, and who is the agent at Varna to whom the box will be given?",
+  "gold_cos": [
+   0.652
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   2,
+   7
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.595,
+   0.568
+  ],
+  "cos_alone": [
+   0.657,
+   0.65
+  ]
+ },
+ {
+  "set": "c009",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me the date the Count told Jonathan to put on the first letter, plus what the white figure carried at its breast as it advanced down the avenue of yews.",
+  "gold_cos": [
+   0.619
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   1,
+   79
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.663,
+   0.565
+  ],
+  "cos_alone": [
+   0.729,
+   0.643
+  ]
+ },
+ {
+  "set": "c010",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What happened to Renfield, according to Arthur's account of the asylum study? Also, where on their bodies were the missing children found wounded?",
+  "gold_cos": [
+   0.607
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   9,
+   15
+  ],
+  "rank_alone": [
+   9,
+   1
+  ],
+  "cos_compound": [
+   0.657,
+   0.646
+  ],
+  "cos_alone": [
+   0.67,
+   0.679
+  ]
+ },
+ {
+  "set": "c011",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Tell me what tool Van Helsing used to open the coffin's lead casing, and how many boxes form the consignment to be delivered to Carfax.",
+  "gold_cos": [
+   0.622
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   3
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.731,
+   0.655
+  ],
+  "cos_alone": [
+   0.717,
+   0.632
+  ]
+ },
+ {
+  "set": "c012",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, and also what machine was included in Mrs. Harker's luggage at the station.",
+  "gold_cos": [
+   0.614
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   8,
+   114
+  ],
+  "rank_alone": [
+   1,
+   4
+  ],
+  "cos_compound": [
+   0.667,
+   0.6
+  ],
+  "cos_alone": [
+   0.641,
+   0.602
+  ]
+ },
+ {
+  "set": "c013",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Where on their bodies were the missing children found wounded, and what machine was included in Mrs. Harker's luggage at the station?",
+  "gold_cos": [
+   0.563
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   3,
+   11
+  ],
+  "rank_alone": [
+   1,
+   4
+  ],
+  "cos_compound": [
+   0.593,
+   0.546
+  ],
+  "cos_alone": [
+   0.679,
+   0.602
+  ]
+ },
+ {
+  "set": "c014",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What animal sprang from the schooner onto the sand upon impact? Also, who died suddenly, as reported in Mina's letter of 18 September?",
+  "gold_cos": [
+   0.626
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   4,
+   10
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.646,
+   0.629
+  ],
+  "cos_alone": [
+   0.641,
+   0.661
+  ]
+ },
+ {
+  "set": "c015",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me which three places were ringed on the atlas map of England in the Count's library, plus what the woman in the courtyard demanded from the Count.",
+  "gold_cos": [
+   0.646
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   20,
+   197
+  ],
+  "rank_alone": [
+   8,
+   1
+  ],
+  "cos_compound": [
+   0.573,
+   0.518
+  ],
+  "cos_alone": [
+   0.585,
+   0.67
+  ]
+ },
+ {
+  "set": "c016",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Which animal sprang from the schooner onto the sand upon impact, and where on their bodies were the missing children found wounded?",
+  "gold_cos": [
+   0.609
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   2,
+   1
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.617,
+   0.618
+  ],
+  "cos_alone": [
+   0.642,
+   0.679
+  ]
+ },
+ {
+  "set": "c017",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know during what hours Renfield stays quiet over three nights according to Seward's diary, and also what name the straying Hampstead children give to the lady who lured them away.",
+  "gold_cos": [
+   0.651
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   35,
+   63
+  ],
+  "rank_alone": [
+   6,
+   1
+  ],
+  "cos_compound": [
+   0.686,
+   0.674
+  ],
+  "cos_alone": [
+   0.687,
+   0.667
+  ]
+ },
+ {
+  "set": "c018",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What firm is Jonathan Harker junior partner of, according to Mina's letter? Also, what will Van Helsing and Seward do to the Count if he is found in the box?",
+  "gold_cos": [
+   0.641
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   44,
+   13
+  ],
+  "rank_alone": [
+   2,
+   1
+  ],
+  "cos_compound": [
+   0.604,
+   0.634
+  ],
+  "cos_alone": [
+   0.538,
+   0.69
+  ]
+ },
+ {
+  "set": "c019",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me what was newly installed on the summit of the East Cliff at Whitby, plus what the woman in the courtyard demanded from the Count.",
+  "gold_cos": [
+   0.58
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   9,
+   164
+  ],
+  "rank_alone": [
+   3,
+   1
+  ],
+  "cos_compound": [
+   0.59,
+   0.541
+  ],
+  "cos_alone": [
+   0.635,
+   0.67
+  ]
+ },
+ {
+  "set": "c020",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What did the woman in the courtyard demand from the Count, and what strong-smelling plant does Lucy say she never liked before but finds delightful tonight?",
+  "gold_cos": [
+   0.652
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   107,
+   52
+  ],
+  "rank_alone": [
+   1,
+   8
+  ],
+  "cos_compound": [
+   0.591,
+   0.611
+  ],
+  "cos_alone": [
+   0.67,
+   0.627
+  ]
+ },
+ {
+  "set": "c021",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know the name of the wolf that the keeper locks in a cage, and also what machine was included in Mrs. Harker's luggage at the station.",
+  "gold_cos": [
+   0.599
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   13,
+   83
+  ],
+  "rank_alone": [
+   2,
+   4
+  ],
+  "cos_compound": [
+   0.655,
+   0.611
+  ],
+  "cos_alone": [
+   0.619,
+   0.602
+  ]
+ },
+ {
+  "set": "c022",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What religious object was held between the dead man's hand and the wheel of the derelict ship? Also, what strong-smelling plant does Lucy say she never liked before but finds delightful tonight?",
+  "gold_cos": [
+   0.614
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   50,
+   265
+  ],
+  "rank_alone": [
+   1,
+   8
+  ],
+  "cos_compound": [
+   0.694,
+   0.645
+  ],
+  "cos_alone": [
+   0.664,
+   0.627
+  ]
+ },
+ {
+  "set": "c023",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me what machine was included in Mrs. Harker's luggage at the station, plus what the traveller's companion exclaimed, meaning \"God's seat\", on seeing the snowy peak.",
+  "gold_cos": [
+   0.628
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   7,
+   61
+  ],
+  "rank_alone": [
+   4,
+   5
+  ],
+  "cos_compound": [
+   0.532,
+   0.494
+  ],
+  "cos_alone": [
+   0.602,
+   0.632
+  ]
+ },
+ {
+  "set": "c024",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "What reason does Jonathan give for believing the Count was hurried when undressing him, and what did the white figure carry at its breast as it advanced down the avenue of yews?",
+  "gold_cos": [
+   0.599
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   3,
+   53
+  ],
+  "rank_alone": [
+   4,
+   1
+  ],
+  "cos_compound": [
+   0.624,
+   0.575
+  ],
+  "cos_alone": [
+   0.687,
+   0.643
+  ]
+ },
+ {
+  "set": "c025",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know which logical errors Renfield says lunatic asylum inmates tend toward, and also where on their bodies the missing children were found wounded.",
+  "gold_cos": [
+   0.621
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   18,
+   20
+  ],
+  "rank_alone": [
+   4,
+   1
+  ],
+  "cos_compound": [
+   0.679,
+   0.677
+  ],
+  "cos_alone": [
+   0.688,
+   0.679
+  ]
+ },
+ {
+  "set": "c026",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Which kind of moth does Van Helsing name when Renfield describes the large moths with skull markings? Also, what reason does Jonathan give for believing the Count was hurried when undressing him?",
+  "gold_cos": [
+   0.627
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   126,
+   2
+  ],
+  "rank_alone": [
+   4,
+   1
+  ],
+  "cos_compound": [
+   0.641,
+   0.723
+  ],
+  "cos_alone": [
+   0.687,
+   0.653
+  ]
+ },
+ {
+  "set": "c027",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Find me which logical errors Renfield says lunatic asylum inmates tend toward, plus how many boxes form the consignment to be delivered to Carfax.",
+  "gold_cos": [
+   0.639
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   4,
+   58
+  ],
+  "rank_alone": [
+   4,
+   1
+  ],
+  "cos_compound": [
+   0.638,
+   0.592
+  ],
+  "cos_alone": [
+   0.688,
+   0.632
+  ]
+ },
+ {
+  "set": "c028",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "Which three places were ringed on the atlas map of England in the Count's library, and what is the name of the wolf that the keeper locks in a cage?",
+  "gold_cos": [
+   0.659
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   22,
+   24
+  ],
+  "rank_alone": [
+   8,
+   2
+  ],
+  "cos_compound": [
+   0.552,
+   0.547
+  ],
+  "cos_alone": [
+   0.585,
+   0.619
+  ]
+ },
+ {
+  "set": "c029",
+  "group": "orthogonal",
+  "parts": 2,
+  "compound": "I'd like to know what word the attendant swore Renfield called out loudly before the sound of falling, and also who the agent at Varna is to whom the box will be given.",
+  "gold_cos": [
+   0.638
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   6,
+   47
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.707,
+   0.662
+  ],
+  "cos_alone": [
+   0.683,
+   0.65
+  ]
+ },
+ {
+  "set": "c030",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What was newly installed on the summit of the East Cliff at Whitby, what word did the attendant swear Renfield called out loudly before the sound of falling, and what did the white figure carry at its breast as it advanced down the avenue of yews?",
+  "gold_cos": [
+   0.576,
+   0.652,
+   0.654
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   28,
+   49,
+   31
+  ],
+  "rank_alone": [
+   3,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.596,
+   0.586,
+   0.593
+  ],
+  "cos_alone": [
+   0.635,
+   0.683,
+   0.643
+  ]
+ },
+ {
+  "set": "c031",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Find me the name of the wolf that the keeper locks in a cage, plus what machine was included in Mrs. Harker's luggage at the station, plus what the traveller's companion exclaimed, meaning \"God's seat\", on seeing the snowy peak.",
+  "gold_cos": [
+   0.599,
+   0.547,
+   0.628
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.6666666666666666,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666666,
+  "rank_compound": [
+   12,
+   48,
+   134
+  ],
+  "rank_alone": [
+   2,
+   4,
+   5
+  ],
+  "cos_compound": [
+   0.568,
+   0.525,
+   0.5
+  ],
+  "cos_alone": [
+   0.619,
+   0.602,
+   0.632
+  ]
+ },
+ {
+  "set": "c032",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Which firm sold the Piccadilly house and would not name the buyer? Also, what name do the straying Hampstead children give to the lady who lured them away, and what does Van Helsing give the horses so they can find the road through the snow?",
+  "gold_cos": [
+   0.658,
+   0.635,
+   0.604
+  ],
+  "recall_compound": 0.6666666666666666,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.33333333333333337,
+  "rank_compound": [
+   2,
+   3,
+   377
+  ],
+  "rank_alone": [
+   2,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.702,
+   0.696,
+   0.55
+  ],
+  "cos_alone": [
+   0.646,
+   0.667,
+   0.665
+  ]
+ },
+ {
+  "set": "c033",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "I'd like to know which three places were ringed on the atlas map of England in the Count's library, and also what was newly installed on the summit of the East Cliff at Whitby, and what word the attendant swore Renfield called out loudly before the sound of falling.",
+  "gold_cos": [
+   0.628,
+   0.635,
+   0.576
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.6666666666666666,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666666,
+  "rank_compound": [
+   30,
+   202,
+   77
+  ],
+  "rank_alone": [
+   8,
+   3,
+   1
+  ],
+  "cos_compound": [
+   0.673,
+   0.627,
+   0.653
+  ],
+  "cos_alone": [
+   0.585,
+   0.635,
+   0.683
+  ]
+ },
+ {
+  "set": "c034",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What lay on a table in the hall of the Carfax house, each labelled, and what name do the straying Hampstead children give to the lady who lured them away? Also, what did the traveller's companion exclaim, meaning \"God's seat\", on seeing the snowy peak?",
+  "gold_cos": [
+   0.605,
+   0.655,
+   0.595
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 0.3333333333333333,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   91,
+   2,
+   481
+  ],
+  "rank_alone": [
+   6,
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.596,
+   0.668,
+   0.533
+  ],
+  "cos_alone": [
+   0.558,
+   0.667,
+   0.632
+  ]
+ },
+ {
+  "set": "c035",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Find me which direction the wind was blowing more steadily from as the party waited in the rocky shelter, plus the churchyard to which Van Helsing asks Arthur to come secretly with him, plus the name of the wolf that the keeper locks in a cage.",
+  "gold_cos": [
+   0.651,
+   0.57,
+   0.652
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   19,
+   10,
+   61
+  ],
+  "rank_alone": [
+   1,
+   1,
+   2
+  ],
+  "cos_compound": [
+   0.594,
+   0.606,
+   0.565
+  ],
+  "cos_alone": [
+   0.696,
+   0.711,
+   0.619
+  ]
+ },
+ {
+  "set": "c036",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What animal sprang from the schooner onto the sand upon impact? Also, what kind of moth does Van Helsing name when Renfield describes the large moths with skull markings, and where does Jonathan decide to sleep despite the Count's warning?",
+  "gold_cos": [
+   0.616,
+   0.609,
+   0.639
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   47,
+   2,
+   221
+  ],
+  "rank_alone": [
+   1,
+   1,
+   2
+  ],
+  "cos_compound": [
+   0.674,
+   0.711,
+   0.63
+  ],
+  "cos_alone": [
+   0.641,
+   0.653,
+   0.69
+  ]
+ },
+ {
+  "set": "c037",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, what the woman in the courtyard demanded from the Count, and also what Van Helsing showed Lucy from the big parcel that arrived from abroad.",
+  "gold_cos": [
+   0.589,
+   0.609,
+   0.627
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   32,
+   439,
+   2
+  ],
+  "rank_alone": [
+   1,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.644,
+   0.561,
+   0.687
+  ],
+  "cos_alone": [
+   0.641,
+   0.67,
+   0.672
+  ]
+ },
+ {
+  "set": "c038",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What household chore did Jonathan Harker see Count Dracula doing in his bedroom, what was newly installed on the summit of the East Cliff at Whitby, and where on their bodies were the missing children found wounded?",
+  "gold_cos": [
+   0.615,
+   0.622,
+   0.528
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   1,
+   293,
+   131
+  ],
+  "rank_alone": [
+   1,
+   3,
+   1
+  ],
+  "cos_compound": [
+   0.639,
+   0.503,
+   0.533
+  ],
+  "cos_alone": [
+   0.634,
+   0.635,
+   0.679
+  ]
+ },
+ {
+  "set": "c039",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Find me what was newly installed on the summit of the East Cliff at Whitby, plus who is left alone with Mina Harker after Mr. Morris quietly leaves the room, plus what name the straying Hampstead children give to the lady who lured them away.",
+  "gold_cos": [
+   0.586,
+   0.526,
+   0.63
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   276,
+   30,
+   135
+  ],
+  "rank_alone": [
+   3,
+   3,
+   1
+  ],
+  "cos_compound": [
+   0.509,
+   0.566,
+   0.535
+  ],
+  "cos_alone": [
+   0.635,
+   0.618,
+   0.667
+  ]
+ },
+ {
+  "set": "c040",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Where on their bodies were the missing children found wounded? Also, what did the woman in the courtyard demand from the Count, and what strong-smelling plant does Lucy say she never liked before but finds delightful tonight?",
+  "gold_cos": [
+   0.6,
+   0.644,
+   0.652
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.6666666666666666,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666666,
+  "rank_compound": [
+   24,
+   114,
+   201
+  ],
+  "rank_alone": [
+   1,
+   1,
+   8
+  ],
+  "cos_compound": [
+   0.677,
+   0.638,
+   0.62
+  ],
+  "cos_alone": [
+   0.679,
+   0.67,
+   0.627
+  ]
+ },
+ {
+  "set": "c041",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "I'd like to know from which direction the wind was blowing more steadily as the party waited in the rocky shelter, and also the name of the wolf that the keeper locks in a cage, and who objects to taking Mina into the Count's death-trap.",
+  "gold_cos": [
+   0.57,
+   0.644,
+   0.657
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   25,
+   71,
+   18
+  ],
+  "rank_alone": [
+   1,
+   2,
+   4
+  ],
+  "cos_compound": [
+   0.673,
+   0.65,
+   0.678
+  ],
+  "cos_alone": [
+   0.696,
+   0.619,
+   0.669
+  ]
+ },
+ {
+  "set": "c042",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Where on their bodies were the missing children found wounded, what did the woman in the courtyard demand from the Count, and what did Van Helsing show Lucy from the big parcel that arrived from abroad?",
+  "gold_cos": [
+   0.6,
+   0.643,
+   0.627
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   21,
+   137,
+   29
+  ],
+  "rank_alone": [
+   1,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.601,
+   0.548,
+   0.592
+  ],
+  "cos_alone": [
+   0.679,
+   0.67,
+   0.672
+  ]
+ },
+ {
+  "set": "c043",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Find me who the second guest is, besides Arthur, invited to Quincey Morris's camp-fire dinner, plus the name of the wolf that the keeper locks in a cage, plus what the white figure carried at its breast as it advanced down the avenue of yews.",
+  "gold_cos": [
+   0.616,
+   0.59,
+   0.53
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   12,
+   2,
+   118
+  ],
+  "rank_alone": [
+   1,
+   2,
+   1
+  ],
+  "cos_compound": [
+   0.535,
+   0.564,
+   0.49
+  ],
+  "cos_alone": [
+   0.609,
+   0.619,
+   0.643
+  ]
+ },
+ {
+  "set": "c044",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What was newly installed on the summit of the East Cliff at Whitby? Also, who is the second guest, besides Arthur, invited to Quincey Morris's camp-fire dinner, and what name do the straying Hampstead children give to the lady who lured them away?",
+  "gold_cos": [
+   0.644,
+   0.526,
+   0.582
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 1.0,
+  "rank_compound": [
+   455,
+   72,
+   58
+  ],
+  "rank_alone": [
+   3,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.546,
+   0.614,
+   0.618
+  ],
+  "cos_alone": [
+   0.635,
+   0.609,
+   0.667
+  ]
+ },
+ {
+  "set": "c045",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "I'd like to know what name the straying Hampstead children give to the lady who lured them away, and also what the traveller's companion exclaimed, meaning \"God's seat\", on seeing the snowy peak, and what strong-smelling plant Lucy says she never liked before but finds delightful tonight.",
+  "gold_cos": [
+   0.595,
+   0.644,
+   0.647
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.3333333333333333,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.3333333333333333,
+  "rank_compound": [
+   21,
+   303,
+   198
+  ],
+  "rank_alone": [
+   1,
+   5,
+   8
+  ],
+  "cos_compound": [
+   0.617,
+   0.552,
+   0.567
+  ],
+  "cos_alone": [
+   0.667,
+   0.632,
+   0.627
+  ]
+ },
+ {
+  "set": "c046",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What is the name of the wolf that the keeper locks in a cage, what did the white figure carry at its breast as it advanced down the avenue of yews, and what did Seward find on Renfield's pillow on 20 July?",
+  "gold_cos": [
+   0.53,
+   0.657,
+   0.608
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   17,
+   34,
+   9
+  ],
+  "rank_alone": [
+   2,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.586,
+   0.571,
+   0.592
+  ],
+  "cos_alone": [
+   0.619,
+   0.643,
+   0.696
+  ]
+ },
+ {
+  "set": "c047",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "Find me what nationality the coastguard thought the strange ship was, plus what name the straying Hampstead children give to the lady who lured them away, plus what Seward found on Renfield's pillow on 20 July.",
+  "gold_cos": [
+   0.54,
+   0.659,
+   0.646
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   11,
+   18,
+   4
+  ],
+  "rank_alone": [
+   1,
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.599,
+   0.593,
+   0.615
+  ],
+  "cos_alone": [
+   0.682,
+   0.668,
+   0.696
+  ]
+ },
+ {
+  "set": "c048",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "What animal sprang from the schooner onto the sand upon impact? Also, which firm sold the Piccadilly house and would not name the buyer, and what did the traveller's companion exclaim, meaning \"God's seat\", on seeing the snowy peak?",
+  "gold_cos": [
+   0.575,
+   0.61,
+   0.587
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 0.6666666666666666,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.3333333333333333,
+  "rank_compound": [
+   5,
+   14,
+   92
+  ],
+  "rank_alone": [
+   1,
+   2,
+   5
+  ],
+  "cos_compound": [
+   0.635,
+   0.614,
+   0.577
+  ],
+  "cos_alone": [
+   0.641,
+   0.646,
+   0.632
+  ]
+ },
+ {
+  "set": "c049",
+  "group": "orthogonal",
+  "parts": 3,
+  "compound": "I'd like to know what animal sprang from the schooner onto the sand upon impact, and also which firm sold the Piccadilly house and would not name the buyer, and the name of the wolf that the keeper locks in a cage.",
+  "gold_cos": [
+   0.575,
+   0.556,
+   0.635
+  ],
+  "recall_compound": 0.3333333333333333,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.6666666666666667,
+  "rank_compound": [
+   5,
+   112,
+   13
+  ],
+  "rank_alone": [
+   1,
+   2,
+   2
+  ],
+  "cos_compound": [
+   0.677,
+   0.611,
+   0.655
+  ],
+  "cos_alone": [
+   0.641,
+   0.646,
+   0.619
+  ]
+ },
+ {
+  "set": "c050",
+  "group": "related",
+  "parts": 2,
+  "compound": "What strong-smelling plant does Lucy say she never liked before but finds delightful tonight, and what did Van Helsing show Lucy from the big parcel that arrived from abroad?",
+  "gold_cos": [
+   0.857
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   18,
+   1
+  ],
+  "rank_alone": [
+   8,
+   1
+  ],
+  "cos_compound": [
+   0.628,
+   0.736
+  ],
+  "cos_alone": [
+   0.627,
+   0.672
+  ]
+ },
+ {
+  "set": "c051",
+  "group": "related",
+  "parts": 2,
+  "compound": "Find me who died suddenly, as reported in Mina's letter of 18 September, plus who is left alone with Mina Harker after Mr. Morris quietly leaves the room.",
+  "gold_cos": [
+   0.833
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   3,
+   29
+  ],
+  "rank_alone": [
+   1,
+   3
+  ],
+  "cos_compound": [
+   0.643,
+   0.595
+  ],
+  "cos_alone": [
+   0.661,
+   0.618
+  ]
+ },
+ {
+  "set": "c052",
+  "group": "related",
+  "parts": 2,
+  "compound": "What was Renfield folding a scrap of paper into when Seward and Van Helsing visited? Also, what did Van Helsing show Lucy from the big parcel that arrived from abroad?",
+  "gold_cos": [
+   0.842
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   10,
+   2
+  ],
+  "rank_alone": [
+   5,
+   1
+  ],
+  "cos_compound": [
+   0.691,
+   0.714
+  ],
+  "cos_alone": [
+   0.624,
+   0.672
+  ]
+ },
+ {
+  "set": "c053",
+  "group": "related",
+  "parts": 2,
+  "compound": "I'd like to know what object Van Helsing says was stolen in the night and recovered, and also what Renfield was folding a scrap of paper into when Seward and Van Helsing visited.",
+  "gold_cos": [
+   0.842
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   3
+  ],
+  "rank_alone": [
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.811,
+   0.77
+  ],
+  "cos_alone": [
+   0.76,
+   0.624
+  ]
+ },
+ {
+  "set": "c054",
+  "group": "related",
+  "parts": 2,
+  "compound": "Who objects to taking Mina into the Count's death-trap, and who is asked to act as secretary at the committee meeting in Dr. Seward's study?",
+  "gold_cos": [
+   0.834
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   6,
+   1
+  ],
+  "rank_alone": [
+   4,
+   1
+  ],
+  "cos_compound": [
+   0.605,
+   0.627
+  ],
+  "cos_alone": [
+   0.669,
+   0.636
+  ]
+ },
+ {
+  "set": "c055",
+  "group": "related",
+  "parts": 2,
+  "compound": "Find me what Seward found on Renfield's pillow on 20 July, plus what Renfield was folding a scrap of paper into when Seward and Van Helsing visited.",
+  "gold_cos": [
+   0.853
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   3
+  ],
+  "rank_alone": [
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.635,
+   0.629
+  ],
+  "cos_alone": [
+   0.696,
+   0.624
+  ]
+ },
+ {
+  "set": "c056",
+  "group": "related",
+  "parts": 2,
+  "compound": "What happened to Renfield, according to Arthur's account of the asylum study? Also, what term does Van Helsing use to say Lucy might be, if not dead?",
+  "gold_cos": [
+   0.857
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   41,
+   1
+  ],
+  "rank_alone": [
+   9,
+   4
+  ],
+  "cos_compound": [
+   0.713,
+   0.761
+  ],
+  "cos_alone": [
+   0.67,
+   0.728
+  ]
+ },
+ {
+  "set": "c057",
+  "group": "related",
+  "parts": 2,
+  "compound": "What date did the Count tell Jonathan to put on the first letter, and which attendant had a finger broken in the struggle with Renfield?",
+  "gold_cos": [
+   0.846
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   7
+  ],
+  "rank_alone": [
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.671,
+   0.637
+  ],
+  "cos_alone": [
+   0.729,
+   0.643
+  ]
+ },
+ {
+  "set": "c058",
+  "group": "related",
+  "parts": 2,
+  "compound": "I'd like to know who died suddenly, as reported in Mina's letter of 18 September, and also what term Van Helsing uses to say Lucy might be, if not dead.",
+  "gold_cos": [
+   0.853
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   2,
+   15
+  ],
+  "rank_alone": [
+   1,
+   4
+  ],
+  "cos_compound": [
+   0.767,
+   0.724
+  ],
+  "cos_alone": [
+   0.661,
+   0.728
+  ]
+ },
+ {
+  "set": "c059",
+  "group": "related",
+  "parts": 2,
+  "compound": "Find me who died suddenly, as reported in Mina's letter of 18 September, plus which attendant had a finger broken in the struggle with Renfield.",
+  "gold_cos": [
+   0.845
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   5,
+   1
+  ],
+  "rank_alone": [
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.634,
+   0.642
+  ],
+  "cos_alone": [
+   0.661,
+   0.643
+  ]
+ },
+ {
+  "set": "c060",
+  "group": "related",
+  "parts": 2,
+  "compound": "To which churchyard does Van Helsing ask Arthur to come secretly with him? Also, what term does Van Helsing use to say Lucy might be, if not dead?",
+  "gold_cos": [
+   0.855
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   4,
+   2
+  ],
+  "rank_alone": [
+   1,
+   4
+  ],
+  "cos_compound": [
+   0.762,
+   0.78
+  ],
+  "cos_alone": [
+   0.711,
+   0.728
+  ]
+ },
+ {
+  "set": "c061",
+  "group": "related",
+  "parts": 2,
+  "compound": "With what did Mina seal the wrapped book on her wedding day, and who is left alone with Mina Harker after Mr. Morris quietly leaves the room?",
+  "gold_cos": [
+   0.82
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   16,
+   6
+  ],
+  "rank_alone": [
+   9,
+   3
+  ],
+  "cos_compound": [
+   0.555,
+   0.582
+  ],
+  "cos_alone": [
+   0.579,
+   0.618
+  ]
+ },
+ {
+  "set": "c062",
+  "group": "related",
+  "parts": 2,
+  "compound": "I'd like to know what Renfield was folding a scrap of paper into when Seward and Van Helsing visited, and also which attendant had a finger broken in the struggle with Renfield.",
+  "gold_cos": [
+   0.838
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   8,
+   11
+  ],
+  "rank_alone": [
+   5,
+   5
+  ],
+  "cos_compound": [
+   0.686,
+   0.678
+  ],
+  "cos_alone": [
+   0.624,
+   0.643
+  ]
+ },
+ {
+  "set": "c063",
+  "group": "related",
+  "parts": 2,
+  "compound": "Who is asked to act as secretary at the committee meeting in Dr. Seward's study? Also, which attendant had a finger broken in the struggle with Renfield?",
+  "gold_cos": [
+   0.833
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   5,
+   14
+  ],
+  "rank_alone": [
+   1,
+   5
+  ],
+  "cos_compound": [
+   0.664,
+   0.653
+  ],
+  "cos_alone": [
+   0.636,
+   0.643
+  ]
+ },
+ {
+  "set": "c064",
+  "group": "related",
+  "parts": 2,
+  "compound": "Find me what date the Count told Jonathan to put on the first letter, plus who is asked to act as secretary at the committee meeting in Dr. Seward's study.",
+  "gold_cos": [
+   0.827
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   7
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.677,
+   0.611
+  ],
+  "cos_alone": [
+   0.729,
+   0.636
+  ]
+ },
+ {
+  "set": "c065",
+  "group": "related",
+  "parts": 2,
+  "compound": "With what did Mina seal the wrapped book on her wedding day, and who died suddenly, as reported in Mina's letter of 18 September?",
+  "gold_cos": [
+   0.832
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   18,
+   4
+  ],
+  "rank_alone": [
+   9,
+   1
+  ],
+  "cos_compound": [
+   0.583,
+   0.604
+  ],
+  "cos_alone": [
+   0.579,
+   0.661
+  ]
+ },
+ {
+  "set": "c066",
+  "group": "related",
+  "parts": 2,
+  "compound": "I'd like to know what date the Count told Jonathan to put on the first letter, and also what Van Helsing and Seward will do to the Count if he is found in the box.",
+  "gold_cos": [
+   0.822
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   2
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.779,
+   0.756
+  ],
+  "cos_alone": [
+   0.729,
+   0.69
+  ]
+ },
+ {
+  "set": "c067",
+  "group": "related",
+  "parts": 2,
+  "compound": "What is the name of the man who might know about the dusty job at Purfleet? Also, which attendant had a finger broken in the struggle with Renfield?",
+  "gold_cos": [
+   0.831
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   42,
+   3
+  ],
+  "rank_alone": [
+   4,
+   5
+  ],
+  "cos_compound": [
+   0.609,
+   0.664
+  ],
+  "cos_alone": [
+   0.567,
+   0.643
+  ]
+ },
+ {
+  "set": "c068",
+  "group": "related",
+  "parts": 2,
+  "compound": "Find me the date the Count told Jonathan to put on the first letter, plus who died suddenly, as reported in Mina's letter of 18 September.",
+  "gold_cos": [
+   0.829
+  ],
+  "recall_compound": 1.0,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   2,
+   3
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.684,
+   0.674
+  ],
+  "cos_alone": [
+   0.729,
+   0.661
+  ]
+ },
+ {
+  "set": "c069",
+  "group": "related",
+  "parts": 2,
+  "compound": "Who died suddenly, as reported in Mina's letter of 18 September, and what did Van Helsing show Lucy from the big parcel that arrived from abroad?",
+  "gold_cos": [
+   0.842
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 1.0,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   6,
+   13
+  ],
+  "rank_alone": [
+   1,
+   1
+  ],
+  "cos_compound": [
+   0.65,
+   0.642
+  ],
+  "cos_alone": [
+   0.661,
+   0.672
+  ]
+ },
+ {
+  "set": "c070",
+  "group": "related",
+  "parts": 2,
+  "compound": "What household chore did Jonathan Harker see Count Dracula doing in his bedroom? Also, how does Jonathan see the Count move down the castle wall?",
+  "gold_cos": [
+   0.837
+  ],
+  "recall_compound": 0.5,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.0,
+  "rank_compound": [
+   1,
+   18
+  ],
+  "rank_alone": [
+   1,
+   9
+  ],
+  "cos_compound": [
+   0.721,
+   0.644
+  ],
+  "cos_alone": [
+   0.634,
+   0.629
+  ]
+ },
+ {
+  "set": "c071",
+  "group": "related",
+  "parts": 2,
+  "compound": "I'd like to know what Dr. Seward says he keeps in the phonograph cylinders that makes it awkward to share, and also which attendant had a finger broken in the struggle with Renfield.",
+  "gold_cos": [
+   0.843
+  ],
+  "recall_compound": 0.0,
+  "recall_decomposed": 0.5,
+  "recall_decomposed_full": 1.0,
+  "gain": 0.5,
+  "rank_compound": [
+   23,
+   14
+  ],
+  "rank_alone": [
+   10,
+   5
+  ],
+  "cos_compound": [
+   0.693,
+   0.703
+  ],
+  "cos_alone": [
+   0.656,
+   0.643
+  ]
+ }
+]

@@ -25,7 +25,9 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 STORE = HERE.parent / "navigate" / "store"
-OUT = HERE / "out"
+# A second set runs through the same code from its own folder (CONJ_SET=fresh).
+DATA = HERE / os.environ["CONJ_SET"] if os.environ.get("CONJ_SET") else HERE
+OUT = DATA / "out"
 MODEL = "BAAI/bge-small-en-v1.5"
 K = 10
 ORTHOGONAL_MAX = 0.66       # every pair of gold passages below this cosine (10th pct)
@@ -67,7 +69,7 @@ def rank(V: np.ndarray, q: np.ndarray, i: int) -> int:
 
 def sub() -> None:
     P, V, idx = store()
-    qs = read(HERE / "questions.jsonl")
+    qs = read(DATA / "questions.jsonl")
     E = embed([q["question"] for q in qs])
     kept = []
     for q, e in zip(qs, E):
@@ -106,7 +108,7 @@ def sub() -> None:
 def compounds() -> None:
     P, V, idx = store()
     sets = {s["set"]: s for s in read(OUT / "sets.jsonl")}
-    comps = read(HERE / "compounds.jsonl")
+    comps = read(DATA / "compounds.jsonl")
     C = embed([c["compound"] for c in comps])
     rows = []
     for c, e in zip(comps, C):
@@ -137,7 +139,7 @@ def compounds() -> None:
 async def jev() -> None:
     from percolate_core.decide import Jev
     from percolate_core.semantic_exceptions import SemanticExceptions
-    comps = read(HERE / "compounds.jsonl")
+    comps = read(DATA / "compounds.jsonl")
     async with Jev(api_key=os.environ["JEV_API_KEY"], concurrency=8) as j:
         sx = SemanticExceptions(j, store=STORE_LINE)
 
@@ -165,7 +167,7 @@ async def detect() -> None:
                      yes="its parts concern different people, places, times or events",
                      no="its parts concern the same person, place, time or event, or one "
                         "part depends on another")
-    comps = read(HERE / "compounds.jsonl")
+    comps = read(DATA / "compounds.jsonl")
     async with Jev(api_key=os.environ["JEV_API_KEY"], concurrency=8) as j:
         async def one(c):
             r = await j.ask({"question": c["compound"], "store": STORE_LINE},
