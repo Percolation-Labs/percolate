@@ -7,8 +7,8 @@
 them. `query` calls it with the session header a runtime sends to a bound
 origin (X-P8-Session-Id), so the server's query log can pair each query with the
 next one. It prints exactly what came back -- the envelope and, when the server
-shows them, the exceptions -- with each row's text cut to `--chars`, the same
-cut in every arm.
+shows them, the exceptions -- with each row's text cut to `--chars` (4,000 by
+default: run 2's 500 hid date headings in every arm), the same cut in every arm.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def main() -> None:
     q = sub.add_parser("query")
     q.add_argument("query")
     q.add_argument("--question")
-    q.add_argument("--chars", type=int, default=500)
+    q.add_argument("--chars", type=int, default=4000)
     a = ap.parse_args()
     if a.cmd == "describe":
         [tool] = call("tools/list", {})["result"]["tools"]

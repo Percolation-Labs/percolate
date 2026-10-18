@@ -167,6 +167,46 @@ class PercolateLog:
             raise RuntimeError(f"content.record_query: {err}")
 
 
+_UUID = __import__("re").compile(r"^[0-9a-fA-F-]{36}$")
+_IDENT = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def hydrate_semantic(up: "Upstream", doc: dict, authorization: str | None) -> dict:
+    """A SEMANTIC answer's rows with the text of each hit.
+
+    aiq.semantic_in returns (chunk_id, distance, model): ids a model cannot
+    read, and no mode resolves them (run 2: "SEMANTIC returns only chunk ids,
+    with no text, so it was hard to use"). The registry names the source's
+    table and text column, and the read-only passthrough fetches them as the
+    caller, so row-level security decides what comes back exactly as it does
+    for the search. Identifiers come from the registry and are checked; ids
+    are checked as UUIDs. Anything unexpected leaves the rows as they were."""
+    plan = doc.get("plan") or {}
+    rows = doc.get("rows") or []
+    ids = [r.get("chunk_id") for r in rows if isinstance(r, dict) and "content" not in r]
+    ids = [i for i in ids if isinstance(i, str) and _UUID.match(i)]
+    if doc.get("mode") != "SEMANTIC" or not plan.get("source") or not ids:
+        return doc
+    src, err = up.read(f"semantic_sources?name=eq.{urllib.parse.quote(plan['source'])}"
+                       "&select=source_table,content_col", authorization)
+    if err or not src:
+        return doc
+    schema, _, table = (src[0].get("source_table") or "").rpartition(".")
+    col = src[0].get("content_col") or ""
+    if not all(_IDENT.match(x) for x in (schema, table, col)):
+        return doc
+    quoted = ", ".join(f"'{i}'" for i in ids)
+    found, err = up.rpc("sql_passthrough", {"p_statement":
+        f'select id::text as id, "{col}" as content from "{schema}"."{table}" '
+        f"where id in ({quoted})"}, authorization)
+    if err or not isinstance(found, list):
+        return doc
+    text = {f.get("id"): f.get("content") for f in found if isinstance(f, dict)}
+    return {**doc, "rows": [{**r, "content": text[r["chunk_id"]]}
+                            if isinstance(r, dict) and r.get("chunk_id") in text else r
+                            for r in rows]}
+
+
 class QueryEmbedder:
     """Embeds a SEARCH or SEMANTIC query's text when the caller sent no vector.
 
@@ -252,13 +292,29 @@ QUERY_ACTIONS = {
     "META_QUESTION": 'SCHEMA "sql" FROM <source> and SCHEMA "graph" say what is held.',
     "EMPTY": "if you searched by words (TEXT), search by meaning (SEARCH), and the reverse.",
     "TRUNCATED_AT_LIMIT": "raise the LIMIT, or narrow the query.",
-    "NEGATION": 'SQL over the source (SCHEMA "sql" FROM <source> names its relation), '
-                "excluding what matches.",
-    "SUPERLATIVE": 'SQL over the source (SCHEMA "sql" FROM <source>), ordered, LIMIT 1.',
-    "COUNT": 'SQL over the source (SCHEMA "sql" FROM <source>): count(*) under an exact filter.',
-    "EXHAUSTIVE": 'SQL over the source (SCHEMA "sql" FROM <source>) with no LIMIT.',
-    "ARITHMETIC": 'SQL over the source (SCHEMA "sql" FROM <source>) to compute it.',
+    "NEGATION": "SQL over {relation}, excluding what matches.",
+    "SUPERLATIVE": "SQL over {relation}, ordered, LIMIT 1.",
+    "COUNT": "SQL over {relation}: count(*) under an exact filter.",
+    "EXHAUSTIVE": "SQL over {relation} with no LIMIT.",
+    "ARITHMETIC": "SQL over {relation} to compute it.",
+    "KNOWN_VS_HAPPENED": "SQL over {relation}, filtering on the time column the question means.",
+    "RELATIVE_TIME": "SQL over {relation}, with the relative time as a date range.",
 }
+
+
+def actions_for(relation: dict | None) -> dict[str, str]:
+    """QUERY_ACTIONS with the source's own relation and columns written in.
+
+    Run 2: the general wording -- 'SCHEMA "sql" FROM <source> names its
+    relation' -- sent a user to `SCHEMA "sql" FROM dracula`, which lists
+    nothing because SCHEMA takes a relation, and they concluded the text was
+    not reachable by SQL. The two users who found the table on their own
+    scored 4.5 of 8; the rest 1.3-2.5. So the move names the table."""
+    if not relation:
+        return {k: v for k, v in QUERY_ACTIONS.items() if "{relation}" not in v}
+    cols = ", ".join(relation.get("columns") or ())
+    where = f"{relation['schema']}.{relation['name']}" + (f" (columns: {cols})" if cols else "")
+    return {k: v.replace("{relation}", where) for k, v in QUERY_ACTIONS.items()}
 
 
 class Exceptions:
@@ -294,6 +350,7 @@ class Exceptions:
         # queries in order. Bounded: the oldest sessions are forgotten.
         self._seen: dict[str, set] = {}
         self._caps: dict[tuple, tuple[float, frozenset]] = {}
+        self._relations: dict[tuple, dict | None] = {}
 
     @property
     def on(self) -> bool:
@@ -316,16 +373,24 @@ class Exceptions:
         hit = self._caps.get(key)
         if hit and _t.monotonic() - hit[0] < 300:
             return hit[1]
-        caps: set[str] = set()
-        if source and self._sql_readable(up, authorization, source):
-            caps.add("sql")
-        out = frozenset(caps)
+        relation = self._sql_relation(up, authorization, source) if source else None
+        out = frozenset({"sql"} if relation else ())
         self._caps[key] = (_t.monotonic(), out)
+        self._relations[key] = relation
         return out
+
+    def relation(self, authorization: str | None, source: str | None) -> dict | None:
+        """The relation the last probe found for this caller and source."""
+        return self._relations.get((authorization, source))
 
     @staticmethod
     def _sql_readable(up: "Upstream", authorization: str | None, source: str) -> bool:
-        """Whether the caller can SELECT from the relation behind `source`.
+        return Exceptions._sql_relation(up, authorization, source) is not None
+
+    @staticmethod
+    def _sql_relation(up: "Upstream", authorization: str | None, source: str) -> dict | None:
+        """The relation behind `source` that the caller can SELECT from, with
+        its columns, or None.
 
         SCHEMA "sql" FROM takes a RELATION name, and a p8ql source is a
         registry name (`dracula` over `sx.passages`): asked with the source,
@@ -342,10 +407,14 @@ class Exceptions:
         schema, _, name = (table or source).rpartition(".")
         doc, err = up.rpc("query", {"p_query": f'SCHEMA "sql" FROM {name}'}, authorization)
         if err is not None or not isinstance(doc, dict):
-            return False
+            return None
         derived = ((doc.get("schema") or {}).get("doc") or {}).get("derived") or {}
-        return any(r.get("name") == name and (not schema or r.get("schema") == schema)
-                   for r in derived.get("relations") or ())
+        for r in derived.get("relations") or ():
+            if r.get("name") == name and (not schema or r.get("schema") == schema):
+                return {"schema": r.get("schema") or schema, "name": name,
+                        "columns": [c.get("name") for c in r.get("columns") or ()
+                                    if isinstance(c, dict) and c.get("name")]}
+        return None
 
     def novel(self, report: Any, session: str | None) -> Any:
         """The report as this session has not yet seen it; unchanged without a session."""
@@ -378,7 +447,7 @@ class Exceptions:
         return Jev()
 
     def inspect(self, doc: Any, question: str | None,
-                capabilities: frozenset | None = None) -> dict:
+                capabilities: frozenset | None = None, relation: dict | None = None) -> dict:
         """``{"report": Report | None, "error": str | None}``. A judge that fails
         does not fail the query: the receipt says it did not run, and why."""
         from ..semantic_exceptions import SemanticExceptions
@@ -388,7 +457,7 @@ class Exceptions:
             jev = self._jev()
             try:
                 return await inspect(SemanticExceptions(jev, store=self.store,
-                                                        actions=QUERY_ACTIONS,
+                                                        actions=actions_for(relation),
                                                         capabilities=capabilities),
                                      doc, question, values_top=self.values_top)
             finally:
@@ -552,6 +621,11 @@ class Handler(BaseHTTPRequestHandler):
                 rows, err = up.rpc("sql_passthrough", {"p_statement": doc["statement"]}, auth)
                 if err is None:
                     doc = {"mode": "SQL", "statement": doc["statement"], "rows": rows}
+            if err is None and isinstance(doc, dict) and doc.get("mode") == "SEMANTIC":
+                try:
+                    doc = hydrate_semantic(up, doc, auth)
+                except Exception as e:  # the ids are still the answer
+                    print(f"[query-mcp] semantic text: {type(e).__name__}: {e}", flush=True)
             if err is None and isinstance(doc, dict) and doc.get("error"):
                 # aiq.query reports some failures at HTTP 200, as an `error`
                 # field beside `rows: []` (GRAPH on a key that resolves to
@@ -578,7 +652,8 @@ class Handler(BaseHTTPRequestHandler):
             if sx is not None and sx.on and isinstance(doc, dict):
                 source = ((doc.get("plan") or {}).get("source")
                           if isinstance(doc.get("plan"), dict) else None)
-                checked = sx.inspect(doc, question, sx.capabilities(up, auth, source))
+                caps = sx.capabilities(up, auth, source)
+                checked = sx.inspect(doc, question, caps, sx.relation(auth, source))
                 full = checked["report"]
                 # The refusal reads the full report: a blended question is
                 # refused every time it is asked, not only the first.
