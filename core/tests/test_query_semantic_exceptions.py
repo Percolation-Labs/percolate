@@ -194,6 +194,29 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         [e] = log.events
         self.assertEqual((e.codes, e.shown, e.exceptions_mode), (["NEGATION"], False, "shadow"))
 
+    async def test_a_session_is_shown_each_exception_once(self):
+        log = ListLog()
+        server = self.start("on", StubJev({"CONJUNCTION": 0.99}), log)
+        with caller_credentials("Bearer t", (server.url,)):
+            first = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+            again = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+            other = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "t"})
+        codes = lambda r: [x["code"] for x in r.content["semantic_exceptions"]["raised"]]
+        self.assertEqual((codes(first), codes(again), codes(other)),
+                         (["CONJUNCTION"], [], ["CONJUNCTION"]))
+        # The log keeps what was computed and says what was shown.
+        self.assertEqual([(e.codes, e.shown_codes) for e in log.events],
+                         [(["CONJUNCTION"], ["CONJUNCTION"]), (["CONJUNCTION"], []),
+                          (["CONJUNCTION"], ["CONJUNCTION"])])
+
+    async def test_strict_refuses_a_repeat_too(self):
+        server = self.start("strict", StubJev({"NEGATION": 0.99}))
+        with caller_credentials("Bearer t", (server.url,)):
+            for _ in range(2):
+                r = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+                self.assertTrue(r.is_error)
+                self.assertIn("NEGATION", str(r.content))
+
     async def test_strict_records_the_refusal(self):
         log = ListLog()
         await self.call(self.start("strict", StubJev({"NEGATION": 0.99}), log), {"query": SEARCH})
@@ -258,7 +281,9 @@ class Log(unittest.TestCase):
     def test_stats_read_the_envelope(self):
         doc = {"rows": [{"distance": 0.2, "source": "a"}, {"distance": 0.5, "source": "b"}]}
         self.assertEqual(stats_of(doc), {"rows": 2, "empty": False, "distance_min": 0.2,
-                                         "distance_max": 0.5, "sources": 2, "with_content": 0})
+                                         "distance_max": 0.5, "sources": 2, "with_content": 0,
+                                         "ids": []})
+        self.assertEqual(stats_of(SEARCH_DOC)["ids"], ["c1"])
         self.assertTrue(stats_of({"rows": []})["empty"])
 
 

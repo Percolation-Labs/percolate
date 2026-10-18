@@ -46,6 +46,7 @@ class QueryEvent:
     user_id: str | None = None
     exceptions_mode: str = "off"         # off | shadow | on | strict
     shown: bool = False                  # the model read the exceptions
+    shown_codes: list = field(default_factory=list)  # the ones it had not seen before
     refused: bool = False                # strict withheld the rows
     error: str | None = None             # the query's own failure, if any
     stats: dict = field(default_factory=dict)
@@ -86,13 +87,19 @@ def stats_of(doc: Any) -> dict:
     if sources:
         out["sources"] = len(sources)
     out["with_content"] = sum(1 for r in rows if isinstance(r.get("content"), str))
+    # Which records came back, so an outcome can be read as evidence gained (the
+    # next query found records this session had not seen) rather than only as
+    # "asked again", which in a task-sized session is nearly every follow-up.
+    out["ids"] = [str(i) for i in (next((r[f] for f in ("chunk_id", "node_id", "key", "id")
+                                        if r.get(f) is not None), None) for r in rows[:50])
+                  if i is not None]
     return out
 
 
 def event_of(query: str, doc: Any, *, question: str | None = None, headers: Mapping[str, str] = {},
              exceptions_mode: str = "off", report: Any = None, judge_error: str | None = None,
-             shown: bool = False, refused: bool = False, error: str | None = None,
-             latency_ms: int | None = None) -> QueryEvent:
+             shown: bool = False, shown_codes: list | None = None, refused: bool = False,
+             error: str | None = None, latency_ms: int | None = None) -> QueryEvent:
     plan = (doc.get("plan") if isinstance(doc, Mapping) else None) or {}
     h = {k.lower(): v for k, v in headers.items()}
     raised, receipt = [], {}
@@ -110,7 +117,7 @@ def event_of(query: str, doc: Any, *, question: str | None = None, headers: Mapp
         limit=int(limit) if isinstance(limit, int) or (isinstance(limit, str) and limit.isdigit()) else None,
         session_id=h.get("x-p8-session-id"), run_id=h.get("x-p8-run-id"),
         user_id=h.get("x-p8-user-id"), exceptions_mode=exceptions_mode, shown=shown,
-        refused=refused, error=error, stats=stats_of(doc), raised=raised, receipt=receipt,
+        shown_codes=list(shown_codes or []), refused=refused, error=error, stats=stats_of(doc), raised=raised, receipt=receipt,
         latency_ms=latency_ms)
 
 

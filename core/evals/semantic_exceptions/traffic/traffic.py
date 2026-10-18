@@ -19,6 +19,10 @@ The report, per arm (shadow: computed, not shown; on/strict: shown):
     lift               retry | raised  /  retry | silent  -- above 1 means the
                        layer speaks where searches struggle (read it in shadow,
                        where speaking cannot have changed the outcome)
+    gain               the share of the next query's records the session had not
+                       seen: evidence gained, from row ids, no judge. In a
+                       session that is one task, nearly every next query is a
+                       "retry", so gain is the outcome that can differ
     follows            share of raised queries whose next query went where the
                        guidance pointed
 
@@ -57,14 +61,29 @@ def text(e) -> str:
     return f"{e.query}" + (f"  (asking: {e.question})" if e.question else "")
 
 
-async def judge(pairs, store: str | None) -> list[dict]:
+def gains(events) -> dict[str, float | None]:
+    """Per event: the share of the NEXT query's records its session had not seen
+    before it. Structural, from row ids; None when there is no next query or it
+    returned nothing."""
+    seen: dict[str, set] = {}
+    first_new: dict[str, float | None] = {}
+    for e, n in followups(events):
+        key = e.run_id or e.session_id or e.id
+        s = seen.setdefault(key, set())
+        s.update(e.stats.get("ids") or [])
+        ids = (n.stats.get("ids") or []) if n else []
+        first_new[e.id] = (round(sum(1 for i in ids if i not in s) / len(ids), 3)
+                           if ids else None)
+    return first_new
+
+
+async def judge(pairs, store: str | None, seen_gain: dict) -> list[dict]:
     out = []
     async with Jev(api_key=os.environ["JEV_API_KEY"], concurrency=8) as jev:
         async def one(e, n):
-            row = {"id": e.id, "arm": "shown" if e.shown else (
-                       "shadow" if e.exceptions_mode == "shadow" else e.exceptions_mode),
-                   "codes": e.codes, "refused": e.refused, "empty": e.stats.get("empty"),
-                   "has_next": n is not None}
+            row = {"id": e.id, "arm": e.exceptions_mode, "codes": e.codes,
+                   "refused": e.refused, "empty": e.stats.get("empty"),
+                   "has_next": n is not None, "gain": seen_gain.get(e.id)}
             if n is None:
                 return row
             qs = {"retry": RETRY}
@@ -96,6 +115,8 @@ def summarise(rows: list[dict], bar: float = 0.5) -> dict:
                            if xs else None)
         rr, rs_ = rate(raised), rate(silent)
         fol = [r for r in raised if "follows_p" in r]
+        gain = lambda xs: (round(sum(x["gain"] for x in xs if x["gain"] is not None)
+                                 / max(1, sum(1 for x in xs if x["gain"] is not None)), 3))
         report["arms"][arm] = {
             "queries": len(rs), "paired": len(paired),
             "fire_rate": round(sum(1 for r in rs if r["codes"]) / len(rs), 3) if rs else None,
@@ -103,6 +124,7 @@ def summarise(rows: list[dict], bar: float = 0.5) -> dict:
             "lift": round(rr / rs_, 2) if rr is not None and rs_ else None,
             "follows": (round(sum(r["follows_p"] >= bar for r in fol) / len(fol), 3)
                         if fol else None),
+            "gain_given_raised": gain(raised), "gain_given_silent": gain(silent),
             "refused": sum(r["refused"] for r in rs)}
     fired = Counter(c for r in rows for c in r["codes"])
     for c, n in fired.most_common():
@@ -119,8 +141,9 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--store")
     a = ap.parse_args()
-    pairs = followups(JsonlLog(a.log))
-    rows = asyncio.run(judge(pairs, a.store))
+    events = list(JsonlLog(a.log))
+    pairs = followups(events)
+    rows = asyncio.run(judge(pairs, a.store, gains(events)))
     report = summarise(rows)
     text_out = json.dumps(report, indent=1)
     if a.out:

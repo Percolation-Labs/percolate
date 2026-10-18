@@ -157,6 +157,11 @@ class Exceptions:
             from ..semantic_exceptions.log import JsonlLog
             log = JsonlLog(os.environ["P8_QUERY_LOG"])
         self.log = log
+        # What each session has already been shown (Report.novel). In use, a
+        # warning repeated on every query was skipped with the rest of the block
+        # by the third; the server is the only place that sees a session's
+        # queries in order. Bounded: the oldest sessions are forgotten.
+        self._seen: dict[str, set] = {}
 
     @property
     def on(self) -> bool:
@@ -167,6 +172,16 @@ class Exceptions:
     def shows(self) -> bool:
         """The model reads them (on, strict)."""
         return self.mode in ("on", "strict")
+
+    def novel(self, report: Any, session: str | None) -> Any:
+        """The report as this session has not yet seen it; unchanged without a session."""
+        if report is None or not session:
+            return report
+        seen = self._seen.pop(session, set())
+        self._seen[session] = seen          # most recent last
+        while len(self._seen) > 10_000:
+            self._seen.pop(next(iter(self._seen)))
+        return report.novel(seen)
 
     def record(self, query: str, doc: Any, **kw: Any) -> None:
         """Append one event. A log that fails does not fail the query."""
@@ -369,11 +384,18 @@ class Handler(BaseHTTPRequestHandler):
                     "content": [{"type": "text", "text": json.dumps(err)}]})
             if sx is not None and sx.on and isinstance(doc, dict):
                 checked = sx.inspect(doc, question)
-                report = checked["report"]
-                refused = bool(sx.mode == "strict" and report is not None and report.errors)
-                sx.record(q, doc, question=question, headers=ctx, report=report,
+                full = checked["report"]
+                # The refusal reads the full report: a blended question is
+                # refused every time it is asked, not only the first.
+                refused = bool(sx.mode == "strict" and full is not None and full.errors)
+                report = sx.novel(full, next(
+                    (v for k, v in ctx.items() if k.lower() == "x-p8-session-id"), None))
+                sx.record(q, doc, question=question, headers=ctx, report=full,
                           judge_error=checked["error"], shown=sx.shows, refused=refused,
+                          shown_codes=sorted(report.codes) if (sx.shows and report) else [],
                           latency_ms=ms())
+                if refused:
+                    report = full
                 if not sx.shows:
                     return self._result(rid, {
                         "content": [{"type": "text", "text": json.dumps(doc)}],
