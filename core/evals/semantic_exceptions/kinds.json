@@ -1,0 +1,174 @@
+{
+ "question": [
+  {
+   "code": "DECOMPOSITION_REQUIRED",
+   "definition": "Does `question` combine two or more distinct parts that would each need their own search to answer?"
+  },
+  {
+   "code": "TWO_QUESTIONS",
+   "definition": "Does `question` contain two unrelated questions with different intents?"
+  },
+  {
+   "code": "NEGATION",
+   "definition": "Does `question` ask for things that lack something or do not mention something?"
+  },
+  {
+   "code": "SUPERLATIVE",
+   "definition": "Does `question` ask for the earliest, latest, first, last, most or least of something?"
+  },
+  {
+   "code": "COUNT",
+   "definition": "Does `question` ask how many of something there are?"
+  },
+  {
+   "code": "COMPARISON",
+   "definition": "Does `question` ask how two or more things, people or views differ or compare?"
+  },
+  {
+   "code": "CONJUNCTION",
+   "definition": "Does `question` ask for something that must satisfy two separate conditions at once?"
+  },
+  {
+   "code": "COUNTERFACTUAL",
+   "definition": "Does `question` ask what would have happened if something had been different?"
+  },
+  {
+   "code": "CAUSAL_WHY",
+   "definition": "Does `question` ask why something happened or what caused it?"
+  },
+  {
+   "code": "EXHAUSTIVE",
+   "definition": "Does `question` ask for every instance or a complete list of something?"
+  },
+  {
+   "code": "PROCEDURAL",
+   "definition": "Does `question` ask how to do something, as a sequence of steps?"
+  },
+  {
+   "code": "YES_NO_CLAIM",
+   "definition": "Does `question` ask whether a particular claim is true?"
+  },
+  {
+   "code": "EXPLORATORY",
+   "definition": "Is `question` an open request to explore or survey a topic, with no specific answer?"
+  },
+  {
+   "code": "MISSING_REFERENT",
+   "definition": "Does `question` use a pronoun or a phrase like 'that' or 'the meeting' whose referent is not given in `question` itself?"
+  },
+  {
+   "code": "ALIAS",
+   "definition": "Does `question` refer to a specific person or thing by a title, nickname or description rather than by name?"
+  },
+  {
+   "code": "ROLE_NOT_NAME",
+   "definition": "Does `question` identify someone only by their role or job?"
+  },
+  {
+   "code": "TIME_UNSPECIFIED",
+   "definition": "Does `question` ask about something that could have changed over time, without saying as of when?"
+  },
+  {
+   "code": "RELATIVE_TIME",
+   "definition": "Does `question` use a relative time such as 'last week', 'recently' or 'two days ago'?"
+  },
+  {
+   "code": "KNOWN_VS_HAPPENED",
+   "definition": "Does `question` ask when something became known, believed or recorded, as distinct from when it happened?"
+  },
+  {
+   "code": "PREDICTION",
+   "definition": "Does `question` ask for a prediction about the future?"
+  },
+  {
+   "code": "PRESUPPOSITION",
+   "definition": "Does `question` take for granted that something happened or is true, where that assumption could be wrong?"
+  },
+  {
+   "code": "LEADING",
+   "definition": "Is `question` worded to favour one particular answer?"
+  },
+  {
+   "code": "OPINION",
+   "definition": "Does `question` ask for a judgement or opinion, such as whether something was right or good?"
+  },
+  {
+   "code": "ANSWER_EMBEDDED",
+   "definition": "Does `question` already state the answer it is asking for, seeking confirmation?"
+  },
+  {
+   "code": "META_QUESTION",
+   "definition": "Does `question` ask about what information is available or held, rather than about the information itself?"
+  },
+  {
+   "code": "OUT_OF_DOMAIN",
+   "definition": "Is `question` about a subject that `store` does not cover?"
+  },
+  {
+   "code": "EXACT_MATCH",
+   "definition": "Does `question` contain a quoted phrase, an identifier or a code that must be matched exactly?"
+  },
+  {
+   "code": "ARITHMETIC",
+   "definition": "Does `question` require calculating a value from numbers, dates or amounts?"
+  },
+  {
+   "code": "SPATIAL",
+   "definition": "Does `question` restrict the answer to a place or a distance from one?"
+  },
+  {
+   "code": "PATH",
+   "definition": "Does `question` ask how two things or people are connected to each other?"
+  },
+  {
+   "code": "FILTERS_EXTRACTABLE",
+   "definition": "Does `question` include a constraint on author, date, type or source that could be applied as an exact filter?"
+  },
+  {
+   "code": "VAGUE_TERM",
+   "definition": "Does `question` depend on a vague word such as 'important', 'significant' or 'main' that it does not define?"
+  },
+  {
+   "code": "INSTRUCTIONS_MIXED_IN",
+   "definition": "Besides saying what to find, does `question` contain instructions about the format or task?"
+  },
+  {
+   "code": "UNDERSPECIFIED",
+   "definition": "Is `question` too short or too general to say what is being looked for?"
+  }
+ ],
+ "values": [
+  {
+   "code": "POINTER",
+   "definition": "Does `passage` point to another document, section, enclosure or entry for part of its content?"
+  },
+  {
+   "code": "HEARSAY",
+   "definition": "Does `passage` report something second-hand, as what someone else said or heard?"
+  },
+  {
+   "code": "SPECULATIVE",
+   "definition": "Does `passage` state a guess, theory, fear or hedge rather than something observed?"
+  },
+  {
+   "code": "INJECTION",
+   "definition": "Does `passage` contain instructions addressed to an AI assistant or to whoever reads it, telling them to do something?"
+  },
+  {
+   "code": "OFF_QUESTION",
+   "definition": "Is `passage` about the same topic as `question` but of no help in answering it?"
+  },
+  {
+   "code": "PARTIAL_ANSWER",
+   "definition": "Does `passage` answer some of `question` but leave part of it unanswered?"
+  },
+  {
+   "code": "TRUNCATED",
+   "definition": "Does `passage` break off mid-thought, as if cut from a longer text?"
+  },
+  {
+   "code": "CONFLICT",
+   "definition": "Do `passage` and `other` give different answers to `question`?"
+  }
+ ]
+}
