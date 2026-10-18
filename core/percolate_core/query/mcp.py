@@ -68,6 +68,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -98,6 +99,17 @@ class Upstream:
     def __init__(self, base: str, timeout: float = 30.0):
         self.base = base.rstrip("/")
         self.timeout = timeout
+
+    def read(self, path: str, authorization: str | None = None, profile: str = "aiq"):
+        """A table read as the caller: ``(rows, None)`` or ``(None, error)``."""
+        req = urllib.request.Request(f"{self.base}/{path}", headers={
+            "Accept-Profile": profile,
+            **({"Authorization": authorization} if authorization else {})})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return json.loads(r.read() or b"null"), None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            return None, {"kind": "dispatch_error", "detail": str(e)}
 
     def rpc(self, fn: str, payload: dict[str, Any], authorization: str | None = None,
             profile: str = "aiq"):
@@ -153,6 +165,80 @@ class PercolateLog:
                                    profile="content")
         if err:
             raise RuntimeError(f"content.record_query: {err}")
+
+
+class QueryEmbedder:
+    """Embeds a SEARCH or SEMANTIC query's text when the caller sent no vector.
+
+    ``aiq.query`` takes the vector beside the text because embedding is a model
+    call, outside SQL. A shell or an IDE can supply it; a model calling this
+    tool cannot, so through MCP both modes failed on every call and agents fell
+    back to TEXT (traffic run 1: "SEARCH and SEMANTIC need an embedding I could
+    not supply"). The tool is the one place that can.
+
+    Nothing about the model is decided here. The plan comes from the database's
+    own parser (``aiq_parse``), and the model from its registry
+    (``aiq.embedding_models``): the one the query names with USING, else the
+    default, embedded only if its provider runs in-process (fastembed), with
+    the registry's ``endpoint`` as the model id -- exactly what the ingest
+    worker used to write the vectors being searched. A hosted provider, or no
+    fastembed installed, leaves the query failing as it did, with its message.
+    The answer says it was embedded here, and with which model.
+    """
+
+    def __init__(self, mode: str | None = None):
+        self.mode = (mode or os.environ.get("P8_QUERY_EMBED") or "auto").lower()
+        self._models: dict[str, dict] = {}
+
+    @property
+    def on(self) -> bool:
+        if self.mode == "off":
+            return False
+        if self.mode == "on":
+            return True
+        try:
+            import fastembed  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def plan(self, up: "Upstream", q: str, auth: str | None) -> dict | None:
+        doc, err = up.rpc("aiq_parse", {"query": q}, auth, profile="public")
+        return doc if err is None and isinstance(doc, dict) and doc.get("ok") else None
+
+    def model(self, up: "Upstream", name: str | None, auth: str | None) -> dict | None:
+        key = name or ""
+        if key not in self._models:
+            where = f"name=eq.{urllib.parse.quote(name)}" if name else "is_default=is.true"
+            rows, err = up.read(f"embedding_models?{where}&select=name,dim,provider,endpoint",
+                                auth)
+            provs, perr = up.read("embedding_providers?select=provider,in_process", auth)
+            if err or perr or not rows:
+                return None
+            local = {p["provider"] for p in provs or () if p.get("in_process")}
+            m = rows[0]
+            if m.get("provider") not in local or not m.get("endpoint"):
+                return None
+            self._models[key] = m
+        return self._models[key]
+
+    def retry(self, up: "Upstream", q: str, auth: str | None):
+        """``(doc, err)`` from asking again with a vector, or None if this
+        query is not one the tool can embed."""
+        if not self.on:
+            return None
+        plan = self.plan(up, q, auth)
+        if not plan or plan.get("mode") not in ("SEMANTIC", "SEARCH") or not plan.get("arg"):
+            return None
+        m = self.model(up, plan.get("model"), auth)
+        if m is None:
+            return None
+        from ..ingest.local_embed import embed_local
+        [vec] = embed_local(m["endpoint"], [plan["arg"]], expected_dim=m.get("dim"))
+        doc, err = up.rpc("query", {"p_query": q, "p_embedding": json.dumps(vec)}, auth)
+        if err is None and isinstance(doc, dict):
+            doc = {**doc, "embedded": {"by": "query tool", "model": m["name"]}}
+        return doc, err
 
 
 class Exceptions:
@@ -309,6 +395,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     upstream: Upstream | None = None
     exceptions: Exceptions | None = None
+    embedder: QueryEmbedder | None = None
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[query-mcp] {fmt % args}", flush=True)
@@ -380,6 +467,17 @@ class Handler(BaseHTTPRequestHandler):
                     "content": [{"type": "text", "text": "query must be a non-empty string"}]})
 
             doc, err = up.rpc("query", {"p_query": q}, auth)
+            if err is not None and err.get("status") == 400 and self.embedder is not None:
+                # Only after aiq.query refused, so a query that needed no vector
+                # pays nothing, and the plan -- not the error's wording -- says
+                # whether a vector is what it lacked.
+                try:
+                    again = self.embedder.retry(up, q, auth)
+                except Exception as e:  # the original refusal is still the answer
+                    print(f"[query-mcp] embedding: {type(e).__name__}: {e}", flush=True)
+                    again = None
+                if again is not None:
+                    doc, err = again
             if err is None and _is_unexecuted_sql(doc):
                 # The statement the parser recognised, not the raw string, and
                 # the caller's header: RLS, the read-only transaction and the
@@ -458,10 +556,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_server(host: str, port: int, postgrest: str,
-                 exceptions: Exceptions | None = None) -> ThreadingHTTPServer:
+                 exceptions: Exceptions | None = None,
+                 embedder: QueryEmbedder | None = None) -> ThreadingHTTPServer:
     """A server bound and ready to ``serve_forever``; ``port=0`` picks a free one."""
     up, sx = Upstream(postgrest), exceptions or Exceptions()
     if isinstance(sx.log, PercolateLog) and sx.log.upstream is None:
         sx.log.upstream = up
-    handler = type("QueryHandler", (Handler,), {"upstream": up, "exceptions": sx})
+    handler = type("QueryHandler", (Handler,), {"upstream": up, "exceptions": sx,
+                                                "embedder": embedder or QueryEmbedder()})
     return ThreadingHTTPServer((host, port), handler)
