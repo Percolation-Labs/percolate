@@ -1,0 +1,22 @@
+{
+ "SUPERLATIVE": {
+  "instruction": "To answer `question`, must one compare a set of things to find the one at an extreme: the earliest or latest, the first or last occurrence, the most or the least?",
+  "yes": "the answer is whichever item comes out at an extreme once several are compared, such as the first time something is mentioned or who wrote the most",
+  "no": "a word like first, last or final only names one known item, or nothing has to be compared",
+  "prompt": "An extreme needs the whole matching set in order, and top-k by similarity returns the nearest, not the earliest or the most. Retrieve every match sorted by date or by value and take the first or last."
+ },
+ "COUNT": {
+  "instruction": "Does answering `question` require a number: how many things or records there are, or which has more of them?",
+  "yes": "the answer is a number of things or records, or depends on counting them",
+  "no": "the question asks what something says or did, even if a number appears in it"
+ },
+ "META_QUESTION": {
+  "instruction": "Does `question` ask what material the store holds or covers on a topic, rather than asking for a fact from it?",
+  "yes": "it asks what records, documents or information exist about something",
+  "no": "it asks for a fact, an event, a reason or an opinion found in the records"
+ },
+ "OFF_QUESTION": {
+  "yes": "the passage is on the topic but nothing in it, stated or clearly implied, answers the question",
+  "no": "the passage answers the question, even if only by clear implication"
+ }
+}

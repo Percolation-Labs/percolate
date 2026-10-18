@@ -63,10 +63,16 @@ class Report:
     input_tokens: int = 0
     # The repository's own next step per kind, appended to the kind's prompt.
     actions: Mapping[str, str] = field(default_factory=dict)
+    # THE RECEIPT. What ran, so an empty report proves the store looked and found
+    # nothing, rather than not looking: each stage run and every kind it checked.
+    stages: list[str] = field(default_factory=list)
+    checked: list[str] = field(default_factory=list)
 
     def __iadd__(self, other: "Report") -> "Report":
         self.raised += other.raised
         self.actions = {**self.actions, **other.actions}
+        self.stages += [s for s in other.stages if s not in self.stages]
+        self.checked += [c for c in other.checked if c not in self.checked]
         self.model = other.model or self.model
         self.jev_requests += other.jev_requests
         self.input_tokens += other.input_tokens
@@ -95,11 +101,23 @@ class Report:
             if key not in seen:
                 seen.add(key)
                 keep.append(r)
-        return Report(keep, self.model, self.jev_requests, self.input_tokens, self.actions)
+        return Report(keep, self.model, self.jev_requests, self.input_tokens, self.actions,
+                      self.stages, self.checked)
 
     @property
     def errors(self) -> list[Raised]:
         return [r for r in self.ordered() if r.kind.severity == "error"]
+
+    def to_dict(self) -> dict:
+        """The typed result: every exception raised, and the receipt."""
+        return {
+            "raised": [{"code": r.code, "stage": r.kind.stage, "severity": r.kind.severity,
+                        "p": r.p, "about": [str(i) for i in _ids(r.evidence)],
+                        "prompt": r.kind.prompt, "action": self.actions.get(r.code)}
+                       for r in self.ordered()],
+            "receipt": {"model": self.model, "stages": self.stages,
+                        "checked": len(self.checked), "jev_requests": self.jev_requests},
+        }
 
     def to_prompt(self, show: int = 5) -> str:
         """The exceptions as the model reads them, worst first, at most `show`."""
@@ -186,15 +204,16 @@ class SemanticExceptions:
         if self.store:
             state["store"] = self.store
         kinds = self._judged("question", state)
-        res = await self.jev.ask(state, {k.code: Noul(k.instruction) for k in kinds})
-        rep = Report(actions=self.actions, model=getattr(res, "model", None), jev_requests=1,
+        res = await self.jev.ask(state, {k.code: Noul(k.instruction, k.yes, k.no) for k in kinds})
+        rep = Report(actions=self.actions, stages=["question"], checked=[k.code for k in kinds],
+                     model=getattr(res, "model", None), jev_requests=1,
                      input_tokens=getattr(res, "input_tokens", 0))
         return {k.code: res[k.code].p for k in kinds}, rep
 
     async def before(self, question: str) -> Report:
         """The question's own exceptions, from one Jev request."""
         ps, rep = await self.probabilities(question)
-        rep.raised = [Raised(c, {"question": question}, round(p, 4))
+        rep.raised = [Raised(c, {"question": question}, round(p, 4), self.kinds[c])
                       for c, p in ps.items() if p >= self.thresholds[c]]
         return rep
 
@@ -209,14 +228,16 @@ class SemanticExceptions:
         per_hit = [k for k in kinds if k.code != "CONFLICT"]
         requests = []
         for i, h in enumerate(top):
-            qs = {k.code: Noul(k.instruction) for k in per_hit}
+            qs = {k.code: Noul(k.instruction, k.yes, k.no) for k in per_hit}
             if conflict is not None:
                 for j in range(i + 1, min(len(top), self.conflict_top)):
                     qs[f"CONFLICT:{j}"] = Noul({"other": top[j][self.text_key],
-                                                "question": conflict.instruction})
+                                                "question": conflict.instruction},
+                                               conflict.yes, conflict.no)
             requests.append(({"question": question, "passage": h[self.text_key]}, qs))
         results = await asyncio.gather(*(self.jev.ask(s, q) for s, q in requests))
-        rep = Report(actions=self.actions, jev_requests=len(results))
+        rep = Report(actions=self.actions, jev_requests=len(results), stages=["values"],
+                     checked=[k.code for k in kinds])
         probs = []
         for (_, qs), res in zip(requests, results):
             rep.model = getattr(res, "model", rep.model)
@@ -236,22 +257,25 @@ class SemanticExceptions:
                     ev = {"id": h.get("id")}
                     if j:
                         ev["other"] = top[int(j)].get("id")
-                    rep.raised.append(Raised(code, ev, round(p, 4)))
+                    rep.raised.append(Raised(code, ev, round(p, 4), self.kinds[code]))
         return rep
 
     # ---- structural -----------------------------------------------------------
     def _keep(self, raised: list[Raised]) -> list[Raised]:
-        return [r for r in raised if r.code in self.kinds]
+        return [Raised(r.code, r.evidence, r.p, self.kinds[r.code])
+                for r in raised if r.code in self.kinds]
 
     def after(self, hits: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The result's own exceptions, from its statistics and fields. Free."""
         return Report(self._keep(result_exceptions(hits, limits=self.limits, **ctx)),
-                      actions=self.actions)
+                      actions=self.actions, stages=["result"],
+                      checked=[c for c, k in self.kinds.items() if k.stage == "result"])
 
     def walk(self, rounds: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The walk's exceptions so far. Free."""
         return Report(self._keep(walk_exceptions(rounds, limits=self.limits, **ctx)),
-                      actions=self.actions)
+                      actions=self.actions, stages=["walk"],
+                      checked=[c for c, k in self.kinds.items() if k.stage == "walk"])
 
     # ---- together -------------------------------------------------------------
     def guard(self, search: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]], *,

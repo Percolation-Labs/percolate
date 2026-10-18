@@ -1,0 +1,14 @@
+{
+ "runs_per_kind": {
+  "v3 wording, 1 run": [
+   "CONFLICT",
+   "INJECTION",
+   "META_QUESTION",
+   "OUT_OF_DOMAIN",
+   "SUPERLATIVE"
+  ],
+  "COUNT (v1=v3 wording)": 2,
+  "OFF_QUESTION (base=v3 wording)": 2,
+  "every other kind": 3
+ }
+}
