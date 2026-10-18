@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from ..decide import Noul
-from .catalogue import KINDS, Kind, by_code
+from .catalogue import CAPABILITY_WORDS, KINDS, LIMIT_PROMPT, Kind, by_code
 from .structural import Limits, Raised, result_exceptions, walk_exceptions
 
 __all__ = ["KINDS", "Kind", "Limits", "Raised", "Report", "SemanticExceptionError",
@@ -67,6 +67,12 @@ class Report:
     # nothing, rather than not looking: each stage run and every kind it checked.
     stages: list[str] = field(default_factory=list)
     checked: list[str] = field(default_factory=list)
+    # What the caller can do (Kind.requires). None: everything. A kind whose
+    # remedy needs more is shown as a limit and never refuses.
+    capabilities: frozenset | None = None
+
+    def reachable(self, r: Raised) -> bool:
+        return self.capabilities is None or set(r.kind.requires) <= self.capabilities
 
     def __iadd__(self, other: "Report") -> "Report":
         self.raised += other.raised
@@ -74,6 +80,8 @@ class Report:
         self.stages += [s for s in other.stages if s not in self.stages]
         self.checked += [c for c in other.checked if c not in self.checked]
         self.model = other.model or self.model
+        if other.capabilities is not None:
+            self.capabilities = other.capabilities
         self.jev_requests += other.jev_requests
         self.input_tokens += other.input_tokens
         return self
@@ -102,22 +110,30 @@ class Report:
                 seen.add(key)
                 keep.append(r)
         return Report(keep, self.model, self.jev_requests, self.input_tokens, self.actions,
-                      self.stages, self.checked)
+                      self.stages, self.checked, self.capabilities)
 
     @property
     def errors(self) -> list[Raised]:
-        return [r for r in self.ordered() if r.kind.severity == "error"]
+        return [r for r in self.ordered() if r.kind.severity == "error" and self.reachable(r)]
 
     def to_dict(self) -> dict:
         """The typed result: every exception raised, and the receipt."""
         return {
             "raised": [{"code": r.code, "stage": r.kind.stage, "severity": r.kind.severity,
                         "p": r.p, "about": [str(i) for i in _ids(r.evidence)],
-                        "prompt": r.kind.prompt, "action": self.actions.get(r.code)}
+                        "prompt": self.prompt_for(r),
+                        "action": self.actions.get(r.code) if self.reachable(r) else None,
+                        **({} if self.reachable(r) else {"limit": True})}
                        for r in self.ordered()],
             "receipt": {"model": self.model, "stages": self.stages,
                         "checked": len(self.checked), "jev_requests": self.jev_requests},
         }
+
+    def prompt_for(self, r: Raised) -> str:
+        if self.reachable(r):
+            return r.kind.prompt
+        missing = [c for c in r.kind.requires if c not in (self.capabilities or ())]
+        return LIMIT_PROMPT.format(needs=" and ".join(CAPABILITY_WORDS.get(c, c) for c in missing))
 
     def to_prompt(self, show: int = 5) -> str:
         """The exceptions as the model reads them, worst first, at most `show`."""
@@ -136,6 +152,9 @@ class Report:
             same = [x for x in self.raised if x.code == r.code]
             ids = [str(i) for x in same for i in _ids(x.evidence)]
             where = f" [{', '.join(dict.fromkeys(ids))}]" if ids else ""
+            if not self.reachable(r):
+                lines.append(f"- LIMIT {r.code}{where}: {self.prompt_for(r)}")
+                continue
             line = f"- {r.kind.severity.upper()} {r.code}{where}: {r.kind.prompt}"
             if r.code in self.actions:
                 line += f" Here: {self.actions[r.code]}"
@@ -178,8 +197,10 @@ class SemanticExceptions:
                  limits: Limits = Limits(), thresholds: Mapping[str, float] | None = None,
                  disable: Sequence[str] = (), enable: Sequence[str] = (),
                  store: str | None = None, actions: Mapping[str, str] | None = None,
-                 text_key: str = "content", values_top: int = 5, conflict_top: int = 3):
+                 text_key: str = "content", values_top: int = 5, conflict_top: int = 3,
+                 capabilities: Sequence[str] | None = None):
         self.jev, self.limits, self.store = jev, limits, store
+        self.capabilities = frozenset(capabilities) if capabilities is not None else None
         self.actions = dict(actions or {})
         self.text_key, self.values_top, self.conflict_top = text_key, values_top, conflict_top
         off, extra = set(disable), set(enable)
@@ -205,7 +226,7 @@ class SemanticExceptions:
             state["store"] = self.store
         kinds = self._judged("question", state)
         res = await self.jev.ask(state, {k.code: Noul(k.instruction, k.yes, k.no) for k in kinds})
-        rep = Report(actions=self.actions, stages=["question"], checked=[k.code for k in kinds],
+        rep = Report(actions=self.actions, capabilities=self.capabilities, stages=["question"], checked=[k.code for k in kinds],
                      model=getattr(res, "model", None), jev_requests=1,
                      input_tokens=getattr(res, "input_tokens", 0))
         return {k.code: res[k.code].p for k in kinds}, rep
@@ -236,7 +257,7 @@ class SemanticExceptions:
                                                conflict.yes, conflict.no)
             requests.append(({"question": question, "passage": h[self.text_key]}, qs))
         results = await asyncio.gather(*(self.jev.ask(s, q) for s, q in requests))
-        rep = Report(actions=self.actions, jev_requests=len(results), stages=["values"],
+        rep = Report(actions=self.actions, capabilities=self.capabilities, jev_requests=len(results), stages=["values"],
                      checked=[k.code for k in kinds])
         probs = []
         for (_, qs), res in zip(requests, results):
@@ -268,13 +289,13 @@ class SemanticExceptions:
     def after(self, hits: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The result's own exceptions, from its statistics and fields. Free."""
         return Report(self._keep(result_exceptions(hits, limits=self.limits, **ctx)),
-                      actions=self.actions, stages=["result"],
+                      actions=self.actions, capabilities=self.capabilities, stages=["result"],
                       checked=[c for c, k in self.kinds.items() if k.stage == "result"])
 
     def walk(self, rounds: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The walk's exceptions so far. Free."""
         return Report(self._keep(walk_exceptions(rounds, limits=self.limits, **ctx)),
-                      actions=self.actions, stages=["walk"],
+                      actions=self.actions, capabilities=self.capabilities, stages=["walk"],
                       checked=[c for c, k in self.kinds.items() if k.stage == "walk"])
 
     # ---- together -------------------------------------------------------------
@@ -288,7 +309,7 @@ class SemanticExceptions:
         also reads the top hits (one Jev request each)."""
 
         async def guarded(question: str, **kw: Any) -> tuple[list, Report]:
-            report = Report(actions=self.actions)
+            report = Report(actions=self.actions, capabilities=self.capabilities)
             if self.jev is not None:
                 report += await self.before(question)
                 if strict and report.errors:

@@ -239,6 +239,26 @@ class QueryEmbedder:
         if err is None and isinstance(doc, dict):
             doc = {**doc, "embedded": {"by": "query tool", "model": m["name"]}}
         return doc, err
+# THE QUERY TOOL'S OWN MOVES, appended to a kind's prompt as "Here: ...". The
+# kinds name a remedy in general terms; a searcher acts on the move this tool
+# offers for it (the navigation round's lesson: the repository's own command).
+QUERY_ACTIONS = {
+    "DECOMPOSITION_REQUIRED": "call this tool once per part, then combine the answers.",
+    "TWO_QUESTIONS": "call this tool once per question.",
+    "CONJUNCTION": "one query per condition; keep the records that come back for both.",
+    "COMPARISON": "one query per side, then compare them.",
+    "YES_NO_CLAIM": "one SEARCH worded as the claim and one worded as its opposite.",
+    "EXACT_MATCH": 'TEXT "<the exact phrase or id>" FROM <source>.',
+    "META_QUESTION": 'SCHEMA "sql" FROM <source> and SCHEMA "graph" say what is held.',
+    "EMPTY": "if you searched by words (TEXT), search by meaning (SEARCH), and the reverse.",
+    "TRUNCATED_AT_LIMIT": "raise the LIMIT, or narrow the query.",
+    "NEGATION": 'SQL over the source (SCHEMA "sql" FROM <source> names its relation), '
+                "excluding what matches.",
+    "SUPERLATIVE": 'SQL over the source (SCHEMA "sql" FROM <source>), ordered, LIMIT 1.',
+    "COUNT": 'SQL over the source (SCHEMA "sql" FROM <source>): count(*) under an exact filter.',
+    "EXHAUSTIVE": 'SQL over the source (SCHEMA "sql" FROM <source>) with no LIMIT.',
+    "ARITHMETIC": 'SQL over the source (SCHEMA "sql" FROM <source>) to compute it.',
+}
 
 
 class Exceptions:
@@ -273,6 +293,7 @@ class Exceptions:
         # by the third; the server is the only place that sees a session's
         # queries in order. Bounded: the oldest sessions are forgotten.
         self._seen: dict[str, set] = {}
+        self._caps: dict[tuple, tuple[float, frozenset]] = {}
 
     @property
     def on(self) -> bool:
@@ -283,6 +304,28 @@ class Exceptions:
     def shows(self) -> bool:
         """The model reads them (on, strict)."""
         return self.mode in ("on", "strict")
+
+    def capabilities(self, up: "Upstream", authorization: str | None,
+                     source: str | None) -> frozenset:
+        """What this caller can do on this source, asked of the database:
+        "sql" when SCHEMA "sql" FROM <source> lists a relation they may read.
+        Cached a few minutes per caller and source; a failed probe grants
+        nothing, so the kinds that need it show as limits rather than advice."""
+        import time as _t
+        key = (authorization, source)
+        hit = self._caps.get(key)
+        if hit and _t.monotonic() - hit[0] < 300:
+            return hit[1]
+        caps: set[str] = set()
+        if source:
+            doc, err = up.rpc("query", {"p_query": f'SCHEMA "sql" FROM {source}'}, authorization)
+            derived = ((doc or {}).get("schema") or {}).get("doc", {}).get("derived", {}) \
+                if err is None and isinstance(doc, dict) else {}
+            if derived.get("relations"):
+                caps.add("sql")
+        out = frozenset(caps)
+        self._caps[key] = (_t.monotonic(), out)
+        return out
 
     def novel(self, report: Any, session: str | None) -> Any:
         """The report as this session has not yet seen it; unchanged without a session."""
@@ -314,7 +357,8 @@ class Exceptions:
         from ..decide import Jev
         return Jev()
 
-    def inspect(self, doc: Any, question: str | None) -> dict:
+    def inspect(self, doc: Any, question: str | None,
+                capabilities: frozenset | None = None) -> dict:
         """``{"report": Report | None, "error": str | None}``. A judge that fails
         does not fail the query: the receipt says it did not run, and why."""
         from ..semantic_exceptions import SemanticExceptions
@@ -323,8 +367,10 @@ class Exceptions:
         async def run():
             jev = self._jev()
             try:
-                return await inspect(SemanticExceptions(jev, store=self.store), doc, question,
-                                     values_top=self.values_top)
+                return await inspect(SemanticExceptions(jev, store=self.store,
+                                                        actions=QUERY_ACTIONS,
+                                                        capabilities=capabilities),
+                                     doc, question, values_top=self.values_top)
             finally:
                 close = getattr(jev, "aclose", None)
                 if close is not None:
@@ -510,7 +556,9 @@ class Handler(BaseHTTPRequestHandler):
                     "_meta": {"errorKind": err["kind"]},
                     "content": [{"type": "text", "text": json.dumps(err)}]})
             if sx is not None and sx.on and isinstance(doc, dict):
-                checked = sx.inspect(doc, question)
+                source = ((doc.get("plan") or {}).get("source")
+                          if isinstance(doc.get("plan"), dict) else None)
+                checked = sx.inspect(doc, question, sx.capabilities(up, auth, source))
                 full = checked["report"]
                 # The refusal reads the full report: a blended question is
                 # refused every time it is asked, not only the first.
