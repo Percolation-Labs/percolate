@@ -5,15 +5,19 @@
   "word": "garlic",
   "answer": 16,
   "truncated_at_10": true,
-  "n": 1
+  "n": 1,
+  "answer_ilike": 16
  },
  {
   "kind": "count",
   "question": "How many passages in the store mention a wolf or wolves?",
   "word": "wolf",
-  "answer": 18,
+  "answer": 44,
   "truncated_at_10": true,
-  "n": 2
+  "n": 2,
+  "answer_before_fix": 18,
+  "fix": "key counted only the stem of \"wolf\"; the question asks for a wolf or wolves, so both forms count",
+  "answer_ilike": 44
  },
  {
   "kind": "count",
@@ -21,7 +25,8 @@
   "word": "Carfax",
   "answer": 19,
   "truncated_at_10": true,
-  "n": 3
+  "n": 3,
+  "answer_ilike": 19
  },
  {
   "kind": "count",
@@ -29,7 +34,8 @@
   "word": "Varna",
   "answer": 18,
   "truncated_at_10": true,
-  "n": 4
+  "n": 4,
+  "answer_ilike": 21
  },
  {
   "kind": "count",
@@ -37,7 +43,8 @@
   "word": "Holmwood",
   "answer": 9,
   "truncated_at_10": false,
-  "n": 5
+  "n": 5,
+  "answer_ilike": 9
  },
  {
   "kind": "count",
@@ -45,7 +52,8 @@
   "word": "crucifix",
   "answer": 17,
   "truncated_at_10": true,
-  "n": 6
+  "n": 6,
+  "answer_ilike": 17
  },
  {
   "kind": "count",
@@ -53,7 +61,8 @@
   "word": "Demeter",
   "answer": 3,
   "truncated_at_10": false,
-  "n": 7
+  "n": 7,
+  "answer_ilike": 3
  },
  {
   "kind": "dates",
@@ -75,7 +84,20 @@
   ],
   "matching_rows": 35,
   "truncated_at_10": true,
-  "n": 8
+  "n": 8,
+  "answer_ilike": [
+   "1893-05-25",
+   "1893-06-05",
+   "1893-07-20",
+   "1893-08-19",
+   "1893-08-20",
+   "1893-08-23",
+   "1893-09-26",
+   "1893-09-30",
+   "1893-10-01",
+   "1893-10-02",
+   "1893-10-03"
+  ]
  },
  {
   "kind": "dates",
@@ -94,7 +116,17 @@
   ],
   "matching_rows": 10,
   "truncated_at_10": false,
-  "n": 9
+  "n": 9,
+  "answer_ilike": [
+   "1893-07-24",
+   "1893-07-26",
+   "1893-08-01",
+   "1893-08-19",
+   "1893-09-22",
+   "1893-09-29",
+   "1893-09-30",
+   "1893-10-01"
+  ]
  },
  {
   "kind": "dates",
@@ -111,7 +143,15 @@
   ],
   "matching_rows": 10,
   "truncated_at_10": false,
-  "n": 10
+  "n": 10,
+  "answer_ilike": [
+   "1893-05-07",
+   "1893-05-08",
+   "1893-05-15",
+   "1893-06-30",
+   "1893-10-01",
+   "1893-10-03"
+  ]
  },
  {
   "kind": "dates",
@@ -123,7 +163,10 @@
   ],
   "matching_rows": 1,
   "truncated_at_10": false,
-  "n": 11
+  "n": 11,
+  "answer_ilike": [
+   "1893-09-24"
+  ]
  },
  {
   "kind": "dates",
@@ -138,7 +181,13 @@
   ],
   "matching_rows": 10,
   "truncated_at_10": false,
-  "n": 12
+  "n": 12,
+  "answer_ilike": [
+   "1893-09-11",
+   "1893-09-20",
+   "1893-09-27",
+   "1893-09-29"
+  ]
  },
  {
   "kind": "dates",
@@ -156,7 +205,16 @@
   ],
   "matching_rows": 19,
   "truncated_at_10": true,
-  "n": 13
+  "n": 13,
+  "answer_ilike": [
+   "1893-09-18",
+   "1893-09-20",
+   "1893-09-22",
+   "1893-09-26",
+   "1893-09-27",
+   "1893-09-29",
+   "1893-10-28"
+  ]
  },
  {
   "kind": "dates",
@@ -172,7 +230,15 @@
   ],
   "matching_rows": 8,
   "truncated_at_10": false,
-  "n": 14
+  "n": 14,
+  "answer_ilike": [
+   "1893-08-19",
+   "1893-08-23",
+   "1893-08-25",
+   "1893-09-09",
+   "1893-09-12",
+   "1893-09-17"
+  ]
  },
  {
   "kind": "dates",
@@ -184,7 +250,16 @@
   ],
   "matching_rows": 1,
   "truncated_at_10": false,
-  "n": 15
+  "n": 15,
+  "answer_ilike": [
+   "1893-05-05",
+   "1893-05-07",
+   "1893-05-08",
+   "1893-05-15",
+   "1893-06-24",
+   "1893-06-29",
+   "1893-10-01"
+  ]
  },
  {
   "kind": "dates",
@@ -197,6 +272,10 @@
   ],
   "matching_rows": 2,
   "truncated_at_10": false,
-  "n": 16
+  "n": 16,
+  "answer_ilike": [
+   "1893-09-22",
+   "1893-09-29"
+  ]
  }
 ]
