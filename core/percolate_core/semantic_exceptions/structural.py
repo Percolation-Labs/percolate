@@ -106,7 +106,7 @@ def result_exceptions(hits: Sequence[Mapping[str, Any]], *, limit: int | None = 
     # Only when the store KNOWS more matched. A ranked search always fills its
     # limit, so without `total` this would fire on every search and mean nothing.
     if limit is not None and total is not None and n >= limit and total > n:
-        raise_("TRUNCATED_AT_LIMIT", returned=n, limit=limit)
+        raise_("TRUNCATED_AT_LIMIT", returned=n, limit=limit, total=total)
     if limit is not None and filtered and n < limit:
         raise_("STARVED_BY_FILTER", returned=n, limit=limit)
 

@@ -12,8 +12,8 @@ invents nothing:
                    if the row carries text, and a score only where the row
                    carries a cosine distance (SEMANTIC); an RRF score is a
                    rank fusion, not a similarity, and is not passed as one
-    the limit      the plan's, so TRUNCATED_AT_LIMIT needs the total the
-                   envelope does not carry and stays silent, as it should
+    the limit      the plan's; TRUNCATED_AT_LIMIT also needs the total the
+                   envelope does not carry, which a probe may supply
 
 A mode with no text (LOOKUP, GRAPH, SQL) is judged only by its result, and an
 envelope that is an error is not judged at all: the error is the answer.
@@ -55,7 +55,7 @@ def hits_of(doc: Mapping[str, Any]) -> list[dict]:
 
 
 async def inspect(sx: SemanticExceptions, doc: Mapping[str, Any], question: str | None = None,
-                  *, values_top: int = 0) -> Report:
+                  *, values_top: int = 0, total: int | None = None) -> Report:
     """Every stage the envelope supports. `values_top` hits are read by Jev (0: none)."""
     report = Report(actions=sx.actions)
     if not isinstance(doc, Mapping) or doc.get("error"):
@@ -65,7 +65,11 @@ async def inspect(sx: SemanticExceptions, doc: Mapping[str, Any], question: str 
         report += await sx.before(q)
     hits = hits_of(doc)
     limit = (doc.get("plan") or {}).get("limit")
-    report += sx.after(hits, limit=int(limit) if isinstance(limit, (int, str)) and str(limit).isdigit() else None)
+    # `total` is how many rows match in all, when a probe counted them: the
+    # envelope carries only the rows returned, so without it the truncation
+    # kinds cannot tell "these are all" from "these are the first ten of 400".
+    report += sx.after(hits, limit=int(limit) if isinstance(limit, (int, str)) and str(limit).isdigit() else None,
+                       total=total)
     if q and values_top and sx.jev is not None and any("content" in h for h in hits):
         saved = sx.values_top
         sx.values_top = values_top
