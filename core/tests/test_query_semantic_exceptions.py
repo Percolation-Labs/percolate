@@ -33,8 +33,8 @@ from percolate_core.agentic.contracts import CanonicalTool, ToolInvocation, Tool
 from percolate_core.agentic.contracts.tools import InvocationTarget
 from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
-from percolate_core.query.mcp import (Exceptions, PercolateLog, QueryEmbedder, build_server,
-                                      hydrate_semantic)
+from percolate_core.query.mcp import (Exceptions, PercolateLog, QueryEmbedder, actions_for,
+                                      build_server, count_matches, hydrate_semantic)
 from percolate_core.semantic_exceptions.log import (
     JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
@@ -415,6 +415,44 @@ class SemanticText(unittest.TestCase):
     def test_other_modes_are_left_alone(self):
         d = {**self.doc(), "mode": "TEXT"}
         self.assertEqual(hydrate_semantic(self.Up(), d, None), d)
+
+
+class CountProbe(unittest.TestCase):
+    """P1: a result that fills its limit is counted, and the count is the move."""
+
+    class Up:
+        def __init__(self):
+            self.sql = []
+
+        def read(self, path, authorization=None, profile="aiq"):
+            return [{"source_table": "sx.passages", "regconfig": "english", "search_with": None}], None
+
+        def rpc(self, fn, payload, authorization=None, profile="aiq"):
+            self.sql.append(payload["p_statement"])
+            return [{"n": 412}], None
+
+    def doc(self, rows=3, limit=3, mode="TEXT"):
+        return {"plan": {"mode": mode, "source": "dracula", "arg": "Lucy's garlic", "limit": limit},
+                "rows": [{"chunk_id": str(i)} for i in range(rows)]}
+
+    def test_a_full_result_is_counted_with_the_same_predicate_text_ranks_by(self):
+        up = self.Up()
+        self.assertEqual(count_matches(up, self.doc(), "Bearer t"), 412)
+        self.assertIn("""plainto_tsquery('english', 'Lucy''s garlic')""", up.sql[0])
+        self.assertIn('from "sx"."passages"', up.sql[0])
+
+    def test_a_result_short_of_its_limit_is_not_counted(self):
+        up = self.Up()
+        self.assertIsNone(count_matches(up, self.doc(rows=2), None))
+        self.assertEqual(up.sql, [])
+
+    def test_a_mode_with_no_lexical_half_is_not_counted(self):
+        self.assertIsNone(count_matches(self.Up(), self.doc(mode="SEMANTIC"), None))
+
+    def test_the_move_carries_the_count(self):
+        a = actions_for({"schema": "sx", "name": "passages", "columns": []}, 412, 10)
+        self.assertIn("412 rows match and you saw 10", a["TRUNCATED_AT_LIMIT"])
+        self.assertNotIn("TRUNCATED_AT_LIMIT", actions_for(None, None, 10))
 
 
 class Embedding(unittest.TestCase):

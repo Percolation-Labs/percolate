@@ -291,7 +291,8 @@ QUERY_ACTIONS = {
     "EXACT_MATCH": 'TEXT "<the exact phrase or id>" FROM <source>.',
     "META_QUESTION": 'SCHEMA "sql" FROM <source> and SCHEMA "graph" say what is held.',
     "EMPTY": "if you searched by words (TEXT), search by meaning (SEARCH), and the reverse.",
-    "TRUNCATED_AT_LIMIT": "raise the LIMIT, or narrow the query.",
+    "TRUNCATED_AT_LIMIT": "{total} rows match and you saw {returned}. For a count or a full "
+                          "list, use SQL over {relation}; otherwise raise the LIMIT or narrow the query.",
     "NEGATION": "SQL over {relation}, excluding what matches.",
     "SUPERLATIVE": "SQL over {relation}, ordered, LIMIT 1.",
     "COUNT": "SQL over {relation}: count(*) under an exact filter.",
@@ -302,7 +303,8 @@ QUERY_ACTIONS = {
 }
 
 
-def actions_for(relation: dict | None) -> dict[str, str]:
+def actions_for(relation: dict | None, total: int | None = None,
+                returned: int | None = None) -> dict[str, str]:
     """QUERY_ACTIONS with the source's own relation and columns written in.
 
     Run 2: the general wording -- 'SCHEMA "sql" FROM <source> names its
@@ -310,11 +312,55 @@ def actions_for(relation: dict | None) -> dict[str, str]:
     nothing because SCHEMA takes a relation, and they concluded the text was
     not reachable by SQL. The two users who found the table on their own
     scored 4.5 of 8; the rest 1.3-2.5. So the move names the table."""
-    if not relation:
-        return {k: v for k, v in QUERY_ACTIONS.items() if "{relation}" not in v}
-    cols = ", ".join(relation.get("columns") or ())
-    where = f"{relation['schema']}.{relation['name']}" + (f" (columns: {cols})" if cols else "")
-    return {k: v.replace("{relation}", where) for k, v in QUERY_ACTIONS.items()}
+    out = {}
+    for k, v in QUERY_ACTIONS.items():
+        if "{total}" in v:
+            if total is None:
+                continue
+            v = v.replace("{total}", str(total)).replace("{returned}", str(returned or 0))
+        if "{relation}" in v:
+            if not relation:
+                continue
+            cols = ", ".join(relation.get("columns") or ())
+            v = v.replace("{relation}", f"{relation['schema']}.{relation['name']}"
+                          + (f" (columns: {cols})" if cols else ""))
+        out[k] = v
+    return out
+
+
+def count_matches(up: "Upstream", doc: dict, authorization: str | None) -> int | None:
+    """PROBE P1: how many rows the query's words match in all, read as a count.
+
+    A ranked result shows its top k and says nothing of the rest, so "these
+    are all of them" and "these are ten of four hundred" look the same to the
+    caller. When a TEXT or SEARCH result fills its LIMIT, the store counts the
+    rows its lexical predicate matches -- the same plainto_tsquery TEXT ranks
+    by, from the registry's table and text-search config -- through the
+    read-only passthrough as the caller. It reads no content and returns one
+    number. None when the result did not fill its limit, the mode has no
+    lexical half, or anything about the registry is unexpected."""
+    plan = doc.get("plan") or {}
+    rows, limit = doc.get("rows") or [], plan.get("limit")
+    if (plan.get("mode") not in ("TEXT", "SEARCH") or not plan.get("source")
+            or not isinstance(plan.get("arg"), str) or not isinstance(limit, int)
+            or len(rows) < limit):
+        return None
+    reg, err = up.read(f"lexical_sources?name=eq.{urllib.parse.quote(plan['source'])}"
+                       "&select=source_table,regconfig,search_with", authorization)
+    if err or not reg or reg[0].get("search_with"):
+        return None
+    schema, _, table = (reg[0].get("source_table") or "").rpartition(".")
+    cfg = reg[0].get("regconfig") or ""
+    if not all(_IDENT.match(x) for x in (schema, table, cfg)):
+        return None
+    arg = plan["arg"].replace("'", "''")
+    found, err = up.rpc("sql_passthrough", {"p_statement":
+        f'select count(*) as n from "{schema}"."{table}" '
+        f"where search_tsv @@ plainto_tsquery('{cfg}', '{arg}')"}, authorization)
+    if err or not isinstance(found, list) or not found:
+        return None
+    n = found[0].get("n") if isinstance(found[0], dict) else None
+    return int(n) if isinstance(n, (int, float)) else None
 
 
 class Exceptions:
@@ -447,7 +493,8 @@ class Exceptions:
         return Jev()
 
     def inspect(self, doc: Any, question: str | None,
-                capabilities: frozenset | None = None, relation: dict | None = None) -> dict:
+                capabilities: frozenset | None = None, relation: dict | None = None,
+                total: int | None = None) -> dict:
         """``{"report": Report | None, "error": str | None}``. A judge that fails
         does not fail the query: the receipt says it did not run, and why."""
         from ..semantic_exceptions import SemanticExceptions
@@ -457,9 +504,11 @@ class Exceptions:
             jev = self._jev()
             try:
                 return await inspect(SemanticExceptions(jev, store=self.store,
-                                                        actions=actions_for(relation),
+                                                        actions=actions_for(
+                                                            relation, total,
+                                                            len(doc.get("rows") or [])),
                                                         capabilities=capabilities),
-                                     doc, question, values_top=self.values_top)
+                                     doc, question, values_top=self.values_top, total=total)
             finally:
                 close = getattr(jev, "aclose", None)
                 if close is not None:
@@ -653,7 +702,13 @@ class Handler(BaseHTTPRequestHandler):
                 source = ((doc.get("plan") or {}).get("source")
                           if isinstance(doc.get("plan"), dict) else None)
                 caps = sx.capabilities(up, auth, source)
-                checked = sx.inspect(doc, question, caps, sx.relation(auth, source))
+                total = None
+                if "sql" in caps:
+                    try:
+                        total = count_matches(up, doc, auth)
+                    except Exception as e:  # a probe that fails says nothing
+                        print(f"[query-mcp] count probe: {type(e).__name__}: {e}", flush=True)
+                checked = sx.inspect(doc, question, caps, sx.relation(auth, source), total)
                 full = checked["report"]
                 # The refusal reads the full report: a blended question is
                 # refused every time it is asked, not only the first.
