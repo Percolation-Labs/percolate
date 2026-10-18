@@ -8,9 +8,9 @@
    "kinds": {
     "DECOMPOSITION_REQUIRED": {
      "threshold": 0.95,
-     "test_precision": 1.0,
-     "test_recall": 0.583,
-     "test_f1": 0.737,
+     "test_precision": 0.889,
+     "test_recall": 0.667,
+     "test_f1": 0.762,
      "test_positives": 12,
      "test_items": 246,
      "train_f1": 0.963,
@@ -33,8 +33,8 @@
     "NEGATION": {
      "threshold": 0.95,
      "test_precision": 1.0,
-     "test_recall": 0.727,
-     "test_f1": 0.842,
+     "test_recall": 0.818,
+     "test_f1": 0.9,
      "test_positives": 11,
      "test_items": 247,
      "train_f1": 1.0,
@@ -68,9 +68,9 @@
     },
     "COMPARISON": {
      "threshold": 0.95,
-     "test_precision": 0.909,
-     "test_recall": 0.909,
-     "test_f1": 0.909,
+     "test_precision": 0.917,
+     "test_recall": 1.0,
+     "test_f1": 0.957,
      "test_positives": 11,
      "test_items": 247,
      "train_f1": 1.0,
@@ -85,7 +85,7 @@
      "test_f1": 0.667,
      "test_positives": 6,
      "test_items": 246,
-     "train_f1": 0.667,
+     "train_f1": 0.545,
      "label_agreement": 0.998,
      "target_in_gold": 0.833,
      "status": "on"
@@ -163,10 +163,10 @@
      "status": "on"
     },
     "MISSING_REFERENT": {
-     "threshold": 0.95,
-     "test_precision": 1.0,
+     "threshold": 0.7,
+     "test_precision": 0.857,
      "test_recall": 0.6,
-     "test_f1": 0.75,
+     "test_f1": 0.706,
      "test_positives": 10,
      "test_items": 245,
      "train_f1": 0.778,
@@ -205,7 +205,7 @@
      "test_f1": 0.0,
      "test_positives": 6,
      "test_items": 245,
-     "train_f1": 0.267,
+     "train_f1": 0.385,
      "label_agreement": 0.996,
      "target_in_gold": 1.0,
      "status": "off"
@@ -217,7 +217,7 @@
      "test_f1": 1.0,
      "test_positives": 8,
      "test_items": 246,
-     "train_f1": 0.941,
+     "train_f1": 0.889,
      "label_agreement": 0.994,
      "target_in_gold": 1.0,
      "status": "on"
@@ -247,22 +247,22 @@
      "status": "unmeasured"
     },
     "PRESUPPOSITION": {
-     "threshold": 0.9,
+     "threshold": 0.95,
      "test_precision": 0.0,
      "test_recall": 0.0,
      "test_f1": 0.0,
      "test_positives": 5,
      "test_items": 245,
-     "train_f1": 0.163,
+     "train_f1": 0.333,
      "label_agreement": 0.988,
      "target_in_gold": 0.5,
      "status": "off"
     },
     "LEADING": {
      "threshold": 0.75,
-     "test_precision": 0.273,
+     "test_precision": 0.3,
      "test_recall": 1.0,
-     "test_f1": 0.429,
+     "test_f1": 0.462,
      "test_positives": 3,
      "test_items": 247,
      "train_f1": 0.778,
@@ -344,9 +344,9 @@
     },
     "SPATIAL": {
      "threshold": 0.85,
-     "test_precision": 0.385,
+     "test_precision": 0.417,
      "test_recall": 0.833,
-     "test_f1": 0.526,
+     "test_f1": 0.556,
      "test_positives": 6,
      "test_items": 246,
      "train_f1": 0.778,
@@ -393,8 +393,8 @@
     "INSTRUCTIONS_MIXED_IN": {
      "threshold": 0.95,
      "test_precision": 1.0,
-     "test_recall": 0.6,
-     "test_f1": 0.75,
+     "test_recall": 0.8,
+     "test_f1": 0.889,
      "test_positives": 5,
      "test_items": 246,
      "train_f1": 1.0,
@@ -456,13 +456,13 @@
      "status": "on"
     },
     "INJECTION": {
-     "threshold": 0.4,
-     "test_precision": 0.75,
+     "threshold": 0.55,
+     "test_precision": 1.0,
      "test_recall": 1.0,
-     "test_f1": 0.857,
+     "test_f1": 1.0,
      "test_positives": 6,
      "test_items": 84,
-     "train_f1": 0.857,
+     "train_f1": 0.8,
      "label_agreement": 1.0,
      "target_in_gold": 1.0,
      "status": "on"
@@ -494,8 +494,8 @@
     "TRUNCATED": {
      "threshold": 0.95,
      "test_precision": 1.0,
-     "test_recall": 0.75,
-     "test_f1": 0.857,
+     "test_recall": 0.875,
+     "test_f1": 0.933,
      "test_positives": 8,
      "test_items": 84,
      "train_f1": 1.0,

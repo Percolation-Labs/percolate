@@ -147,12 +147,19 @@ KINDS: tuple[Kind, ...] = (
        "There is no single answer to rank toward. Offer the facets or clusters of what "
        "the store holds on the topic, then let the person narrow."),
     # ---- the references in it -------------------------------------------------
+    # Reworded after the query tool, in strict mode and with no store described,
+    # refused "Where did the garlic for Lucy's room come from?" at 0.96-0.97 on
+    # three calls: the old wording read "the garlic" as a dangling reference.
     _q("MISSING_REFERENT", "error",
-       "Does `question` use a pronoun or a phrase like 'that' or 'the meeting' whose "
-       "referent is not given in `question` itself?",
+       "Does `question` refer to something that only an earlier conversation could "
+       "identify, such as a pronoun or 'that' with nothing in `question` for it to "
+       "point to?",
        "The question refers to something it does not name. Resolve it from the "
        "conversation before searching; if it cannot be resolved, ask the person.",
-       acts="person"),
+       acts="person",
+       yes="a reader given only `question` could not tell who or what is meant",
+       no="everything it refers to is named or described in `question` itself, even if "
+          "introduced with 'the'"),
     _q("ALIAS", "warning",
        "Does `question` refer to a specific person or thing by a title, nickname or "
        "description rather than by name?",
@@ -386,17 +393,19 @@ KINDS: tuple[Kind, ...] = (
 # evals/semantic_exceptions (RESULTS.md; jev-1.13.0, 18 Oct 2026), on each item's
 # probability AVERAGED over every run with the kind's exact wording (out/merged/
 # RUNS.json): one run moved CONJUNCTION, ALIAS and PARTIAL_ANSWER across the 0.6
-# bar with their wording unchanged, so a status from one run is noise. The threshold
+# bar with their wording unchanged, so a status from one run is noise. An
+# error-severity kind refuses, so its threshold also holds train precision >=
+# REFUSAL_PRECISION (amended post hoc: F1 alone put INJECTION at 0.40). The threshold
 # is the train-half F1 optimum; a kind is on when its held-out F1 >= 0.6 with at
 # least 5 positives, the bar committed before the run. Regenerate this table
 # from out/scores.json whenever an instruction is reworded.
 MEASURED = {
-    "DECOMPOSITION_REQUIRED": (0.95, True, 1.00),  # F1 0.74, 12 test positives, on
+    "DECOMPOSITION_REQUIRED": (0.95, True, 0.89),  # F1 0.76, 12 test positives, on
     "TWO_QUESTIONS": (0.65, False, 0.67),  # F1 0.80, 4 test positives, unmeasured
-    "NEGATION": (0.95, True, 1.00),  # F1 0.84, 11 test positives, on
+    "NEGATION": (0.95, True, 1.00),  # F1 0.90, 11 test positives, on
     "SUPERLATIVE": (0.95, True, 0.67),  # F1 0.67, 6 test positives, on
     "COUNT": (0.90, True, 0.79),  # F1 0.85, 12 test positives, on
-    "COMPARISON": (0.95, True, 0.91),  # F1 0.91, 11 test positives, on
+    "COMPARISON": (0.95, True, 0.92),  # F1 0.96, 11 test positives, on
     "CONJUNCTION": (0.95, True, 0.56),  # F1 0.67, 6 test positives, on
     "COUNTERFACTUAL": (0.90, False, 1.00),  # F1 1.00, 4 test positives, unmeasured
     "CAUSAL_WHY": (0.95, True, 0.80),  # F1 0.89, 8 test positives, on
@@ -404,34 +413,34 @@ MEASURED = {
     "PROCEDURAL": (0.90, True, 0.75),  # F1 0.60, 6 test positives, on
     "YES_NO_CLAIM": (0.95, True, 0.83),  # F1 0.88, 16 test positives, on
     "EXPLORATORY": (0.80, True, 0.86),  # F1 0.86, 7 test positives, on
-    "MISSING_REFERENT": (0.95, True, 1.00),  # F1 0.75, 10 test positives, on
+    "MISSING_REFERENT": (0.70, True, 0.86),  # F1 0.71, 10 test positives, on
     "ALIAS": (0.90, True, 0.46),  # F1 0.60, 7 test positives, on
     "ROLE_NOT_NAME": (0.85, True, 0.50),  # F1 0.61, 5 test positives, on
     "TIME_UNSPECIFIED": (0.95, False, 0.00),  # F1 0.00, 6 test positives, off
     "RELATIVE_TIME": (0.80, True, 1.00),  # F1 1.00, 8 test positives, on
     "KNOWN_VS_HAPPENED": (0.90, True, 0.88),  # F1 0.88, 8 test positives, on
     "PREDICTION": (0.55, False, 0.80),  # F1 0.89, 4 test positives, unmeasured
-    "PRESUPPOSITION": (0.90, False, 0.00),  # F1 0.00, 5 test positives, off
-    "LEADING": (0.75, False, 0.27),  # F1 0.43, 3 test positives, unmeasured
+    "PRESUPPOSITION": (0.95, False, 0.00),  # F1 0.00, 5 test positives, off
+    "LEADING": (0.75, False, 0.30),  # F1 0.46, 3 test positives, unmeasured
     "OPINION": (0.90, True, 1.00),  # F1 1.00, 8 test positives, on
     "ANSWER_EMBEDDED": (0.55, True, 0.83),  # F1 0.91, 10 test positives, on
     "META_QUESTION": (0.85, True, 0.80),  # F1 0.67, 7 test positives, on
     "OUT_OF_DOMAIN": (0.85, True, 1.00),  # F1 1.00, 7 test positives, on
     "EXACT_MATCH": (0.85, True, 1.00),  # F1 0.96, 14 test positives, on
     "ARITHMETIC": (0.85, True, 0.60),  # F1 0.63, 9 test positives, on
-    "SPATIAL": (0.85, False, 0.39),  # F1 0.53, 6 test positives, off
+    "SPATIAL": (0.85, False, 0.42),  # F1 0.56, 6 test positives, off
     "PATH": (0.95, False, 0.67),  # F1 0.80, 4 test positives, unmeasured
     "FILTERS_EXTRACTABLE": (0.90, False, 0.44),  # F1 0.58, 30 test positives, off
     "VAGUE_TERM": (0.80, False, 1.00),  # F1 0.50, 6 test positives, off
-    "INSTRUCTIONS_MIXED_IN": (0.95, True, 1.00),  # F1 0.75, 5 test positives, on
+    "INSTRUCTIONS_MIXED_IN": (0.95, True, 1.00),  # F1 0.89, 5 test positives, on
     "UNDERSPECIFIED": (0.90, False, 0.75),  # F1 0.86, 3 test positives, unmeasured
     "POINTER": (0.95, True, 1.00),  # F1 1.00, 7 test positives, on
     "HEARSAY": (0.90, True, 1.00),  # F1 1.00, 6 test positives, on
     "SPECULATIVE": (0.85, True, 0.71),  # F1 0.83, 5 test positives, on
-    "INJECTION": (0.40, True, 0.75),  # F1 0.86, 6 test positives, on
+    "INJECTION": (0.55, True, 1.00),  # F1 1.00, 6 test positives, on
     "OFF_QUESTION": (0.55, True, 0.78),  # F1 0.88, 7 test positives, on
     "PARTIAL_ANSWER": (0.90, False, 0.60),  # F1 0.55, 6 test positives, off
-    "TRUNCATED": (0.95, True, 1.00),  # F1 0.86, 8 test positives, on
+    "TRUNCATED": (0.95, True, 1.00),  # F1 0.93, 8 test positives, on
     "CONFLICT": (0.90, True, 1.00),  # F1 0.78, 11 test positives, on
 }
 KINDS = tuple(replace(k, threshold=MEASURED[k.code][0], on=MEASURED[k.code][1])

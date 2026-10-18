@@ -127,11 +127,17 @@ EXCEPTIONS_MODES = ("off", "on", "strict")
 class Exceptions:
     """The semantic-exceptions hook: off unless the operator turns it on."""
 
-    def __init__(self, mode: str | None = None, jev_factory: Any = None, values_top: int = 0):
+    def __init__(self, mode: str | None = None, jev_factory: Any = None, values_top: int = 0,
+                 store: str | None = None):
         self.mode = (mode or os.environ.get("P8_SEMANTIC_EXCEPTIONS") or "off").lower()
         if self.mode not in EXCEPTIONS_MODES:
             raise ValueError(f"P8_SEMANTIC_EXCEPTIONS must be one of {EXCEPTIONS_MODES}")
         self.values_top = int(os.environ.get("P8_SEMANTIC_EXCEPTIONS_VALUES", values_top))
+        # One sentence on what this store holds. It switches on OUT_OF_DOMAIN and
+        # it is the condition the thresholds were measured under; without it the
+        # same question can score differently (measured: "the garlic" 0.96 vs
+        # below threshold), so an operator should set it.
+        self.store = store or os.environ.get("P8_SEMANTIC_EXCEPTIONS_STORE") or None
         self._jev_factory = jev_factory
 
     @property
@@ -153,7 +159,7 @@ class Exceptions:
         async def run():
             jev = self._jev()
             try:
-                return await inspect(SemanticExceptions(jev), doc, question,
+                return await inspect(SemanticExceptions(jev, store=self.store), doc, question,
                                      values_top=self.values_top)
             finally:
                 close = getattr(jev, "aclose", None)

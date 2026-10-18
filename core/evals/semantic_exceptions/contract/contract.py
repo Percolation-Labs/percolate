@@ -71,8 +71,14 @@ async def main() -> None:
     ap.add_argument("--variant")
     ap.add_argument("--out")
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--no-store", action="store_true",
+                    help="judge without the store description, as the query tool does by default")
     a = ap.parse_args()
     cases = [json.loads(l) for l in open(a.cases) if l.strip()]
+    if a.no_store:
+        # OUT_OF_DOMAIN is only asked with a store described; its cases cannot hold.
+        cases = [{k: v for k, v in c.items() if k != "store"} for c in cases
+                 if "OUT_OF_DOMAIN" not in c.get("raise", [])]
     if a.offline:
         cases = [c for c in cases if c["stage"] in ("result", "walk")]
     kinds = kinds_with(json.load(open(a.variant)) if a.variant else {})

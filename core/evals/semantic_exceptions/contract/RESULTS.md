@@ -7,13 +7,19 @@
 
 ## The verdict, against the bars in README.md
 
-| | held-out, run 1 | held-out, run 2 | bar |
-|---|---|---|---|
-| cases passed | 96.9% | 97.7% | ≥ 95% |
-| wrong refusals | 0 | 0 | 0 |
-| guidance points to the move | 57/57 | 57/58 | ≥ 90% |
+The shipped catalogue was run on both contracts, with the store described and without it. The query tool runs without a description unless `P8_SEMANTIC_EXCEPTIONS_STORE` is set.
 
-My own calibration cases pass at 95.2%, and every structural case passes; CI runs those (`tests/test_semantic_exceptions.py`, `Contract`). Before calibration, the held-out contract passed at 92–93%, with one wrong refusal: runbook steps were refused as an injection.
+| run | cases passed | wrong refusals | guidance points to the move |
+|---|---|---|---|
+| held-out, store described, run 1 | 97.7% | 0 | 58/58 |
+| held-out, store described, run 2 | 97.7% | 0 | 57/59 |
+| held-out, no store | 98.4% (128 cases*) | 0 | 56/56 |
+| calibration (mine), store described | 94.1% | 0 | 54/55 |
+| calibration (mine), no store | 91.6% (83 cases*) | 0 | 51/54 |
+
+\* OUT_OF_DOMAIN is asked only when a store is described, so its cases are left out of the no-store runs.
+
+Every remaining failure is a miss; no run produced a wrong refusal. Without a store description, recall drops on my own cases, and the drop includes the motivating blended question, "How many boxes did the Count ship, and where did they all end up?" An operator should therefore set the description. Before calibration, the held-out contract passed at 92–93% with one wrong refusal.
 
 ## How it was calibrated
 
@@ -24,7 +30,9 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
   - OUT_OF_DOMAIN: 0.86 → 1.00.
   - SUPERLATIVE: 0.63 → 0.67, with precision 0.46 → 0.67.
   - COUNT: 0.80 → 0.85.
+- **Variant 4 (MISSING_REFERENT): shipped,** found in use. The query tool, in strict mode with no store described, refused "Where did the garlic for Lucy's room come from?" at 0.96–0.97 on three calls; the old wording read "the garlic" as a dangling reference. The new wording scores it 0.61–0.63, while true dangling references stay at 0.97–0.98.
 - **Thresholds and on/off status** are measured on each item's probability averaged over every run with identical wording (`../out/merged/RUNS.json`).
+- **The refusal rule, amended post hoc.** An error-severity kind refuses: in strict mode it withholds rows. So its threshold is the higher of the train F1 optimum and the lowest threshold that holds train precision ≥ 0.85. F1 alone had put INJECTION at 0.40, with precision 0.75, and the runbook case scored exactly 0.40. Held-out precision is now NEGATION 1.00, DECOMPOSITION_REQUIRED 0.89, MISSING_REFERENT 0.86 and INJECTION 1.00.
 
 ## Still failing, and why
 
@@ -34,7 +42,17 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
 - **Two disputable cases:** ROLE_NOT_NAME on an unnamed landlady, and a presupposition labelled ANSWER_EMBEDDED.
 - **Two held-out near misses about "first meeting" and "first night"** follow the example I wrote into SPEC.md. The labelled gold contradicts that example, so these two cases are contaminated by the spec, not evidence against the layer.
 
+## Injected into the query layer
+
+`percolate_core.semantic_exceptions.query` turns any `aiq.query` envelope into a typed report. The `query` MCP tool uses it under `P8_SEMANTIC_EXCEPTIONS` (`off`, `on` or `strict`). It was run end to end against a disposable stack (`sx-nav-db` and `sx-nav-rest`, extension 0.2.22): the real PostgREST with a real JWT, called through the runtime's own MCP client.
+
+- **In `on` mode:** a negation question came back with its rows, plus NEGATION and passage-stage SPECULATIVE and OFF_QUESTION exceptions. The receipt showed three stages, 49 kinds checked and 3 Jev requests.
+- **In `strict` mode:** the rows were withheld behind the prompt.
+- **One finding outside this module:** through MCP, SEARCH and SEMANTIC fail, because they need `p_embedding` and the tool never sends one. Only TEXT and the non-vector modes work there.
+
 ## What surprised us
+
+- **The deployment condition was not the measured one.** Every measurement passed a store description to Jev; the query tool did not. The same question then scored above a refusal threshold. The contract now runs both ways.
 
 - **I was wrong about my own contract.** We expected the author's cases to be the safe ground truth. Three of them were overturned by independent labels, and one of my spec's examples misled the held-out writer.
 - **Identical wording measured twice changed status.** Three kinds crossed the 0.6 bar between runs with no change at all. A single measurement cannot set a status near the bar.

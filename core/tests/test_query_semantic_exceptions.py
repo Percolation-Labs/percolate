@@ -106,6 +106,19 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(block["receipt"]["model"], "jev-stub")
         self.assertEqual(jev.asked[0]["question"], "Which entries never mention Renfield?")
 
+    async def test_the_store_description_reaches_the_judge(self):
+        jev = StubJev({})
+        pg = FakePostgrest(answers={("query", SEARCH): (200, SEARCH_DOC)})
+        self.addCleanup(pg.close)
+        mcp = build_server("127.0.0.1", 0, pg.url,
+                           exceptions=Exceptions("on", jev_factory=lambda: jev, store="Dracula"))
+        threading.Thread(target=mcp.serve_forever, daemon=True).start()
+        self.addCleanup(mcp.server_close)
+        self.addCleanup(mcp.shutdown)
+        await self.call(ToolServer(name="q", kind="mcp",
+                                   url=f"http://127.0.0.1:{mcp.server_address[1]}"), {"query": SEARCH})
+        self.assertEqual(jev.asked[0]["store"], "Dracula")
+
     async def test_nothing_raised_still_proves_it_looked(self):
         server = self.start("on", StubJev({}))
         result = await self.call(server, {"query": SEARCH, "question": "What did Seward note?"})
