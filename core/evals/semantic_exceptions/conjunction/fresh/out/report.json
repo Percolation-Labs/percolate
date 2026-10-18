@@ -1,0 +1,82 @@
+{
+ "k": 10,
+ "groups": {
+  "orthogonal-2": {
+   "compounds": 30,
+   "recall_compound": 0.433,
+   "recall_decomposed": 0.867,
+   "recall_decomposed_full": 1.0,
+   "gain": 0.433,
+   "splitting_helps": 23,
+   "median_rank_compound": 14.0,
+   "median_rank_alone": 1.0
+  },
+  "orthogonal-3": {
+   "compounds": 20,
+   "recall_compound": 0.2,
+   "recall_decomposed": 0.867,
+   "recall_decomposed_full": 1.0,
+   "gain": 0.667,
+   "splitting_helps": 19,
+   "median_rank_compound": 31.5,
+   "median_rank_alone": 1.0
+  },
+  "related-2": {
+   "compounds": 22,
+   "recall_compound": 0.705,
+   "recall_decomposed": 0.864,
+   "recall_decomposed_full": 1.0,
+   "gain": 0.159,
+   "splitting_helps": 7,
+   "median_rank_compound": 4.5,
+   "median_rank_alone": 3.0
+  }
+ },
+ "jev": {
+  "DECOMPOSITION_REQUIRED": {
+   "threshold": 0.95,
+   "fires_where_splitting_helps": "42/42",
+   "fires_on_orthogonal": "49/50",
+   "false_alarms_on_related": "22/22",
+   "mean_gain_where_it_fires": 0.42,
+   "mean_gain_where_silent": 0.0
+  },
+  "TWO_QUESTIONS": {
+   "threshold": 0.65,
+   "fires_where_splitting_helps": "0/42",
+   "fires_on_orthogonal": "0/50",
+   "false_alarms_on_related": "0/22",
+   "mean_gain_where_it_fires": null,
+   "mean_gain_where_silent": 0.414
+  },
+  "CONJUNCTION": {
+   "threshold": 0.95,
+   "fires_where_splitting_helps": "0/42",
+   "fires_on_orthogonal": "0/50",
+   "false_alarms_on_related": "0/22",
+   "mean_gain_where_it_fires": null,
+   "mean_gain_where_silent": 0.414
+  }
+ },
+ "detect": {
+  "parts_counted_right": "70/72",
+  "unrelated>=0.5": {
+   "orthogonal": "42/50",
+   "related": "9/22",
+   "mean_gain_flagged": 0.487,
+   "mean_gain_not_flagged": 0.238
+  },
+  "unrelated>=0.7": {
+   "orthogonal": "24/50",
+   "related": "2/22",
+   "mean_gain_flagged": 0.532,
+   "mean_gain_not_flagged": 0.348
+  },
+  "unrelated>=0.9": {
+   "orthogonal": "0/50",
+   "related": "0/22",
+   "mean_gain_flagged": null,
+   "mean_gain_not_flagged": 0.414
+  }
+ }
+}
