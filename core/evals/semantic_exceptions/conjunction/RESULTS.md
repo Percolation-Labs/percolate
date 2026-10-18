@@ -77,3 +77,35 @@ It misses 8 orthogonal compounds that gain a lot from splitting, so it fails F2 
 **The calibration question dissolves.** Splitting almost never loses recall, and even related parts gain from it (+0.13 first set, +0.16 fresh). So the best policy for recall is to split every compound, and the relatedness detector only trades recall for fewer queries. The exception that earns its place is the one already shipped. DECOMPOSITION_REQUIRED fired on 149 of 152 compounds across both sets, and agents that follow it should recover about 0.4 of recall on two-part questions and about 0.7 on three-part ones, at one extra query per extra part.
 
 **Still to show:** an agent shown the exception actually splits, and gets that recall end to end.
+
+## Step 5a: capable agents already split (18 Oct)
+
+8 Haiku agents (4 shadow, 4 on) each answered the same 20 orthogonal compounds from the fresh set through the query tool, at most 3 queries per question. Nothing in the prompt mentioned splitting. Each answer was scored from the query log against each part's answering passage (`e2e.py`, `e2e/capable-agents.json`).
+
+| arm | recall | queries per question | exceptions shown |
+|---|---|---|---|
+| shadow | 0.78 | 2.19 | none |
+| on | 0.83 | 1.83 | ALIAS 12, CAUSAL_WHY 7, OUT_OF_DOMAIN 6, COUNT 4, DECOMPOSITION_REQUIRED 1 |
+
+- **No agent ever sent a compound to the store.** In all 135 question sessions, the first query was one part, in both arms. So DECOMPOSITION_REQUIRED had nothing to fire on (shown once in 80 questions). A capable agent already carries this piece of search wisdom, and the exception adds nothing for it.
+- **A harmful false positive.** OUT_OF_DOMAIN fired on a part about the East Cliff at Whitby, which is in the book, and one agent stopped looking for it.
+- **This is the wrong test of the purpose.** The purpose is that agents should not have to carry the wisdom. The test that matches it is a thin agent that forwards the question as given and is told only to follow what the store raises (step 5b).
+
+## Step 5b: a thin agent, told only to follow the store, splits and recovers the answers (18 Oct)
+
+This is the test that matches the purpose. 8 Haiku agents ran the same 20 compounds. Each one forwarded the question to the store word for word, as `SEARCH "<question>"`, and was told only to do what any SEMANTIC EXCEPTIONS block says, with up to 3 more queries. It was not told to split. The prompt was the same in both arms (`e2e/thin-agent-prompt.txt`). Scores were read from the query log (`e2e/thin-agents.json`).
+
+| thin agent | recall from its own queries | recall, pairs / triples | queries per question | split |
+|---|---|---|---|---|
+| shadow (nothing shown) | **0.31** | 0.60 / 0.47 (everything seen) | 1.01 | 0 of 80 |
+| on (exceptions shown) | **0.97** | 0.96 / 0.97 | 3.65 | 79 of 80 |
+
+- **The store detected the compound on every question, in both arms.** DECOMPOSITION_REQUIRED was raised on the first query of 80 of 80 in shadow, and 79 of 80 in on.
+- **Shown it, a thin agent splits every time and finds nearly everything.** Recall is 0.97 against 0.31. That beats the 0.87 measured offline, because the agents also reworded each part.
+- **Together with step 5a, this is the claim made measurable.** A capable agent already splits (5a). An agent that carries none of that know-how, told only to follow the store, does just as well once the store says so (5b: 0.97, against 0.83 for the capable agents in 5a). The know-how moved out of the agent and into the data tier.
+
+## Still open
+
+- The relatedness detector, which saves queries rather than recall, failed F2 and does not ship.
+- OUT_OF_DOMAIN fired on in-domain parts (the East Cliff at Whitby) in step 5a. That is a false positive to fix before the next kind is tested.
+- DECOMPOSITION_REQUIRED is an error and refuses in strict mode. These results support keeping that: a refusal forces the split, and splitting almost never costs recall.
