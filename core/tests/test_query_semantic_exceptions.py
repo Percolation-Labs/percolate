@@ -34,7 +34,8 @@ from percolate_core.agentic.contracts.tools import InvocationTarget
 from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
 from percolate_core.query.mcp import (Exceptions, PercolateLog, QueryEmbedder, actions_for,
-                                      build_server, count_matches, hydrate_semantic)
+                                      build_server, count_matches, describe_sources,
+                                      hydrate_semantic)
 from percolate_core.semantic_exceptions.log import (
     JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
@@ -453,6 +454,35 @@ class CountProbe(unittest.TestCase):
         a = actions_for({"schema": "sx", "name": "passages", "columns": []}, 412, 10)
         self.assertIn("412 rows match and you saw 10", a["TRUNCATED_AT_LIMIT"])
         self.assertNotIn("TRUNCATED_AT_LIMIT", actions_for(None, None, 10))
+
+
+class DescribeSources(unittest.TestCase):
+    class Up:
+        def read(self, path, authorization=None, profile="aiq"):
+            if path.startswith("lexical_sources?select=name"):
+                return [{"name": "dracula"}, {"name": "chunks"}], None
+            if path.startswith("semantic_sources?select=name"):
+                return [{"name": "dracula"}], None
+            table = "sx.passages" if "dracula" in path else "content.resource_chunks"
+            return [{"source_table": table}], None
+
+        def rpc(self, fn, payload, authorization=None, profile="aiq"):
+            # only the dracula table is readable by this caller
+            rel = ([{"schema": "sx", "name": "passages",
+                     "columns": [{"name": "source"}, {"name": "time"}]}]
+                   if payload["p_query"].endswith("passages") else [])
+            return {"schema": {"doc": {"derived": {"relations": rel}}}}, None
+
+    def test_each_readable_source_is_named_with_its_table_and_columns(self):
+        text = describe_sources(self.Up(), None)
+        self.assertIn("- dracula: the table sx.passages (source, time)", text)
+        self.assertNotIn("chunks", text)
+
+    def test_nothing_readable_says_nothing(self):
+        class Up(self.Up):
+            def rpc(self, fn, payload, authorization=None, profile="aiq"):
+                return {"schema": {"doc": {"derived": {"relations": []}}}}, None
+        self.assertEqual(describe_sources(Up(), None), "")
 
 
 class Embedding(unittest.TestCase):
