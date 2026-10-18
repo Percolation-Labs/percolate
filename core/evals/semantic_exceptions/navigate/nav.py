@@ -354,6 +354,10 @@ def main() -> None:
     elif a.cmd == "grep":
         a.with_ = a.without = None
         do_list(a, phrase=a.phrase)
+    elif a.id not in BY_ID:
+        entry = [p["id"] for p in P if p["entry"] == a.id.split(".")[0]]
+        raise SystemExit(f"no passage {a.id}." + (f" Entry {a.id.split('.')[0]} has: {', '.join(entry)}."
+                                                  if entry else " Ids look like e0106.1."))
     elif a.cmd == "read":
         print(show(P[BY_ID[a.id]], words=None))
     elif a.cmd == "around":

@@ -1,0 +1,42 @@
+{
+ "U3": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"Night of 4-5 May, recorded 5 May; matches key."},
+  {"q":2,"score":2,"wrong_claim":false,"why":"Seward, VH's old student/friend, proposed to Lucy in May."},
+  {"q":3,"score":2,"wrong_claim":false,"why":"A vampire, Count Dracula, in the house next to the asylum (Carfax); matches key."},
+  {"q":4,"score":1,"wrong_claim":false,"why":"Finds 2 of 4: Un-Dead/natural-death reversal at the coffin, and Renfield's restored reason; misses 7 Sept punctures and the 28 Sept retraction; 'mental' illness is not a key item."},
+  {"q":5,"score":2,"wrong_claim":false,"why":"50 boxes; 6 Chicksand St, 6 Jamaica Lane, 9 Piccadilly, the rest at Carfax."},
+  {"q":6,"score":2,"wrong_claim":false,"why":"26 July, Mina's journal, door to be locked."},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Only 12 September diary entry."},
+  {"q":8,"score":2,"wrong_claim":false,"why":"5 May, Harker's journal."}
+ ],
+ "U5": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"Just after midnight 4-5 May, so 5 May; matches key."},
+  {"q":2,"score":2,"wrong_claim":false,"why":"Seward, proposed 24 May, VH's old friend and master."},
+  {"q":3,"score":2,"wrong_claim":false,"why":"A vampire, the Count, preyed on Lucy; Carfax mentioned."},
+  {"q":4,"score":2,"wrong_claim":false,"why":"Finds 3 of 4: body-snatcher view dropped at the coffin 27 Sept, 28 Sept retraction restored 29 Sept, Renfield's reason; misses 7 Sept punctures."},
+  {"q":5,"score":2,"wrong_claim":false,"why":"50 boxes; 6/6/9 to the three London addresses, 29 at Carfax."},
+  {"q":6,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal, lock the door."},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Only 12 September diary entry."},
+  {"q":8,"score":2,"wrong_claim":false,"why":"5 May, Harker's journal."}
+ ],
+ "U7": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"A little after midnight, early 5 May; matches key."},
+  {"q":2,"score":2,"wrong_claim":false,"why":"Seward, Lucy's suitor and VH's old friend/student; others met VH in September."},
+  {"q":3,"score":2,"wrong_claim":false,"why":"A vampire, the Count, who preyed on Lucy and made her Un-Dead; Carfax/boxes not mentioned but core correct."},
+  {"q":4,"score":2,"wrong_claim":false,"why":"Finds 3 of 4: acceptance at the coffin 27 Sept, 28 Sept retraction restored 29 Sept, Renfield's sanity; misses 7 Sept punctures."},
+  {"q":5,"score":2,"wrong_claim":false,"why":"50 boxes; 6 Chicksand, 6 Jamaica Lane, 9 Piccadilly, 29 at Carfax."},
+  {"q":6,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal, lock the door."},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Only 12 September diary entry."},
+  {"q":8,"score":2,"wrong_claim":false,"why":"5 May entry, Harker's journal."}
+ ],
+ "U9": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"Around midnight 4-5 May, first hours of 5 May; matches key."},
+  {"q":2,"score":2,"wrong_claim":false,"why":"Seward, proposed to Lucy, VH's old friend and master."},
+  {"q":3,"score":2,"wrong_claim":false,"why":"A vampire, the Count, 'amongst us', preyed on Lucy; Carfax/boxes not mentioned but core correct."},
+  {"q":4,"score":2,"wrong_claim":false,"why":"Finds 3 of 4: acceptance at the coffin 27 Sept, 28 Sept retraction resolved 29 Sept, Renfield's restored reason; misses 7 Sept punctures; 'Finis' is extra."},
+  {"q":5,"score":2,"wrong_claim":false,"why":"50 boxes; 6 Chicksand, 6 Jamaica Lane, 9 Piccadilly, 29 at Carfax."},
+  {"q":6,"score":2,"wrong_claim":false,"why":"26 July, Mina's journal; matches key."},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Only 12 September diary entry."},
+  {"q":8,"score":2,"wrong_claim":false,"why":"5 May entry, Harker's journal."}
+ ]
+}
