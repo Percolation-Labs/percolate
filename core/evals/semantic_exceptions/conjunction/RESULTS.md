@@ -1,5 +1,7 @@
 # The conjunction control: results (18 Oct)
 
+**How to read this, first: a bitter-lesson result.** Even Haiku splits a compound question on its own. In 135 of 135 question sessions its first query asked one part (step 5a), so for a capable agent the decomposition exception had nothing to do. What the result does show is resilience. A thin agent that carries no search know-how, told only to follow the store, goes from 0.31 to 0.97 (step 5b). That is real, but it is a placeholder with diminishing returns: decomposition is exactly the kind of general principle models learn. And on the way in the case is weak as a design principle, because anything Jev reads from the question could be given to the model directly. The case worth making is on the way out and by statistics probe, where the store sees the whole result or its own counts before the agent does, and where the argument is cost and attention: the same answer for fewer turns, queries and tokens. The result is not that the data tier knows something the model cannot.
+
 This is the protocol and predictions in `README.md`, run once: 76 blind sub-questions (45 kept), 80 blind compounds (30 orthogonal pairs, 20 orthogonal triples, 30 related pairs), bge-small over the 620 Dracula passages, and k = 10. The raw numbers are in `out/report.json`, `out/measure.json`, `out/jev.jsonl` and `out/detect.jsonl`.
 
 ## Blending loses the parts, and splitting recovers them
