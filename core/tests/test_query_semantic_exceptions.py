@@ -25,6 +25,7 @@ Run: python -m unittest discover -s tests -p test_query_semantic_exceptions.py
 
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 
@@ -32,7 +33,7 @@ from percolate_core.agentic.contracts import CanonicalTool, ToolInvocation, Tool
 from percolate_core.agentic.contracts.tools import InvocationTarget
 from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
-from percolate_core.query.mcp import Exceptions, PercolateLog, build_server
+from percolate_core.query.mcp import Exceptions, PercolateLog, QueryEmbedder, build_server
 from percolate_core.semantic_exceptions.log import (
     JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
@@ -303,6 +304,64 @@ class Log(unittest.TestCase):
                                          "ids": []})
         self.assertEqual(stats_of(SEARCH_DOC)["ids"], ["c1"])
         self.assertTrue(stats_of({"rows": []})["empty"])
+
+
+class FakeUpstream:
+    """What QueryEmbedder asks the database: the plan, the model rows, the query."""
+
+    def __init__(self, mode="SEARCH", provider="fastembed", in_process=True):
+        self.mode, self.provider, self.in_process = mode, provider, in_process
+        self.calls = []
+
+    def rpc(self, fn, payload, authorization=None, profile="aiq"):
+        self.calls.append((fn, payload, profile))
+        if fn == "aiq_parse":
+            return {"ok": True, "mode": self.mode, "arg": "who attacked Lucy", "model": None}, None
+        if fn == "query" and "p_embedding" in payload:
+            return {"mode": self.mode, "rows": [{"chunk_id": "c1"}]}, None
+        return None, {"kind": "tool_error", "status": 400}
+
+    def read(self, path, authorization=None, profile="aiq"):
+        if path.startswith("embedding_models"):
+            return [{"name": "bge-small-en-v1.5", "dim": 3, "provider": self.provider,
+                     "endpoint": "BAAI/bge-small-en-v1.5"}], None
+        return [{"provider": self.provider, "in_process": self.in_process}], None
+
+
+class Embedding(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        patch = mock.patch("percolate_core.ingest.local_embed.embed_local",
+                           side_effect=lambda model, texts, **kw: [[0.1, 0.2, 0.3]] * len(texts))
+        self.embed = patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_search_is_embedded_with_the_registered_model_and_says_so(self):
+        up = FakeUpstream()
+        doc, err = QueryEmbedder("on").retry(up, 'SEARCH "who attacked Lucy" FROM d', None)
+        self.assertIsNone(err)
+        self.assertEqual(doc["embedded"], {"by": "query tool", "model": "bge-small-en-v1.5"})
+        self.assertEqual(self.embed.call_args.args[:2], ("BAAI/bge-small-en-v1.5", ["who attacked Lucy"]))
+        [(fn, payload, _)] = [c for c in up.calls if c[0] == "query"]
+        self.assertEqual(json.loads(payload["p_embedding"]), [0.1, 0.2, 0.3])
+
+    def test_the_plan_comes_from_the_database_parser(self):
+        up = FakeUpstream()
+        QueryEmbedder("on").retry(up, 'SEARCH "x" FROM d', None)
+        self.assertEqual(up.calls[0][0], "aiq_parse")
+        self.assertEqual(up.calls[0][2], "public")
+
+    def test_a_mode_without_vectors_is_left_alone(self):
+        self.assertIsNone(QueryEmbedder("on").retry(FakeUpstream(mode="TEXT"), "TEXT x", None))
+        self.embed.assert_not_called()
+
+    def test_a_hosted_provider_is_not_embedded_here(self):
+        up = FakeUpstream(provider="openai", in_process=False)
+        self.assertIsNone(QueryEmbedder("on").retry(up, 'SEARCH "x" FROM d', None))
+        self.embed.assert_not_called()
+
+    def test_off_never_embeds(self):
+        self.assertIsNone(QueryEmbedder("off").retry(FakeUpstream(), 'SEARCH "x" FROM d', None))
 
 
 class Adapter(unittest.TestCase):
