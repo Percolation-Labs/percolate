@@ -50,6 +50,21 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
 - **In `strict` mode:** the rows were withheld behind the prompt.
 - **One finding outside this module:** through MCP, SEARCH and SEMANTIC fail, because they need `p_embedding` and the tool never sends one. Only TEXT and the non-vector modes work there.
 
+## Round 5: the kinds off for noise (18 Oct)
+
+`variant-5.json` rewords TIME_UNSPECIFIED, PRESUPPOSITION and FILTERS_EXTRACTABLE, each with yes/no criteria, written from what the two labellers agreed on. It was measured twice on the labelled eval (`out/v5`, `out/v5b`), with the probabilities averaged (`out/v5m`). No other kind changed status; PARTIAL_ANSWER moved between runs, but it is a passage kind the variant does not touch.
+
+| kind | fires at p ≥ 0.8 (of 487), old → new | held-out F1, old → new | status |
+|---|---|---|---|
+| TIME_UNSPECIFIED | 155 → 13 (18 at its 0.75 threshold) | 0.00 → 0.43 | off; the rewording is kept |
+| PRESUPPOSITION | 277 → 163 | 0.00 → 0.13 | off; the old wording stays |
+| FILTERS_EXTRACTABLE | 217 → 147 | 0.58 → 0.54 | off; the old wording stays |
+
+- **TIME_UNSPECIFIED is kept but stays off.** It is no longer noise, but 6 held-out positives cannot carry a precision. Several of its 8 "false positives" look right to me ("Tickets in the MOB project filed by Kenji that are still open"), and the eval does not let me overrule the labels.
+- **FILTERS_EXTRACTABLE is a planner's job, not an exception.** The two labellers disagree on 29 questions, more than for any other kind, because almost every question here names a narrator or a record type. A repository that knows its filterable fields should extract them, and a prompt to the model adds nothing.
+- **PRESUPPOSITION does not separate.** Every question assumes something. Wording has not found the line between an ordinary premise and a doubtful one, and five held-out positives are too few to fit one.
+- **A false alarm of my own.** The shipped catalogue raises 0.30 kinds of any severity per plain question, up from 0.23. The bar is on error-severity kinds, which stay at 0.0. Of the 24 warnings, 16 are EXACT_MATCH on a ticket id or a commit hash: key lookups, which is the right advice for a question the generator called plain.
+
 ## What surprised us
 
 - **The deployment condition was not the measured one.** Every measurement passed a store description to Jev; the query tool did not. The same question then scored above a refusal threshold. The contract now runs both ways.
@@ -57,3 +72,4 @@ Each change was tried as a variant (`variant-*.json`). A variant had to pass the
 - **I was wrong about my own contract.** We expected the author's cases to be the safe ground truth. Three of them were overturned by independent labels, and one of my spec's examples misled the held-out writer.
 - **Identical wording measured twice changed status.** Three kinds crossed the 0.6 bar between runs with no change at all. A single measurement cannot set a status near the bar.
 - **A real defect came from the contract, not the unit tests.** A raised exception looked its kind up in the shipped catalogue, so a repository's own kinds (and every variant) spoke with the default prompt. The unit tests all used the default kinds and could not see it.
+- **Rewording cannot fix a kind its labellers cannot agree on.** FILTERS_EXTRACTABLE had the most labeller disagreement, and no wording helped. Where people disagree, the kind is the wrong unit.
