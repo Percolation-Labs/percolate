@@ -15,8 +15,8 @@ The store holds Bram Stoker's Dracula as 644 passages of about 200 words,
 each from a dated journal entry, letter, telegram, cutting or log, with its
 narrator, document and date. `search` ranks passages by meaning and words
 together. `list` and `grep` are exact: every passage that matches, and a count.
-Matching ignores case, line breaks and curly quotes; `|` in a grep phrase means
-or. `--by-entry` applies --with/--without/grep to whole entries (a letter or a
+Matching starts at a word ("Art" finds Arthur, not heart) and ignores case,
+line breaks and curly quotes; `|` in a grep phrase means or. `--by-entry` applies --with/--without/grep to whole entries (a letter or a
 day's journal) rather than to single passages, and lists the entries.
 
 Exceptions: every `search` is inspected by percolate_core.semantic_exceptions
@@ -248,7 +248,34 @@ def norm(s: str) -> str:
 
 
 def has(text: str, needle: str) -> bool:
-    return any(norm(n) in text for n in needle.split("|") if n.strip())
+    """At the start of a word: "Art" finds Arthur, not heart (round one and two)."""
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(norm(n)), text)
+               for n in needle.split("|") if n.strip())
+
+
+async def do_task(text: str) -> None:
+    """The question's shape belongs to the task, not to one search call.
+
+    Round two of the navigation test: users who went straight to `grep` and
+    `list` never met a question-stage exception, because only `search` raised
+    them. Here the task's own question is judged once, at the start, and the
+    result is advice on how to go about it -- never a refusal."""
+    from percolate_core.decide import Jev
+    from percolate_core.semantic_exceptions import SemanticExceptions
+    async with Jev(api_key=jev_key()) as jev:
+        sx = SemanticExceptions(jev, store=STORE_DESCRIPTION, actions=ACTIONS)
+        report = await sx.before(text)
+    s = session()
+    seen: set = set()
+    report.novel(seen)
+    s["seen"] = sorted(seen)
+    save(s)
+    with open(SESSIONS / f"{SESSION.stem}.log.jsonl", "a") as f:
+        f.write(json.dumps({"task": text, "raised": [[r.code, r.p] for r in report.raised]}) + "\n")
+    if report.raised:
+        print()
+        print(report.to_prompt(show=6).replace(
+            "Act on these before answering:", "Plan for these before you start:"))
 
 
 def do_list(a, phrase: str | None = None) -> None:
@@ -318,6 +345,8 @@ def main() -> None:
     if a.cmd == "task":
         save({"task": a.text, "rounds": []})
         print("task started; the walk log is empty.")
+        if EXCEPTIONS:
+            asyncio.run(do_task(a.text))
     elif a.cmd == "search":
         asyncio.run(do_search(a))
     elif a.cmd == "list":
