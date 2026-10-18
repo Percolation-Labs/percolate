@@ -1,0 +1,38 @@
+{
+ "U1": [
+  {"q":1,"score":0,"wrong_claim":false,"why":"50 boxes and Carfax right, but no London destination named; rule needs at least one for 1"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July, Mina's journal, door locked (e0044.1)"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only 12 Sept diary (e0106), others name Arthur"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"Arthur, Seward, Van Helsing, Quincey in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool's glass-houses, Van Helsing telegraphed and arranged"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"Harker's journal 5 May, e0004.1, Slovak/Servian words"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the 25 May letter to Arthur (e0030)"}
+ ],
+ "U3": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"50; 6 Mile End, 6 Bermondsey, 9 Piccadilly, 29 left; 'nine from a house in Piccadilly' is garbled wording but count and place match"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July, Mina's journal, lock the door"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only 12 Sept (e0106), checked name variants"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool, telegram, Van Helsing arranged, daily boxful"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"5 May Harker journal e0004.1, were-wolf or vampire"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"One letter, 25 May; telegram noted as to him, not his writing"}
+ ],
+ "U5": [
+  {"q":1,"score":1,"wrong_claim":false,"why":"50 and 9 to Piccadilly; misses Mile End and Bermondsey"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July, Mina, e0044.1, door locked"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only 12 Sept (e0106.1)"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates and entries"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool, telegraphed, Van Helsing arranged"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"5 May, Harker, e0004.1"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the 25 May letter (e0030.1)"}
+ ],
+ "U7": [
+  {"q":1,"score":1,"wrong_claim":false,"why":"50, 9 to Piccadilly; names Bermondsey and Mile End but without counts"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July, Mina, lock the door"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only 12 Sept (e0106)"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool, Van Helsing arranged, daily boxful"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"5 May Harker journal, vrolok/vlkoslak gloss"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the 25 May letter, others only report him"}
+ ]
+}

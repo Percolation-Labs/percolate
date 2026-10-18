@@ -1,0 +1,38 @@
+{
+ "U2": [
+  {"q":1,"score":1,"wrong_claim":false,"why":"50 and 9 to Piccadilly, but Bermondsey and Mile End given only as a combined twelve, no split"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal, Mrs Westenra, door locked"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only the 12 Sept diary entry"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"Arthur, Seward, Van Helsing, Quincey in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool's glass-houses, telegraphed, Van Helsing decked the room"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"Harker's journal, 5 May, Slovak/Servian were-wolf or vampire"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the one 25 May letter to Arthur"}
+ ],
+ "U4": [
+  {"q":1,"score":1,"wrong_claim":false,"why":"50 and 9 to Piccadilly; Mile End and Bermondsey missing"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal e0044.1, door locked"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only the 12 Sept diary entry e0106"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool, telegram, Van Helsing placed them"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"Harker's journal 5 May, e0004.1"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the one 25 May letter; the line to Seward correctly called second-hand"}
+ ],
+ "U6": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"50; 9 Piccadilly, 6 Bermondsey, 6 Mile End; rest at Carfax (puts the eight found in a Carfax dining-room, a muddle the key does not address)"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal, Mrs Westenra, door locked"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only the 12 Sept diary entry"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool's glass-houses, Van Helsing arranged them"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"Harker's journal 5 May, e0004.1"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the one 25 May letter to Arthur"}
+ ],
+ "U8": [
+  {"q":1,"score":2,"wrong_claim":false,"why":"50; 9 Piccadilly, 6 Bermondsey, 6 Mile End; 29 at Carfax"},
+  {"q":2,"score":2,"wrong_claim":false,"why":"26 July 1893, Mina's journal e0044.1"},
+  {"q":3,"score":2,"wrong_claim":false,"why":"Only the 12 Sept diary entry e0106"},
+  {"q":4,"score":2,"wrong_claim":false,"why":"All four in order with dates"},
+  {"q":5,"score":2,"wrong_claim":false,"why":"Haarlem, Vanderpool, Van Helsing decked the room, daily boxful"},
+  {"q":6,"score":2,"wrong_claim":false,"why":"Harker's journal 5 May, e0004.1"},
+  {"q":7,"score":2,"wrong_claim":false,"why":"Exactly the one 25 May letter to Arthur"}
+ ]
+}
