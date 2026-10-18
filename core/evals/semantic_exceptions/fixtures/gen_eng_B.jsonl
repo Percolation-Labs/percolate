@@ -1,0 +1,102 @@
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "what broke in the billing service last week"}
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "Show me postmortems written in the past couple of months about database failovers."}
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "Has anyone touched the rate limiter config since yesterday?"}
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "on-call notes from three nights ago, the pager kept firing for ledger-api"}
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "Which design docs about the search indexer have been updated lately?"}
+{"domain": "eng", "target": "RELATIVE_TIME", "question": "Priya mentioned a flaky integration test in standup this morning — is there a ticket for it?"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "When did we first realise the auth token leak in session-gateway, as opposed to when it started?"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "At what point did the team learn that the March outage was caused by the DNS change?"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "when was the memory leak in notifier-worker first reported in a ticket"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "How long after the data corruption in orders-db began did anyone on call notice it?"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "What did we believe the root cause of INC-2291 was before the postmortem corrected it?"}
+{"domain": "eng", "target": "KNOWN_VS_HAPPENED", "question": "By the time Marcus filed PLAT-884, had people already been aware the cert would expire?"}
+{"domain": "eng", "target": "PREDICTION", "question": "Will the payments-queue run out of disk again before Q4?"}
+{"domain": "eng", "target": "PREDICTION", "question": "Which services are likely to cause the next major incident?"}
+{"domain": "eng", "target": "PREDICTION", "question": "how many tickets will the infra team close next sprint"}
+{"domain": "eng", "target": "PREDICTION", "question": "Is the Kafka migration going to finish on schedule, based on what's in the design doc and tickets?"}
+{"domain": "eng", "target": "PREDICTION", "question": "At current growth, when does the analytics cluster hit its storage limit?"}
+{"domain": "eng", "target": "PREDICTION", "question": "Should we expect the same timeout errors once the new load balancer goes live?"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "Why did Dana revert the caching layer in checkout-svc?"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "Who approved deleting the production backups during the 2024 migration?"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "What was the fix for the data loss caused by the search reindex?"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "when did the mobile team stop using the legacy auth endpoint"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "How many customers were affected when the EU region went down for six hours?"}
+{"domain": "eng", "target": "PRESUPPOSITION", "question": "Find the follow-up tickets from the postmortem on the ledger double-charge bug."}
+{"domain": "eng", "target": "LEADING", "question": "Isn't it true that the rewrite of the scheduler was a waste of time given how many bugs it introduced?"}
+{"domain": "eng", "target": "LEADING", "question": "Show me the evidence that the platform team keeps ignoring on-call handoff notes."}
+{"domain": "eng", "target": "LEADING", "question": "Don't the incident records prove that Friday deploys are reckless?"}
+{"domain": "eng", "target": "LEADING", "question": "find all the times the vendor SDK obviously caused our outages"}
+{"domain": "eng", "target": "LEADING", "question": "Surely the move to microservices is what made incident response slower — what supports that?"}
+{"domain": "eng", "target": "LEADING", "question": "What went wrong with Tomas's design for the event bus?"}
+{"domain": "eng", "target": "OPINION", "question": "Was switching from Postgres to DynamoDB for user-profiles the right call?"}
+{"domain": "eng", "target": "OPINION", "question": "Which on-call rotation setup was best for the team?"}
+{"domain": "eng", "target": "OPINION", "question": "did we handle the september outage well"}
+{"domain": "eng", "target": "OPINION", "question": "Is the retry logic in webhook-dispatcher well designed?"}
+{"domain": "eng", "target": "OPINION", "question": "Looking at the design reviews, whose architecture proposals have held up better over time?"}
+{"domain": "eng", "target": "OPINION", "question": "How good was the decision to deprecate the v1 API without a migration window?"}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "The INC-1874 outage was caused by an expired TLS certificate, right?"}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "Can you confirm that Rahul wrote the original design doc for the feature-flag service?"}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "the search service runs on Elasticsearch 7.10, yes?"}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "Just checking: we rolled back release 4.12 because of the memory regression in the image resizer."}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "Was it the payments team, as I recall, that owned the fraud-scoring pipeline in 2023?"}
+{"domain": "eng", "target": "ANSWER_EMBEDDED", "question": "I think the default connection pool size in order-api is 50 — is that what the config commit says?"}
+{"domain": "eng", "target": "META_QUESTION", "question": "Do we have any postmortems from before 2021 in here?"}
+{"domain": "eng", "target": "META_QUESTION", "question": "What kinds of documents does this store contain about the mobile apps?"}
+{"domain": "eng", "target": "META_QUESTION", "question": "how many tickets are indexed for the identity team"}
+{"domain": "eng", "target": "META_QUESTION", "question": "Is there any record at all of the decision to sunset the reporting service, or was it never written down?"}
+{"domain": "eng", "target": "META_QUESTION", "question": "Which teams' on-call notes are missing or incomplete?"}
+{"domain": "eng", "target": "META_QUESTION", "question": "Are commit messages from the old monorepo included, or only the newer repos?"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "What's the company's revenue for last fiscal year?"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "best pizza place near the office"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "How do I apply for parental leave?"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "Who won the Premier League in 2019?"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "What salary band is a senior engineer in the London office?"}
+{"domain": "eng", "target": "OUT_OF_DOMAIN", "question": "Which marketing campaign brought in the most new customers this year?"}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "PLAT-2071"}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "Find every log excerpt containing \"ECONNRESET upstream 10.4.2.17\""}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "which commit is a3f9e21c and what did it change"}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "Any on-call notes mentioning error code E_LEDGER_409?"}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "Who added the feature flag `enable_async_checkout_v2`?"}
+{"domain": "eng", "target": "EXACT_MATCH", "question": "Tickets where the stack trace includes NullPointerException at InvoiceRenderer.java:212"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "What was the total downtime in minutes across all Sev-1 incidents in 2025?"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "average time to resolve a P2 ticket for the data platform team"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "How many days passed between the first report of the cache stampede bug and its fix being merged?"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "By what percentage did p99 latency on search-api drop after the index rewrite?"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "If each failed deploy cost us roughly 40 minutes, how much time did the broken CI pipeline cost in June?"}
+{"domain": "eng", "target": "ARITHMETIC", "question": "Did Wei's team close more tickets than Ola's team over the year?"}
+{"domain": "eng", "target": "SPATIAL", "question": "Incidents that affected the Frankfurt data centre"}
+{"domain": "eng", "target": "SPATIAL", "question": "Which outages hit customers in Asia-Pacific?"}
+{"domain": "eng", "target": "SPATIAL", "question": "on-call notes from engineers based in the Toronto office"}
+{"domain": "eng", "target": "SPATIAL", "question": "Any latency problems reported for edge nodes within 500 km of Sydney?"}
+{"domain": "eng", "target": "SPATIAL", "question": "Were there network partitions between us-east-1 and us-west-2 in the postmortems?"}
+{"domain": "eng", "target": "SPATIAL", "question": "What hardware failures happened in the rack row nearest the cooling unit at the Dublin colo?"}
+{"domain": "eng", "target": "PATH", "question": "How is the inventory service connected to the email notification outage?"}
+{"domain": "eng", "target": "PATH", "question": "What's the link between Jordan Lee and the original payments-gateway design?"}
+{"domain": "eng", "target": "PATH", "question": "how does a change to the shared proto library end up breaking the mobile build"}
+{"domain": "eng", "target": "PATH", "question": "Have Sana and Felix ever worked on the same incident or ticket?"}
+{"domain": "eng", "target": "PATH", "question": "Trace the chain of dependencies from auth-service to the reporting dashboard."}
+{"domain": "eng", "target": "PATH", "question": "Which tickets tie the 2023 schema migration to the later billing discrepancies?"}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "Postmortems authored by Elena Ruiz in 2024"}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "commit messages from the infra repo between Jan and March 2023 about terraform"}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "Show only design documents, not tickets, that discuss multi-tenancy."}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "What did the SRE team's on-call notes say about Redis eviction in November 2025?"}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "Tickets in the MOB project filed by Kenji that are still open"}
+{"domain": "eng", "target": "FILTERS_EXTRACTABLE", "question": "I'm after Sev-1 incident reports, anything from before the 2022 reorg, about queue backlogs."}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "What were the most important incidents for the platform team?"}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "significant architecture changes to the checkout flow"}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "Which services have the main reliability problems?"}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "Find the big refactors of the notifications code."}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "Who are the key people to talk to about the data pipeline?"}
+{"domain": "eng", "target": "VAGUE_TERM", "question": "Which postmortems had serious customer impact?"}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "Summarise the INC-3102 postmortem in three bullet points."}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "List all tickets about flaky tests as a markdown table with columns id, owner, status."}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "find the auth-service design doc and translate the key decisions into Spanish"}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "What caused the March queue outage? Keep it under 50 words and don't mention names."}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "Pull the on-call notes for the ledger service and draft a handover email for the next rotation."}
+{"domain": "eng", "target": "INSTRUCTIONS_MIXED_IN", "question": "Compare the two caching proposals from the design docs, answer as JSON."}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "errors"}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "the thing with the deploy"}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "What happened?"}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "database stuff"}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "Anything about that issue Sam had?"}
+{"domain": "eng", "target": "UNDERSPECIFIED", "question": "Tell me about the service."}

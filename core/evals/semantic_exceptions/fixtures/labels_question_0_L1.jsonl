@@ -1,0 +1,244 @@
+{"id": "q-446e31cda3", "kinds": []}
+{"id": "q-b492830e8c", "kinds": ["ALIAS"]}
+{"id": "q-0707fd871d", "kinds": ["DECOMPOSITION_REQUIRED", "KNOWN_VS_HAPPENED", "ARITHMETIC"]}
+{"id": "q-6951be0e79", "kinds": ["EXACT_MATCH"]}
+{"id": "q-05a68581e7", "kinds": []}
+{"id": "q-38ff9cd579", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-67eeb79567", "kinds": ["ALIAS", "SUPERLATIVE"]}
+{"id": "q-5e57587c2f", "kinds": ["COMPARISON"]}
+{"id": "q-0eceb54914", "kinds": ["NEGATION"]}
+{"id": "q-5a989e4de1", "kinds": ["VAGUE_TERM", "SUPERLATIVE"]}
+{"id": "q-f29363e5ac", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-2404f8b546", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-a7e1d342eb", "kinds": ["ROLE_NOT_NAME", "TIME_UNSPECIFIED"]}
+{"id": "q-07eb8a5cc6", "kinds": ["COMPARISON"]}
+{"id": "q-c66b4a4bfc", "kinds": []}
+{"id": "q-b5d5710ec4", "kinds": ["EXACT_MATCH"]}
+{"id": "q-81c57cc6e2", "kinds": ["CONJUNCTION"]}
+{"id": "q-62802eb1e6", "kinds": ["NEGATION"]}
+{"id": "q-0d3e12e1ef", "kinds": ["EXACT_MATCH"]}
+{"id": "q-47b7a4b1c7", "kinds": ["RELATIVE_TIME"]}
+{"id": "q-043a05bc03", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED", "CAUSAL_WHY", "EXACT_MATCH"]}
+{"id": "q-ba1929fe70", "kinds": ["KNOWN_VS_HAPPENED"]}
+{"id": "q-e38181dc54", "kinds": ["COUNT"]}
+{"id": "q-a40f5c9a94", "kinds": []}
+{"id": "q-a9e6dd4989", "kinds": ["DECOMPOSITION_REQUIRED", "EXHAUSTIVE"]}
+{"id": "q-00f4a33405", "kinds": ["PATH"]}
+{"id": "q-21b70c3346", "kinds": ["TIME_UNSPECIFIED"]}
+{"id": "q-51c00e4576", "kinds": ["MISSING_REFERENT", "UNDERSPECIFIED"]}
+{"id": "q-5570d25d1b", "kinds": ["NEGATION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-c2dfaf578a", "kinds": ["SUPERLATIVE", "FILTERS_EXTRACTABLE"]}
+{"id": "q-ab1ed63ac6", "kinds": ["COMPARISON"]}
+{"id": "q-1b831038c1", "kinds": ["COMPARISON", "YES_NO_CLAIM", "EXACT_MATCH"]}
+{"id": "q-823507d852", "kinds": ["EXPLORATORY"]}
+{"id": "q-1ecb213f09", "kinds": ["MISSING_REFERENT"]}
+{"id": "q-e67ebe483e", "kinds": ["PREDICTION"]}
+{"id": "q-f449068907", "kinds": ["EXACT_MATCH", "FILTERS_EXTRACTABLE"]}
+{"id": "q-c1d0f6147e", "kinds": ["TIME_UNSPECIFIED"]}
+{"id": "q-96a721a194", "kinds": ["META_QUESTION"]}
+{"id": "q-c171a7040e", "kinds": ["TIME_UNSPECIFIED"]}
+{"id": "q-9566c79035", "kinds": ["RELATIVE_TIME", "FILTERS_EXTRACTABLE"]}
+{"id": "q-29e054f92b", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-8a591d48e1", "kinds": []}
+{"id": "q-a621babcba", "kinds": ["NEGATION"]}
+{"id": "q-dddde53921", "kinds": ["SUPERLATIVE"]}
+{"id": "q-5e01a5850d", "kinds": ["VAGUE_TERM"]}
+{"id": "q-bf0150bd27", "kinds": ["CONJUNCTION", "SPATIAL"]}
+{"id": "q-91e985a76b", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-6ad48bc2f6", "kinds": ["COUNTERFACTUAL", "EXACT_MATCH"]}
+{"id": "q-6f21532368", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED"]}
+{"id": "q-0a6c10d2a6", "kinds": ["PRESUPPOSITION"]}
+{"id": "q-67071c4b61", "kinds": ["MISSING_REFERENT", "UNDERSPECIFIED"]}
+{"id": "q-5995c8300d", "kinds": ["EXACT_MATCH"]}
+{"id": "q-12f16573b1", "kinds": ["INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-ca548e3b7f", "kinds": ["KNOWN_VS_HAPPENED"]}
+{"id": "q-d4d9a6c16c", "kinds": ["ALIAS"]}
+{"id": "q-c81df6851b", "kinds": ["META_QUESTION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-46a7c2bfc9", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-e6d493e604", "kinds": ["EXACT_MATCH"]}
+{"id": "q-0a3ab43609", "kinds": []}
+{"id": "q-93c5e23d9a", "kinds": ["OPINION", "MISSING_REFERENT"]}
+{"id": "q-e4bcb2fc90", "kinds": ["NEGATION"]}
+{"id": "q-1008ce8d6d", "kinds": ["COMPARISON", "FILTERS_EXTRACTABLE"]}
+{"id": "q-b23471d040", "kinds": ["INSTRUCTIONS_MIXED_IN", "EXHAUSTIVE"]}
+{"id": "q-dfce12980d", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-884532ad69", "kinds": ["OPINION", "LEADING"]}
+{"id": "q-9973812ac5", "kinds": ["LEADING", "PRESUPPOSITION"]}
+{"id": "q-d6171999fb", "kinds": ["COUNT", "ALIAS"]}
+{"id": "q-53534fd46f", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-5175a54456", "kinds": []}
+{"id": "q-db46f89f44", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-d5a3fa1053", "kinds": ["ALIAS"]}
+{"id": "q-f015cd7820", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-b6182bb54a", "kinds": ["SUPERLATIVE"]}
+{"id": "q-79f925dd42", "kinds": ["CONJUNCTION", "ALIAS"]}
+{"id": "q-d3d7e60403", "kinds": ["VAGUE_TERM"]}
+{"id": "q-af75e18afb", "kinds": ["LEADING", "YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-31db21a366", "kinds": ["VAGUE_TERM"]}
+{"id": "q-0f0133d5a1", "kinds": ["ROLE_NOT_NAME"]}
+{"id": "q-b947dc73a2", "kinds": ["COUNT", "TIME_UNSPECIFIED"]}
+{"id": "q-d076ba43a8", "kinds": ["ANSWER_EMBEDDED", "YES_NO_CLAIM"]}
+{"id": "q-ddb5199823", "kinds": ["INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-f9a55e1616", "kinds": ["KNOWN_VS_HAPPENED", "YES_NO_CLAIM", "EXACT_MATCH"]}
+{"id": "q-c9604e723b", "kinds": ["ALIAS"]}
+{"id": "q-fb8192eff0", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED"]}
+{"id": "q-c9b909bb11", "kinds": ["DECOMPOSITION_REQUIRED", "FILTERS_EXTRACTABLE"]}
+{"id": "q-0500cc5b09", "kinds": ["DECOMPOSITION_REQUIRED"]}
+{"id": "q-4f55efbbd6", "kinds": ["COUNT", "FILTERS_EXTRACTABLE"]}
+{"id": "q-d0477f3b0a", "kinds": ["ARITHMETIC", "COUNT"]}
+{"id": "q-ec8713d6f9", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-6f182cbbd9", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-1b619c44a7", "kinds": ["EXACT_MATCH", "ALIAS"]}
+{"id": "q-a4bb576750", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED", "YES_NO_CLAIM"]}
+{"id": "q-b6188fe416", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-7a823479a5", "kinds": ["CONJUNCTION"]}
+{"id": "q-70f5b9cb0e", "kinds": []}
+{"id": "q-5b3283cc79", "kinds": []}
+{"id": "q-e0c6c0353d", "kinds": ["CONJUNCTION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-083202fb43", "kinds": ["EXHAUSTIVE", "INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-ed8fc96aed", "kinds": ["COMPARISON", "INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-d797dc6d96", "kinds": ["EXPLORATORY"]}
+{"id": "q-087aa43b3b", "kinds": ["PATH"]}
+{"id": "q-704f3a5c72", "kinds": []}
+{"id": "q-feae1c8fcd", "kinds": ["VAGUE_TERM", "FILTERS_EXTRACTABLE"]}
+{"id": "q-c650b489f9", "kinds": ["ARITHMETIC"]}
+{"id": "q-38e356c717", "kinds": ["ROLE_NOT_NAME"]}
+{"id": "q-13c1200838", "kinds": ["ARITHMETIC", "FILTERS_EXTRACTABLE"]}
+{"id": "q-635cd9cfae", "kinds": ["OPINION"]}
+{"id": "q-d64c753700", "kinds": ["ALIAS"]}
+{"id": "q-cdb9f49374", "kinds": ["MISSING_REFERENT", "UNDERSPECIFIED"]}
+{"id": "q-3d1698a4dd", "kinds": ["SUPERLATIVE"]}
+{"id": "q-c30391c165", "kinds": ["EXPLORATORY"]}
+{"id": "q-9cf6f9c901", "kinds": ["YES_NO_CLAIM", "EXACT_MATCH"]}
+{"id": "q-299d9768f4", "kinds": ["YES_NO_CLAIM", "ANSWER_EMBEDDED", "TIME_UNSPECIFIED"]}
+{"id": "q-7b00e37c7d", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-4b8a277b79", "kinds": ["PROCEDURAL"]}
+{"id": "q-8de8f9baf7", "kinds": ["PATH"]}
+{"id": "q-c2c4a896be", "kinds": ["UNDERSPECIFIED"]}
+{"id": "q-0949b48a21", "kinds": ["SPATIAL"]}
+{"id": "q-f536f35317", "kinds": ["ROLE_NOT_NAME", "FILTERS_EXTRACTABLE"]}
+{"id": "q-596ecce645", "kinds": ["PATH"]}
+{"id": "q-0aa905ac23", "kinds": ["EXACT_MATCH", "EXHAUSTIVE"]}
+{"id": "q-1914d337d3", "kinds": ["SPATIAL"]}
+{"id": "q-17fa320105", "kinds": ["RELATIVE_TIME", "FILTERS_EXTRACTABLE"]}
+{"id": "q-b62b6e6024", "kinds": []}
+{"id": "q-58c1568ee9", "kinds": ["PREDICTION"]}
+{"id": "q-af2c0c6489", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-3f665c72e7", "kinds": []}
+{"id": "q-c222399caf", "kinds": ["META_QUESTION"]}
+{"id": "q-66a4a572e9", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-60d6a428b1", "kinds": ["ARITHMETIC", "KNOWN_VS_HAPPENED"]}
+{"id": "q-a5e148743f", "kinds": ["META_QUESTION"]}
+{"id": "q-562a78c37f", "kinds": ["ROLE_NOT_NAME"]}
+{"id": "q-121f238fe8", "kinds": ["PRESUPPOSITION"]}
+{"id": "q-8e1673045e", "kinds": []}
+{"id": "q-4abebfc356", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-9e75467f78", "kinds": ["COUNT"]}
+{"id": "q-728950255e", "kinds": ["OPINION"]}
+{"id": "q-9dddf8f490", "kinds": ["SPATIAL"]}
+{"id": "q-5125ff1f00", "kinds": ["MISSING_REFERENT"]}
+{"id": "q-e3b533d763", "kinds": ["PREDICTION"]}
+{"id": "q-6b9ec2b4a3", "kinds": ["LEADING", "EXHAUSTIVE", "PRESUPPOSITION"]}
+{"id": "q-0b9e5b051c", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-e0dbc17613", "kinds": ["META_QUESTION"]}
+{"id": "q-e9cb69d973", "kinds": []}
+{"id": "q-cd2546d584", "kinds": []}
+{"id": "q-bec4bb51cf", "kinds": ["OPINION"]}
+{"id": "q-d992ecc292", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED", "PROCEDURAL"]}
+{"id": "q-c94ec1a0bc", "kinds": ["COUNT"]}
+{"id": "q-5fa4cacf06", "kinds": ["COUNT"]}
+{"id": "q-63f3107673", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-deb1777733", "kinds": ["PROCEDURAL"]}
+{"id": "q-40832e520a", "kinds": ["META_QUESTION"]}
+{"id": "q-b8392ad046", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-4b29befee0", "kinds": ["YES_NO_CLAIM"]}
+{"id": "q-f634532f88", "kinds": ["CONJUNCTION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-2c975a1ad3", "kinds": ["EXACT_MATCH"]}
+{"id": "q-c4d0c5634f", "kinds": ["TWO_QUESTIONS", "DECOMPOSITION_REQUIRED", "TIME_UNSPECIFIED"]}
+{"id": "q-0e966404d4", "kinds": ["ANSWER_EMBEDDED", "YES_NO_CLAIM"]}
+{"id": "q-5408eb3f56", "kinds": ["SUPERLATIVE"]}
+{"id": "q-2c4feaa7a7", "kinds": ["EXHAUSTIVE", "FILTERS_EXTRACTABLE"]}
+{"id": "q-3d3af9a729", "kinds": ["SPATIAL"]}
+{"id": "q-6fd65bb521", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-94fe9709a0", "kinds": ["MISSING_REFERENT", "UNDERSPECIFIED"]}
+{"id": "q-cc78906bef", "kinds": ["CONJUNCTION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-b880911953", "kinds": ["COUNT"]}
+{"id": "q-a5592d1ec3", "kinds": ["SUPERLATIVE"]}
+{"id": "q-cac47bc331", "kinds": ["CONJUNCTION"]}
+{"id": "q-f431e92d0d", "kinds": ["PRESUPPOSITION"]}
+{"id": "q-94aec7fefd", "kinds": []}
+{"id": "q-014c0f6ef3", "kinds": ["VAGUE_TERM"]}
+{"id": "q-b60e389737", "kinds": ["ALIAS"]}
+{"id": "q-2a7911ee8c", "kinds": []}
+{"id": "q-7037add49e", "kinds": ["EXACT_MATCH"]}
+{"id": "q-0606a5bfaa", "kinds": ["ALIAS"]}
+{"id": "q-71574c4dfe", "kinds": ["EXHAUSTIVE", "FILTERS_EXTRACTABLE"]}
+{"id": "q-54601c0f53", "kinds": ["YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-c9c27149d8", "kinds": []}
+{"id": "q-2571d51e5e", "kinds": ["EXPLORATORY"]}
+{"id": "q-c2ef3a48b5", "kinds": ["MISSING_REFERENT"]}
+{"id": "q-d652124e44", "kinds": ["ARITHMETIC"]}
+{"id": "q-6fe882ae0c", "kinds": ["MISSING_REFERENT"]}
+{"id": "q-ffb5eccf1f", "kinds": ["EXACT_MATCH"]}
+{"id": "q-6b82c973ca", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-153b4f7ec6", "kinds": ["LEADING", "PRESUPPOSITION"]}
+{"id": "q-22a5a3d1a3", "kinds": ["INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-d84e81d791", "kinds": ["CAUSAL_WHY", "INSTRUCTIONS_MIXED_IN"]}
+{"id": "q-9030ec5e47", "kinds": ["YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-69697e4ba8", "kinds": ["PREDICTION"]}
+{"id": "q-368cebc444", "kinds": []}
+{"id": "q-e8d3f4aaf0", "kinds": ["COMPARISON", "OPINION"]}
+{"id": "q-d0edc2a1ca", "kinds": ["SPATIAL"]}
+{"id": "q-126b4e50eb", "kinds": []}
+{"id": "q-2820292330", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-26db3a8f2c", "kinds": ["EXHAUSTIVE"]}
+{"id": "q-15d77ed09e", "kinds": ["YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-938f44c9ee", "kinds": []}
+{"id": "q-5a97884b02", "kinds": []}
+{"id": "q-49a5bff390", "kinds": ["LEADING", "PRESUPPOSITION"]}
+{"id": "q-e2f637fd24", "kinds": ["COMPARISON"]}
+{"id": "q-18db80c578", "kinds": []}
+{"id": "q-f512d9ba46", "kinds": ["COUNT", "FILTERS_EXTRACTABLE"]}
+{"id": "q-6eb06e92b6", "kinds": ["EXHAUSTIVE"]}
+{"id": "q-716b0d2c97", "kinds": ["MISSING_REFERENT", "UNDERSPECIFIED"]}
+{"id": "q-b51501ac28", "kinds": ["FILTERS_EXTRACTABLE", "SPATIAL"]}
+{"id": "q-32d9c52eab", "kinds": ["COUNT", "FILTERS_EXTRACTABLE"]}
+{"id": "q-d161636d18", "kinds": ["VAGUE_TERM"]}
+{"id": "q-d033fb1c29", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-85d162d2d3", "kinds": ["YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-88258376ab", "kinds": ["ALIAS"]}
+{"id": "q-818a427575", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-1cc45e25e3", "kinds": ["ALIAS"]}
+{"id": "q-54672d1356", "kinds": ["NEGATION", "CONJUNCTION"]}
+{"id": "q-a2811af3ec", "kinds": ["COUNTERFACTUAL"]}
+{"id": "q-d5db8bdf46", "kinds": ["DECOMPOSITION_REQUIRED", "ALIAS"]}
+{"id": "q-8dac4b3c8b", "kinds": ["PROCEDURAL"]}
+{"id": "q-a10c326e82", "kinds": []}
+{"id": "q-9231d89a85", "kinds": []}
+{"id": "q-c30148a833", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-3cb3b30632", "kinds": ["MISSING_REFERENT"]}
+{"id": "q-5aa8fdb523", "kinds": ["ARITHMETIC"]}
+{"id": "q-f0b096da61", "kinds": ["CAUSAL_WHY"]}
+{"id": "q-c220f5ae6e", "kinds": ["YES_NO_CLAIM"]}
+{"id": "q-f5834509a3", "kinds": ["ALIAS"]}
+{"id": "q-c906a3891d", "kinds": ["META_QUESTION"]}
+{"id": "q-d2779b6b84", "kinds": ["NEGATION"]}
+{"id": "q-896a4b4001", "kinds": ["OPINION"]}
+{"id": "q-6133c9a5e9", "kinds": ["PRESUPPOSITION"]}
+{"id": "q-35d0353592", "kinds": ["CONJUNCTION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-2ad748755e", "kinds": ["ALIAS"]}
+{"id": "q-d3787a3c1f", "kinds": ["FILTERS_EXTRACTABLE"]}
+{"id": "q-2c06f05dca", "kinds": ["PATH"]}
+{"id": "q-c9b286ff5b", "kinds": ["ALIAS"]}
+{"id": "q-8c6265edd9", "kinds": ["OUT_OF_DOMAIN"]}
+{"id": "q-1d90e63b9c", "kinds": ["COUNT", "TIME_UNSPECIFIED"]}
+{"id": "q-e812deafc0", "kinds": ["ARITHMETIC"]}
+{"id": "q-34e959505a", "kinds": []}
+{"id": "q-e54c7d4bd6", "kinds": ["EXACT_MATCH"]}
+{"id": "q-536a2493a9", "kinds": ["ROLE_NOT_NAME"]}
+{"id": "q-315e991daf", "kinds": ["LEADING", "YES_NO_CLAIM", "ANSWER_EMBEDDED"]}
+{"id": "q-ac585aa61b", "kinds": ["NEGATION", "FILTERS_EXTRACTABLE"]}
+{"id": "q-35b0da0c35", "kinds": []}
+{"id": "q-59eb89274c", "kinds": ["CAUSAL_WHY", "ALIAS"]}
+{"id": "q-b69fc6514b", "kinds": ["NEGATION"]}
+{"id": "q-2e9b012340", "kinds": ["TIME_UNSPECIFIED"]}
