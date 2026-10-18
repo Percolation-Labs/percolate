@@ -32,7 +32,7 @@ from percolate_core.agentic.contracts import CanonicalTool, ToolInvocation, Tool
 from percolate_core.agentic.contracts.tools import InvocationTarget
 from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
-from percolate_core.query.mcp import Exceptions, build_server
+from percolate_core.query.mcp import Exceptions, PercolateLog, build_server
 from percolate_core.semantic_exceptions.log import (
     JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
@@ -250,6 +250,24 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_error)
         [e] = log.events
         self.assertEqual(e.error, "403")
+
+    async def test_the_percolate_log_writes_a_row_as_the_caller(self):
+        pg = FakePostgrest(answers={("query", SEARCH): (200, SEARCH_DOC)})
+        self.addCleanup(pg.close)
+        mcp = build_server("127.0.0.1", 0, pg.url,
+                           exceptions=Exceptions("shadow", jev_factory=lambda: StubJev({}),
+                                                 log=PercolateLog()))
+        threading.Thread(target=mcp.serve_forever, daemon=True).start()
+        self.addCleanup(mcp.server_close)
+        self.addCleanup(mcp.shutdown)
+        server = ToolServer(name="q", kind="mcp", url=f"http://127.0.0.1:{mcp.server_address[1]}")
+        with caller_credentials("Bearer the-caller", (server.url,)):
+            await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+        [w] = [r for r in pg.seen if r["path"] == "/rpc/record_query"]
+        self.assertEqual(w["headers"]["Content-Profile"], "content")
+        self.assertEqual(w["headers"]["Authorization"], "Bearer the-caller")
+        self.assertEqual((w["body"]["p_event"]["query"], w["body"]["p_event"]["session_id"]),
+                         (SEARCH, "s"))
 
     async def test_a_failed_log_does_not_fail_the_query(self):
         result = await self.call(self.start("on", StubJev({}), BrokenLog()), {"query": SEARCH})

@@ -99,7 +99,8 @@ class Upstream:
         self.base = base.rstrip("/")
         self.timeout = timeout
 
-    def rpc(self, fn: str, payload: dict[str, Any], authorization: str | None = None):
+    def rpc(self, fn: str, payload: dict[str, Any], authorization: str | None = None,
+            profile: str = "aiq"):
         """``(document, None)`` on success, ``(None, error)`` otherwise."""
         req = urllib.request.Request(
             f"{self.base}/rpc/{fn}",
@@ -107,9 +108,10 @@ class Upstream:
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                # aiq is not PostgREST's default schema, so every call names it.
-                "Accept-Profile": "aiq",
-                "Content-Profile": "aiq",
+                # aiq is not PostgREST's default schema, so every call names it
+                # (content for the query log's one write).
+                "Accept-Profile": profile,
+                "Content-Profile": profile,
                 **({"Authorization": authorization} if authorization else {}),
             },
         )
@@ -136,6 +138,23 @@ class Upstream:
 EXCEPTIONS_MODES = ("off", "shadow", "on", "strict")
 
 
+class PercolateLog:
+    """The query log as rows: each event goes to content.record_query with the
+    caller's own Authorization, so it is a private stored row they own on the
+    query_log channel (extension 0.2.23). Bound to the handler's upstream when
+    the server is built, since that is the PostgREST every query goes to."""
+
+    upstream: "Upstream | None" = None
+
+    def append(self, event: Any, authorization: str | None = None) -> None:
+        if self.upstream is None:
+            raise RuntimeError("the query log has no PostgREST to write to")
+        _, err = self.upstream.rpc("record_query", {"p_event": event.to_dict()}, authorization,
+                                   profile="content")
+        if err:
+            raise RuntimeError(f"content.record_query: {err}")
+
+
 class Exceptions:
     """The semantic-exceptions hook: off unless the operator turns it on."""
 
@@ -153,9 +172,15 @@ class Exceptions:
         self._jev_factory = jev_factory
         # THE QUERY LOG (semantic_exceptions/log.py): one QueryEvent per call,
         # in every mode including off, when P8_QUERY_LOG names a file.
+        # `percolate` writes each event through content.record_query as the
+        # caller, so it is a private row they own; anything else names a file.
         if log is None and os.environ.get("P8_QUERY_LOG"):
-            from ..semantic_exceptions.log import JsonlLog
-            log = JsonlLog(os.environ["P8_QUERY_LOG"])
+            target = os.environ["P8_QUERY_LOG"]
+            if target == "percolate":
+                log = PercolateLog()
+            else:
+                from ..semantic_exceptions.log import JsonlLog
+                log = JsonlLog(target)
         self.log = log
         # What each session has already been shown (Report.novel). In use, a
         # warning repeated on every query was skipped with the rest of the block
@@ -183,13 +208,17 @@ class Exceptions:
             self._seen.pop(next(iter(self._seen)))
         return report.novel(seen)
 
-    def record(self, query: str, doc: Any, **kw: Any) -> None:
+    def record(self, query: str, doc: Any, authorization: str | None = None, **kw: Any) -> None:
         """Append one event. A log that fails does not fail the query."""
         if self.log is None:
             return
         from ..semantic_exceptions.log import event_of
         try:
-            self.log.append(event_of(query, doc, exceptions_mode=self.mode, **kw))
+            event = event_of(query, doc, exceptions_mode=self.mode, **kw)
+            if isinstance(self.log, PercolateLog):
+                self.log.append(event, authorization=authorization)
+            else:
+                self.log.append(event)
         except Exception as e:
             print(f"[query-mcp] query log: {type(e).__name__}: {e}", flush=True)
 
@@ -376,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if err:
                 if sx is not None:
-                    sx.record(q, doc, question=question, headers=ctx, latency_ms=ms(),
+                    sx.record(q, doc, authorization=auth, question=question, headers=ctx, latency_ms=ms(),
                               error=str(err.get("status") or err["kind"]))
                 return self._result(rid, {
                     "isError": True,
@@ -390,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
                 refused = bool(sx.mode == "strict" and full is not None and full.errors)
                 report = sx.novel(full, next(
                     (v for k, v in ctx.items() if k.lower() == "x-p8-session-id"), None))
-                sx.record(q, doc, question=question, headers=ctx, report=full,
+                sx.record(q, doc, authorization=auth, question=question, headers=ctx, report=full,
                           judge_error=checked["error"], shown=sx.shows, refused=refused,
                           shown_codes=sorted(report.codes) if (sx.shows and report) else [],
                           latency_ms=ms())
@@ -417,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
                     content.append({"type": "text", "text": prompt})
                 return self._result(rid, {"content": content, "structuredContent": doc})
             if sx is not None:
-                sx.record(q, doc, question=question, headers=ctx, latency_ms=ms())
+                sx.record(q, doc, authorization=auth, question=question, headers=ctx, latency_ms=ms())
             return self._result(rid, {
                 "content": [{"type": "text", "text": json.dumps(doc)}],
                 # The half a citation-extracting runtime reads (brief §5.3): the
@@ -431,6 +460,8 @@ class Handler(BaseHTTPRequestHandler):
 def build_server(host: str, port: int, postgrest: str,
                  exceptions: Exceptions | None = None) -> ThreadingHTTPServer:
     """A server bound and ready to ``serve_forever``; ``port=0`` picks a free one."""
-    handler = type("QueryHandler", (Handler,), {"upstream": Upstream(postgrest),
-                                                "exceptions": exceptions or Exceptions()})
+    up, sx = Upstream(postgrest), exceptions or Exceptions()
+    if isinstance(sx.log, PercolateLog) and sx.log.upstream is None:
+        sx.log.upstream = up
+    handler = type("QueryHandler", (Handler,), {"upstream": up, "exceptions": sx})
     return ThreadingHTTPServer((host, port), handler)
