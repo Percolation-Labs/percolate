@@ -63,6 +63,12 @@ class Catalogue(unittest.TestCase):
         from percolate_core.semantic_exceptions.catalogue import MEASURED
         self.assertEqual({k.code for k in KINDS if k.judged}, set(MEASURED))
 
+    def test_a_refusal_has_the_precision_to_deserve_one(self):
+        from percolate_core.semantic_exceptions.catalogue import MEASURED, REFUSAL_PRECISION
+        for k in KINDS:
+            if k.stage == "question" and k.severity == "error":
+                self.assertGreaterEqual(MEASURED[k.code][2], REFUSAL_PRECISION, k.code)
+
     def test_every_kind_tells_the_model_what_to_do(self):
         for k in KINDS:
             self.assertGreater(len(k.prompt.split()), 4, k.code)
@@ -299,6 +305,17 @@ class ReportAndGuard(unittest.TestCase):
         rep = SemanticExceptions().after([{"id": i, "retracted": True} for i in range(3)])
         self.assertEqual(len(rep.raised), 3)
         self.assertIn("RETRACTED [0, 1, 2]", rep.to_prompt())
+
+    def test_what_was_shown_in_this_task_is_not_shown_again(self):
+        sx = SemanticExceptions()
+        seen = set()
+        first = sx.after([{"id": "a", "continues": True}], ).novel(seen)
+        again = sx.after([{"id": "a", "continues": True}, {"id": "b", "continues": True}]).novel(seen)
+        self.assertEqual([r.evidence["id"] for r in first.raised], ["a"])
+        self.assertEqual([r.evidence["id"] for r in again.raised], ["b"])
+        loop = [{"found": [1], "opened": ["q"]}, {"found": [1], "opened": ["q"]}]
+        self.assertEqual(sx.walk(loop).novel(seen).codes, {"LOOP"})
+        self.assertEqual(sx.walk(loop).novel(seen).codes, {"LOOP"})
 
     def test_the_repository_names_its_own_next_step(self):
         jev = StubJev({"NEGATION": 0.99})

@@ -2,8 +2,8 @@
 
     nav.py task "what you are trying to find out"     start a task (resets the walk)
     nav.py search "question" [filters] [--limit 8] [--force]
-    nav.py list [filters] [--with TEXT] [--without TEXT] [--limit 30]
-    nav.py grep "exact phrase" [filters] [--limit 30]
+    nav.py list [filters] [--with TEXT] [--without TEXT] [--by-entry] [--limit 30]
+    nav.py grep "exact phrase|another phrase" [filters] [--by-entry] [--limit 30]
     nav.py read ID
     nav.py around ID
 
@@ -15,6 +15,9 @@ The store holds Bram Stoker's Dracula as 644 passages of about 200 words,
 each from a dated journal entry, letter, telegram, cutting or log, with its
 narrator, document and date. `search` ranks passages by meaning and words
 together. `list` and `grep` are exact: every passage that matches, and a count.
+Matching ignores case, line breaks and curly quotes; `|` in a grep phrase means
+or. `--by-entry` applies --with/--without/grep to whole entries (a letter or a
+day's journal) rather than to single passages, and lists the entries.
 
 Exceptions: every `search` is inspected by percolate_core.semantic_exceptions
 at the measured thresholds -- the question before it runs, the result, the top
@@ -52,14 +55,15 @@ LIMITS = dict(low_score=None, flat_spread=None, min_gap=None)
 ACTIONS = {
     "DECOMPOSITION_REQUIRED": "run one `search` per part.",
     "TWO_QUESTIONS": "run one `search` per question.",
-    "NEGATION": "`list --without TERM` (with --source/--after/--before) gives the exact "
-                "complement; exclude every way the records name the thing, not just one word.",
+    "NEGATION": "`list --without \"TERM|OTHER NAME\" --by-entry` (with --source/--after/"
+                "--before) gives the exact complement by whole entry; name every way the "
+                "records refer to the thing, not just one word.",
     "COUNT": "`list` and `grep` print an exact count of passages and entries.",
     "SUPERLATIVE": "`list` and `grep` print matches in date order; for an idea with many "
                    "phrasings, `search` again with `--before` the earliest date found until "
                    "nothing earlier comes back (or `--after` the latest).",
-    "EXHAUSTIVE": "`grep` each name you find and `list` with filters; read `around` any "
-                  "passage that holds part of the list.",
+    "EXHAUSTIVE": "`grep \"a|b|c\"` every name you find and `list` with filters; read "
+                  "`around` any passage that holds part of the list.",
     "COMPARISON": "`search` each side with its own --source.",
     "CONJUNCTION": "`search` or `grep` each condition, then keep what both return.",
     "CAUSAL_WHY": "find the event, then `search --before` its date for what led to it.",
@@ -190,6 +194,9 @@ async def do_search(a) -> None:
             print("REFUSED: the question was not searched.")
             print(report.to_prompt())
             print("(Search anyway with --force.)")
+            SESSIONS.mkdir(exist_ok=True)
+            with open(SESSIONS / f"{SESSION.stem}.log.jsonl", "a") as f:
+                f.write(json.dumps({"question": a.question, "refused": [r.code for r in report.errors]}) + "\n")
             return
         # --force acknowledges the errors: say so once rather than repeat them.
         forced = [r.code for r in report.errors]
@@ -201,16 +208,30 @@ async def do_search(a) -> None:
         # The module's fields only. A diary is a series of entries, not versions
         # of one document, so `document` is not `version_of`; filters run before
         # ranking over every passage, so nothing is ever starved by a filter.
-        hit_t = [{"id": h["id"], "score": h["score"], "source": h["source"],
-                  "content": h["content"], "time": d(h["time"]) if h["time"] else None,
-                  "continues": h["parts"] > 1 and n < 3}
+        # A filter the user chose is not something the store detected: no
+        # SINGLE_SOURCE under --source, and TIME_SKEW is measured against the
+        # window asked for, not the whole store. Only the top hit can CONTINUE.
+        hit_t = [{"id": h["id"], "score": h["score"], "content": h["content"],
+                  "time": d(h["time"]) if h["time"] else None,
+                  "continues": h["parts"] > 1 and n == 0,
+                  **({} if a.source else {"source": h["source"]})}
                  for n, h in enumerate(hits)]
-        report += sx.after(hit_t, limit=a.limit, time_range=(d(times[0]), d(times[-1])))
+        window = (d(a.after or times[0]), d(a.before or times[-1]))
+        report += sx.after(hit_t, limit=a.limit, time_range=window)
         if hits:
             report += await sx.values(a.question, hits)
-        s["rounds"].append({"found": [h["id"] for h in hits], "opened": [a.question]})
-        save(s)
+        # Each search asks its own question and settles it; the walk is the
+        # task's searches, so a repeat that finds nothing new is a LOOP.
+        s["rounds"].append({"found": [h["id"] for h in hits], "opened": [a.question],
+                            "closed": [a.question]})
         report += sx.walk(s["rounds"])
+        seen = set(s.get("seen", []))
+        report = report.novel(seen)
+        s["seen"] = sorted(seen)
+        save(s)
+        with open(SESSIONS / f"{SESSION.stem}.log.jsonl", "a") as f:
+            f.write(json.dumps({"question": a.question, "forced": forced,
+                                "raised": [[r.code, r.p] for r in report.raised]}) + "\n")
     print(f"{len(hits)} passages:")
     print("\n".join(show(h) for h in hits))
     if forced:
@@ -221,20 +242,45 @@ async def do_search(a) -> None:
         print(text)
 
 
+def norm(s: str) -> str:
+    s = s.replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
+    return " ".join(s.lower().split())
+
+
+def has(text: str, needle: str) -> bool:
+    return any(norm(n) in text for n in needle.split("|") if n.strip())
+
+
 def do_list(a, phrase: str | None = None) -> None:
     ids = filtered(a)
+    text = {i: norm(P[i]["content"]) for i in ids}
+    if a.by_entry:
+        # whole entries: an entry has a term if any of its passages does
+        whole: dict[str, str] = {}
+        for i in ids:
+            whole[P[i]["entry"]] = whole.get(P[i]["entry"], "") + " " + text[i]
+        text = {i: whole[P[i]["entry"]] for i in ids}
     if a.with_ or phrase:
-        needle = (phrase or a.with_).lower()
-        ids = [i for i in ids if needle in P[i]["content"].lower()]
+        ids = [i for i in ids if has(text[i], phrase or a.with_)]
     if a.without:
-        ids = [i for i in ids if a.without.lower() not in P[i]["content"].lower()]
+        ids = [i for i in ids if not has(text[i], a.without)]
     entries = {P[i]["entry"] for i in ids}
     print(f"{len(ids)} passages match ({len(entries)} entries).")
+    if a.by_entry:
+        firsts = {}
+        for i in ids:
+            firsts.setdefault(P[i]["entry"], i)
+        for e, i in list(firsts.items())[: a.limit]:
+            p = P[i]
+            print(f"[{e}] {p['time']} | {p['source']} | {p['document']} | {p['parts']} passage(s)")
+        if len(firsts) > a.limit:
+            print(f"... {len(firsts) - a.limit} more entries not shown (raise --limit).")
+        return
     for i in ids[: a.limit]:
         p = P[i]
         if phrase:
             t = " ".join(p["content"].split())
-            k = t.lower().find(phrase.lower())
+            k = max((norm(t).find(norm(n)) for n in phrase.split("|")), default=0)
             print(f"[{p['id']}] {p['time']} | {p['source']} | ...{t[max(0, k - 80): k + 120]}...")
         else:
             first = " ".join(p["content"].split()[:14])
@@ -244,7 +290,8 @@ def do_list(a, phrase: str | None = None) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    doc = __doc__ if EXCEPTIONS else __doc__.split("Exceptions:")[0]
+    ap = argparse.ArgumentParser(description=doc, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("task")
     t.add_argument("text")
@@ -263,6 +310,8 @@ def main() -> None:
         if name == "list":
             p.add_argument("--with", dest="with_")
             p.add_argument("--without")
+        if name in ("list", "grep"):
+            p.add_argument("--by-entry", action="store_true")
     for name in ("read", "around"):
         sub.add_parser(name).add_argument("id")
     a = ap.parse_args()

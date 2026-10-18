@@ -76,7 +76,7 @@ KINDS: tuple[Kind, ...] = (
        "own search to answer?",
        "This question blends separate parts. Split it into its sub-questions, search "
        "each one separately, then combine the answers."),
-    _q("TWO_QUESTIONS", "error",
+    _q("TWO_QUESTIONS", "warning",
        "Does `question` contain two unrelated questions with different intents?",
        "This is two unrelated questions in one. Answer each on its own."),
     _q("NEGATION", "error",
@@ -84,7 +84,7 @@ KINDS: tuple[Kind, ...] = (
        "Similarity search cannot negate: it finds what is near a term, never what "
        "avoids it. Retrieve what does match and subtract it from the set, or filter "
        "on an exact field."),
-    _q("SUPERLATIVE", "error",
+    _q("SUPERLATIVE", "warning",
        "Does `question` ask for the earliest, latest, first, last, most or least of "
        "something?",
        "An extreme needs the whole matching set, and top-k by similarity returns the "
@@ -200,7 +200,7 @@ KINDS: tuple[Kind, ...] = (
        "matched exactly?",
        "Match the quoted phrase or identifier exactly (full-text phrase or key lookup). "
        "Similarity returns near misses."),
-    _q("ARITHMETIC", "error",
+    _q("ARITHMETIC", "warning",
        "Does `question` require calculating a value from numbers, dates or amounts?",
        "The answer is computed, not found. Retrieve the values, then calculate in "
        "code or SQL."),
@@ -348,57 +348,65 @@ KINDS: tuple[Kind, ...] = (
 )
 
 
-# MEASURED, not chosen: (threshold, on by default) for each judged kind, from
+# MEASURED, not chosen: (threshold, on by default, held-out precision) for each
+# judged kind, from
 # evals/semantic_exceptions (RESULTS.md; jev-1.13.0, 18 Oct 2026). The threshold
 # is the train-half F1 optimum; a kind is on when its held-out F1 >= 0.6 with at
 # least 5 positives, the bar committed before the run. Regenerate this table
 # from out/scores.json whenever an instruction is reworded.
 MEASURED = {
-    "DECOMPOSITION_REQUIRED": (0.95, True),  # F1 0.76, 12 test positives, on
-    "TWO_QUESTIONS": (0.65, False),  # F1 0.80, 4 test positives, unmeasured
-    "NEGATION": (0.95, True),  # F1 0.95, 11 test positives, on
-    "SUPERLATIVE": (0.90, True),  # F1 0.63, 6 test positives, on
-    "COUNT": (0.95, True),  # F1 0.80, 12 test positives, on
-    "COMPARISON": (0.95, True),  # F1 0.96, 11 test positives, on
-    "CONJUNCTION": (0.95, True),  # F1 0.63, 6 test positives, on
-    "COUNTERFACTUAL": (0.90, False),  # F1 1.00, 4 test positives, unmeasured
-    "CAUSAL_WHY": (0.95, True),  # F1 0.89, 8 test positives, on
-    "EXHAUSTIVE": (0.95, True),  # F1 0.92, 7 test positives, on
-    "PROCEDURAL": (0.90, True),  # F1 0.60, 6 test positives, on
-    "YES_NO_CLAIM": (0.95, True),  # F1 0.88, 16 test positives, on
-    "EXPLORATORY": (0.80, True),  # F1 0.86, 7 test positives, on
-    "MISSING_REFERENT": (0.95, True),  # F1 0.75, 10 test positives, on
-    "ALIAS": (0.90, False),  # F1 0.53, 7 test positives, off
-    "ROLE_NOT_NAME": (0.85, True),  # F1 0.61, 5 test positives, on
-    "TIME_UNSPECIFIED": (0.95, False),  # F1 0.00, 6 test positives, off
-    "RELATIVE_TIME": (0.80, True),  # F1 1.00, 8 test positives, on
-    "KNOWN_VS_HAPPENED": (0.90, True),  # F1 0.88, 8 test positives, on
-    "PREDICTION": (0.55, False),  # F1 0.89, 4 test positives, unmeasured
-    "PRESUPPOSITION": (0.95, False),  # F1 0.00, 5 test positives, off
-    "LEADING": (0.80, False),  # F1 0.60, 3 test positives, unmeasured
-    "OPINION": (0.90, True),  # F1 1.00, 8 test positives, on
-    "ANSWER_EMBEDDED": (0.90, True),  # F1 0.71, 10 test positives, on
-    "META_QUESTION": (0.90, True),  # F1 0.67, 7 test positives, on
-    "OUT_OF_DOMAIN": (0.90, True),  # F1 0.86, 7 test positives, on
-    "EXACT_MATCH": (0.85, True),  # F1 0.96, 14 test positives, on
-    "ARITHMETIC": (0.85, True),  # F1 0.63, 9 test positives, on
-    "SPATIAL": (0.85, False),  # F1 0.50, 6 test positives, off
-    "PATH": (0.95, False),  # F1 0.80, 4 test positives, unmeasured
-    "FILTERS_EXTRACTABLE": (0.90, False),  # F1 0.57, 30 test positives, off
-    "VAGUE_TERM": (0.80, False),  # F1 0.50, 6 test positives, off
-    "INSTRUCTIONS_MIXED_IN": (0.95, True),  # F1 0.89, 5 test positives, on
-    "UNDERSPECIFIED": (0.90, False),  # F1 0.86, 3 test positives, unmeasured
-    "POINTER": (0.95, True),  # F1 1.00, 7 test positives, on
-    "HEARSAY": (0.90, True),  # F1 0.92, 6 test positives, on
-    "SPECULATIVE": (0.85, True),  # F1 0.83, 5 test positives, on
-    "INJECTION": (0.95, True),  # F1 0.86, 6 test positives, on
-    "OFF_QUESTION": (0.55, True),  # F1 0.88, 7 test positives, on
-    "PARTIAL_ANSWER": (0.90, False),  # F1 0.55, 6 test positives, off
-    "TRUNCATED": (0.95, True),  # F1 0.93, 8 test positives, on
-    "CONFLICT": (0.90, True),  # F1 0.78, 11 test positives, on
+    "DECOMPOSITION_REQUIRED": (0.95, True, 0.89),  # F1 0.76, 12 test positives, on
+    "TWO_QUESTIONS": (0.65, False, 0.67),  # F1 0.80, 4 test positives, unmeasured
+    "NEGATION": (0.95, True, 1.00),  # F1 0.95, 11 test positives, on
+    "SUPERLATIVE": (0.90, True, 0.46),  # F1 0.63, 6 test positives, on
+    "COUNT": (0.95, True, 0.77),  # F1 0.80, 12 test positives, on
+    "COMPARISON": (0.95, True, 0.92),  # F1 0.96, 11 test positives, on
+    "CONJUNCTION": (0.95, True, 0.46),  # F1 0.63, 6 test positives, on
+    "COUNTERFACTUAL": (0.90, False, 1.00),  # F1 1.00, 4 test positives, unmeasured
+    "CAUSAL_WHY": (0.95, True, 0.80),  # F1 0.89, 8 test positives, on
+    "EXHAUSTIVE": (0.95, True, 1.00),  # F1 0.92, 7 test positives, on
+    "PROCEDURAL": (0.90, True, 0.75),  # F1 0.60, 6 test positives, on
+    "YES_NO_CLAIM": (0.95, True, 0.83),  # F1 0.88, 16 test positives, on
+    "EXPLORATORY": (0.80, True, 0.86),  # F1 0.86, 7 test positives, on
+    "MISSING_REFERENT": (0.95, True, 1.00),  # F1 0.75, 10 test positives, on
+    "ALIAS": (0.90, False, 0.42),  # F1 0.53, 7 test positives, off
+    "ROLE_NOT_NAME": (0.85, True, 0.50),  # F1 0.61, 5 test positives, on
+    "TIME_UNSPECIFIED": (0.95, False, 0.00),  # F1 0.00, 6 test positives, off
+    "RELATIVE_TIME": (0.80, True, 1.00),  # F1 1.00, 8 test positives, on
+    "KNOWN_VS_HAPPENED": (0.90, True, 0.88),  # F1 0.88, 8 test positives, on
+    "PREDICTION": (0.55, False, 0.80),  # F1 0.89, 4 test positives, unmeasured
+    "PRESUPPOSITION": (0.95, False, 0.00),  # F1 0.00, 5 test positives, off
+    "LEADING": (0.80, False, 0.43),  # F1 0.60, 3 test positives, unmeasured
+    "OPINION": (0.90, True, 1.00),  # F1 1.00, 8 test positives, on
+    "ANSWER_EMBEDDED": (0.90, True, 0.86),  # F1 0.71, 10 test positives, on
+    "META_QUESTION": (0.90, True, 0.80),  # F1 0.67, 7 test positives, on
+    "OUT_OF_DOMAIN": (0.90, True, 0.86),  # F1 0.86, 7 test positives, on
+    "EXACT_MATCH": (0.85, True, 1.00),  # F1 0.96, 14 test positives, on
+    "ARITHMETIC": (0.85, True, 0.60),  # F1 0.63, 9 test positives, on
+    "SPATIAL": (0.85, False, 0.36),  # F1 0.50, 6 test positives, off
+    "PATH": (0.95, False, 0.67),  # F1 0.80, 4 test positives, unmeasured
+    "FILTERS_EXTRACTABLE": (0.90, False, 0.41),  # F1 0.57, 30 test positives, off
+    "VAGUE_TERM": (0.80, False, 1.00),  # F1 0.50, 6 test positives, off
+    "INSTRUCTIONS_MIXED_IN": (0.95, True, 1.00),  # F1 0.89, 5 test positives, on
+    "UNDERSPECIFIED": (0.90, False, 0.75),  # F1 0.86, 3 test positives, unmeasured
+    "POINTER": (0.95, True, 1.00),  # F1 1.00, 7 test positives, on
+    "HEARSAY": (0.90, True, 0.86),  # F1 0.92, 6 test positives, on
+    "SPECULATIVE": (0.85, True, 0.71),  # F1 0.83, 5 test positives, on
+    "INJECTION": (0.95, True, 0.75),  # F1 0.86, 6 test positives, on
+    "OFF_QUESTION": (0.55, True, 0.78),  # F1 0.88, 7 test positives, on
+    "PARTIAL_ANSWER": (0.90, False, 0.60),  # F1 0.55, 6 test positives, off
+    "TRUNCATED": (0.95, True, 1.00),  # F1 0.93, 8 test positives, on
+    "CONFLICT": (0.90, True, 1.00),  # F1 0.78, 11 test positives, on
 }
 KINDS = tuple(replace(k, threshold=MEASURED[k.code][0], on=MEASURED[k.code][1])
               if k.code in MEASURED else k for k in KINDS)
+
+# A QUESTION-STAGE ERROR IS A REFUSAL, so it needs the precision to deserve one.
+# Users in the navigation test were refused "the last box shipped on the
+# Czarina Catherine" (SUPERLATIVE, held-out precision 0.46) and a plain lookup
+# (ARITHMETIC, 0.60); each wrong refusal cost a detour and taught them to
+# distrust the rest. Below this, a kind warns and the search runs.
+REFUSAL_PRECISION = 0.85
 
 _BY_CODE = {k.code: k for k in KINDS}
 assert len(_BY_CODE) == len(KINDS), "kind codes must be unique"

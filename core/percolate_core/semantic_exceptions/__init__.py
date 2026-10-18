@@ -79,6 +79,24 @@ class Report:
     def codes(self) -> set[str]:
         return {r.code for r in self.raised}
 
+    def novel(self, seen: set) -> "Report":
+        """This report without what `seen` says was already shown in this task,
+        and `seen` updated. A record keeps its exception once; a question keeps
+        its own. The walk's kinds always show: a second LOOP is news.
+
+        In use, CONTINUES and SINGLE_SOURCE repeated on every search until users
+        learned to skip the whole block, including the line that mattered."""
+        keep = []
+        for r in self.raised:
+            if r.kind.stage == "walk":
+                keep.append(r)
+                continue
+            key = f"{r.code}|{_ids(r.evidence) or r.evidence.get('question') or ''}"
+            if key not in seen:
+                seen.add(key)
+                keep.append(r)
+        return Report(keep, self.model, self.jev_requests, self.input_tokens, self.actions)
+
     @property
     def errors(self) -> list[Raised]:
         return [r for r in self.ordered() if r.kind.severity == "error"]

@@ -65,6 +65,10 @@ def main() -> None:
         dated = "own" if d else "inherited"
         d = d or last
         last = d
+        # A heading alone ("JONATHAN HARKER'S JOURNAL") is not a passage: in
+        # use it outranked the entries it heads, with nothing to read.
+        if len(e["text"].split()) < 15:
+            continue
         parts = split(e["text"])
         for i, t in enumerate(parts):
             passages.append({
