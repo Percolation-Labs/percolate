@@ -519,6 +519,36 @@ class Exceptions:
             return {"report": None, "error": f"{type(e).__name__}: {e}"[:300]}
 
 
+def describe_sources(up: "Upstream", authorization: str | None) -> str:
+    """Each searchable source and the table behind it that this caller may
+    query with SQL, with its columns: said once, in the tool's description.
+
+    Probe P1 (evals/semantic_exceptions/probes/RESULTS.md): the fact that moved
+    answers was not a count but that the source `dracula` is the table
+    sx.passages, whose columns say who wrote each passage and when. Agents not
+    told said "the store does not expose which document a passage belongs
+    to". A fact about the schema is the same for every query, so it belongs
+    here, at no per-query cost, rather than in an exception."""
+    names: dict[str, None] = {}
+    for reg in ("lexical_sources", "semantic_sources"):
+        rows, err = up.read(f"{reg}?select=name&order=name", authorization)
+        for r in rows or ():
+            if isinstance(r, dict) and r.get("name"):
+                names[r["name"]] = None
+    lines = []
+    for name in names:
+        rel = Exceptions._sql_relation(up, authorization, name)
+        if rel:
+            cols = ", ".join(rel.get("columns") or ())
+            lines.append(f"- {name}: the table {rel['schema']}.{rel['name']}"
+                         + (f" ({cols})" if cols else ""))
+    if not lines:
+        return ""
+    return ("SOURCES YOU CAN ALSO READ WITH SQL. Each search source below is a table you may "
+            "query directly in SQL mode, for exact filters, counts, sorts, exclusions and the "
+            "columns a search does not return:\n" + "\n".join(lines))
+
+
 def describe_query_tool(up: Upstream, authorization: str | None,
                         exceptions: "Exceptions | None" = None) -> dict[str, Any]:
     """The tool definition, its description built from ``SCHEMA "p8ql"``."""
@@ -539,6 +569,10 @@ def describe_query_tool(up: Upstream, authorization: str | None,
             "description": "One p8ql statement. See the modes above.",
         }
     }
+    if os.environ.get("P8_QUERY_DESCRIBE_SOURCES", "off").lower() in ("on", "1", "true"):
+        tables = describe_sources(up, authorization)
+        if tables:
+            preamble = preamble.rstrip() + "\n\n" + tables + "\n"
     if exceptions is not None and exceptions.shows:
         preamble = (preamble.rstrip() + "\n\nThe store also checks what you ask and what came "
                     "back, and answers with SEMANTIC EXCEPTIONS when it sees something you should "
