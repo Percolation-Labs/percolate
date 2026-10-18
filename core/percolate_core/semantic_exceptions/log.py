@@ -169,3 +169,27 @@ def followups(events: Iterable[QueryEvent]) -> list[tuple[QueryEvent, QueryEvent
 def digest(text: str) -> str:
     """A stable short id for a query string, for grouping repeats."""
     return hashlib.sha1(text.strip().lower().encode()).hexdigest()[:12]
+
+
+def read_percolate(base: str, authorization: str, page: int = 1000) -> list[QueryEvent]:
+    """The caller's own query log from a Percolate PostgREST: every metadata
+    object on the query_log channel that row-level security lets them read."""
+    import urllib.request
+
+    def get(path: str):
+        req = urllib.request.Request(f"{base.rstrip('/')}/{path}", headers={
+            "Accept-Profile": "content", "Authorization": authorization})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+
+    [chan] = get("channels?name=eq.query_log&select=id") or [None]
+    if chan is None:
+        return []
+    out, offset = [], 0
+    while True:
+        rows = get(f"resources?channel_id=eq.{chan['id']}&select=metadata"
+                   f"&order=id&limit={page}&offset={offset}")
+        out += [QueryEvent.from_dict(r["metadata"]) for r in rows if r.get("metadata")]
+        if len(rows) < page:
+            return out
+        offset += page

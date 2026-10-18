@@ -1,6 +1,7 @@
 """Read the query log and ask whether the exceptions met real searches where they struggled.
 
     python traffic.py <query-log.jsonl> [--out report.json] [--store "<one sentence>"]
+    python traffic.py --postgrest http://... --token <jwt> [...]   # the caller's rows in Percolate
 
 Every logged query is paired with the next query in its run (log.followups).
 For each pair Jev answers two questions, and nothing else is judged:
@@ -45,7 +46,7 @@ sys.path.insert(0, str(HERE.parents[2]))
 
 from percolate_core.decide import Jev, Noul  # noqa: E402
 from percolate_core.semantic_exceptions import KINDS  # noqa: E402
-from percolate_core.semantic_exceptions.log import JsonlLog, followups  # noqa: E402
+from percolate_core.semantic_exceptions.log import JsonlLog, followups, read_percolate  # noqa: E402
 
 PROMPT = {k.code: k.prompt for k in KINDS}
 RETRY = Noul("Is `next` a second attempt to find the same information as `first` (reworded, "
@@ -137,11 +138,14 @@ def summarise(rows: list[dict], bar: float = 0.5) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("log")
+    ap.add_argument("log", nargs="?")
+    ap.add_argument("--postgrest")
+    ap.add_argument("--token")
     ap.add_argument("--out")
     ap.add_argument("--store")
     a = ap.parse_args()
-    events = list(JsonlLog(a.log))
+    events = (read_percolate(a.postgrest, f"Bearer {a.token}") if a.postgrest
+              else list(JsonlLog(a.log)))
     pairs = followups(events)
     rows = asyncio.run(judge(pairs, a.store, gains(events)))
     report = summarise(rows)
