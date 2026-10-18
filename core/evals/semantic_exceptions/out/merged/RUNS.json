@@ -1,0 +1,10 @@
+{
+ "runs_per_kind": {
+  "SUPERLATIVE, INJECTION, OUT_OF_DOMAIN, META_QUESTION, CONFLICT (v3 wording)": 1,
+  "COUNT (v1 = v3 wording)": 2,
+  "MISSING_REFERENT (v4 wording)": 1,
+  "OFF_QUESTION (base, v3, v4)": 3,
+  "every other kind": 4
+ },
+ "refusal_rule": "error-severity kinds: threshold = max(train F1 optimum, lowest threshold with train precision >= 0.85); amended post hoc 18 Oct"
+}

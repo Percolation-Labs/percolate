@@ -39,11 +39,25 @@ Three properties the port keeps, and ``tests/test_query_mcp.py`` checks each:
 
 Standard library only: the server forwards one JSON body, and the base install
 (no extras) can run it.
+
+SEMANTIC EXCEPTIONS, when the operator turns them on (``P8_SEMANTIC_EXCEPTIONS``
+= ``on`` or ``strict``, with ``JEV_API_KEY`` bound like any credential). The
+tool then takes an optional ``question`` -- what the caller is trying to find
+out, in its own words -- and every answer carries
+``structuredContent.semantic_exceptions``: the typed exceptions the question and
+the result raised, and a receipt of what was checked, so "nothing raised" is
+distinguishable from "nothing ran". Their prompt is appended to the text the
+model reads. ``strict`` withholds the rows when an error-severity kind is raised
+(a blended question, a negation): the model gets the prompt as an error and
+asks again. This is the one place the server adds anything to what ``aiq.query``
+returned, and it adds it beside the rows, never in them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -107,7 +121,58 @@ class Upstream:
             return None, {"kind": "dispatch_error", "detail": str(e)}
 
 
-def describe_query_tool(up: Upstream, authorization: str | None) -> dict[str, Any]:
+EXCEPTIONS_MODES = ("off", "on", "strict")
+
+
+class Exceptions:
+    """The semantic-exceptions hook: off unless the operator turns it on."""
+
+    def __init__(self, mode: str | None = None, jev_factory: Any = None, values_top: int = 0,
+                 store: str | None = None):
+        self.mode = (mode or os.environ.get("P8_SEMANTIC_EXCEPTIONS") or "off").lower()
+        if self.mode not in EXCEPTIONS_MODES:
+            raise ValueError(f"P8_SEMANTIC_EXCEPTIONS must be one of {EXCEPTIONS_MODES}")
+        self.values_top = int(os.environ.get("P8_SEMANTIC_EXCEPTIONS_VALUES", values_top))
+        # One sentence on what this store holds. It switches on OUT_OF_DOMAIN and
+        # it is the condition the thresholds were measured under; without it the
+        # same question can score differently (measured: "the garlic" 0.96 vs
+        # below threshold), so an operator should set it.
+        self.store = store or os.environ.get("P8_SEMANTIC_EXCEPTIONS_STORE") or None
+        self._jev_factory = jev_factory
+
+    @property
+    def on(self) -> bool:
+        return self.mode != "off"
+
+    def _jev(self):
+        if self._jev_factory is not None:
+            return self._jev_factory()
+        from ..decide import Jev
+        return Jev()
+
+    def inspect(self, doc: Any, question: str | None) -> dict:
+        """``{"report": Report | None, "error": str | None}``. A judge that fails
+        does not fail the query: the receipt says it did not run, and why."""
+        from ..semantic_exceptions import SemanticExceptions
+        from ..semantic_exceptions.query import inspect
+
+        async def run():
+            jev = self._jev()
+            try:
+                return await inspect(SemanticExceptions(jev, store=self.store), doc, question,
+                                     values_top=self.values_top)
+            finally:
+                close = getattr(jev, "aclose", None)
+                if close is not None:
+                    await close()
+        try:
+            return {"report": asyncio.run(run()), "error": None}
+        except Exception as e:  # the rows are still the answer
+            return {"report": None, "error": f"{type(e).__name__}: {e}"[:300]}
+
+
+def describe_query_tool(up: Upstream, authorization: str | None,
+                        exceptions: "Exceptions | None" = None) -> dict[str, Any]:
     """The tool definition, its description built from ``SCHEMA "p8ql"``."""
     doc, err = up.rpc("query", {"p_query": 'SCHEMA "p8ql"'}, authorization)
     if err:
@@ -120,18 +185,29 @@ def describe_query_tool(up: Upstream, authorization: str | None) -> dict[str, An
         detail = json.dumps(facet, indent=1)
         modes = [m["mode"] for m in facet.get("declared", {}).get("modes", [])]
     preamble = TOOL_PREAMBLE % (", ".join(modes) if modes else "see the grammar below")
+    properties: dict[str, Any] = {
+        "query": {
+            "type": "string",
+            "description": "One p8ql statement. See the modes above.",
+        }
+    }
+    if exceptions is not None and exceptions.on:
+        preamble = (preamble.rstrip() + "\n\nThe store also checks what you ask and what came "
+                    "back, and answers with SEMANTIC EXCEPTIONS when it sees something you should "
+                    "act on (a question to split, a negation to run as an exact filter, a result "
+                    "that continues). Act on them before answering.\n")
+        properties["question"] = {
+            "type": "string",
+            "description": "What you are trying to find out, in your own words. The store "
+                           "checks it and says how to approach it.",
+        }
     return {
         "name": "query",
         "title": "Query the Percolate knowledge base",
         "description": preamble + "\n" + detail,
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "One p8ql statement. See the modes above.",
-                }
-            },
+            "properties": properties,
             "required": ["query"],
             "additionalProperties": False,
         },
@@ -153,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     upstream: Upstream | None = None
+    exceptions: Exceptions | None = None
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[query-mcp] {fmt % args}", flush=True)
@@ -207,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._result(rid, {})
 
         if method == "tools/list":
-            return self._result(rid, {"tools": [describe_query_tool(up, auth)]})
+            return self._result(rid, {"tools": [describe_query_tool(up, auth, self.exceptions)]})
 
         if method == "tools/call":
             params = msg.get("params") or {}
@@ -243,6 +320,27 @@ class Handler(BaseHTTPRequestHandler):
                     "isError": True,
                     "_meta": {"errorKind": err["kind"]},
                     "content": [{"type": "text", "text": json.dumps(err)}]})
+            sx = self.exceptions
+            if sx is not None and sx.on and isinstance(doc, dict):
+                question = (params.get("arguments") or {}).get("question")
+                checked = sx.inspect(doc, question if isinstance(question, str) else None)
+                report = checked["report"]
+                block = (report.to_dict() if report is not None
+                         else {"raised": [], "receipt": {"ran": False, "error": checked["error"]}})
+                prompt = report.to_prompt(show=6) if report is not None else ""
+                if sx.mode == "strict" and report is not None and report.errors:
+                    # The rows are withheld, not lost: asking again as the
+                    # exceptions say returns them.
+                    return self._result(rid, {
+                        "isError": True,
+                        "_meta": {"errorKind": "semantic_exception"},
+                        "content": [{"type": "text", "text": prompt}],
+                        "structuredContent": {"semantic_exceptions": block}})
+                doc = {**doc, "semantic_exceptions": block}
+                content = [{"type": "text", "text": json.dumps(doc)}]
+                if prompt:
+                    content.append({"type": "text", "text": prompt})
+                return self._result(rid, {"content": content, "structuredContent": doc})
             return self._result(rid, {
                 "content": [{"type": "text", "text": json.dumps(doc)}],
                 # The half a citation-extracting runtime reads (brief §5.3): the
@@ -253,7 +351,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(rid, -32601, f"unknown method: {method!r}")
 
 
-def build_server(host: str, port: int, postgrest: str) -> ThreadingHTTPServer:
+def build_server(host: str, port: int, postgrest: str,
+                 exceptions: Exceptions | None = None) -> ThreadingHTTPServer:
     """A server bound and ready to ``serve_forever``; ``port=0`` picks a free one."""
-    handler = type("QueryHandler", (Handler,), {"upstream": Upstream(postgrest)})
+    handler = type("QueryHandler", (Handler,), {"upstream": Upstream(postgrest),
+                                                "exceptions": exceptions or Exceptions()})
     return ThreadingHTTPServer((host, port), handler)

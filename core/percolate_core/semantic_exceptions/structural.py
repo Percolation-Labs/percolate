@@ -51,10 +51,14 @@ class Raised:
     code: str
     evidence: Mapping[str, Any]
     p: float | None = None
+    # The kind that raised it, as the inspector held it. Looking the code up in
+    # the shipped catalogue instead gave a repository's own kinds the default
+    # prompt and severity; the contract's variant run found it.
+    source_kind: Any = None
 
     @property
     def kind(self):
-        return by_code(self.code)
+        return self.source_kind or by_code(self.code)
 
 
 @dataclass(frozen=True)

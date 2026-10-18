@@ -358,6 +358,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_semantic_exceptions.py
 
+      # The query tool carries them to every agent: off changes nothing; on, each
+      # answer has the typed exceptions and a receipt beside the rows; strict
+      # withholds the rows on an error; a failed judge never fails the query.
+      - name: The query tool answers with semantic exceptions when they are on
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_query_semantic_exceptions.py
+
       # A runtime that cannot serve the database it is pointed at refuses at
       # STARTUP rather than inside the first turn. It used to fail in band --
       # AG-UI answers 200 with one RUN_ERROR in a well-formed stream, and

@@ -317,6 +317,16 @@ class ReportAndGuard(unittest.TestCase):
         self.assertEqual(sx.walk(loop).novel(seen).codes, {"LOOP"})
         self.assertEqual(sx.walk(loop).novel(seen).codes, {"LOOP"})
 
+    def test_a_repositorys_own_kind_speaks_with_its_own_prompt(self):
+        from dataclasses import replace
+        mine = [replace(k, prompt="Use our anti-join.") if k.code == "NEGATION" else k
+                for k in KINDS]
+        rep = run(SemanticExceptions(StubJev({"NEGATION": 0.99}), kinds=mine).before("q"))
+        self.assertIn("Use our anti-join.", rep.to_prompt())
+        retracted = [replace(k, severity="warning") if k.code == "RETRACTED" else k for k in KINDS]
+        rep = SemanticExceptions(kinds=retracted).after([{"id": 1, "retracted": True}])
+        self.assertIn("WARNING RETRACTED", rep.to_prompt())
+
     def test_the_repository_names_its_own_next_step(self):
         jev = StubJev({"NEGATION": 0.99})
         sx = SemanticExceptions(jev, actions={"NEGATION": "`list --without TERM`."})
@@ -350,6 +360,27 @@ class ReportAndGuard(unittest.TestCase):
             return []
         hits, rep = run(SemanticExceptions().guard(search)("anything"))
         self.assertEqual(rep.codes, {"EMPTY"})
+
+
+class Contract(unittest.TestCase):
+    """The contract's deterministic half (evals/semantic_exceptions/contract):
+    every result and walk case, as a black box, input in and typed codes out."""
+
+    def test_every_structural_case_holds(self):
+        import json
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "evals/semantic_exceptions/contract/cases.jsonl"
+        cases = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        structural = [c for c in cases if c["stage"] in ("result", "walk")]
+        self.assertGreaterEqual(len(structural), 10)
+        for c in structural:
+            sx = SemanticExceptions(limits=Limits(**c.get("limits", {})))
+            rep = sx.after(**c["input"]) if c["stage"] == "result" else sx.walk(**c["input"])
+            with self.subTest(case=c["name"]):
+                self.assertTrue(set(c["raise"]) <= rep.codes, rep.codes)
+                self.assertFalse(set(c["not_raise"]) & rep.codes, rep.codes)
+                self.assertEqual(rep.stages, [c["stage"]])
+                self.assertTrue(rep.checked)
 
 
 @unittest.skipUnless(os.environ.get("JEV_API_KEY"), "live: needs JEV_API_KEY")

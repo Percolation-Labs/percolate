@@ -20,9 +20,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 
-from percolate_core.semantic_exceptions import KINDS, SemanticExceptions  # noqa: E402
+from dataclasses import replace  # noqa: E402
 
-FIX, OUT = HERE / "fixtures", HERE / "out"
+from percolate_core.semantic_exceptions import KINDS, SemanticExceptions  # noqa: E402
+from percolate_core.semantic_exceptions.catalogue import REFUSAL_PRECISION  # noqa: E402
+
+FIX = HERE / "fixtures"
+# A variant (contract/variant-*.json) overrides kinds by code, and gets its own
+# out/<tag>/ so a calibration is measured beside the shipped wording, not over it.
+VARIANT = json.loads(Path(os.environ["SX_VARIANT"]).read_text()) if os.environ.get("SX_VARIANT") else {}
+OUT = HERE / "out" / os.environ["SX_TAG"] if os.environ.get("SX_TAG") else HERE / "out"
+KINDS = tuple(replace(k, **VARIANT.get(k.code, {})) for k in KINDS)
+KIND = {k.code: k for k in KINDS}
 STORES = {
     "dracula": "Bram Stoker's Dracula (1897) as dated documents: journal entries (Jonathan "
                "Harker, Mina Murray/Harker, Dr John Seward's phonograph diary), letters (Lucy "
@@ -84,7 +93,8 @@ async def run() -> None:
     vs = [r for r in read(FIX / "items_values.jsonl") if r["id"] not in done]
     every = [k.code for k in KINDS]
     async with Jev(api_key=os.environ["JEV_API_KEY"], concurrency=8) as jev:
-        sx = {d: SemanticExceptions(jev, enable=every, store=s) for d, s in STORES.items()}
+        sx = {d: SemanticExceptions(jev, kinds=KINDS, enable=every, store=s)
+              for d, s in STORES.items()}
 
         async def one_q(r):
             ps, rep = await sx[r["domain"]].probabilities(r["question"])
@@ -94,7 +104,8 @@ async def run() -> None:
             hits = [{"id": 0, "content": r["passage"]}]
             if r.get("other"):
                 hits.append({"id": 1, "content": r["other"]})
-            s = SemanticExceptions(jev, enable=every, values_top=len(hits), conflict_top=2)
+            s = SemanticExceptions(jev, kinds=KINDS, enable=every, values_top=len(hits),
+                                   conflict_top=2)
             probs, _, rep = await s.value_probabilities(r["question"], hits)
             p = {k.partition(":")[0]: v for k, v in probs[0].items()}
             return {"id": r["id"], "model": rep.model, "p": p}
@@ -145,6 +156,17 @@ def score() -> None:
             train = [i for i in agree if not test(i)]
             held = [i for i in agree if test(i)]
             best = max(GRID, key=lambda t: (prf(*counts(train, t))[2], t))
+            # AMENDED AFTER SEEING RESULTS (post hoc, 18 Oct): an error-severity
+            # kind refuses, so its threshold must also hold train precision >=
+            # REFUSAL_PRECISION. F1 put INJECTION at 0.40 (precision 0.75) and
+            # strict mode then withheld runbook steps as an injection.
+            if KIND[c].severity == "error":
+                def precision(t):
+                    tp, fp, _ = counts(train, t)
+                    return tp / (tp + fp) if tp + fp else 1.0
+                held_up = [t for t in GRID if precision(t) >= REFUSAL_PRECISION
+                           and counts(train, t)[0] > 0]
+                best = max(best, min(held_up) if held_up else GRID[-1])
             p, r, f1 = prf(*counts(held, best))
             pos = sum(1 for i in held if agree[i])
             status = ("unmeasured" if pos < 5 else "on" if f1 >= 0.6 else "off")
