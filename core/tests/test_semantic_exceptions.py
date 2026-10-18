@@ -145,8 +145,10 @@ class Result(unittest.TestCase):
         self.assertNotIn("EMPTY", codes(self.scores(0.5)))
 
     def test_truncated_at_limit(self):
-        self.assertIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8, .7), limit=3))
-        self.assertNotIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8), limit=3))
+        self.assertIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8, .7), limit=3, total=40))
+        self.assertNotIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8), limit=3, total=40))
+        # A ranked search always fills its limit: without a known total it is silent.
+        self.assertNotIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8, .7), limit=3))
         self.assertNotIn("TRUNCATED_AT_LIMIT", codes(self.scores(.9, .8, .7), limit=3, total=3))
 
     def test_too_broad_and_starved(self):
@@ -165,17 +167,36 @@ class Result(unittest.TestCase):
         self.assertIn("LOW_BEST_SCORE", codes(self.scores(.1, .05), limits=lim))
         self.assertNotIn("LOW_BEST_SCORE", codes(self.scores(.5, .05), limits=lim))
 
+    GAP = Limits(min_gap=0.1)
+
     def test_strong_single_hit_and_cliff(self):
-        self.assertIn("STRONG_SINGLE_HIT", codes(self.scores(.95, .60, .59, .58, .57)))
-        cliff = codes(self.scores(.90, .89, .88, .50, .49, .48))
+        self.assertIn("STRONG_SINGLE_HIT", codes(self.scores(.95, .60, .59, .58, .57), limits=self.GAP))
+        cliff = codes(self.scores(.90, .89, .88, .50, .49, .48), limits=self.GAP)
         self.assertIn("SCORE_CLIFF", cliff)
         self.assertNotIn("STRONG_SINGLE_HIT", cliff)
-        even = codes(self.scores(.90, .85, .80, .75, .70))
+        even = codes(self.scores(.90, .85, .80, .75, .70), limits=self.GAP)
         self.assertFalse({"SCORE_CLIFF", "STRONG_SINGLE_HIT"} & even)
 
-    def test_cliff_says_where_to_cut(self):
-        rep = SemanticExceptions().after(self.scores(.90, .89, .88, .50, .49, .48))
+    def test_a_large_ratio_over_a_tiny_gap_is_not_a_standout(self):
+        # Measured in use: .6957 over .677 with the rest within .01 is a ratio of
+        # four and a gap of nothing.
+        tiny = self.scores(.6957, .677, .6759, .6643, .6604)
+        self.assertFalse({"SCORE_CLIFF", "STRONG_SINGLE_HIT"} & codes(tiny, limits=self.GAP))
+        self.assertFalse({"SCORE_CLIFF", "STRONG_SINGLE_HIT"}
+                         & codes(self.scores(.95, .60, .59, .58, .57)))
+
+    def test_cliff_says_where_to_cut_and_the_standout_is_named(self):
+        sx = SemanticExceptions(limits=self.GAP)
+        rep = sx.after(self.scores(.90, .89, .88, .50, .49, .48))
         self.assertEqual([r.evidence["keep"] for r in rep.raised if r.code == "SCORE_CLIFF"], [3])
+        self.assertIn("SCORE_CLIFF [0, 1, 2]", rep.to_prompt())
+        hits = [{"id": "low", "score": .57}, {"id": "top", "score": .95},
+                {"id": "b", "score": .60}, {"id": "c", "score": .59}, {"id": "d", "score": .58}]
+        self.assertIn("STRONG_SINGLE_HIT [top]", sx.after(hits).to_prompt())
+
+    def test_continues(self):
+        self.assertIn("CONTINUES", codes([{"id": 1, "continues": True}]))
+        self.assertNotIn("CONTINUES", codes([{"id": 1, "continues": False}]))
 
     def test_single_source(self):
         same = [{"id": i, "source": "Seward"} for i in range(3)]
@@ -195,8 +216,8 @@ class Result(unittest.TestCase):
     def test_duplicates_and_versions(self):
         self.assertIn("DUPLICATES", codes([{"id": 1, "content": "a"}, {"id": 2, "content": "a"}]))
         self.assertNotIn("DUPLICATES", codes([{"id": 1, "content": "a"}, {"id": 2, "content": "b"}]))
-        self.assertIn("VERSION_PILE_UP", codes([{"id": 1, "document": "d"}, {"id": 2, "document": "d"}]))
-        self.assertNotIn("VERSION_PILE_UP", codes([{"id": 1, "document": "d"}, {"id": 2, "document": "e"}]))
+        self.assertIn("VERSION_PILE_UP", codes([{"id": 1, "version_of": "d"}, {"id": 2, "version_of": "d"}]))
+        self.assertNotIn("VERSION_PILE_UP", codes([{"id": 1, "version_of": "d"}, {"id": 2, "version_of": "e"}]))
 
     def test_per_hit_fields(self):
         d = dt.datetime
@@ -265,6 +286,7 @@ class Walk(unittest.TestCase):
 class ReportAndGuard(unittest.TestCase):
     def test_prompt_puts_errors_first_and_counts_what_it_leaves_out(self):
         jev = StubJev({"NEGATION": 0.96, "COMPARISON": 0.99, "EXACT_MATCH": 0.97, "CAUSAL_WHY": 0.98})
+        # NEGATION is the only error here; COUNT became a warning in use.
         rep = run(SemanticExceptions(jev).before("q"))
         text = rep.to_prompt(show=2)
         lines = text.splitlines()
@@ -273,10 +295,17 @@ class ReportAndGuard(unittest.TestCase):
         self.assertIn("and 2 more", lines[3])
         self.assertEqual(SemanticExceptions().after([{"id": 1}]).to_prompt(), "")
 
-    def test_one_line_per_kind_however_many_hits_raise_it(self):
+    def test_one_line_per_kind_naming_every_record_it_is_about(self):
         rep = SemanticExceptions().after([{"id": i, "retracted": True} for i in range(3)])
         self.assertEqual(len(rep.raised), 3)
-        self.assertIn("RETRACTED (3 results)", rep.to_prompt())
+        self.assertIn("RETRACTED [0, 1, 2]", rep.to_prompt())
+
+    def test_the_repository_names_its_own_next_step(self):
+        jev = StubJev({"NEGATION": 0.99})
+        sx = SemanticExceptions(jev, actions={"NEGATION": "`list --without TERM`."})
+        text = run(sx.before("q")).to_prompt()
+        self.assertIn("Here: `list --without TERM`.", text)
+        self.assertNotIn("Here:", SemanticExceptions(jev).after([]).to_prompt())
 
     def test_strict_guard_refuses_before_searching(self):
         called = []
@@ -297,7 +326,7 @@ class ReportAndGuard(unittest.TestCase):
         jev = StubJev({"COUNT": 0.99})
         hits, rep = run(SemanticExceptions(jev).guard(search)("How many?", limit=3))
         self.assertEqual(len(hits), 3)
-        self.assertEqual(rep.codes, {"COUNT", "TRUNCATED_AT_LIMIT"})
+        self.assertEqual(rep.codes, {"COUNT"})
 
     def test_guard_without_jev_runs_the_structural_stage_only(self):
         async def search(question, limit=10):

@@ -6,13 +6,14 @@ needs a field the repository did not return stays silent; it never guesses.
     id              anything hashable
     score           similarity, HIGHER IS BETTER (pass 1 - distance for pgvector)
     source          who or what it came from: a narrator, a document, an origin
-    document        the document a version or chunk belongs to
+    version_of      the document this is one version of (not merely a part of)
     content         the text, for exact duplicates
     time            when it happened (world time; anything orderable, a datetime
                     for RECORDING_LAG)
     recorded_at     when it was written down
     superseded_by   a later record replaces it
     retracted       true when withdrawn
+    continues       true when the passage is one part of a longer record
     provenance      present and None means the source is known to be missing
     embedding_model the space its vector lives in
 
@@ -25,10 +26,11 @@ A walk is a list of rounds, oldest first, each a mapping:
     spent       cost of the round, in the walk's budget units
 
 ABSOLUTE SCORE THRESHOLDS HAVE NO DEFAULT. A cosine of 0.6 is strong in one
-embedding space and noise in another, so `low_score` and `flat_spread` are
-off until the repository sets them for its model. The relative detectors
-(SCORE_CLIFF, STRONG_SINGLE_HIT) compare gaps within one result and carry a
-default, because a gap ratio means the same thing in any space.
+embedding space and noise in another, so `low_score`, `flat_spread` and
+`min_gap` are off until the repository sets them for its model. `min_gap`
+gates SCORE_CLIFF and STRONG_SINGLE_HIT as well as their ratios: in use, a
+ratio alone called a 0.019 cosine gap "one result stands well above the rest",
+because within one top-k list the median gap can be almost nothing.
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ class Limits:
     low_score: float | None = None        # LOW_BEST_SCORE below this; off when None
     flat_spread: float | None = None      # FLAT_SCORES when top-`flat_n` span less; off when None
     flat_n: int = 5
+    min_gap: float | None = None          # SCORE_CLIFF / STRONG_SINGLE_HIT need a gap this big; off when None
     cliff_ratio: float = 4.0              # a gap this many times the median gap is a cliff
     single_hit_ratio: float = 4.0         # 1st-2nd gap this many times the median of the rest
     too_broad: int = 1000                 # TOO_BROAD when `total` exceeds this
@@ -96,13 +99,16 @@ def result_exceptions(hits: Sequence[Mapping[str, Any]], *, limit: int | None = 
 
     if total is not None and total > limits.too_broad:
         raise_("TOO_BROAD", total=total)
-    if limit is not None and n >= limit and (total is None or total > n):
+    # Only when the store KNOWS more matched. A ranked search always fills its
+    # limit, so without `total` this would fire on every search and mean nothing.
+    if limit is not None and total is not None and n >= limit and total > n:
         raise_("TRUNCATED_AT_LIMIT", returned=n, limit=limit)
     if limit is not None and filtered and n < limit:
         raise_("STARVED_BY_FILTER", returned=n, limit=limit)
 
-    scores = sorted((float(h["score"]) for h in hits if h.get("score") is not None),
-                    reverse=True)
+    scored = sorted((h for h in hits if h.get("score") is not None),
+                    key=lambda h: float(h["score"]), reverse=True)
+    scores = [float(h["score"]) for h in scored]
     if scores:
         if limits.low_score is not None and scores[0] < limits.low_score:
             raise_("LOW_BEST_SCORE", best=scores[0], below=limits.low_score)
@@ -112,15 +118,17 @@ def result_exceptions(hits: Sequence[Mapping[str, Any]], *, limit: int | None = 
             raise_("FLAT_SCORES", spread=round(top[0] - top[-1], 6), over=len(top))
         gaps = _gaps(scores)
         # Three gaps at least, so a median of the others means something.
-        if len(gaps) >= 3:
+        if len(gaps) >= 3 and limits.min_gap is not None:
             rest = median(gaps[1:]) or 1e-9
-            if gaps[0] >= limits.single_hit_ratio * rest:
-                raise_("STRONG_SINGLE_HIT", gap=round(gaps[0], 6), median_gap=round(rest, 6))
+            if gaps[0] >= max(limits.min_gap, limits.single_hit_ratio * rest):
+                raise_("STRONG_SINGLE_HIT", id=scored[0].get("id"), gap=round(gaps[0], 6),
+                       median_gap=round(rest, 6))
             else:
                 mid = median(gaps) or 1e-9
                 i = max(range(1, len(gaps)), key=gaps.__getitem__)
-                if gaps[i] >= limits.cliff_ratio * mid:
-                    raise_("SCORE_CLIFF", keep=i + 1, of=len(scores), gap=round(gaps[i], 6))
+                if gaps[i] >= max(limits.min_gap, limits.cliff_ratio * mid):
+                    raise_("SCORE_CLIFF", keep=i + 1, of=len(scores), gap=round(gaps[i], 6),
+                           ids=[h.get("id") for h in scored[:i + 1]])
 
     sources = [h["source"] for h in hits if h.get("source") is not None]
     if len(sources) == n and len(set(sources)) == 1:
@@ -143,14 +151,16 @@ def result_exceptions(hits: Sequence[Mapping[str, Any]], *, limit: int | None = 
 
     docs: dict[Any, list] = {}
     for h in hits:
-        if h.get("document") is not None:
-            docs.setdefault(h["document"], []).append(h.get("id"))
+        if h.get("version_of") is not None:
+            docs.setdefault(h["version_of"], []).append(h.get("id"))
     piled = {str(d): ids for d, ids in docs.items() if len(ids) > 1}
     if piled:
         raise_("VERSION_PILE_UP", documents=piled)
 
     for h in hits:
         hid = h.get("id")
+        if h.get("continues"):
+            raise_("CONTINUES", id=hid)
         if h.get("retracted"):
             raise_("RETRACTED", id=hid)
         if h.get("superseded_by") is not None:

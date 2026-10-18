@@ -61,9 +61,12 @@ class Report:
     model: str | None = None
     jev_requests: int = 0
     input_tokens: int = 0
+    # The repository's own next step per kind, appended to the kind's prompt.
+    actions: Mapping[str, str] = field(default_factory=dict)
 
     def __iadd__(self, other: "Report") -> "Report":
         self.raised += other.raised
+        self.actions = {**self.actions, **other.actions}
         self.model = other.model or self.model
         self.jev_requests += other.jev_requests
         self.input_tokens += other.input_tokens
@@ -95,12 +98,23 @@ class Report:
             seen.add(r.code)
             shown += 1
             same = [x for x in self.raised if x.code == r.code]
-            where = f" ({len(same)} results)" if len(same) > 1 else ""
-            lines.append(f"- {r.kind.severity.upper()} {r.code}{where}: {r.kind.prompt}")
+            ids = [str(i) for x in same for i in _ids(x.evidence)]
+            where = f" [{', '.join(dict.fromkeys(ids))}]" if ids else ""
+            line = f"- {r.kind.severity.upper()} {r.code}{where}: {r.kind.prompt}"
+            if r.code in self.actions:
+                line += f" Here: {self.actions[r.code]}"
+            lines.append(line)
         rest = len({r.code for r in self.raised}) - shown
         if rest > 0:
             lines.append(f"- and {rest} more of lower severity.")
         return "\n".join(lines)
+
+
+def _ids(evidence: Mapping[str, Any]) -> list:
+    """The records an exception is about, so the prompt can name them."""
+    if evidence.get("id") is not None:
+        return [evidence["id"]] + ([evidence["other"]] if evidence.get("other") is not None else [])
+    return list(evidence.get("ids") or ())
 
 
 class SemanticExceptionError(Exception):
@@ -119,14 +133,18 @@ class SemanticExceptions:
     `thresholds` overrides a judged kind's measured threshold by code; `disable`
     turns kinds off by code and `enable` turns on one the eval left off; `store`
     is a sentence describing what the store holds, which switches on
-    OUT_OF_DOMAIN."""
+    OUT_OF_DOMAIN; `actions` maps a kind to this repository's own next step
+    ("`list --without TERM` gives the exact complement"), which the prompt
+    appends. A kind's prompt says what to do in general; only the repository
+    knows which of its tools does it."""
 
     def __init__(self, jev: Any = None, *, kinds: Sequence[Kind] = KINDS,
                  limits: Limits = Limits(), thresholds: Mapping[str, float] | None = None,
                  disable: Sequence[str] = (), enable: Sequence[str] = (),
-                 store: str | None = None,
+                 store: str | None = None, actions: Mapping[str, str] | None = None,
                  text_key: str = "content", values_top: int = 5, conflict_top: int = 3):
         self.jev, self.limits, self.store = jev, limits, store
+        self.actions = dict(actions or {})
         self.text_key, self.values_top, self.conflict_top = text_key, values_top, conflict_top
         off, extra = set(disable), set(enable)
         self.kinds = {k.code: k for k in kinds
@@ -151,7 +169,7 @@ class SemanticExceptions:
             state["store"] = self.store
         kinds = self._judged("question", state)
         res = await self.jev.ask(state, {k.code: Noul(k.instruction) for k in kinds})
-        rep = Report(model=getattr(res, "model", None), jev_requests=1,
+        rep = Report(actions=self.actions, model=getattr(res, "model", None), jev_requests=1,
                      input_tokens=getattr(res, "input_tokens", 0))
         return {k.code: res[k.code].p for k in kinds}, rep
 
@@ -180,7 +198,7 @@ class SemanticExceptions:
                                                 "question": conflict.instruction})
             requests.append(({"question": question, "passage": h[self.text_key]}, qs))
         results = await asyncio.gather(*(self.jev.ask(s, q) for s, q in requests))
-        rep = Report(jev_requests=len(results))
+        rep = Report(actions=self.actions, jev_requests=len(results))
         probs = []
         for (_, qs), res in zip(requests, results):
             rep.model = getattr(res, "model", rep.model)
@@ -209,11 +227,13 @@ class SemanticExceptions:
 
     def after(self, hits: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The result's own exceptions, from its statistics and fields. Free."""
-        return Report(self._keep(result_exceptions(hits, limits=self.limits, **ctx)))
+        return Report(self._keep(result_exceptions(hits, limits=self.limits, **ctx)),
+                      actions=self.actions)
 
     def walk(self, rounds: Sequence[Mapping[str, Any]], **ctx: Any) -> Report:
         """The walk's exceptions so far. Free."""
-        return Report(self._keep(walk_exceptions(rounds, limits=self.limits, **ctx)))
+        return Report(self._keep(walk_exceptions(rounds, limits=self.limits, **ctx)),
+                      actions=self.actions)
 
     # ---- together -------------------------------------------------------------
     def guard(self, search: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]], *,
@@ -226,7 +246,7 @@ class SemanticExceptions:
         also reads the top hits (one Jev request each)."""
 
         async def guarded(question: str, **kw: Any) -> tuple[list, Report]:
-            report = Report()
+            report = Report(actions=self.actions)
             if self.jev is not None:
                 report += await self.before(question)
                 if strict and report.errors:

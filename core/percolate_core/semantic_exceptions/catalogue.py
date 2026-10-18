@@ -90,10 +90,13 @@ KINDS: tuple[Kind, ...] = (
        "An extreme needs the whole matching set, and top-k by similarity returns the "
        "nearest, not the earliest or the most. Retrieve every match and sort or "
        "aggregate over them."),
-    _q("COUNT", "error",
+    # A warning, not an error: the number is often written in one record ("fifty
+    # boxes"), and refusing that search blocked the right move (navigation test).
+    _q("COUNT", "warning",
        "Does `question` ask how many of something there are?",
-       "A count needs an exact filter and a count over it, not a similarity ranking, "
-       "which returns at most k. Count over a filter, or say the count is a lower bound."),
+       "If the number is stated in a record, search for the record that states it. If "
+       "it means counting records, count over an exact filter: a similarity ranking "
+       "returns at most k, so a count of hits is only a lower bound."),
     _q("COMPARISON", "warning",
        "Does `question` ask how two or more things, people or views differ or compare?",
        "Retrieve each side of the comparison with its own search, then compare. One "
@@ -293,6 +296,9 @@ KINDS: tuple[Kind, ...] = (
     _s("TIME_SKEW", "result", "warning",
        "The results cluster in a narrow period of what the store covers. If the "
        "question is not about that period, look elsewhere in time."),
+    _s("CONTINUES", "result", "warning",
+       "This passage is one part of a longer record, and the rest may hold the answer "
+       "or change its meaning. Read the parts around it before relying on it."),
     _s("DUPLICATES", "result", "warning",
        "Several results are the same text. Deduplicate and look wider for other "
        "evidence."),
