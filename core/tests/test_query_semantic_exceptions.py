@@ -353,6 +353,33 @@ class FakeUpstream:
         return [{"provider": self.provider, "in_process": self.in_process}], None
 
 
+class Probe(unittest.TestCase):
+    """The capability probe resolves a source to its relation before asking."""
+
+    class Up:
+        def __init__(self, relations, table="sx.passages"):
+            self.relations, self.table, self.asked = relations, table, []
+
+        def read(self, path, authorization=None, profile="aiq"):
+            return ([{"source_table": self.table}] if self.table else []), None
+
+        def rpc(self, fn, payload, authorization=None, profile="aiq"):
+            self.asked.append(payload["p_query"])
+            return {"schema": {"doc": {"derived": {"relations": self.relations}}}}, None
+
+    def test_a_source_is_asked_about_by_its_relation(self):
+        up = self.Up([{"schema": "sx", "name": "passages"}])
+        self.assertTrue(Exceptions._sql_readable(up, None, "dracula"))
+        self.assertEqual(up.asked, ['SCHEMA "sql" FROM passages'])
+
+    def test_a_relation_of_the_same_name_in_another_schema_is_not_it(self):
+        self.assertFalse(Exceptions._sql_readable(
+            self.Up([{"schema": "public", "name": "passages"}]), None, "dracula"))
+
+    def test_nothing_readable_is_no_sql(self):
+        self.assertFalse(Exceptions._sql_readable(self.Up([]), None, "dracula"))
+
+
 class Embedding(unittest.TestCase):
     def setUp(self):
         from unittest import mock

@@ -317,15 +317,35 @@ class Exceptions:
         if hit and _t.monotonic() - hit[0] < 300:
             return hit[1]
         caps: set[str] = set()
-        if source:
-            doc, err = up.rpc("query", {"p_query": f'SCHEMA "sql" FROM {source}'}, authorization)
-            derived = ((doc or {}).get("schema") or {}).get("doc", {}).get("derived", {}) \
-                if err is None and isinstance(doc, dict) else {}
-            if derived.get("relations"):
-                caps.add("sql")
+        if source and self._sql_readable(up, authorization, source):
+            caps.add("sql")
         out = frozenset(caps)
         self._caps[key] = (_t.monotonic(), out)
         return out
+
+    @staticmethod
+    def _sql_readable(up: "Upstream", authorization: str | None, source: str) -> bool:
+        """Whether the caller can SELECT from the relation behind `source`.
+
+        SCHEMA "sql" FROM takes a RELATION name, and a p8ql source is a
+        registry name (`dracula` over `sx.passages`): asked with the source,
+        the probe said no on a store whose table the caller could read. So the
+        source is resolved through the registry first, and the relation is
+        matched by schema and name."""
+        table = None
+        for reg in ("lexical_sources", "semantic_sources"):
+            rows, err = up.read(f"{reg}?name=eq.{urllib.parse.quote(source)}&select=source_table",
+                                authorization)
+            if err is None and rows:
+                table = rows[0].get("source_table")
+                break
+        schema, _, name = (table or source).rpartition(".")
+        doc, err = up.rpc("query", {"p_query": f'SCHEMA "sql" FROM {name}'}, authorization)
+        if err is not None or not isinstance(doc, dict):
+            return False
+        derived = ((doc.get("schema") or {}).get("doc") or {}).get("derived") or {}
+        return any(r.get("name") == name and (not schema or r.get("schema") == schema)
+                   for r in derived.get("relations") or ())
 
     def novel(self, report: Any, session: str | None) -> Any:
         """The report as this session has not yet seen it; unchanged without a session."""
