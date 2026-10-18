@@ -446,7 +446,12 @@ MEASURED = {
     "OPINION": (0.90, True, 1.00),  # F1 1.00, 8 test positives, on
     "ANSWER_EMBEDDED": (0.55, True, 0.83),  # F1 0.91, 10 test positives, on
     "META_QUESTION": (0.85, True, 0.80),  # F1 0.67, 7 test positives, on
-    "OUT_OF_DOMAIN": (0.85, True, 1.00),  # F1 1.00, 7 test positives, on
+    # Raised from 0.85 on real traffic: through the query tool it fired on ten
+    # in-domain questions, every one wrong ("What was newly installed on the
+    # summit of the East Cliff at Whitby?", 0.85-0.90), and an agent stopped
+    # looking for an answer the store held. At 0.92 the eval keeps 10 of 12
+    # positives with 0 false positives, and all ten real firings fall silent.
+    "OUT_OF_DOMAIN": (0.92, True, 1.00),  # judged from the question alone
     "EXACT_MATCH": (0.85, True, 1.00),  # F1 0.96, 14 test positives, on
     "ARITHMETIC": (0.85, True, 0.60),  # F1 0.63, 9 test positives, on
     "SPATIAL": (0.85, False, 0.42),  # F1 0.56, 6 test positives, off
