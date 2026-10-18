@@ -24,3 +24,13 @@ Capable Haiku agents (4 shadow, 4 on) get the plain research prompt: no hint abo
 - **T1.** On truncated questions, the on arm is right more often than shadow, by at least 0.25.
 - **T2.** On controls, the arms differ by at most 0.10. The probe has nothing to say there, and a capable agent already handles small sets.
 - **T3.** On truncated questions, the on arm spends no more queries per right answer than shadow. The argument is cost and attention, so the probe must not buy its accuracy with extra turns.
+
+## Disclosure in the description, no exceptions (registered 18 Oct, before any agent ran)
+
+P1 found that what moved answers was not the count but the fact that `dracula` is the table `sx.passages`, whose columns say who wrote each passage and when. That fact is the same for every query, so under the bitter-lesson reading it belongs in the tool's description, not in an exception. The test uses the same 16 questions and capable Haiku agents, 4 per arm, with exceptions off in both arms. The arms are the **plain** description, and the **described** one (`P8_QUERY_DESCRIBE_SOURCES=on`), which lists each source's table and columns. Each agent works in its own folder, which the P1 contamination made necessary.
+
+- **D1.** On the 9 date-list questions, the described arm is right at least 0.30 more often than plain.
+- **D2.** The described arm is right at least as often as P1's on arm overall (38 of 64 then), with no exceptions shown.
+- **D3.** The described arm spends no more queries per right answer than plain.
+
+If D1 and D2 hold, schema facts move to the description and leave the exception catalogue. What stays are facts about this result or this question.
