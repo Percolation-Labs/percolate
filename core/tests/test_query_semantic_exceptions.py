@@ -13,7 +13,12 @@ What must hold:
    prompt appended for the model;
 3. without a ``question``, a text mode is judged on the string it searched;
 4. strict withholds the rows when an error-severity kind is raised;
-5. a judge that fails does not fail the query, and the receipt says it did not run.
+5. a judge that fails does not fail the query, and the receipt says it did not run;
+6. shadow computes the exceptions and shows the model nothing, so the two arms
+   differ only in what is shown;
+7. with a query log, every call -- in every mode, failed or not -- is one typed
+   QueryEvent carrying the session and run, and a log that fails does not fail
+   the query.
 
 Run: python -m unittest discover -s tests -p test_query_semantic_exceptions.py
 """
@@ -25,8 +30,11 @@ import unittest
 
 from percolate_core.agentic.contracts import CanonicalTool, ToolInvocation, ToolServer
 from percolate_core.agentic.contracts.tools import InvocationTarget
+from percolate_core.agentic.tools.auth import caller_credentials
 from percolate_core.agentic.tools.mcp import McpProvider
 from percolate_core.query.mcp import Exceptions, build_server
+from percolate_core.semantic_exceptions.log import (
+    JsonlLog, QueryEvent, event_of, followups, stats_of)
 from percolate_core.semantic_exceptions.query import hits_of, question_of
 
 from test_query_mcp import FakePostgrest
@@ -65,21 +73,38 @@ class Broken:
         raise RuntimeError("Jev answered 429")
 
 
+class ListLog:
+    def __init__(self):
+        self.events: list[QueryEvent] = []
+
+    def append(self, event):
+        self.events.append(event)
+
+    def __iter__(self):
+        return iter(self.events)
+
+
+class BrokenLog(ListLog):
+    def append(self, event):
+        raise OSError("disk full")
+
+
 class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
-    def start(self, mode: str, jev=None):
-        pg = FakePostgrest(answers={("query", SEARCH): (200, SEARCH_DOC)})
+    def start(self, mode: str, jev=None, log=None, status=200):
+        pg = FakePostgrest(status=status, answers={("query", SEARCH): (200, SEARCH_DOC)})
         self.addCleanup(pg.close)
-        sx = Exceptions(mode, jev_factory=(lambda: jev) if jev is not None else None)
+        sx = Exceptions(mode, jev_factory=(lambda: jev) if jev is not None else None, log=log)
         mcp = build_server("127.0.0.1", 0, pg.url, exceptions=sx)
         threading.Thread(target=mcp.serve_forever, daemon=True).start()
         self.addCleanup(mcp.server_close)
         self.addCleanup(mcp.shutdown)
         return ToolServer(name="q", kind="mcp", url=f"http://127.0.0.1:{mcp.server_address[1]}")
 
-    async def call(self, server, arguments):
+    async def call(self, server, arguments, headers=None):
         tool = CanonicalTool(name="query", target=InvocationTarget(tool_name="query"))
         return await McpProvider().invoke(
-            server, tool, ToolInvocation(call_id="c1", tool_name="query", arguments=arguments))
+            server, tool, ToolInvocation(call_id="c1", tool_name="query", arguments=arguments),
+            headers=headers)
 
     async def test_off_changes_nothing(self):
         server = self.start("off")
@@ -156,6 +181,110 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
         receipt = result.content["semantic_exceptions"]["receipt"]
         self.assertFalse(receipt["ran"])
         self.assertIn("429", receipt["error"])
+
+    async def test_shadow_computes_them_and_shows_nothing(self):
+        log = ListLog()
+        server = self.start("shadow", StubJev({"NEGATION": 0.99}), log)
+        [tool] = await McpProvider().list_tools(server)
+        self.assertIn("question", tool.input_schema["properties"])
+        self.assertNotIn("SEMANTIC EXCEPTIONS", tool.description)
+        result = await self.call(server, {"query": SEARCH})
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content, SEARCH_DOC)
+        [e] = log.events
+        self.assertEqual((e.codes, e.shown, e.exceptions_mode), (["NEGATION"], False, "shadow"))
+
+    async def test_a_session_is_shown_each_exception_once(self):
+        log = ListLog()
+        server = self.start("on", StubJev({"CONJUNCTION": 0.99}), log)
+        with caller_credentials("Bearer t", (server.url,)):
+            first = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+            again = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+            other = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "t"})
+        codes = lambda r: [x["code"] for x in r.content["semantic_exceptions"]["raised"]]
+        self.assertEqual((codes(first), codes(again), codes(other)),
+                         (["CONJUNCTION"], [], ["CONJUNCTION"]))
+        # The log keeps what was computed and says what was shown.
+        self.assertEqual([(e.codes, e.shown_codes) for e in log.events],
+                         [(["CONJUNCTION"], ["CONJUNCTION"]), (["CONJUNCTION"], []),
+                          (["CONJUNCTION"], ["CONJUNCTION"])])
+
+    async def test_strict_refuses_a_repeat_too(self):
+        server = self.start("strict", StubJev({"NEGATION": 0.99}))
+        with caller_credentials("Bearer t", (server.url,)):
+            for _ in range(2):
+                r = await self.call(server, {"query": SEARCH}, headers={"X-P8-Session-Id": "s"})
+                self.assertTrue(r.is_error)
+                self.assertIn("NEGATION", str(r.content))
+
+    async def test_strict_records_the_refusal(self):
+        log = ListLog()
+        await self.call(self.start("strict", StubJev({"NEGATION": 0.99}), log), {"query": SEARCH})
+        [e] = log.events
+        self.assertTrue(e.shown and e.refused)
+
+    async def test_every_call_is_one_event_with_its_session_and_run(self):
+        log = ListLog()
+        server = self.start("on", StubJev({}), log)
+        # The runtime forwards X-P8-* only to an origin the operator bound, as it
+        # would for the query server in a deployment.
+        with caller_credentials("Bearer t", (server.url,)):
+            await self.call(server, {"query": SEARCH, "question": "What did Seward note?"},
+                            headers={"X-P8-Session-Id": "s1", "X-P8-Run-Id": "r1"})
+        [e] = log.events
+        self.assertEqual((e.session_id, e.run_id, e.question), ("s1", "r1", "What did Seward note?"))
+        self.assertEqual((e.mode, e.source, e.limit), ("SEARCH", "diary", 10))
+        self.assertEqual(e.stats["rows"], 1)
+        self.assertTrue(e.receipt["ran"])
+        self.assertGreater(e.receipt["checked"], 20)
+
+    async def test_off_still_logs_without_a_judge(self):
+        log = ListLog()
+        await self.call(self.start("off", None, log), {"query": SEARCH})
+        [e] = log.events
+        self.assertEqual((e.exceptions_mode, e.raised, e.receipt), ("off", [], {}))
+
+    async def test_a_failed_query_is_logged_with_its_error(self):
+        log = ListLog()
+        result = await self.call(self.start("on", StubJev({}), log, status=403), {"query": SEARCH})
+        self.assertTrue(result.is_error)
+        [e] = log.events
+        self.assertEqual(e.error, "403")
+
+    async def test_a_failed_log_does_not_fail_the_query(self):
+        result = await self.call(self.start("on", StubJev({}), BrokenLog()), {"query": SEARCH})
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content["rows"], SEARCH_DOC["rows"])
+
+
+class Log(unittest.TestCase):
+    def test_the_outcome_is_the_next_query_in_the_same_run(self):
+        a = QueryEvent("q1", run_id="r", at=1)
+        b = QueryEvent("q2", run_id="r", at=2)
+        c = QueryEvent("q3", run_id="other", at=1.5)
+        d = QueryEvent("q4", at=3)
+        pairs = {e.query: (n.query if n else None) for e, n in followups([b, d, c, a])}
+        self.assertEqual(pairs, {"q1": "q2", "q2": None, "q3": None, "q4": None})
+
+    def test_a_session_pairs_when_there_is_no_run(self):
+        a, b = QueryEvent("q1", session_id="s", at=1), QueryEvent("q2", session_id="s", at=2)
+        self.assertEqual(followups([a, b])[0][1].query, "q2")
+
+    def test_the_file_round_trips(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            log = JsonlLog(f"{d}/q.jsonl")
+            log.append(event_of(SEARCH, SEARCH_DOC, headers={"X-P8-Session-Id": "s"}))
+            [e] = list(log)
+            self.assertEqual((e.query, e.session_id, e.mode), (SEARCH, "s", "SEARCH"))
+
+    def test_stats_read_the_envelope(self):
+        doc = {"rows": [{"distance": 0.2, "source": "a"}, {"distance": 0.5, "source": "b"}]}
+        self.assertEqual(stats_of(doc), {"rows": 2, "empty": False, "distance_min": 0.2,
+                                         "distance_max": 0.5, "sources": 2, "with_content": 0,
+                                         "ids": []})
+        self.assertEqual(stats_of(SEARCH_DOC)["ids"], ["c1"])
+        self.assertTrue(stats_of({"rows": []})["empty"])
 
 
 class Adapter(unittest.TestCase):

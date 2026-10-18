@@ -51,6 +51,14 @@ model reads. ``strict`` withholds the rows when an error-severity kind is raised
 (a blended question, a negation): the model gets the prompt as an error and
 asks again. This is the one place the server adds anything to what ``aiq.query``
 returned, and it adds it beside the rows, never in them.
+
+``shadow`` computes the same exceptions and shows the model nothing: the tool
+looks as it does under ``on`` but without the paragraph and the block, so an
+experiment can compare the two arms on real traffic. ``P8_QUERY_LOG`` names a
+file that receives one ``QueryEvent`` per call in every mode (the question, the
+plan, result statistics, the exceptions and whether they were shown), with the
+session and run from the runtime's ``X-P8-*`` headers so that what a caller
+asked next can be paired with what it asked first (semantic_exceptions/log.py).
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,14 +130,17 @@ class Upstream:
             return None, {"kind": "dispatch_error", "detail": str(e)}
 
 
-EXCEPTIONS_MODES = ("off", "on", "strict")
+# shadow computes and logs the exceptions without showing them: the control arm
+# of the same traffic, so "did the agent need a second try where the layer would
+# have spoken?" is answerable without the layer having changed what it did.
+EXCEPTIONS_MODES = ("off", "shadow", "on", "strict")
 
 
 class Exceptions:
     """The semantic-exceptions hook: off unless the operator turns it on."""
 
     def __init__(self, mode: str | None = None, jev_factory: Any = None, values_top: int = 0,
-                 store: str | None = None):
+                 store: str | None = None, log: Any = None):
         self.mode = (mode or os.environ.get("P8_SEMANTIC_EXCEPTIONS") or "off").lower()
         if self.mode not in EXCEPTIONS_MODES:
             raise ValueError(f"P8_SEMANTIC_EXCEPTIONS must be one of {EXCEPTIONS_MODES}")
@@ -139,10 +151,47 @@ class Exceptions:
         # below threshold), so an operator should set it.
         self.store = store or os.environ.get("P8_SEMANTIC_EXCEPTIONS_STORE") or None
         self._jev_factory = jev_factory
+        # THE QUERY LOG (semantic_exceptions/log.py): one QueryEvent per call,
+        # in every mode including off, when P8_QUERY_LOG names a file.
+        if log is None and os.environ.get("P8_QUERY_LOG"):
+            from ..semantic_exceptions.log import JsonlLog
+            log = JsonlLog(os.environ["P8_QUERY_LOG"])
+        self.log = log
+        # What each session has already been shown (Report.novel). In use, a
+        # warning repeated on every query was skipped with the rest of the block
+        # by the third; the server is the only place that sees a session's
+        # queries in order. Bounded: the oldest sessions are forgotten.
+        self._seen: dict[str, set] = {}
 
     @property
     def on(self) -> bool:
+        """The exceptions are computed (shadow, on, strict)."""
         return self.mode != "off"
+
+    @property
+    def shows(self) -> bool:
+        """The model reads them (on, strict)."""
+        return self.mode in ("on", "strict")
+
+    def novel(self, report: Any, session: str | None) -> Any:
+        """The report as this session has not yet seen it; unchanged without a session."""
+        if report is None or not session:
+            return report
+        seen = self._seen.pop(session, set())
+        self._seen[session] = seen          # most recent last
+        while len(self._seen) > 10_000:
+            self._seen.pop(next(iter(self._seen)))
+        return report.novel(seen)
+
+    def record(self, query: str, doc: Any, **kw: Any) -> None:
+        """Append one event. A log that fails does not fail the query."""
+        if self.log is None:
+            return
+        from ..semantic_exceptions.log import event_of
+        try:
+            self.log.append(event_of(query, doc, exceptions_mode=self.mode, **kw))
+        except Exception as e:
+            print(f"[query-mcp] query log: {type(e).__name__}: {e}", flush=True)
 
     def _jev(self):
         if self._jev_factory is not None:
@@ -191,15 +240,16 @@ def describe_query_tool(up: Upstream, authorization: str | None,
             "description": "One p8ql statement. See the modes above.",
         }
     }
-    if exceptions is not None and exceptions.on:
+    if exceptions is not None and exceptions.shows:
         preamble = (preamble.rstrip() + "\n\nThe store also checks what you ask and what came "
                     "back, and answers with SEMANTIC EXCEPTIONS when it sees something you should "
                     "act on (a question to split, a negation to run as an exact filter, a result "
                     "that continues). Act on them before answering.\n")
+    if exceptions is not None and exceptions.on:
+        # Asked in shadow too, so the two arms differ only in what is shown.
         properties["question"] = {
             "type": "string",
-            "description": "What you are trying to find out, in your own words. The store "
-                           "checks it and says how to approach it.",
+            "description": "What you are trying to find out, in your own words.",
         }
     return {
         "name": "query",
@@ -290,6 +340,8 @@ class Handler(BaseHTTPRequestHandler):
             params = msg.get("params") or {}
             if params.get("name") != "query":
                 return self._error(rid, -32602, f"unknown tool: {params.get('name')!r}")
+            started = time.monotonic()
+            ctx = {k: v for k, v in self.headers.items() if k.lower().startswith("x-p8-")}
             q = (params.get("arguments") or {}).get("query")
             if not isinstance(q, str) or not q.strip():
                 # A tool result, not a protocol error: the model wrote a bad
@@ -315,20 +367,43 @@ class Handler(BaseHTTPRequestHandler):
                 # asked the wrong question. The whole envelope goes back, so
                 # `did_you_mean` and `candidates` reach the model with it.
                 err = {"kind": "tool_error", "body": doc}
+            sx = self.exceptions
+            question = (params.get("arguments") or {}).get("question")
+            question = question if isinstance(question, str) else None
+
+            def ms() -> int:
+                return int((time.monotonic() - started) * 1000)
+
             if err:
+                if sx is not None:
+                    sx.record(q, doc, question=question, headers=ctx, latency_ms=ms(),
+                              error=str(err.get("status") or err["kind"]))
                 return self._result(rid, {
                     "isError": True,
                     "_meta": {"errorKind": err["kind"]},
                     "content": [{"type": "text", "text": json.dumps(err)}]})
-            sx = self.exceptions
             if sx is not None and sx.on and isinstance(doc, dict):
-                question = (params.get("arguments") or {}).get("question")
-                checked = sx.inspect(doc, question if isinstance(question, str) else None)
-                report = checked["report"]
+                checked = sx.inspect(doc, question)
+                full = checked["report"]
+                # The refusal reads the full report: a blended question is
+                # refused every time it is asked, not only the first.
+                refused = bool(sx.mode == "strict" and full is not None and full.errors)
+                report = sx.novel(full, next(
+                    (v for k, v in ctx.items() if k.lower() == "x-p8-session-id"), None))
+                sx.record(q, doc, question=question, headers=ctx, report=full,
+                          judge_error=checked["error"], shown=sx.shows, refused=refused,
+                          shown_codes=sorted(report.codes) if (sx.shows and report) else [],
+                          latency_ms=ms())
+                if refused:
+                    report = full
+                if not sx.shows:
+                    return self._result(rid, {
+                        "content": [{"type": "text", "text": json.dumps(doc)}],
+                        "structuredContent": doc})
                 block = (report.to_dict() if report is not None
                          else {"raised": [], "receipt": {"ran": False, "error": checked["error"]}})
                 prompt = report.to_prompt(show=6) if report is not None else ""
-                if sx.mode == "strict" and report is not None and report.errors:
+                if refused:
                     # The rows are withheld, not lost: asking again as the
                     # exceptions say returns them.
                     return self._result(rid, {
@@ -341,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
                 if prompt:
                     content.append({"type": "text", "text": prompt})
                 return self._result(rid, {"content": content, "structuredContent": doc})
+            if sx is not None:
+                sx.record(q, doc, question=question, headers=ctx, latency_ms=ms())
             return self._result(rid, {
                 "content": [{"type": "text", "text": json.dumps(doc)}],
                 # The half a citation-extracting runtime reads (brief §5.3): the
