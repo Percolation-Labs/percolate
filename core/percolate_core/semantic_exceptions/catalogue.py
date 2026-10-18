@@ -429,7 +429,12 @@ MEASURED = {
     "PROCEDURAL": (0.90, True, 0.75),  # F1 0.60, 6 test positives, on
     "YES_NO_CLAIM": (0.95, True, 0.83),  # F1 0.88, 16 test positives, on
     "EXPLORATORY": (0.80, True, 0.86),  # F1 0.86, 7 test positives, on
-    "MISSING_REFERENT": (0.70, True, 0.86),  # F1 0.71, 10 test positives, on
+    # Raised from 0.70 on real traffic: it refused "Which letters never mention
+    # Arthur?" (0.80 with a thin store description) and "Check how TEXT matches
+    # terms" (0.70); true dangling references ("What did he decide after
+    # that?") sit at 0.96-0.97 under any description. On the eval 0.90 keeps
+    # precision 1.00 (0 false positives) and recall 0.45, against 0.87 / 0.65.
+    "MISSING_REFERENT": (0.90, True, 1.00),  # refusal: precision over recall
     "ALIAS": (0.90, True, 0.46),  # F1 0.60, 7 test positives, on
     "ROLE_NOT_NAME": (0.85, True, 0.50),  # F1 0.61, 5 test positives, on
     "TIME_UNSPECIFIED": (0.75, False, 0.38),  # F1 0.43, 6 test positives, off (out/v5m)
