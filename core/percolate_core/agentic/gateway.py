@@ -34,7 +34,7 @@ from .contracts import ChatRequest, InboundMessage, RequestContext
 from .db import connected
 from .runtime import EventSink, inbound_delegation
 from .runtime.budget import Budget
-from .runtime.delegation import TOOL_PREFIX
+from .runtime.delegation import AGENT_TOOL_INPUT, TOOL_PREFIX, agent_tool_description
 from .settings import Settings
 from .task_outcome import failure_is_terminal
 
@@ -128,26 +128,23 @@ def build_server(settings: Settings | None = None) -> Any:
     class AgentGateway(MCPServer):
         """The MCP surface of this runtime's own agents."""
 
-        async def list_tools(self) -> list[MCPTool]:
-            async with connected(resolved, None) as repo:
+        async def _handle_list_tools(self, ctx: Any, params: Any) -> Any:
+            # The listing is the CALLER's (REM-971). MCPServer.list_tools takes
+            # no request, so the request is read here, where call_tool already
+            # reads it, and the same verified token decides both.
+            from mcp.types import ListToolsResult
+
+            headers = getattr(getattr(ctx, "request", None), "headers", None) or {}
+            return ListToolsResult(tools=await self.list_tools(caller_claims(dict(headers))))
+
+        async def list_tools(self, claims: dict[str, Any] | None = None) -> list[MCPTool]:
+            async with connected(resolved, claims) as repo:
                 agents = await repo.list_agents()
             return [
                 MCPTool(
                     name=f"{TOOL_PREFIX}{agent.name}",
-                    description=(
-                        (agent.system_prompt.splitlines() or [""])[0]
-                        or f"Delegate a task to the {agent.name} agent."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "prompt": {
-                                "type": "string",
-                                "description": "What this agent should do.",
-                            }
-                        },
-                        "required": ["prompt"],
-                    },
+                    description=agent_tool_description(agent),
+                    input_schema=AGENT_TOOL_INPUT,
                 )
                 for agent in agents
             ]

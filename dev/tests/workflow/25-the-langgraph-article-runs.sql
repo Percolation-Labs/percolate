@@ -28,8 +28,8 @@
 -- never ran (REM-957's fifth reader); the live run parses each in `zsh -f -i -n` first. It takes each out, drops that prefix,
 -- and runs it as the reader would, in one shell whose variables and functions carry from block to block, with the
 -- SQL in one psql session. It changes only what this machine forces: the project and directory name, the ports in
--- the stack's .env (and the content and MinIO ports, taken here too), the image (a local 0.2.23 build until
--- percolationlabs/percolate-postgres:19-0.2.23 is published), and the model. dev/faultsrv
+-- the stack's .env (and the content and MinIO ports, taken here too), the image (P8_DB_IMAGE in .env, when a
+-- run tests a local build), and the model. dev/faultsrv
 -- joins the stack through COMPOSE_FILE, OPENAI_BASE_URL points the agents at it, and the agent rows script it,
 -- so every request is the reader's word for word.
 --
@@ -117,8 +117,6 @@ $$ language sql;
 -- mkdir langgraph-tour && cd langgraph-tour
 -- curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml \
 --   -o docker-compose.yml
--- sed -i.bak 's#percolationlabs/percolate-postgres:19-0.2.22#percolationlabs/percolate-postgres:19-0.2.23#' \
---   docker-compose.yml
 -- cat > .env <<'EOF'
 -- COMPOSE_PROJECT_NAME=langgraph-tour
 -- P8_PG_PORT=5432
@@ -149,14 +147,18 @@ $$ language sql;
 -- export TOKEN=$(percolate auth token --email me@example.com)
 --
 -- start() {
---   curl -s $REST/rpc/start_workflow \
+--   r=$(curl -s $REST/rpc/start_workflow \
 --     -H 'Content-Profile: workflow' -H "Authorization: Bearer $TOKEN" \
 --     -H 'Content-Type: application/json' \
---     -d "{\"p_name\": \"$1\", \"p_input\": $2}" | jq -r .
+--     -d "{\"p_name\": \"$1\", \"p_input\": $2}" | jq -r .)
+--   case $r in
+--     ????????-????-????-????-????????????) echo "$r" ;;
+--     *) echo "start $1 failed: $r" >&2; return 1 ;;
+--   esac
 -- }
 --
 -- show() {
---   for i in $(seq 30); do
+--   for i in $(seq 150); do
 --     [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$1'")" != running ] && break
 --     sleep 2
 --   done
@@ -328,10 +330,24 @@ select pg_temp.check((select count(*) from agentic.agent_versions_api where name
 -- The agents every workflow below names. The draft used them and never made them; define_yaml only warns.
 -- block: agents
 select (agentic.upsert_agent(jsonb_build_object(
-         'name', a, 'model', 'openai:gpt-4o-mini',
-         'system_prompt', 'You are the ' || replace(a, '_', ' ') || '. Answer briefly.'))).name
-from unnest(array['joker', 'writer', 'editor', 'planner', 'psc_report_extractor', 'classifier',
-                  'researcher', 'fraud_scorer', 'document_reviewer', 'assessor', 'critic']) a;
+         'name', name, 'model', 'openai:gpt-4o-mini', 'system_prompt', prompt))).name
+from (values
+  ('joker',      'Write one short joke on the topic you are given.'),
+  ('writer',     'Write what you are asked for, in under 150 words.'),
+  ('editor',     'Combine the pieces you are given into one short piece.'),
+  ('planner',    'List the sections a short report on the topic needs.'),
+  ('psc_report_extractor',
+                 'Read a port state control inspection note and list each deficiency it records, '
+                 'quoting the note, or say it records none. Add nothing the note does not say.'),
+  ('classifier', 'Classify a safety report as SAFETY, FINANCE or OTHER, with one sentence why.'),
+  ('researcher', 'Say what an inspector should check next, given the classification before you.'),
+  ('fraud_scorer', 'Score an insurance claim for fraud risk.'),
+  ('document_reviewer',
+                 'Given the documents a hull damage claim lists, say which ones such a claim '
+                 'usually also needs and whether any are missing. You cannot open the files.'),
+  ('assessor',   'From the fraud score, cover check and document review of a claim, recommend '
+                 'pay, investigate or refuse, with one reason.'),
+  ('critic',     'Grade a joke funny or not funny, with one line of feedback.')) a(name, prompt);
 -- /block
 
 select pg_temp.check((select count(*) from agentic.agents where name in ('joker', 'writer', 'assessor')) = 3,

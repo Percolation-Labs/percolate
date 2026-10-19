@@ -71,6 +71,9 @@ def run(serves_agents: bool, refused: bool):
             serves_agents=serves_agents,
             cached_tools=[CanonicalTool(name=TOOL, target=InvocationTarget(tool_name=TOOL))],
         ))
+        # The agent delegated to is a row the caller may read: a server that
+        # serves agents offers the caller's agents, not its cached list (REM-971).
+        await repo.upsert_agent(AgentSpec(name=TOOL.removeprefix("agent__")))
         await repo.upsert_agent(AgentSpec(name="harbourmaster",
                                           tools=[{"server": "p8-agents", "tools": [TOOL]}]))
         seen: list = []

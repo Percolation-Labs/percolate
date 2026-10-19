@@ -1,0 +1,50 @@
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+mem0-add         all            46    52%    83%        26%     0%
+mem0-add         current        14     7%    57%        50%     0%
+mem0-add         historical      8    12%    88%        62%     0%
+mem0-add         stable         12    92%   100%         0%     0%
+mem0-add         change          5    80%    80%         0%     0%
+mem0-add         scoped_agent    7   100%   100%         0%     0%
+
+mem0-expire      all            46    57%    89%        11%     0%
+mem0-expire      current        14    21%    79%         0%     0%
+mem0-expire      historical      8    12%    88%        62%     0%
+mem0-expire      stable         12    92%   100%         0%     0%
+mem0-expire      change          5    80%    80%         0%     0%
+mem0-expire      scoped_agent    7   100%   100%         0%     0%
+
+mem0-update      all            46    50%    65%        17%     0%
+mem0-update      current        14    21%    79%         0%     0%
+mem0-update      historical      8     0%     0%       100%     0%
+mem0-update      stable         12    92%   100%         0%     0%
+mem0-update      change          5    40%     0%         0%     0%
+mem0-update      scoped_agent    7   100%   100%         0%     0%
+
+orgless-search   all            46    52%    80%        28%     0%
+orgless-search   current        14    21%    57%        50%     0%
+orgless-search   historical      8    12%    88%        75%     0%
+orgless-search   stable         12    92%   100%         0%     0%
+orgless-search   change          5    80%    80%         0%     0%
+orgless-search   scoped_agent    7    71%    86%         0%     0%
+
+orgless-valid    all            46    76%    87%         0%     0%
+orgless-valid    current        14    57%    79%         0%     0%
+orgless-valid    historical      8    75%    88%         0%     0%
+orgless-valid    stable         12    92%   100%         0%     0%
+orgless-valid    change          5    80%    80%         0%     0%
+orgless-valid    scoped_agent    7    86%    86%         0%     0%
+
+percolate-search all            46    52%    80%        28%     0%
+percolate-search current        14    21%    57%        50%     0%
+percolate-search historical      8    12%    88%        75%     0%
+percolate-search stable         12    92%   100%         0%     0%
+percolate-search change          5    80%    80%         0%     0%
+percolate-search scoped_agent    7    71%    86%         0%     0%
+
+percolate-valid  all            46    76%    87%         0%     0%
+percolate-valid  current        14    57%    79%         0%     0%
+percolate-valid  historical      8    75%    88%         0%     0%
+percolate-valid  stable         12    92%   100%         0%     0%
+percolate-valid  change          5    80%    80%         0%     0%
+percolate-valid  scoped_agent    7    86%    86%         0%     0%
+
