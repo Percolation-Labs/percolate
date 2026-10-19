@@ -31108,6 +31108,20 @@ drop function if exists agentic.session_windows(uuid);
 drop function if exists agentic.session_windows(uuid, text);
 create or replace function agentic.session_windows(p_session uuid, p_run uuid default null)
 returns jsonb as $$
+begin
+    -- A SESSION THE CALLER CANNOT READ IS REFUSED BY NAME (REM-1021). It used to
+    -- filter to nothing, so reflect_session started by the wrong person -- the
+    -- tour's `start` helper signs as the admin, and Maya's conversation is
+    -- private to Maya -- read zero windows, wrote nothing and reported
+    -- `succeeded`; a Mem0 reader got an empty facts table and no error. One
+    -- message covers "no such session" and "someone else's", so the refusal
+    -- says nothing about a session the caller may not see.
+    if not (rbac.is_operator() or agentic.session_readable(p_session)) then
+        raise exception 'session % is not one the run''s owner can read: it does not exist, or it belongs to someone else', p_session
+            using errcode = 'insufficient_privilege',
+                  hint = 'start reflect_session as the person who had the conversation, with their token';
+    end if;
+    return (
     with speaker as (
         select coalesce(nullif(btrim((select r.input->>'speaker' from workflow.runs r where r.id = p_run)), ''),
                         'The person') as name
@@ -31122,10 +31136,9 @@ returns jsonb as $$
     from agentic.messages m
     where m.session_id = p_session
       and m.role = 'user'
-      and coalesce(btrim(m.content), '') <> ''
-      -- The session's read rule, as windows_to_index applies its resource's.
-      and (rbac.is_operator() or agentic.session_readable(p_session));
-$$ language sql stable security definer set search_path = pg_catalog, public;
+      and coalesce(btrim(m.content), '') <> '');
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
 revoke execute on function agentic.session_windows(uuid, uuid) from public;
 
 select workflow.register_step_function(
