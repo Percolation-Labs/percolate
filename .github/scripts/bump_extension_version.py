@@ -201,14 +201,21 @@ def main() -> None:
     # about which references are live: the ones used as paths. Matching
     # `^\s*(mountPath|subPath):` is the same predicate references.sh greps for,
     # which is what keeps the writer and the checker from drifting apart.
-    swapped, mounts = re.subn(
-        r"^(\s*(?:mountPath|subPath):.*?)percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
-        lambda m: f"{m.group(1)}percolate--{new}.sql", K8S_MANIFEST.read_text(), flags=re.M)
-    if mounts == 0:
-        fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no mountPath/subPath naming "
-             "percolate--<version>.sql -- the manifest changed shape and this bump "
-             "would leave it stale")
-    planned[K8S_MANIFEST] = swapped
+    #
+    # ONLY WHERE IT EXISTS. Percolation-Labs/percolate holds the extension and
+    # not the kind stack, which stays in p8-subsystems and follows the published
+    # image, so there is no manifest here to move. A manifest that is present
+    # but no longer matches still refuses, as before.
+    mounts = None
+    if K8S_MANIFEST.exists():
+        swapped, mounts = re.subn(
+            r"^(\s*(?:mountPath|subPath):.*?)percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
+            lambda m: f"{m.group(1)}percolate--{new}.sql", K8S_MANIFEST.read_text(), flags=re.M)
+        if mounts == 0:
+            fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no mountPath/subPath naming "
+                 "percolate--<version>.sql -- the manifest changed shape and this bump "
+                 "would leave it stale")
+        planned[K8S_MANIFEST] = swapped
     old_ref = f"extension/percolate/sql/percolate--{current}.sql"
     new_ref = f"extension/percolate/sql/percolate--{new}.sql"
     references = path_references(current)
@@ -224,7 +231,10 @@ def main() -> None:
     try:
         for path, text in planned.items():
             path.write_text(text)
-        print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {mounts} mount reference(s) -> {new}")
+        if mounts is None:
+            print(f"  {K8S_MANIFEST.relative_to(ROOT)}: not in this tree, nothing to move")
+        else:
+            print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {mounts} mount reference(s) -> {new}")
         for path in references:
             print(f"  {path.relative_to(ROOT)}: {old_ref} -> {new_ref}")
 

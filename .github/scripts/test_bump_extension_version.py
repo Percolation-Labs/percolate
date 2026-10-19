@@ -128,6 +128,18 @@ class Bump(unittest.TestCase):
         self.assertIn("nothing was changed", refused.stderr)
         self.assertEqual(self.status(), "")
 
+    def test_a_tree_without_the_kind_manifest_still_bumps(self):
+        # Percolation-Labs/percolate carries no k8s/: the kind stack stays in
+        # p8-subsystems. Every other reference still moves.
+        sh("git", "rm", "-q", "k8s/kind/manifests/postgres.yaml", cwd=self.root)
+        sh("git", "commit", "-qm", "no kind manifest", cwd=self.root)
+        done = self.bump()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("not in this tree", done.stdout)
+        read = lambda name: (self.root / name).read_text()
+        self.assertIn("default_version = '0.2.6'", read("extension/percolate/percolate.control"))
+        self.assertIn("percolate--0.2.6.sql", read("specs/tables/source/page.html"))
+
     def test_a_rule_that_no_longer_matches_refuses_before_writing(self):
         (self.root / "k8s/kind/manifests/postgres.yaml").write_text("volumeMounts: []\n")
         sh("git", "commit", "-qam", "manifest without a mount", cwd=self.root)
