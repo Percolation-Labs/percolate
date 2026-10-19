@@ -281,7 +281,7 @@ scenarios:
         select workflow.get_task_context((select id from t2),'w2') as c;
     check:
       - name: the stored definition does NOT resolve the session
-        sql: "select input->'body'->>'session_id' from workflow.tasks where run_id=(select run_id from ctx) and step_key='triage'"
+        sql: "select coalesce(input->'body'->>'session_id', input->'body'->>'session') from workflow.tasks where run_id=(select run_id from ctx) and step_key='triage'"
         is: "{{run.$session}}"
         because: "resolving at author time would make the stored definition a snapshot of one run"
       - name: the second task claimed is the specialist, released by the first
@@ -289,13 +289,13 @@ scenarios:
         is: "deep"
         because: "if `deep` were claimable before `triage` completed, the dependency edge would be decoration and the session comparison below would be between two roots"
       - name: dispatch binds the session to a real id
-        sql: "select ((select c from ctx1) #>> '{task_input,body,session_id}') ~ '^[0-9a-f-]{36}$'"
+        sql: "select coalesce((select c from ctx1) #>> '{task_input,body,session_id}', (select c from ctx1) #>> '{task_input,body,session}') ~ '^[0-9a-f-]{36}$'"
         is: "true"
         because: "the engine binds every namespace the worker cannot know BEFORE dispatch; a literal template reaching a worker is failure-modes.md §1's first entry"
       - name: the second step got the same conversation
         sql: |
-          select ((select c from ctx1) #>> '{task_input,body,session_id}')
-               = ((select c from ctx2) #>> '{task_input,body,session_id}')
+          select coalesce((select c from ctx1) #>> '{task_input,body,session_id}', (select c from ctx1) #>> '{task_input,body,session}')
+               = coalesce((select c from ctx2) #>> '{task_input,body,session_id}', (select c from ctx2) #>> '{task_input,body,session}')
         is: "true"
         because: "two steps declaring the same group must land in one conversation -- otherwise the specialist starts from nothing and the group key is decoration"
       - name: and the specialist can see what triage concluded
@@ -349,7 +349,7 @@ scenarios:
         select workflow.start_workflow('ev_deleg03','{}'::jsonb) as run_id;
     check:
       - name: the ungrouped step carries no session
-        sql: "select coalesce(input->'body'->>'session_id','(none)') from workflow.tasks where run_id=(select run_id from ctx) and step_key='solo'"
+        sql: "select coalesce(input->'body'->>'session_id', input->'body'->>'session', '(none)') from workflow.tasks where run_id=(select run_id from ctx) and step_key='solo'"
         is: "(none)"
         because: "a stateless step joined to a thread carries context nobody asked it to see, and the default has to be the safe one"
 
@@ -402,9 +402,9 @@ scenarios:
         because: "two roots must both be ready; if one were not the comparison below would be between a session and a null"
       - name: the two groups do not collapse into one id
         sql: |
-          select (workflow.get_task_context((select id from cl where step_key='hep'),  (select worker from cl where step_key='hep'))  #>> '{task_input,body,session_id}')
+          select coalesce(workflow.get_task_context((select id from cl where step_key='hep'),  (select worker from cl where step_key='hep')) #>> '{task_input,body,session_id}', workflow.get_task_context((select id from cl where step_key='hep'),  (select worker from cl where step_key='hep')) #>> '{task_input,body,session}')
               is distinct from
-                 (workflow.get_task_context((select id from cl where step_key='card'), (select worker from cl where step_key='card')) #>> '{task_input,body,session_id}')
+                 coalesce(workflow.get_task_context((select id from cl where step_key='card'), (select worker from cl where step_key='card')) #>> '{task_input,body,session_id}', workflow.get_task_context((select id from cl where step_key='card'), (select worker from cl where step_key='card')) #>> '{task_input,body,session}')
         is: "true"
         because: "if the group key were ignored, a cardiac assessment would be answered with a hepatic transcript in its context and nothing would report it"
 

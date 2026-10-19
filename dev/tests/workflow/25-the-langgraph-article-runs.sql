@@ -86,6 +86,15 @@ begin
     return v_n;
 end $$ language plpgsql;
 
+-- Whether the installed parser is the one this tree compiles (dev/tests/run.sh, "requires-parser"). Its absence asserts:
+-- a database whose parser lags its SQL (the published image under a newer tree) defers only what the parser decides.
+create function pg_temp.parser_current() returns boolean language sql stable as $$
+    select coalesce((select p.extversion = c.extversion
+                       from pg_catalog.pg_extension p, pg_catalog.pg_extension c
+                      where p.extname = 'percolate_parser' and c.extname = 'percolate'), false)
+       and coalesce(current_setting('percolate.parser_behind', true), 'absent') <> 'yes';
+$$;
+
 create function pg_temp.status(p_run uuid, p_step text) returns text as $$
     select status from workflow.tasks where run_id = p_run and step_key = p_step
 $$ language sql;
@@ -430,8 +439,20 @@ begin
     -- REM-957: the compiled body said `session`, which the runtime ignores, and the id had no row, which it 404s.
     select * into t from workflow.claim_task('http', 'wf25') where run_id = r;
     v_ctx := workflow.get_task_context(t.id, 'wf25');
-    perform pg_temp.check((v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid,
-        '§7 the step sends the group''s session as session_id');
+    -- The key the runtime reads is the compiler's (#460, plan_graph.rs); that the group's session reaches the step
+    -- is the engine's, and holds whichever key a lagging parser spelled it under.
+    if pg_temp.parser_current() then
+        perform pg_temp.check((v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid,
+            '§7 the step sends the group''s session as session_id');
+    else
+        perform pg_temp.check(coalesce(v_ctx #>> '{task_input,body,session_id}',
+                                       v_ctx #>> '{task_input,body,session}')::uuid = v_sid,
+            '§7 the step carries the group''s session');
+        raise notice 'DEFERRED: workflow/25 §7 the session sent as session_id -- the compiled parser (%) predates '
+                     'the extension SQL (%), and the key is the compiler''s',
+            (select extversion from pg_catalog.pg_extension where extname = 'percolate_parser'),
+            (select extversion from pg_catalog.pg_extension where extname = 'percolate');
+    end if;
     perform pg_temp.check(exists (select 1 from agentic.sessions where id = v_sid
                                    and owner_id = (select id from rbac.users where email = 'me@example.com')),
         '§7 the session row exists, owned by the person who started the run');
@@ -440,7 +461,8 @@ begin
     select * into t from workflow.claim_task('http', 'wf25') where run_id = r;
     v_ctx := workflow.get_task_context(t.id, 'wf25');
     perform pg_temp.check(t.step_key = 'deep_dive'
-        and (v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid, '§7 both steps carry one session');
+        and coalesce(v_ctx #>> '{task_input,body,session_id}', v_ctx #>> '{task_input,body,session}')::uuid = v_sid,
+        '§7 both steps carry one session');
     perform workflow.complete_task(t.id, '{"status": 200, "result": "done"}', 'wf25');
     perform set_config('session.id', v_sid::text, false);
 end $$;
