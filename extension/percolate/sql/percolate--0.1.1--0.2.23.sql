@@ -35891,9 +35891,17 @@ alter table claims.origin_links enable row level security;
 drop policy if exists origin_links_readable on claims.origin_links;
 create policy origin_links_readable on claims.origin_links for select using (research.revision_readable(evidence));
 alter table claims.origins enable row level security;
+-- The policy asks a function, not an inline exists. Inline, the planner may hash the subquery: on statistics that
+-- say cites is tiny it computed every readable citation, research.revision_readable on each row, to answer for one
+-- origin, so claims.study_of grew with every unrelated package after an ANALYZE (REM-1003). A function with SET is
+-- never inlined, so each origin asks only about its own citations, through cites_origin.
+create or replace function claims.origin_readable(p_origin uuid) returns boolean
+language sql stable security invoker cost 1000 set search_path = pg_catalog, public as $$
+    select exists (select 1 from claims.cites c where c.origin_id = p_origin);
+$$;
 drop policy if exists origins_readable on claims.origins;
-create policy origins_readable on claims.origins for select
-    using (exists (select 1 from claims.cites c where c.origin_id = origins.id));
+create policy origins_readable on claims.origins for select using (claims.origin_readable(id));
+grant execute on function claims.origin_readable(uuid) to authenticated;
 grant select on claims.origins, claims.cites, claims.origin_links to authenticated;
 revoke all on function claims.origin_for(text, text, bigint), claims.project_cites(uuid) from public;
 
@@ -36241,16 +36249,22 @@ alter table claims.erasures enable row level security;
 --     anybody else sees a transaction's id, time and actor kind when a link or relation they may read names it, and
 --     never its actor, credential or reason.
 -- ------------------------------------------------------------
+-- A function for the same reason as claims.origin_readable (REM-1003): the indexes below stop the planner hashing
+-- these tables only while it believes they are large. After an ANALYZE of a small graph it hashed them again.
+create or replace function claims.tx_named_by_readable(p_tx bigint) returns boolean
+language sql stable security invoker cost 1000 set search_path = pg_catalog, public as $$
+    select exists (select 1 from claims.expresses e where e.tx = p_tx)
+        or exists (select 1 from claims.relations r where r.tx = p_tx)
+        or exists (select 1 from claims.answered a where a.tx = p_tx)
+        or exists (select 1 from claims.cites c where c.tx = p_tx)
+        or exists (select 1 from claims.origin_links l where l.tx = p_tx)
+        or exists (select 1 from claims.resolutions r where r.tx = p_tx)
+        or exists (select 1 from claims.consensus c where c.tx = p_tx);
+$$;
 drop policy if exists tx_readable on claims.tx;
 create policy tx_readable on claims.tx for select using (
-    actor_id = rbac.current_user_id()
-    or exists (select 1 from claims.expresses e where e.tx = tx.id)
-    or exists (select 1 from claims.relations r where r.tx = tx.id)
-    or exists (select 1 from claims.answered a where a.tx = tx.id)
-    or exists (select 1 from claims.cites c where c.tx = tx.id)
-    or exists (select 1 from claims.origin_links l where l.tx = tx.id)
-    or exists (select 1 from claims.resolutions r where r.tx = tx.id)
-    or exists (select 1 from claims.consensus c where c.tx = tx.id));
+    actor_id = rbac.current_user_id() or claims.tx_named_by_readable(id));
+grant execute on function claims.tx_named_by_readable(bigint) to authenticated;
 grant select (id, at, actor_kind) on claims.tx to authenticated;
 -- Each exists above finds the rows naming one transaction. Without these the planner hashed every table whole, so
 -- one tx read ran research.revision_readable on every row in the graph: a claim page took 3.3 s on production with
@@ -36691,6 +36705,25 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      where h.rev is not null;
 $$;
 
+-- The confirmed-or-not link rows that touch any of p_origins, among those the caller may read: exactly what
+-- origin_links_readable admits, fetched by origin first and checked second. Under row security the planner put the
+-- policy's research.revision_readable ahead of the endpoint test on a sequential scan, so on the statistics of a
+-- small graph every link in it was checked to find the one or two incident to an origin (REM-1003). A definer reads
+-- the incident rows through origin_links_a/_b and applies the policy's own test to those rows only.
+create or replace function claims.readable_links_of(p_origins uuid[], p_revisions uuid[])
+returns setof claims.origin_links
+language sql stable security definer cost 1000 rows 10 set search_path = pg_catalog, public as $$
+    with incident as materialized (
+        select l.* from claims.origin_links l where l.a = any(p_origins)
+        union
+        select l.* from claims.origin_links l where l.b = any(p_origins))
+    select i.* from incident i
+     where (p_revisions is null or i.evidence = any(p_revisions))
+       and research.revision_readable(i.evidence);
+$$;
+revoke all on function claims.readable_links_of(uuid[], uuid[]) from public;
+grant execute on function claims.readable_links_of(uuid[], uuid[]) to authenticated;
+
 -- The study an origin names, as one representative origin (graph.md §3, REM-477). A DOI or an address is strong
 -- identity, and two strong keys joined by a link name one study, because a link is only ever asserted from one
 -- source carrying both. A title is weak: two different documents can carry one title ("Our theory manuscript"
@@ -36716,9 +36749,7 @@ begin
         -- Materialize the RLS-filtered candidates before joining tx, whose own RLS checks assertion access.
         loop
             with candidates as materialized (
-                select l.* from claims.origin_links l
-                 where (l.a = any(frontier) or l.b = any(frontier))
-                   and (p_revisions is null or l.evidence = any(p_revisions))),
+                select l.* from claims.readable_links_of(frontier, p_revisions) l),
             latest as (
                 select distinct on (l.a,l.b,l.evidence,l.source_key) l.*
                   from candidates l cross join lateral
@@ -36737,8 +36768,7 @@ begin
         return (select min(o::text)::uuid from unnest(seen) o);
     end if;
     with candidates as materialized (
-        select l.* from claims.origin_links l where (l.a=p_origin or l.b=p_origin)
-          and (p_revisions is null or l.evidence=any(p_revisions))),
+        select l.* from claims.readable_links_of(array[p_origin], p_revisions) l),
     latest as (
         select distinct on (l.a,l.b,l.evidence,l.source_key) l.*
           from candidates l cross join lateral
