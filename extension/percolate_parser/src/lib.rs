@@ -744,7 +744,8 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             "queue": "which worker pool claims it; in-database kinds ignore it",
             "rate_key": "a shared throttle this task consumes before being claimed -- workflow.queue_config holds the rate; two steps naming the same key share one budget",
             "compensate_with": "step id to run in reverse order if a saga member fails",
-            "saga_group": "groups tasks compensated together"
+            "saga_group": "groups tasks compensated together",
+            "when": "a SQL predicate over {{run.x}} and earlier results ({{steps.<id>.result...}}, each a bound value; a step it names must be in needs). Asked once, when the step's needs are done: false or null marks the step skipped, which counts as done for the steps after it, so a step after a skipped one runs unless it has a when of its own"
         },
         "actions": [
             {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
@@ -1227,6 +1228,15 @@ struct WfStep {
     compensate_with: Option<String>,
     #[serde(default)]
     saga_group: Option<String>,
+
+    // A conditional step (REM-967): a SQL predicate over the run's input and
+    // earlier results, carried as written. The engine asks it once, when the
+    // step's needs are done; false or null marks the step `skipped`, which
+    // counts as done for the steps after it. Its {{templates}} bind like a
+    // `sql:` statement's, and lint_spec holds it to the same rule: a step it
+    // names must be in `needs`.
+    #[serde(default)]
+    when: Option<String>,
 }
 
 // `sql:` HAS TWO SPELLINGS AND THE SHORT ONE IS THE DEFAULT.
@@ -2042,6 +2052,14 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
         if s.saga_group.is_some() || s.compensate_with.is_some() {
             step["saga_group"] = serde_json::json!(
                 s.saga_group.clone().unwrap_or_else(|| "default".into()));
+        }
+        if let Some(w) = &s.when {
+            if w.trim().is_empty() {
+                return Err(format!(
+                    "step '{}' declares an empty when:. Write the condition it runs under, \
+                     or leave the key out to run it always.", s.id));
+            }
+            step["when"] = serde_json::json!(w);
         }
         steps.push(step);
     }
