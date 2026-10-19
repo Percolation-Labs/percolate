@@ -15953,7 +15953,7 @@ create table if not exists aiq.node_resolutions (
     -- meta/spikes/2026-09-30-jev-decisions.
     tier         text not null
                      check (tier in ('registry','crosswalk','embedding','llm',
-                                     'decision_model','human')),
+                                     'decision_model','agent','human')),
     -- The matched key, the score, the agent run. `moved_keys` under this is
     -- written by aiq.resolve_nodes and read by aiq.unresolve_node: reversing a
     -- merge needs to know which key rows moved, and re-deriving them later is
@@ -15975,7 +15975,7 @@ comment on table aiq.node_resolutions is
 -- list arrives by replacing the constraint, not through the create above.
 alter table aiq.node_resolutions drop constraint if exists node_resolutions_tier_check;
 alter table aiq.node_resolutions add constraint node_resolutions_tier_check
-    check (tier in ('registry','crosswalk','embedding','llm','decision_model','human'));
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','agent','human'));
 
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
@@ -16014,7 +16014,7 @@ create table if not exists aiq.node_distinctions (
     b_id        uuid not null,
     tier        text not null
                     check (tier in ('registry','crosswalk','embedding','llm',
-                                    'decision_model','human')),
+                                    'decision_model','agent','human')),
     evidence    jsonb not null default '{}',
     decided_by  text not null check (length(btrim(decided_by)) > 0),
     undone_at   timestamptz,
@@ -16027,6 +16027,13 @@ create table if not exists aiq.node_distinctions (
 );
 comment on table aiq.node_distinctions is
     'A decision that two nodes are different things, with the evidence, who decided, and whether it was undone.';
+-- 'agent' (REM-1055): the person's own connected AI deciding through
+-- aiq.complete_judgement, a different kind of assertion from a configured
+-- model ('llm') and from the person ('human'). Replaced, not created, for
+-- node_resolutions' replay reason.
+alter table aiq.node_distinctions drop constraint if exists node_distinctions_tier_check;
+alter table aiq.node_distinctions add constraint node_distinctions_tier_check
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','agent','human'));
 create unique index if not exists idx_node_distinctions_live
     on aiq.node_distinctions (a_id, b_id) where undone_at is null;
 create index if not exists idx_node_distinctions_b
@@ -29280,6 +29287,8 @@ declare
     v_promoted   int := 0;
     v_refused    int := 0;
     v_left       int := 0;
+    v_left_ids   uuid[] := '{}';
+    v_queued     int := 0;
     r            record;
     v_receipt    jsonb;
 begin
@@ -29336,20 +29345,438 @@ begin
             end;
         else
             v_left := v_left + 1;
+            v_left_ids := v_left_ids || r.soft_id;
         end if;
     end loop;
+
+    -- 3. What no rule decided waits for a judge (REM-1055), once per case.
+    v_queued := aiq.enqueue_soft_judgements(v_left_ids, p_decided_by);
 
     v_receipt := jsonb_build_object(
         'since', v_since, 'until', v_until,
         'superseded', v_superseded,
         'promoted_exact', v_promoted,
         'promotion_refused', v_refused,
-        'soft_left_for_a_judge', v_left);
+        'soft_left_for_a_judge', v_left,
+        'queued_for_a_judge', v_queued);
     insert into aiq.dream_runs (since, until, decided_by, receipt)
     values (v_since, v_until, p_decided_by, v_receipt);
     return v_receipt;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- JUDGEMENTS: what dream leaves, waiting for a judge (REM-1055).
+--
+-- dream decides only what is known by construction. Every other case -- a soft
+-- node with no exact target, or with several -- used to be a count in its
+-- receipt and then a person's job: the Zep tutorial piped a shell call to a
+-- model into aiq.promote_soft_node. Percolate runs on the person's own AI, so
+-- the case waits HERE, the way a review request waits for a connected agent,
+-- and nothing decides it until a judge does. A configured model is a judge
+-- behind the same calls (tier 'llm' or 'decision_model'), not a default.
+--
+-- `evidence` is what a judge needs that it could not otherwise ask for: the
+-- name, the kind it claimed, and up to five candidates a trigram match
+-- proposes, each with its key and summary. It does NOT carry what was said
+-- about the subject: a fact is gated by the memory it came from (§10a), so the
+-- judge reads the subject with aiq.query, as itself.
+--
+-- THE JUDGE ACTS AS ITSELF, UNDER ROW POLICY. The four calls below are SECURITY
+-- INVOKER (query/06: nothing a person reaches in aiq runs past their policies).
+-- A judge sees an item when it can see the item's subject node, so a private
+-- memory's candidate stays its owner's. It may UPDATE the row, and a BEFORE
+-- trigger allows only the moves a judge has: claim, release, decide or pass to
+-- a person, each by the live claimant. Applying a decision -- promoting the
+-- soft node, recording a distinction -- is the engine's write path, so an AFTER
+-- trigger does it as the owner. Nobody can call that trigger; the guard is what
+-- stands between a caller and it.
+--
+-- NOT A `hire:` QUEUE YET, and why (hired-steps.md §7 asks). A hired step is
+-- a workflow task claimed through claim_task under the run starter's grant, and
+-- that is the mechanism this should converge on. Two things stop it today:
+-- claim_task is the worker's alone (REM-1060 is the change that lets a caller
+-- claim as itself), and who may see a judgement is decided by its SUBJECT,
+-- while a hired step is scoped to the run's starter, which for dream is the
+-- engine. When REM-1060 lands, this becomes a `hire:judge` queue whose claim
+-- predicate is this table's row policy, and these four calls keep their names.
+--
+-- kind: 'bind' (a soft node to a typed one) is the only one dream queues today;
+-- 'merge' (two typed nodes) and 'withdraw' (a fact to retract) are declared so a
+-- client renders them when a rule starts leaving them.
+create table if not exists aiq.judgements (
+    id              uuid primary key default uuidv7(),
+    kind            text not null check (kind in ('bind','merge','withdraw')),
+    -- The soft node's registry node, for a bind. No foreign key: promotion
+    -- evicts that node, and the decided row is the record of why.
+    subject_node_id uuid not null,
+    evidence        jsonb not null default '{}'::jsonb,
+    status          text not null default 'open'
+                        check (status in ('open','claimed','to_human','decided','moot')),
+    queued_by       text not null,
+    queued_at       timestamptz not null default now(),
+    claimed_by      uuid,
+    -- What the item goes back to on release: open, or to_human.
+    claimed_from    text,
+    lease_until     timestamptz,
+    verdict         jsonb,
+    reason          text,
+    decided_by      text,
+    tier            text check (tier in ('llm','decision_model','agent','human')),
+    decided_at      timestamptz,
+    -- The resolution and distinction ids the verdict wrote, so it can be undone
+    -- by name (aiq.unresolve_node, aiq.undo_distinct).
+    result          jsonb,
+    org_id          uuid
+);
+comment on table aiq.judgements is
+    'A case a rule could not decide, waiting for a judge: the connected agent, a configured model or a person. Its verdict, reason, decider and tier, and what it wrote.';
+select rbac.adopt_shared_org('aiq.judgements');
+create unique index if not exists idx_judgements_live
+    on aiq.judgements (kind, subject_node_id) where status in ('open','claimed','to_human');
+create index if not exists idx_judgements_queue on aiq.judgements (status, queued_at);
+
+alter table aiq.judgements enable row level security;
+-- Seen through the subject, or -- once a bind is decided and promotion has
+-- evicted the subject -- through the node it was bound to. As the caller: the
+-- subqueries read aiq.nodes under the caller's own policy.
+drop policy if exists judgements_via_subject on aiq.judgements;
+create policy judgements_via_subject on aiq.judgements for select
+  using (exists (select 1 from aiq.nodes n where n.id = aiq.judgements.subject_node_id)
+      or (aiq.judgements.verdict->>'decision' = 'bind'
+          and exists (select 1 from aiq.nodes n
+                       where n.id::text = aiq.judgements.verdict->>'target')));
+drop policy if exists judgements_judge_moves on aiq.judgements;
+create policy judgements_judge_moves on aiq.judgements for update
+  using (exists (select 1 from aiq.nodes n where n.id = aiq.judgements.subject_node_id));
+revoke all on aiq.judgements from public, authenticated, api_viewer;
+grant select on aiq.judgements to authenticated;
+grant update (status, claimed_by, claimed_from, lease_until, verdict, reason, decided_by, tier, decided_at)
+    on aiq.judgements to authenticated;
+
+-- A bind's evidence: the soft node and up to five candidates of the kind it
+-- claimed, in its org or the shared one, not already decided distinct.
+create or replace function aiq.soft_bind_evidence(p_soft_id uuid)
+returns jsonb language sql stable set search_path = pg_catalog, public as $$
+    select jsonb_build_object(
+        'soft_id', s.id, 'key', s.key, 'label', s.label,
+        'claimed_kind', s.claimed_kind, 'attrs', s.attrs,
+        'candidates', coalesce((
+            select jsonb_agg(jsonb_build_object('node_id', c.node_id, 'key', c.key,
+                                                'entity_type', c.entity_type, 'summary', c.summary,
+                                                'sim', round(c.sim::numeric, 3))
+                             order by c.sim desc)
+              from (select * from (
+                      select distinct on (m.node_id) m.* from (
+                          select n.id as node_id, k.key, n.entity_type, n.summary,
+                                 similarity(k.key, s.key) as sim
+                            from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+                           where k.key % s.key and n.entity_type = s.claimed_kind
+                             and n.org_id in (rbac.shared_org_id(), s.org_id)
+                          union all
+                          select n.id, null, n.entity_type, n.summary, similarity(lower(n.summary), s.key)
+                            from aiq.nodes n
+                           where lower(n.summary) % s.key and n.entity_type = s.claimed_kind
+                             and n.org_id in (rbac.shared_org_id(), s.org_id)) m
+                       where not aiq.decided_distinct(sn.id, m.node_id)
+                       order by m.node_id, m.sim desc) best
+                     order by best.sim desc limit 5) c), '[]'::jsonb))
+      from aiq.soft_nodes s
+      join aiq.nodes sn on sn.entity_type = 'soft' and sn.entity_id = s.id
+     where s.id = p_soft_id;
+$$;
+
+-- Queue a bind for each soft node given, unless one is already live; mark moot
+-- a bind whose soft node resolved some other way. Returns how many were added.
+-- dream is the one caller (freddie, 19 Oct: knit fires loud, dream reconciles
+-- -- a landing must not queue what a rule would settle).
+create or replace function aiq.enqueue_soft_judgements(p_soft_ids uuid[], p_queued_by text)
+returns int language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_n int;
+begin
+    with ins as (
+        insert into aiq.judgements (kind, subject_node_id, evidence, queued_by, org_id)
+        select 'bind', sn.id, aiq.soft_bind_evidence(s.id), p_queued_by,
+               coalesce(s.org_id, rbac.shared_org_id())
+          from aiq.soft_nodes s
+          join aiq.nodes sn on sn.entity_type = 'soft' and sn.entity_id = s.id
+         where s.id = any(p_soft_ids) and s.resolved_node_id is null
+        on conflict (kind, subject_node_id) where status in ('open','claimed','to_human') do nothing
+        returning 1)
+    select count(*) into v_n from ins;
+    update aiq.judgements j set status = 'moot', claimed_by = null, lease_until = null
+     where j.kind = 'bind' and j.status in ('open','claimed','to_human')
+       and not exists (select 1 from aiq.nodes n where n.id = j.subject_node_id and n.entity_type = 'soft');
+    return v_n;
+end;
+$$;
+
+-- THE GUARD: the moves a judge may make by UPDATE, and nothing else. Runs as
+-- the caller, so "the target is a candidate you can see" is the caller's own
+-- policy answering. The engine (any role but authenticated) is not guarded:
+-- dream and the apply trigger below write as the owner.
+--
+-- Leases are clock time, not transaction time: now() stands still for a whole
+-- transaction, so a lease measured by it could not lapse inside one.
+create or replace function aiq.judgements_guard()
+returns trigger language plpgsql set search_path = pg_catalog, public as $$
+declare
+    v_uid uuid := rbac.current_user_id(); v_live boolean; v_dec text;
+begin
+    if current_user <> 'authenticated' then
+        return new;
+    end if;
+    if v_uid is null then
+        raise exception 'a judgement is decided by somebody: no signed-in caller';
+    end if;
+    if new.id <> old.id or new.kind <> old.kind or new.subject_node_id <> old.subject_node_id
+       or new.evidence <> old.evidence or new.queued_by <> old.queued_by
+       or new.queued_at <> old.queued_at or new.result is distinct from old.result
+       or new.org_id <> old.org_id then
+        raise exception 'a judge changes only a judgement''s claim and verdict';
+    end if;
+    v_live := old.status = 'claimed' and old.claimed_by = v_uid and old.lease_until > clock_timestamp();
+
+    if new.status = 'claimed' then
+        -- Take: an open item, one whose lease lapsed, or (by id, see
+        -- claim_judgement) one passed to a person.
+        if not (old.status in ('open','to_human')
+                or (old.status = 'claimed' and old.lease_until <= clock_timestamp())
+                or v_live) then
+            raise exception 'judgement % is held by someone else', old.id;
+        end if;
+        if new.claimed_by is distinct from v_uid
+           or new.lease_until is null or new.lease_until <= clock_timestamp()
+           or new.lease_until > clock_timestamp() + interval '1 hour'
+           or new.verdict is distinct from old.verdict or new.decided_at is distinct from old.decided_at then
+            raise exception 'a claim is yours, for up to an hour, and decides nothing';
+        end if;
+        return new;
+    end if;
+
+    if not v_live then
+        raise exception 'you do not hold a live claim on judgement %', old.id
+            using hint = 'aiq.claim_judgement(p_id => ...) first; a lapsed lease must be claimed again';
+    end if;
+
+    if new.status in ('open','to_human') and new.verdict is null then
+        -- Release, or pass to a person: the claim ends and nothing is decided.
+        if new.claimed_by is not null or new.lease_until is not null or new.decided_at is not null then
+            raise exception 'a release ends the claim and records nothing';
+        end if;
+        return new;
+    end if;
+
+    if new.status <> 'decided' then
+        raise exception 'a judge moves a judgement to claimed, open, to_human or decided, not %', new.status;
+    end if;
+    v_dec := new.verdict->>'decision';
+    if v_dec is null or v_dec not in ('bind','distinct','none') then
+        raise exception 'decision must be bind, distinct or none, not %', coalesce(v_dec, 'missing');
+    end if;
+    if coalesce(btrim(new.reason), '') = '' then
+        raise exception 'a judgement needs a reason: it is the record a later reader checks the verdict against';
+    end if;
+    if new.tier is null then
+        raise exception 'a judgement needs a tier: agent, human, llm or decision_model';
+    end if;
+    if v_dec = 'bind' and not exists (
+            select 1 from jsonb_array_elements(old.evidence->'candidates') c
+              join aiq.nodes n on n.id::text = c->>'node_id'
+             where c->>'node_id' = new.verdict->>'target') then
+        raise exception 'a bind names one of the candidates you can see as target; % is not one',
+            coalesce(new.verdict->>'target', 'missing')
+            using hint = 'if it is something else, decide none and say what';
+    end if;
+    -- Who decided is the caller, whatever the row says.
+    new.decided_by := case new.tier when 'human' then 'user:' else new.tier || ':' end || v_uid;
+    new.decided_at := clock_timestamp();
+    new.claimed_by := null; new.claimed_from := null; new.lease_until := null;
+    return new;
+end;
+$$;
+create or replace trigger judgements_guard before update on aiq.judgements
+    for each row execute function aiq.judgements_guard();
+
+-- THE APPLY: a decided verdict, carried out by the engine's own write path and
+-- recorded on the row. Distinct is recorded against every candidate the
+-- decider could see when deciding.
+create or replace function aiq.judgements_apply()
+returns trigger language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_ev jsonb := jsonb_build_object('judgement', new.id, 'reason', new.reason);
+    v_res uuid[] := '{}'; v_dist uuid[] := '{}'; v_c jsonb;
+begin
+    if new.verdict->>'decision' = 'bind' then
+        perform aiq.promote_soft_node((new.evidence->>'soft_id')::uuid, (new.verdict->>'target')::uuid,
+                                      new.decided_by, new.tier, v_ev);
+        select coalesce(array_agg(r.id), '{}') into v_res from aiq.node_resolutions r
+         where r.merged_id = new.subject_node_id and r.canonical_id = (new.verdict->>'target')::uuid
+           and r.undone_at is null;
+    elsif new.verdict->>'decision' = 'distinct' then
+        for v_c in select * from jsonb_array_elements(coalesce(new.verdict->'seen', '[]'::jsonb)) loop
+            v_dist := v_dist || aiq.record_distinct(new.subject_node_id, (v_c #>> '{}')::uuid,
+                                                    new.decided_by, new.tier, v_ev);
+        end loop;
+    end if;
+    update aiq.judgements
+       set result = jsonb_build_object('resolution_ids', to_jsonb(v_res), 'distinction_ids', to_jsonb(v_dist))
+     where id = new.id;
+    return null;
+end;
+$$;
+create or replace trigger judgements_apply after update on aiq.judgements
+    for each row when (new.status = 'decided' and old.status is distinct from 'decided')
+    execute function aiq.judgements_apply();
+
+-- What the claimant may see of an item: the candidates it can see, and how to
+-- decide it in words an agent passes through.
+create or replace function aiq.judgement_for_judge(p_id uuid)
+returns jsonb language plpgsql stable set search_path = pg_catalog, public as $$
+declare j aiq.judgements; v_ev jsonb; v_ids text;
+begin
+    select * into j from aiq.judgements where id = p_id;
+    v_ev := j.evidence || jsonb_build_object('candidates', coalesce(
+        (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
+          where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
+    select string_agg(c->>'node_id' || ' (' || coalesce(c->>'key', c->>'summary') || ')', ', ')
+      into v_ids from jsonb_array_elements(v_ev->'candidates') c;
+    return jsonb_build_object(
+        'id', j.id, 'kind', j.kind, 'status', j.status, 'lease_until', j.lease_until,
+        'evidence', v_ev,
+        'how_to_decide', format(
+            'Decide whether %L, named as a %s, is the same thing as one of the candidates. '
+            'Read what was said about it first, as yourself: aiq.query(''LOOKUP "%s"'') or GRAPH. '
+            'Then call aiq.complete_judgement(%L, verdict, reason) with verdict one of: '
+            '{"decision":"bind","target":"<node_id>"} where target is one of %s; '
+            '{"decision":"distinct"} if it is none of them (recorded against each, so it is not asked again); '
+            '{"decision":"none"} to leave it unresolved and say why; '
+            '{"decision":"human"} to pass it to a person. '
+            'Not sure: aiq.release_judgement(%L) gives it back with nothing recorded. Your claim ends at %s.',
+            coalesce(v_ev->>'label', v_ev->>'key'), v_ev->>'claimed_kind', v_ev->>'key', j.id,
+            coalesce(v_ids, 'none (no candidate: distinct does nothing, so use none or human)'),
+            j.id, j.lease_until));
+end;
+$$;
+
+-- Take one item. Your own live claim comes back first, so a retry after a lost
+-- response is the same item. An open item, or one whose lease lapsed, is taken
+-- SKIP LOCKED; a to_human item only by id, since it was passed to a person.
+create or replace function aiq.claim_judgement(p_kinds text[] default null, p_id uuid default null,
+                                               p_lease interval default '10 minutes')
+returns jsonb language plpgsql set search_path = pg_catalog, public as $$
+declare v_uid uuid := rbac.current_user_id(); v_id uuid;
+begin
+    if v_uid is null then
+        raise exception 'claim_judgement needs a signed-in caller: a judgement is decided by somebody';
+    end if;
+    if p_lease is null or p_lease <= interval '0' or p_lease > interval '1 hour' then
+        raise exception 'p_lease must be between 0 and 1 hour, not %', p_lease;
+    end if;
+    select id into v_id from aiq.judgements
+     where status = 'claimed' and claimed_by = v_uid and lease_until > clock_timestamp()
+       and (p_id is null or id = p_id) and (p_kinds is null or kind = any(p_kinds))
+     order by queued_at limit 1;
+    if v_id is null then
+        select id into v_id from aiq.judgements
+         where (status = 'open' or (status = 'claimed' and lease_until <= clock_timestamp())
+                or (status = 'to_human' and p_id is not null))
+           and (p_id is null or id = p_id) and (p_kinds is null or kind = any(p_kinds))
+         order by queued_at
+         for update skip locked limit 1;
+        if v_id is null then
+            if p_id is not null then
+                raise exception 'judgement % is not open to you: it does not exist, you cannot see it, or someone holds it', p_id;
+            end if;
+            return jsonb_build_object('empty', true);
+        end if;
+        update aiq.judgements
+           set claimed_from = case when status = 'claimed' then coalesce(claimed_from, 'open') else status end,
+               status = 'claimed', claimed_by = v_uid, lease_until = clock_timestamp() + p_lease
+         where id = v_id;
+    end if;
+    return aiq.judgement_for_judge(v_id);
+end;
+$$;
+
+create or replace function aiq.release_judgement(p_id uuid)
+returns jsonb language plpgsql set search_path = pg_catalog, public as $$
+declare v_status text;
+begin
+    update aiq.judgements
+       set status = coalesce(claimed_from, 'open'), claimed_by = null, claimed_from = null, lease_until = null
+     where id = p_id and status = 'claimed' and claimed_by = rbac.current_user_id()
+    returning status into v_status;
+    if not found then
+        raise exception 'you hold no claim on judgement %', p_id;
+    end if;
+    return jsonb_build_object('id', p_id, 'status', v_status);
+end;
+$$;
+
+-- Decide an item you hold. The same verdict again is idempotent; a different
+-- one after the decision is refused -- undo by the ids in `result` and judge
+-- again. The guard trigger checks the claim, the lease and the verdict; the
+-- apply trigger carries it out.
+create or replace function aiq.complete_judgement(p_id uuid, p_verdict jsonb, p_reason text,
+                                                  p_tier text default 'agent')
+returns jsonb language plpgsql set search_path = pg_catalog, public as $$
+declare j aiq.judgements; v_verdict jsonb := p_verdict;
+begin
+    select * into j from aiq.judgements where id = p_id;
+    if not found then
+        raise exception 'no judgement % you can see', p_id;
+    end if;
+    if j.status = 'decided' then
+        if j.verdict - 'seen' = p_verdict then
+            return jsonb_build_object('id', j.id, 'status', j.status, 'verdict', j.verdict,
+                                      'decided_by', j.decided_by, 'tier', j.tier, 'already', true) || j.result;
+        end if;
+        raise exception 'judgement % was already decided (%), by %', p_id, j.verdict, j.decided_by
+            using hint = 'undo what it wrote (result: resolution_ids, distinction_ids) and queue it again';
+    end if;
+    if p_tier is null or p_tier not in ('agent','human','llm','decision_model') then
+        raise exception 'p_tier must be agent, human, llm or decision_model, not %', coalesce(p_tier, 'missing');
+    end if;
+    if p_verdict->>'decision' = 'human' then
+        if p_tier = 'human' then
+            raise exception 'a person deciding uses bind, distinct or none';
+        end if;
+        update aiq.judgements
+           set status = 'to_human', claimed_by = null, claimed_from = null, lease_until = null
+         where id = p_id;
+        return jsonb_build_object('id', p_id, 'status', 'to_human');
+    end if;
+    -- Distinct is recorded against the candidates the decider can see now.
+    if p_verdict->>'decision' = 'distinct' then
+        v_verdict := p_verdict || jsonb_build_object('seen', coalesce(
+            (select jsonb_agg(c->'node_id') from jsonb_array_elements(j.evidence->'candidates') c
+              where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
+    end if;
+    update aiq.judgements
+       set status = 'decided', verdict = v_verdict, reason = p_reason, tier = p_tier
+     where id = p_id;
+    select * into j from aiq.judgements where id = p_id;
+    return jsonb_build_object('id', j.id, 'status', j.status, 'verdict', j.verdict,
+                              'decided_by', j.decided_by, 'tier', j.tier) || coalesce(j.result, '{}'::jsonb);
+end;
+$$;
+
+-- What waits, or what was decided, among the items the caller can see.
+create or replace function aiq.list_judgements(p_status text default 'open', p_limit int default 50)
+returns jsonb language sql stable set search_path = pg_catalog, public as $$
+    select coalesce(jsonb_agg(x order by x->>'queued_at'), '[]'::jsonb) from (
+        select jsonb_build_object('id', j.id, 'kind', j.kind, 'status', j.status,
+                                  'label', coalesce(j.evidence->>'label', j.evidence->>'key'),
+                                  'claimed_kind', j.evidence->>'claimed_kind',
+                                  'candidates', jsonb_array_length(coalesce(j.evidence->'candidates', '[]'::jsonb)),
+                                  'queued_at', j.queued_at, 'verdict', j.verdict, 'reason', j.reason,
+                                  'decided_by', j.decided_by, 'tier', j.tier, 'decided_at', j.decided_at) as x
+          from aiq.judgements j
+         where j.status = coalesce(p_status, j.status)
+         order by j.queued_at
+         limit greatest(least(coalesce(p_limit, 50), 500), 1)) t;
+$$;
 
 -- The schedule, on the engine's own clock (workflow.schedules, ticked by
 -- workflow.tick()). Not installed by default: like every other schedule here,
@@ -29623,6 +30050,23 @@ revoke execute on function aiq.install_structure_null(text)                from 
 -- sql step runs as the engine owner) and an operator's, never a user's.
 revoke execute on function aiq.dream(timestamptz, text)                    from public;
 revoke execute on function aiq.schedule_dream(text, boolean)               from public;
+revoke execute on function aiq.soft_bind_evidence(uuid)                    from public;
+revoke execute on function aiq.enqueue_soft_judgements(uuid[], text)       from public;
+-- The two triggers run when the table is written; nobody calls them.
+revoke execute on function aiq.judgements_guard()                          from public;
+revoke execute on function aiq.judgements_apply()                          from public;
+-- The four a judge calls, as themselves: SECURITY INVOKER, under the table's
+-- row policy and its guard trigger (see JUDGEMENTS).
+revoke execute on function aiq.judgement_for_judge(uuid)                   from public;
+revoke execute on function aiq.claim_judgement(text[], uuid, interval)     from public;
+revoke execute on function aiq.release_judgement(uuid)                     from public;
+revoke execute on function aiq.complete_judgement(uuid, jsonb, text, text) from public;
+revoke execute on function aiq.list_judgements(text, int)                  from public;
+grant execute on function aiq.judgement_for_judge(uuid)                   to authenticated;
+grant execute on function aiq.claim_judgement(text[], uuid, interval)     to authenticated;
+grant execute on function aiq.release_judgement(uuid)                     to authenticated;
+grant execute on function aiq.complete_judgement(uuid, jsonb, text, text) to authenticated;
+grant execute on function aiq.list_judgements(text, int)                  to authenticated;
 
 grant execute on function aiq.upsert_graph(jsonb, jsonb)      to worker;
 grant execute on function aiq.close_edge(jsonb, timestamptz, jsonb) to worker;
@@ -38232,6 +38676,10 @@ declare
         -- would start from -infinity -- harmless, since it is idempotent, but
         -- the record of what each run did would be gone.
         'aiq.dream_runs',
+        -- aiq.judgements: every verdict a judge gave, with its reason and
+        -- tier, and what it wrote. Lost in a restore, the resolutions stay but
+        -- nothing says who decided them or why.
+        'aiq.judgements',
         'aiq.entity_registry',
         'aiq.embedding_models',
         'aiq.graph_vocabulary',
