@@ -30,8 +30,22 @@ create function pg_temp.priya() returns table(relation text, key text) language 
         as r(relation text, key text)
 $$;
 
--- Part one's shell makes this user before any block runs.
-select rbac.bootstrap_admin('me@example.com', 'a long passphrase') \g /dev/null
+-- Part one's shell makes this user with rbac.bootstrap_admin on a fresh install. A suite database already has an
+-- admin, so here the reader is made as the neighbouring research tests make theirs: a user and a role that may write research, define workflows and register text,
+-- inside this transaction.
+insert into rbac.users (email, status) values ('me@example.com', 'active') on conflict do nothing;
+insert into rbac.roles (name, description) values ('rp-q20', 'may list, read and write research (test)') on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values
+    ('rp-q20', 'research', 'list'), ('rp-q20', 'research', 'select'), ('rp-q20', 'research', 'insert'),
+    ('rp-q20', 'workflows', 'update'), ('rp-q20', 'resources', 'create')
+    on conflict do nothing;
+insert into rbac.user_roles (user_id, role) select id, 'rp-q20' from rbac.users where email = 'me@example.com'
+    on conflict do nothing;
+
+-- The suite's graph sample (dev/init/04) already holds a typed Priya Raman in demo.people. The article runs on a
+-- fresh install, where she does not exist until HR's list arrives, so the sample's row is set aside here, inside
+-- this transaction.
+delete from demo.people where lower(full_name) = 'priya raman';
 
 -- §1
 create schema if not exists team;
