@@ -80,7 +80,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('agentic.land_message_facts(uuid,jsonb)', 'agentic.session_readable',
  'refused unless the caller is signed in and may read the message''s session, and the message is the user''s; it lands only that message''s facts, as agent:<caller> (REM-1056)'),
 ('agentic.session_messages(uuid)', 'agentic.session_windows',
- 'reads through session_windows, which returns nothing for a session the caller may not read; it passes no run, so no run''s input is read (REM-1056)'),
+ 'reads through session_windows, which refuses by name a session the caller may not read (REM-1021); it passes no run, so no run''s input is read (REM-1056)'),
 ('agentic.session_readable(uuid)', 'rbac.may_read',
  'answers whether the caller may read one session, by the session''s own owner, org and visibility; it returns a boolean and no row (REM-969)'),
 ('agentic.create_session(text)', 'owner',
