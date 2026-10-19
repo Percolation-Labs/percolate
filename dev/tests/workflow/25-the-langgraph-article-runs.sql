@@ -363,7 +363,7 @@ begin
         '§2 only the first step of a chain is claimable');
     perform pg_temp.check(pg_temp.work(r) = 1 and pg_temp.work(r) = 1 and pg_temp.work(r) = 1,
         '§2 each step frees the next');
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded', '§2 the chain finishes');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§2 the chain finishes');
 end $$;
 
 -- The gate: a joke that already has its punchline skips the rest (REM-967).
@@ -373,7 +373,7 @@ begin
     perform pg_temp.check(pg_temp.work(r) = 1, '§2 the joke is written');
     perform pg_temp.check(pg_temp.status(r, 'improve') = 'skipped' and pg_temp.status(r, 'polish') = 'skipped',
         '§2 a joke with a punchline skips improve and polish');
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded', '§2 and the run succeeds');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§2 and the run succeeds');
 end $$;
 
 -- §2's prose: a chain of query steps has finished by the time start_workflow returns.
@@ -387,8 +387,8 @@ $y$);
 do $$
 declare r uuid := pg_temp.start('query_chain');
 begin
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded'
-        and (select output #>> '{result,0,n}' from workflow.tasks where run_id = r and step_key = 'b') = '2',
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded'
+        and (select output #>> '{result,0,n}' from workflow.tasks where run_id = r and step_key = 'b') is not distinct from '2',
         '§2 query steps finish inside start_workflow');
 end $$;
 
@@ -417,7 +417,7 @@ declare r uuid := pg_temp.start('compare', '{"topic": "tides"}');
 begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§3 three steps with no dependency start together');
     perform pg_temp.check(pg_temp.work(r) = 1, '§3 the join runs once all three are back');
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded', '§3 the run finishes');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§3 the run finishes');
 end $$;
 
 
@@ -495,7 +495,7 @@ select set_config('request.jwt.claims', '', false);
 
 
 select pg_temp.check((select tools from agentic.agents where name = 'router')
-    = '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
+    is not distinct from '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
 
 
 -- §5 ------------------------------------------------------------------------------------------------------------
@@ -546,7 +546,7 @@ declare r uuid := pg_temp.start('extract_reports', '{}');
 begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§5 one child per row');
     perform pg_temp.check((select output #>> '{result,landed}' from workflow.tasks
-                            where run_id = r and step_key = 'land') = '3', '§5 the fan-in lands every child');
+                            where run_id = r and step_key = 'land') is not distinct from '3', '§5 the fan-in lands every child');
     perform pg_temp.check((select count(*) from reports where extracted_at is not null) = 3,
         '§5 every report is extracted');
 end $$;
@@ -585,7 +585,7 @@ begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§5 the width came from the plan');
     perform pg_temp.check((select array_agg(input#>>'{item,section}' order by step_key) from workflow.tasks
                             where run_id = r and step_key like 'write[%')
-        = array['intro', 'method', 'results'], '§5 each child got its section');
+        is not distinct from array['intro', 'method', 'results'], '§5 each child got its section');
 end $$;
 
 
@@ -632,8 +632,8 @@ begin
     perform pg_temp.check((select output->'result'->0 @> '{"attempts": 2, "satisfied": true}' from workflow.tasks
                             where run_id = r and step_key = 'refine'), '§6 the repeat reports two attempts, satisfied');
     perform pg_temp.check((select output#>>'{result,0,attempts}' from workflow.tasks
-                            where run_id = r and step_key = 'tell') = '2'
-        and (select status from workflow.runs where id = r) = 'succeeded', '§6 the step after the repeat reads it');
+                            where run_id = r and step_key = 'tell') is not distinct from '2'
+        and (select status from workflow.runs where id = r) is not distinct from 'succeeded', '§6 the step after the repeat reads it');
 end $$;
 
 
