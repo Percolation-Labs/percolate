@@ -63,6 +63,14 @@ show() {
 mkfifo $W/cmd $W/ack
 python3 -I "$(dirname "$B")/psqlpaste.py" "$P8_DSN" $W/cmd $W/ack &
 exec 3> $W/cmd 4< $W/ack
+waiting() {
+  for i in $(seq 90); do
+    s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
+    case $s in waiting_external|succeeded|skipped|failed|cancelled) break ;; esac
+    sleep 2
+  done
+  echo "$s"
+}
 fail=0
 for f in $(ls $B | grep -v '^00-' | sort); do
   out=$CAP/${f%.*}.txt
@@ -81,7 +89,6 @@ for f in $(ls $B | grep -v '^00-' | sort); do
       read -r verdict <&4
       [ "$verdict" = ok ] || { echo "FAIL $f"; fail=1; } ;;
   esac
-  [ "$f" = 15-notes.sql ] && sleep 20
   echo "done $f"
 done
 exec 3>&-; wait
