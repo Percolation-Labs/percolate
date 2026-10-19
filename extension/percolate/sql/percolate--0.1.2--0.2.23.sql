@@ -35212,7 +35212,7 @@ returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
     v_run   uuid := workflow.assert_task_in_current_run(p_matrix_task);
-    v_owner uuid := workflow.task_owner();
+    v_owner uuid := workflow.run_owner_of(v_run);
     c       record;
     v_key   text;
     v_p     real;
