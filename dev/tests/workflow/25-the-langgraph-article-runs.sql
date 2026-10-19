@@ -124,15 +124,20 @@ $$ language sql;
 -- P8_PG_PORT=5432
 -- P8_REST_PORT=3000
 -- P8_AGENT_PORT=8080
+-- P8_CONTENT_PORT=8081
+-- P8_MINIO_PORT=9000
+-- P8_MINIO_CONSOLE_PORT=9001
 -- OPENAI_API_KEY=sk-your-key
 -- EOF
 -- docker compose up -d --wait
 -- /live
--- live: shell
+-- live: venv
 -- python3 -m venv .venv && . .venv/bin/activate
 -- pip install 'percolate-core[sample,agent]>=0.2.5'
---
+-- /live
+-- live: shell
 -- set -a; . ./.env; set +a
+-- export PAGER=cat
 -- export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
 -- export P8_ADMIN_DSN=$P8_DSN
 -- export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
@@ -165,7 +170,7 @@ $$ language sql;
 -- waiting() {
 --   for i in $(seq 90); do
 --     s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
---     case $s in waiting_external|succeeded|failed|cancelled) break ;; esac
+--     case $s in waiting_external|succeeded|skipped|failed|cancelled) break ;; esac
 --     sleep 2
 --   done
 --   echo "$s"
@@ -410,6 +415,11 @@ $y$);
 -- live: start_compare
 -- RUN=$(start compare '{"topic": "tides"}')
 -- show $RUN
+-- /live
+-- live: compare_times
+-- psql "$P8_DSN" -c "select step_key, to_char(claimed_at, 'HH24:MI:SS.MS') as claimed,
+--   to_char(completed_at, 'HH24:MI:SS.MS') as finished
+--   from workflow.tasks where run_id = '$RUN' order by claimed_at, step_key"
 -- /live
 
 do $$
@@ -972,13 +982,14 @@ end $$;
 -- from workflow.tasks
 -- where run_id = :'run_id' order by step_key;
 --
--- select seq, role, citations from agentic.messages
--- where session_id = :'session_id' order by seq;
+-- select seq, role, jsonb_array_length(tool_calls) as tool_calls, citations
+-- from agentic.messages where session_id = :'session_id' order by seq;
 -- SQL
 -- /live
 select current_setting('run.id') as run_id, current_setting('session.id') as session_id \gset
 select step_key, kind, status, claimed_by as worker from workflow.tasks where run_id = :'run_id' order by step_key;
-select seq, role, citations from agentic.messages where session_id = :'session_id' order by seq;
+select seq, role, jsonb_array_length(tool_calls) as tool_calls, citations
+from agentic.messages where session_id = :'session_id' order by seq;
 
 select pg_temp.check((select count(*) from workflow.tasks where run_id = current_setting('run.id')::uuid) = 8,
     '§10 every step of the claim, the reversal included, is a row');
