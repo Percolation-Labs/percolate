@@ -706,6 +706,7 @@ insert into workflow.lifecycle_states (state, is_terminal, is_success, note) val
     ('succeeded',        true,  true,  'finished, and did what it was asked'),
     ('failed',           true,  false, 'finished, and did not'),
     ('cancelled',        true,  false, 'stopped deliberately before finishing'),
+    ('skipped',          true,  true,  'did not run because its when was false, and counts as done for the steps after it'),
     ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
 on conflict (state) do update
     set is_terminal = excluded.is_terminal,
@@ -1513,6 +1514,13 @@ begin
         where t.status = 'ready'
           and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
 
+        -- A skip (REM-967) finishes no task through complete_task, which is
+        -- where a run asks whether it is done; so a run whose last step was
+        -- skipped asks here, after the steps after it have been released.
+        if new.status = 'skipped' then
+            perform workflow.check_run_completion(new.run_id);
+        end if;
+
     elsif workflow.is_terminal(new.status) then
         update workflow.tasks t2
         set status = 'cancelled'
@@ -1632,7 +1640,7 @@ begin
         select distinct d from unnest(coalesce(p_deps, '{}'::uuid[])) d where d is not null
     loop
         select status into v_status from workflow.tasks where id = v_dep for update;
-        if v_status is distinct from 'succeeded' then
+        if not coalesce(workflow.is_success(v_status), false) then
             v_n := v_n + 1;
         end if;
     end loop;
@@ -1729,14 +1737,16 @@ begin
     loop
         continue when (v_step->>'key') = any(v_comp);
         insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
-                                    wait_signal, input, rate_key, saga_group, compensation_task_key)
+                                    wait_signal, input, rate_key, saga_group, compensation_task_key,
+                                    when_sql)
         values (
             v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
             coalesce(v_step->>'kind', 'work'), 0, 'pending',
             case when coalesce(v_step->>'kind','work') = 'signal'
                  then coalesce(v_step->'input'->>'signal', v_step->>'signal', v_step->>'key') end,
             v_step->'input', v_step->>'rate_key',
-            v_step->>'saga_group', v_step->>'compensation_task_key')
+            v_step->>'saga_group', v_step->>'compensation_task_key',
+            v_step->>'when')
         returning id into v_new_id;
         v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
     end loop;
@@ -2802,7 +2812,7 @@ create or replace view workflow.v_queue_depth as
 
 create or replace view workflow.v_run_progress as
     select r.id as run_id, d.name as workflow_name, r.status as run_status,
-           count(*) filter (where t.status = 'succeeded') as done,
+           count(*) filter (where workflow.is_success(t.status)) as done,
            count(*) as total, r.created_at, r.updated_at
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
@@ -3658,9 +3668,14 @@ begin
     loop
         v_val    := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
         v_params := v_params || jsonb_build_object(v_ref, v_val);
+        -- A JSON null -- a skipped step's result (REM-967), or a null a step
+        -- returned -- binds as an untyped NULL, so it takes the type its place
+        -- in the statement needs: `{{x}} >= 2` over a skipped step is null,
+        -- not "operator does not exist: text >= numeric".
         v_slot   := case jsonb_typeof(v_val)
                         when 'number'  then '(($1->>' || quote_literal(v_ref) || ')::numeric)'
                         when 'boolean' then '(($1->>' || quote_literal(v_ref) || ')::boolean)'
+                        when 'null'    then 'NULL'
                         else                '($1->>' || quote_literal(v_ref) || ')'
                     end;
         v_pat := '\{\{\s*' || regexp_replace(v_ref, '([.$\\])', '\\\1', 'g') || '\s*\}\}';
@@ -4901,6 +4916,18 @@ begin
                  then '. {{items}} is a matrix TEMPLATE namespace: it binds when the '
                       'fan-out expands, so it means nothing on a step outside one.'
                  else '' end;
+    end if;
+
+    -- A skipped step (REM-967) ran nothing and wrote nothing, and its result is
+    -- null rather than an error: a statement binds NULL for it, and
+    -- a when: over it is null, which skips. That is what lets a condition be
+    -- written over a step that may itself have been skipped -- and what an
+    -- unrolled repeat asks of every attempt after the one that finished.
+    if v_val is null and v_head = 'steps' and exists (
+           select 1 from workflow.tasks t
+           where t.run_id = p_run_id and t.step_key = split_part(v_rest, '.', 1)
+             and t.status = 'skipped') then
+        return 'null'::jsonb;
     end if;
 
     if v_val is null then
@@ -6770,9 +6797,129 @@ create or replace function workflow.check_run_completion(p_run_id uuid) returns 
       and not exists (
           select 1 from workflow.tasks t
           where t.run_id = p_run_id
-            and t.status <> 'succeeded'
+            and not workflow.is_success(t.status)
             and not (t.status = 'failed' and t.tolerate_failure));
 $$ language sql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- CONDITIONAL STEPS: `when:` (REM-957, REM-967)
+-- ------------------------------------------------------------
+-- A step may carry a predicate over the run's input and earlier results. It
+-- is asked once, at the moment the step would become eligible -- every
+-- dependency done, the step about to be marked ready or waiting -- and a false
+-- or null answer marks it `skipped` instead. Skipped is terminal and a
+-- success (lifecycle_states), so the cascade releases the steps after it
+-- exactly as a success would, and a run of successes and skips is finished.
+--
+-- WHY HERE, AND NOT IN EACH DISPATCHER. A step reaches readiness through the
+-- cascade, through start_workflow's second pass (roots), and through the
+-- paths that add tasks later; it is then run by autorun, drain, a claim or a
+-- signal. Asking at the one transition every path shares means no kind can
+-- forget to ask, and a skipped step is never claimed, autorun or waited on,
+-- because by the time anything looks it is not ready.
+--
+-- The predicate is the author's SQL, so it goes through run_sql exactly as a
+-- `sql:` step's statement does: read-only, under sql_policy, as the run's
+-- owner (row policies apply), with each {{template}} a bound parameter. It
+-- is asked on pending -> ready (or waiting), and on the ready -> ready update
+-- start_workflow gives each root; never once a step has been claimed, so the
+-- retry path (running -> ready) does not ask again.
+--
+-- A predicate that cannot be evaluated fails the step, and the run, rather
+-- than the statement that released it: an error raised here would roll back
+-- the predecessor's own completion, so a bad `when:` would look like a
+-- failure of the step before it.
+alter table workflow.tasks add column if not exists when_sql text;
+
+create or replace function workflow.apply_when() returns trigger as $$
+declare
+    v_prev text := current_setting('workflow.current_run_id', true);
+    v_res  jsonb;
+    v_ok   jsonb;
+begin
+    if new.when_sql is null
+       or new.pending_deps <> 0
+       or new.status not in ('ready', 'waiting_external')
+       or old.status <> 'pending' and not (old.status = new.status and old.attempts = 0
+                                           and old.claimed_at is null) then
+        return new;
+    end if;
+
+    perform set_config('workflow.current_run_id', new.run_id::text, true);
+    begin
+        v_res := workflow.resolve_statement_params(
+                     'select (' || new.when_sql || ') as ok', new.run_id, null);
+        v_ok  := workflow.run_sql(v_res->>'sql', false, 30000, v_res->'params') -> 0 -> 'ok';
+    exception when others then
+        perform set_config('workflow.current_run_id', coalesce(v_prev, ''), true);
+        new.status := 'failed';
+        new.error  := jsonb_build_object('error', 'when: ' || sqlerrm, 'sqlstate', sqlstate);
+        update workflow.runs set status = 'failed'
+        where id = new.run_id and status = 'running';
+        return new;
+    end;
+    perform set_config('workflow.current_run_id', coalesce(v_prev, ''), true);
+
+    if v_ok is distinct from 'true'::jsonb then
+        new.status       := 'skipped';
+        new.completed_at := clock_timestamp();
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_apply_when
+    before update of status on workflow.tasks
+    for each row execute function workflow.apply_when();
+
+-- ------------------------------------------------------------
+-- REPEATS: `repeat:` (REM-968)
+-- ------------------------------------------------------------
+-- The compiler unrolls a repeat into attempts (`<step>_<n>`), each skipped by
+-- `when:` once the check held after the one before, and ends it with a step
+-- named for the repeat that calls this. It reports how many attempts ran,
+-- whether the check held, and the last attempt's results, so the steps after
+-- a repeat read {{steps.<id>.result.0.last.<step>}} without knowing which
+-- attempt that was.
+--
+-- p_satisfied is the check over the last attempt that ran: the compiler
+-- passes coalesce(check over attempt max, ..., check over attempt 1), and a
+-- skipped attempt's check is null (its results are), so the first answer
+-- that is not null belongs to the last attempt that ran.
+--
+-- It reads only the run whose step is calling it (workflow.current_run_id,
+-- which a caller cannot set: set_config is revoked from them), so it needs no
+-- access check of its own and leaks nothing about another run.
+create or replace function workflow.repeat_outcome(p_spec jsonb, p_satisfied boolean)
+returns table (attempts int, max_attempts int, satisfied boolean, last jsonb) as $$
+#variable_conflict use_column
+declare
+    v_run uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+    v_max int  := (p_spec->>'max')::int;
+    v_n   int;
+begin
+    if v_run is null then
+        raise exception 'repeat_outcome reports on the repeat a step belongs to, and is '
+                        'only called by the step the compiler writes at the end of one';
+    end if;
+
+    select coalesce(max(i), 0) into v_n
+    from generate_series(1, v_max) i
+    where exists (
+        select 1 from workflow.tasks t
+        join jsonb_array_elements_text(p_spec->'steps') s(step) on t.step_key = s.step || '_' || i
+        where t.run_id = v_run and t.status <> 'skipped');
+
+    return query
+    select v_n, v_max, coalesce(p_satisfied, false),
+           (select jsonb_object_agg(s.step, t.output->'result')
+            from jsonb_array_elements_text(p_spec->'steps') s(step)
+            left join workflow.tasks t on t.run_id = v_run and t.step_key = s.step || '_' || v_n);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.repeat_outcome(jsonb, boolean) to authenticated;
+
 
 -- ------------------------------------------------------------
 -- 21f. Agent steps with a declared output shape.
@@ -7189,6 +7336,8 @@ begin
             ('signal',       E'name: c\nsteps:\n  - id: s\n    signal: true'),
             ('timer',        E'name: c\nsteps:\n  - id: s\n    timer: 1'),
             ('sub_workflow', E'name: c\nsteps:\n  - id: s\n    workflow: other'),
+            ('when',         E'name: c\nsteps:\n  - id: s\n    work: true\n    when: \'true\''),
+            ('repeat',       E'name: c\nsteps:\n  - id: r\n    repeat:\n      max: 2\n      until: \'{{steps.s.result}} is not null\'\n      steps: [{id: s, work: true}]'),
 
             ('continue_on',  E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      continue_on: failed\n      min_success: 0.5\n      template: {work: true}'),
 
@@ -8012,7 +8161,7 @@ alter table workflow.runs  add  constraint runs_status_check
 alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
-                      'succeeded','failed','cancelled'));
+                      'succeeded','failed','cancelled','skipped'));
 
 -- AND THE IDEMPOTENCY KEY, for the same reason and with the same shape.
 --
@@ -16305,6 +16454,60 @@ drop function if exists aiq.semantic(text, vector, int);
 -- ============================================================
 
 -- ------------------------------------------------------------
+-- 8z. Semantic exceptions the result raises, raised where the rows are (REM-948).
+--
+-- percolate-core's `semantic_exceptions` module answers a search with rows AND
+-- the exceptions they raise, each carrying a prompt the model reads. It runs in
+-- Python, outside the transaction, so it sees only what the envelope carries --
+-- and the envelope carries the rows returned, never how many matched. Its own
+-- comment says so: TRUNCATED_AT_LIMIT "also needs the total the envelope does
+-- not carry". The database is the one party that knows the total, so the kinds
+-- that need it are raised here, in the statement that ran the search, with no
+-- round trip.
+--
+-- ONE VOCABULARY. Codes, stages, severities and prompts are core's catalogue,
+-- copied verbatim between the markers below, and `dev/semantic-exceptions.py
+-- --check` fails when a copy differs from `core/percolate_core/semantic_exceptions/
+-- catalogue.py`. Moving the catalogue itself into the database is a later card;
+-- this is the three result kinds that only the store can raise honestly.
+--
+-- TOO_BROAD's bar is core's default (Limits.too_broad, 1000). A count is a
+-- bounded probe, never an unbounded scan: `p_total` is at most bar + 1, and
+-- `capped` says when it stopped counting.
+-- ------------------------------------------------------------
+create or replace function aiq.result_exceptions(
+    p_rows jsonb, p_limit int default null, p_total int default null,
+    p_capped boolean default false)
+returns jsonb as $$
+    with k(code, stage, severity, prompt) as (values
+        -- semantic-exception kinds: begin
+        ('EMPTY', 'result', 'warning', 'Nothing matched. Rephrase in the records'' own words, widen the filters, or report that the store holds nothing on this.'),
+        ('TRUNCATED_AT_LIMIT', 'result', 'warning', 'The result filled the limit, so more matches exist. The answer may be partial: page further or say so.'),
+        ('TOO_BROAD', 'result', 'warning', 'A very large number of records match. Add a filter or a time window.')
+        -- semantic-exception kinds: end
+    ), raised(code, evidence) as (
+        select 'EMPTY', '{}'::jsonb
+         where jsonb_array_length(coalesce(p_rows, '[]')) = 0
+        union all
+        select 'TOO_BROAD', jsonb_build_object('total', p_total, 'capped', p_capped)
+         where p_total > 1000
+        union all
+        -- Only when the store KNOWS more matched, as core's own rule says: a
+        -- ranked search always fills its limit, so without a total this would
+        -- fire on every search and mean nothing.
+        select 'TRUNCATED_AT_LIMIT',
+               jsonb_build_object('returned', jsonb_array_length(p_rows), 'limit', p_limit,
+                                  'total', p_total, 'capped', p_capped)
+         where p_limit is not null and p_total is not null
+           and jsonb_array_length(p_rows) >= p_limit and p_total > jsonb_array_length(p_rows)
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'code', k.code, 'stage', k.stage, 'severity', k.severity,
+               'prompt', k.prompt, 'evidence', r.evidence) order by k.code), '[]'::jsonb)
+      from raised r join k using (code);
+$$ language sql immutable;
+
+-- ------------------------------------------------------------
 -- 9. Single dispatch entry point.
 --
 -- One PostgREST RPC for the whole dialect, so an agent posts
@@ -16347,6 +16550,9 @@ declare
     v_out    jsonb;
     v_unresolved jsonb := '[]'::jsonb;
     v_exhausted  boolean := false;
+    v_limit      int;
+    v_total      bigint;
+    v_exceptions jsonb;
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
@@ -16380,6 +16586,7 @@ begin
             'answer is indistinguishable from "there is nothing to find"',
             p->>'limit';
     end if;
+    v_limit := coalesce((p->>'limit')::int, 10);   -- the per-mode functions' own default
 
     case p->>'mode'
     when 'LOOKUP' then
@@ -16561,12 +16768,24 @@ begin
         select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb) into v_out
         from aiq.semantic_in(p->>'source', p_embedding, p->>'model',
                              (p->>'limit')::int) s;
+        v_exceptions := aiq.result_exceptions(v_out);
 
     when 'TEXT' then
         -- Lexical only. Needs no embedding at all, which is exactly why it
         -- answers the rare-exact-token case (§11) that SEMANTIC misses.
-        select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
-        from aiq.lexical(p->>'source', p->>'arg', (p->>'limit')::int) l;
+        --
+        -- One scan answers both the rows and the count: the text index finds
+        -- every match and the sort keeps the top, so asking for up to 1001
+        -- ranked rows costs what asking for ten does, and the first LIMIT of
+        -- them are the rows. The count is what raises TRUNCATED_AT_LIMIT and
+        -- TOO_BROAD below (REM-948).
+        select coalesce(jsonb_agg(to_jsonb(l) - 'n' order by l.n) filter (where l.n <= v_limit), '[]'::jsonb),
+               count(*)
+          into v_out, v_total
+        from (select x.*, row_number() over (order by x.score desc) as n
+                from aiq.lexical(p->>'source', p->>'arg', greatest(v_limit, 1001)) x) l;
+        v_exceptions := aiq.result_exceptions(v_out, v_limit, least(v_total, 1001)::int,
+                                              v_total > 1000);
 
     when 'SEARCH' then
         if p_embedding is null then
@@ -16577,6 +16796,7 @@ begin
         select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
         from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
                         (p->>'limit')::int) h;
+        v_exceptions := aiq.result_exceptions(v_out);
 
     when 'SCHEMA' then
         -- The one mode that returns a document rather than rows, so it says
@@ -16714,6 +16934,12 @@ begin
         -- and a reader would stop looking at it on the one that can.
         || case when p->>'mode' in ('RELEVANCE', 'PATH')
                 then jsonb_build_object('exhausted', v_exhausted)
+                else '{}'::jsonb end
+        -- Only the retrieval modes raise result exceptions, and they always say
+        -- so: an empty list is "the store looked and found none to raise", which
+        -- a missing key could not distinguish from "this mode never looks".
+        || case when p->>'mode' in ('TEXT', 'SEMANTIC', 'SEARCH')
+                then jsonb_build_object('exceptions', coalesce(v_exceptions, '[]'::jsonb))
                 else '{}'::jsonb end;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -19606,6 +19832,8 @@ grant execute on function aiq.semantic_in(text, vector, text, int) to authentica
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
+-- aiq.query raises result exceptions through it as the caller (REM-948).
+grant execute on function aiq.result_exceptions(jsonb, int, int, boolean) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
 -- Diagnostic, and granted for the same reason the error messages name the fix:
@@ -21259,6 +21487,189 @@ comment on function aiq.resolve_mention(text, text, real, text[]) is
     'score is read through method: 1.0 for exact and suffix, similarity for '
     'fuzzy, entropy for escalate:low-entropy, and the total candidate count '
     'for escalate:ambiguous, which returns at most five ordered exemplars.';
+
+-- ------------------------------------------------------------
+-- An iterated semantic join: a walk whose relation is a wildcard (REM-997).
+--
+-- The study is Percolate writing ld-436bceb0b31c, "Graph queries as iterated
+-- semantic joins". This is its first runnable slice, and it keeps the study's
+-- decisions that make the walk well defined:
+--
+--   * THE RELATION IS A WILDCARD, resolved hop by hop. From each frontier node
+--     the walk may follow a stored current edge of ANY type, in either
+--     direction (link `edge`); move to another node holding the identical key
+--     (`key`: two records of one thing that nobody merged); move to a node
+--     whose key is at least p_similarity alike by trigram (`similarity`); or
+--     follow a link a judge proposes under a criterion stated in words
+--     (`judged`). Each hop says which kind of link it was.
+--   * SEMI-NAIVE. Each round joins only the rows new in the round before, and
+--     a node is reached once, by its first path. The walk ends when the
+--     target is reached, when a round finds nothing new (the wildcard does not
+--     resolve), or at the bound.
+--   * THE BOUND IS EXPLICIT AND ENFORCED. p_max_rounds is required to be 1..5,
+--     the dialect's DEPTH ceiling, and p_budget caps the frontier read in one
+--     round. The budget DEFERS, never drops: the rows past it wait, first in
+--     first out, for the next round, so a smaller budget changes how many
+--     rounds a walk takes, not where it is heading.
+--   * CANDIDATES BY THRESHOLD, NEVER TOP-K. A top-k list is not monotone: a new
+--     row can push a true candidate out of it.
+--   * A JUDGE IS AN INTERFACE THAT RAISES WHEN UNCONFIGURED. A judged link is a
+--     model call, and REM-948's spike measured one Jev request at 0.2-0.4 s, too
+--     slow to hold inside a statement. So the walk calls the function named by
+--     the setting `percolate.link_judge` -- (criterion text, frontier uuid[])
+--     returning (src uuid, dst uuid, p real) -- and refuses, by name, when none
+--     is configured. Jev plugs in there, behind describe-then-call; a test plugs
+--     in a stub. The study's "every judgement is kept as an edge" is not built:
+--     this walk stores nothing, so it stays STABLE.
+--
+-- SECURITY INVOKER, like every read in this layer: the walk sees only the
+-- nodes, keys and edges the caller's row security admits.
+-- ------------------------------------------------------------
+create or replace function aiq.iterated_join(
+    p_seed text, p_target_type text, p_max_rounds int, p_budget int default 50,
+    p_similarity real default 0.6, p_criterion text default null,
+    p_links text[] default array['edge', 'key', 'similarity', 'judged'])
+returns table(round int, node_id uuid, key text, entity_type text, path jsonb, resolved boolean)
+as $$
+declare
+    v_seed     uuid;
+    v_seen     uuid[];
+    v_frontier jsonb := '[]';   -- [{node, path}], the queue, oldest first
+    v_read     jsonb;
+    v_new      jsonb;
+    v_judge    text := nullif(current_setting('percolate.link_judge', true), '');
+    v_round    int := 0;
+    v_n        int;
+begin
+    if p_max_rounds is null or p_max_rounds < 1 or p_max_rounds > 5 then
+        raise exception 'iterated_join needs p_max_rounds between 1 and 5 (got %): the bound is stated, never assumed', p_max_rounds;
+    end if;
+    if p_budget is null or p_budget < 1 then
+        raise exception 'iterated_join needs p_budget of at least 1 (got %)', p_budget;
+    end if;
+    if p_criterion is not null and v_judge is null then
+        raise exception 'iterated_join: a judged link was asked for (criterion %), and no judge is configured', quote_literal(p_criterion)
+            using errcode = 'feature_not_supported',
+                  hint = 'set percolate.link_judge to a function (criterion text, frontier uuid[]) returning (src uuid, dst uuid, p real). A model call runs behind describe-then-call, outside the statement (REM-948).';
+    end if;
+
+    if p_links is null or cardinality(p_links) = 0
+       or not p_links <@ array['edge', 'key', 'similarity', 'judged'] then
+        raise exception 'iterated_join: p_links must name some of edge, key, similarity, judged (got %)', p_links;
+    end if;
+
+    -- The seed is exact, as GRAPH's is: a typo must not walk a different node,
+    -- and a key two nodes hold must not quietly pick one of them.
+    select min(k.node_id::text)::uuid, count(distinct k.node_id) into v_seed, v_n
+      from aiq.node_keys k where k.key = lower(p_seed);
+    if v_n = 0 then
+        raise exception 'iterated_join: no node has the key %', quote_literal(p_seed);
+    elsif v_n > 1 then
+        raise exception 'iterated_join: the key % names % nodes; seed with a key only one holds', quote_literal(p_seed), v_n;
+    end if;
+    v_seen := array[v_seed];
+    v_frontier := jsonb_build_array(jsonb_build_object('node', v_seed, 'path', '[]'::jsonb));
+
+    while v_round < p_max_rounds and jsonb_array_length(v_frontier) > 0 loop
+        v_round := v_round + 1;
+        -- Read at most p_budget rows of the queue; the rest wait their turn.
+        select coalesce(jsonb_agg(f.value order by f.ord) filter (where f.ord <= p_budget), '[]'),
+               coalesce(jsonb_agg(f.value order by f.ord) filter (where f.ord > p_budget), '[]')
+          into v_read, v_frontier
+          from jsonb_array_elements(v_frontier) with ordinality f(value, ord);
+
+        with fr as (
+            select (r.value->>'node')::uuid as node, r.value->'path' as path
+              from jsonb_array_elements(v_read) r
+        ), hop as (
+            select fr.node as src, e.dst_id as dst, 'edge' as link, e.relation as via, 1.0::real as score, fr.path
+              from fr join aiq.edges_current e on e.src_id = fr.node
+             where 'edge' = any (p_links)
+            union all
+            select fr.node, e.src_id, 'edge', e.relation || ' (inverse)', 1.0::real, fr.path
+              from fr join aiq.edges_current e on e.dst_id = fr.node
+             where 'edge' = any (p_links)
+            union all
+            select fr.node, k2.node_id, 'key', k1.key, 1.0::real, fr.path
+              from fr join aiq.node_keys k1 on k1.node_id = fr.node
+                      join aiq.node_keys k2 on k2.key = k1.key and k2.node_id <> fr.node
+             where 'key' = any (p_links)
+            union all
+            select fr.node, k2.node_id, 'similarity', k1.key || ' ~ ' || k2.key,
+                   similarity(k1.key, k2.key), fr.path
+              from fr join aiq.node_keys k1 on k1.node_id = fr.node
+                      join aiq.node_keys k2 on k2.key % k1.key and k2.key <> k1.key
+                                           and k2.node_id <> fr.node
+             where 'similarity' = any (p_links) and similarity(k1.key, k2.key) >= p_similarity
+        ), firsts as (
+            -- One path per newly reached node: the strongest link, then the
+            -- lowest-numbered kind (edge, key, similarity, judged) on a tie.
+            select distinct on (h.dst) h.*
+              from hop h
+             where not (h.dst = any (v_seen))
+             order by h.dst, h.score desc,
+                      array_position(array['edge','key','similarity','judged'], h.link)
+        )
+        select coalesce(jsonb_agg(jsonb_build_object(
+                   'node', f.dst,
+                   'path', f.path || jsonb_build_object(
+                       'from', (select min(k.key) || ' (' || min(k.entity_type) || ')' from aiq.node_keys k where k.node_id = f.src),
+                       'to',   (select min(k.key) || ' (' || min(k.entity_type) || ')' from aiq.node_keys k where k.node_id = f.dst),
+                       'link', f.link, 'via', f.via, 'score', round(f.score::numeric, 3)))
+                   order by f.dst), '[]')
+          into v_new
+          from firsts f;
+
+        if v_judge is not null and p_criterion is not null and 'judged' = any (p_links) then
+            execute format('select coalesce(jsonb_agg(jsonb_build_object(''node'', j.dst, ''path'', fr.path || jsonb_build_object(
+                    ''from'', (select min(k.key) || '' ('' || min(k.entity_type) || '')'' from aiq.node_keys k where k.node_id = j.src),
+                    ''to'', (select min(k.key) || '' ('' || min(k.entity_type) || '')'' from aiq.node_keys k where k.node_id = j.dst),
+                    ''link'', ''judged'', ''via'', %L, ''score'', round(j.p::numeric, 3)))), ''[]'')
+                  from %s(%L, $1) j
+                  join (select (r.value->>''node'')::uuid as node, r.value->''path'' as path
+                          from jsonb_array_elements($2) r) fr on fr.node = j.src
+                 where not (j.dst = any ($3))
+                   and not exists (select 1 from jsonb_array_elements($4) x where (x->>''node'')::uuid = j.dst)',
+                   p_criterion, v_judge::regproc, p_criterion)
+              into v_read
+             using (select array_agg((r.value->>'node')::uuid) from jsonb_array_elements(v_read) r),
+                   v_read, v_seen, v_new;
+            v_new := v_new || v_read;
+        end if;
+
+        v_seen := v_seen || coalesce((select array_agg((n->>'node')::uuid) from jsonb_array_elements(v_new) n), '{}');
+
+        -- A target reached in this round ends the walk: those are the answers.
+        if exists (select 1 from jsonb_array_elements(v_new) n join aiq.nodes x on x.id = (n->>'node')::uuid
+                    where x.entity_type = p_target_type) then
+            return query
+                select v_round, x.id, (select min(k.key) from aiq.node_keys k where k.node_id = x.id),
+                       x.entity_type, n->'path', true
+                  from jsonb_array_elements(v_new) n join aiq.nodes x on x.id = (n->>'node')::uuid
+                 where x.entity_type = p_target_type
+                 order by 3;
+            return;
+        end if;
+        v_frontier := v_frontier || v_new;
+    end loop;
+
+    -- Not resolved: one row saying why, so an empty answer is never silent.
+    return query select v_round, null::uuid, null::text, p_target_type, jsonb_build_object(
+        'reason', case when jsonb_array_length(v_frontier) = 0 then 'nothing new to join: the wildcard does not resolve'
+                       else 'the bound was reached before the target' end,
+        'rounds', v_round, 'reached', cardinality(v_seen) - 1, 'waiting', jsonb_array_length(v_frontier)), false;
+end;
+$$ language plpgsql stable security invoker;
+
+comment on function aiq.iterated_join(text, text, int, int, real, text, text[]) is
+    'A walk whose relation is a wildcard: from the seed key, each round joins the '
+    'frontier through stored edges, shared keys, key similarity at a threshold, '
+    'or (with a criterion) a configured judge, until a node of p_target_type is '
+    'reached; p_links narrows which kinds the wildcard ranges over. Bounded by p_max_rounds (1..5) and p_budget per round, which defers '
+    'and never drops. Every hop names its link kind. REM-997; study ld-436bceb0b31c.';
+
+-- The same grant every read in this layer has: the walk runs as the caller.
+grant execute on function aiq.iterated_join(text, text, int, int, real, text, text[]) to authenticated;
 
 
 -- ============================================================
@@ -27041,6 +27452,23 @@ create table if not exists aiq.graph_vocabulary (
 comment on table aiq.graph_vocabulary is
     'The relation names an extractor may emit, and how much weight a machine-made one starts with.';
 
+-- SINGLE-VALUED: a subject holds one current value of this relation at a time,
+-- so a later edge for the same subject supersedes an earlier one (REM-961).
+-- `lives_in`, `works_at`, `manager_is` are; `prefers` is not, because a person
+-- prefers many things and which preference replaced which is a judgement. It is
+-- a property of the TERM, so it lives here and not per triple in
+-- aiq.relation_types.
+--
+-- NULLABLE for the reason relation_types.is_symmetric is: null is UNDECLARED and
+-- reads as false, so a writer that said nothing and a writer that said false
+-- stay distinguishable. aiq.dream() acts only on relations declared true.
+-- Measured on research-notes/mem0-baseline's fixture: the four relations that
+-- hold one value recover 7 of its 11 supersessions with no false one; treating
+-- every relation as single-valued recovers 8 and invents 22.
+alter table aiq.graph_vocabulary add column if not exists single_valued boolean;
+comment on column aiq.graph_vocabulary.single_valued is
+    'true: a subject holds one current value at a time, and aiq.dream() supersedes the older edge. null: undeclared, read as false.';
+
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
 -- `percolate.seeding` note and specs/contract/schema.sql section 4.
@@ -27177,7 +27605,8 @@ begin
 
         update aiq.graph_vocabulary g
            set machine_weight = coalesce((e->>'machine_weight')::real, g.machine_weight),
-               description    = coalesce(e->>'description',            g.description)
+               description    = coalesce(e->>'description',            g.description),
+               single_valued  = coalesce((e->>'single_valued')::boolean, g.single_valued)
           from jsonb_array_elements(p_relations) e
          where g.relation = e->>'relation';
     end if;
@@ -28453,6 +28882,164 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- DREAM: the graph reconciles itself on a schedule (REM-961).
+--
+-- Knit writes fast and loud: every session lands what it heard, and a name it
+-- cannot bind lands soft. Reconciling that was a pair of calls somebody made by
+-- hand -- promote_soft_node and retract_derived -- and nothing ran them, so
+-- "write fast, reconcile later" happened only when someone remembered.
+--
+-- aiq.dream() does the part that is known BY CONSTRUCTION, and only that. It
+-- makes no judgement about meaning, because a scheduled job inside the database
+-- has no way to make one it could show its working for:
+--
+--   1. Supersession, for relations declared single-valued
+--      (aiq.graph_vocabulary.single_valued). Where a subject holds more than one
+--      current edge of such a relation within one org, every one but the newest
+--      ends where the next begins: valid_to = the next edge's valid_from. The
+--      edge is not deleted and keeps its provenance, so an as-of read before
+--      the change still finds it.
+--   2. Soft nodes whose key is EXACTLY the canonical key of one node of the kind
+--      they claimed, in the same org: promoted through aiq.promote_soft_node at
+--      tier 'registry', which is what that tier means (a match on a registered
+--      entity's key, not a model's guess), so the move, the kept name and the
+--      resolution row are the ones a hand promotion makes.
+--
+-- Everything else is counted and left: an unresolved soft node with no exact
+-- match (an alias like "P. Raman" is a judge's call), and a relation nobody
+-- declared. The receipt carries counts only, never another owner's names.
+--
+-- Idempotent: a second run finds nothing to supersede and nothing to promote.
+-- Each run is recorded in aiq.dream_runs, whose `until` is the next run's
+-- `since`; supersession looks only at subjects with an edge written since then,
+-- and promotion at every soft node still unresolved, because an exact target
+-- can appear long after the soft node did.
+create table if not exists aiq.dream_runs (
+    id          uuid primary key default uuidv7(),
+    since       timestamptz not null,
+    until       timestamptz not null,
+    decided_by  text not null,
+    receipt     jsonb not null,
+    ran_at      timestamptz not null default now()
+);
+comment on table aiq.dream_runs is
+    'Each aiq.dream() run: the window it reconciled (since, until] and what it did. The newest until is the next run''s watermark.';
+create index if not exists idx_dream_runs_until on aiq.dream_runs (until desc);
+-- The engine's record, not a user's: the aiq schema's default grants give every
+-- web role SELECT, and a table they can read needs a policy and a declared
+-- surface. Nobody but the owner and an operator reads this, so the grants go.
+revoke all on aiq.dream_runs from public, authenticated, api_viewer;
+
+create or replace function aiq.dream(p_since timestamptz default null,
+                                     p_decided_by text default 'dream')
+returns jsonb as $$
+declare
+    v_until      timestamptz := clock_timestamp();
+    v_since      timestamptz;
+    v_superseded int := 0;
+    v_promoted   int := 0;
+    v_refused    int := 0;
+    v_left       int := 0;
+    r            record;
+    v_receipt    jsonb;
+begin
+    if coalesce(btrim(p_decided_by), '') = '' then
+        raise exception 'aiq.dream needs p_decided_by: who or what decided, for the resolution rows it writes';
+    end if;
+    v_since := coalesce(p_since, (select max(until) from aiq.dream_runs), '-infinity'::timestamptz);
+
+    -- 1. Supersession. One UPDATE: within each (subject, relation, org) of a
+    --    single-valued relation, an edge with a later current one after it ends
+    --    where that one begins. Only subjects touched since the watermark.
+    with groups as (
+        select distinct e.src_id, e.relation, e.org_id
+          from aiq.edges e
+          join aiq.graph_vocabulary v on v.relation = e.relation and v.single_valued
+         where e.created_at > v_since or e.valid_from > v_since
+    ), ordered as (
+        select e.id,
+               lead(e.valid_from) over (partition by e.src_id, e.relation, e.org_id
+                                        order by e.valid_from, e.created_at, e.id) as next_from
+          from aiq.edges e
+          join groups g on g.src_id = e.src_id and g.relation = e.relation
+                       and g.org_id is not distinct from e.org_id
+         where aiq.edge_is_current(e.valid_from, e.valid_to, v_until)
+    ), ended as (
+        update aiq.edges e set valid_to = o.next_from
+          from ordered o
+         where e.id = o.id and o.next_from is not null
+        returning 1
+    )
+    select count(*) into v_superseded from ended;
+
+    -- 2. Exact soft nodes. Each promotion runs on its own, so one the resolver
+    --    refuses (decided distinct, a scope mismatch) is counted, not fatal.
+    for r in
+        select s.id as soft_id,
+               array_agg(distinct t.id) filter (where t.id is not null) as targets
+          from aiq.soft_nodes s
+          join aiq.nodes sn on sn.entity_type = 'soft' and sn.entity_id = s.id
+          left join (aiq.node_keys k join aiq.nodes t on t.id = k.node_id)
+                 on k.kind = 'canonical' and k.key = lower(btrim(s.key))
+                and t.entity_type = s.claimed_kind
+                and t.org_id is not distinct from s.org_id
+         where s.resolved_node_id is null
+         group by s.id
+    loop
+        if cardinality(r.targets) = 1 then
+            begin
+                perform aiq.promote_soft_node(r.soft_id, r.targets[1], p_decided_by, 'registry',
+                                              jsonb_build_object('rule', 'exact canonical key, same kind, same org'));
+                v_promoted := v_promoted + 1;
+            exception when others then
+                v_refused := v_refused + 1;
+            end;
+        else
+            v_left := v_left + 1;
+        end if;
+    end loop;
+
+    v_receipt := jsonb_build_object(
+        'since', v_since, 'until', v_until,
+        'superseded', v_superseded,
+        'promoted_exact', v_promoted,
+        'promotion_refused', v_refused,
+        'soft_left_for_a_judge', v_left);
+    insert into aiq.dream_runs (since, until, decided_by, receipt)
+    values (v_since, v_until, p_decided_by, v_receipt);
+    return v_receipt;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The schedule, on the engine's own clock (workflow.schedules, ticked by
+-- workflow.tick()). Not installed by default: like every other schedule here,
+-- it is an operator's choice, and without the tick it would never fire anyway.
+-- Re-running it changes the cron and keeps one schedule.
+create or replace function aiq.schedule_dream(p_cron text default '*/15 * * * *',
+                                              p_enabled boolean default true)
+returns jsonb as $$
+declare v_id uuid;
+begin
+    perform workflow.register_step_function('dream', 'aiq.dream', '{}', 300000,
+        'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
+    perform workflow.define_yaml($y$
+name: dream
+steps:
+  - id: reconcile
+    sql: {function: dream, args: []}
+$y$);
+    select id into v_id from workflow.schedules where name = 'dream';
+    if v_id is null then
+        v_id := workflow.schedule_workflow('dream', 'dream', p_cron);
+    else
+        update workflow.schedules set cron_expr = p_cron where id = v_id;
+    end if;
+    perform workflow.set_schedule_enabled('dream', p_enabled);
+    return jsonb_build_object('schedule', 'dream', 'cron', p_cron, 'enabled', p_enabled, 'id', v_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 8b. "Not the same": the decision a resolver makes most often, recorded.
 --
 -- aiq.node_distinctions (ai-query-layer/schema.sql) holds it. A resolver that
@@ -28691,6 +29278,10 @@ revoke execute on function aiq.undo_distinct(uuid, text)                   from 
 revoke execute on function aiq.resolution_candidates(text, text, uuid, int, int, real) from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
+-- Dream reconciles every owner's graph, so it is the engine's (a registered
+-- sql step runs as the engine owner) and an operator's, never a user's.
+revoke execute on function aiq.dream(timestamptz, text)                    from public;
+revoke execute on function aiq.schedule_dream(text, boolean)               from public;
 
 grant execute on function aiq.upsert_graph(jsonb, jsonb)      to worker;
 grant execute on function aiq.land_graph(jsonb, uuid)         to worker;
@@ -34036,6 +34627,210 @@ grant execute on function claims.pose_question(text, text), claims.propose_answe
     to authenticated;
 
 -- ------------------------------------------------------------
+-- 10a2. Finding a question by meaning (REM-998). A person asks "does agent memory need valid time?" and the graph
+--       either names the question already holding that argument, with its stances as of a date, or says there is
+--       none close enough.
+--
+-- WHAT WAS MISSING WAS IN THE ENGINE, NOT ONLY THE SURFACE. A question had no searchable text and no vector: it was
+-- in no lexical or semantic source, so the only way to find one was the words of its key, which is what the
+-- application's search does. Reproduced on 19 October: the top hit for the question above was one about clinical
+-- methods being "valid" in another hospital, matched on one shared word. Claims were already a corpus
+-- (research.claims, §12 below); the questions they answer were not.
+--
+-- So a question gets one text, its phrasing or else its frame's subject and outcome, and that text is registered
+-- as the semantic corpus `questions`, like chunks and claims. Its vectors live in the model's space,
+-- keyed by the question's id, and claims.questions_to_embed lists the ones a space still lacks -- the rows an
+-- `embed:` matrix fans out over (claims.install_question_embed_workflow). Readability is the question's own policy
+-- (claims.question_readable): a question nobody you can read answers is not found, by meaning or by words.
+--
+-- DISTANCE RANKS AND NEVER DECIDES, the rule claims.candidates already states. find_question returns the nearest
+-- questions with their distance and whether each falls inside the caller's floor; "none close enough" is an answer
+-- the caller reads off `within`, and the nearest question is still shown so the caller can see what it missed.
+-- The floor has no default, for the reason candidates gives.
+-- ------------------------------------------------------------
+alter table claims.questions add column if not exists search_text text
+    generated always as (coalesce(phrasing, subject || ': ' || outcome)) stored;
+comment on column claims.questions.search_text is
+    'The words a question is found by: its phrasing, or its frame''s subject and outcome. Derived, never written.';
+
+do $$
+begin
+    if to_regclass('aiq.semantic_sources') is not null then
+        insert into aiq.semantic_sources (name, source_table, content_col)
+        values ('questions', 'claims.questions', 'search_text')
+        on conflict (name) do update
+           set source_table = excluded.source_table,
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
+    end if;
+end $$;
+-- Not a lexical source as well: aiq.register_lexical_source adds a generated tsvector over the content column, and
+-- a generated column cannot read another one. Finding a question by its words is what failed above.
+
+-- The questions the caller may read that a model's space has no vector for, shaped as an `embed:` matrix's rows:
+-- chunk_id is what aiq.land_embeddings keys the space by. Invoker, so a run sees what its owner may read and an
+-- operator's run sees all of it.
+create or replace function claims.questions_to_embed(p_model text, p_limit int default 500)
+returns table (chunk_id uuid, text text)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    v_tbl text;
+begin
+    if not exists (select 1 from aiq.embedding_models where name = p_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', p_model);
+    end if;
+    v_tbl := aiq.embedding_space_name(p_model);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        return query select q.id, q.search_text from claims.questions q
+                      order by q.id limit least(greatest(p_limit, 1), 5000);
+        return;
+    end if;
+    return query execute format(
+        'select q.id, q.search_text from claims.questions q
+          where not exists (select 1 from aiq.%I e where e.chunk_id = q.id)
+          order by q.id limit $1', v_tbl)
+        using least(greatest(p_limit, 1), 5000);
+end;
+$$;
+
+-- The questions nearest a text's vector, each with its stances as of p_at: how many of the claims answering it say
+-- yes, no or depends, from how many works. The vector arrives alongside, as it does for aiq.query; embedding is an
+-- external model call and this schema makes none.
+create or replace function claims.find_question(p_embedding vector, p_max_distance float8, p_limit int default 5,
+                                                p_model text default null, p_at timestamptz default now())
+returns table (question uuid, phrasing text, distance float8, within boolean,
+               yes int, no int, depends int, works int)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    m     aiq.embedding_models;
+    v_tbl text;
+begin
+    if p_max_distance is null then
+        raise check_violation using
+            message = 'find_question needs a distance floor: whether a question is close enough is the caller''s call',
+            hint = 'the number is meaningful only against the model that produced the vectors';
+    end if;
+    if p_embedding is null then
+        raise check_violation using message = 'find_question needs the text''s vector: embed it with the model and pass it';
+    end if;
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+    end if;
+    if m.name is null then
+        raise no_data_found using message = format('embedding model %s is not registered', coalesce(p_model, '(the default)'));
+    end if;
+    if vector_dims(p_embedding) <> m.dim then
+        raise data_exception using message = format('the vector has %s dimensions and model %s expects %s',
+                                                    vector_dims(p_embedding), m.name, m.dim);
+    end if;
+    v_tbl := aiq.embedding_space_name(m.name);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise no_data_found using message = format('embedding model %s is registered but its space does not exist', m.name);
+    end if;
+    return query execute format($q$
+        with near as (
+            select q.id, q.search_text, (e.embedding <=> $1)::float8 as d
+              from aiq.%I e join claims.questions q on q.id = e.chunk_id
+             order by e.embedding <=> $1 limit $2),
+        latest as (
+            select distinct on (a.claim_id, a.question_id) a.question_id, a.stance, a.op, a.evidence
+              from claims.answered a join claims.tx t on t.id = a.tx
+             where a.question_id in (select id from near) and t.at <= $3
+             order by a.claim_id, a.question_id, t.at desc, a.id desc)
+        select n.id, n.search_text, n.d, n.d <= $4,
+               count(*) filter (where l.stance = 'yes' and l.op = 'assert')::int,
+               count(*) filter (where l.stance = 'no' and l.op = 'assert')::int,
+               count(*) filter (where l.stance = 'depends' and l.op = 'assert')::int,
+               count(distinct v.work_id) filter (where l.op = 'assert' and l.stance <> 'unknown')::int
+          from near n
+          left join latest l on l.question_id = n.id
+          left join research.revisions v on v.id = l.evidence
+         group by n.id, n.search_text, n.d
+         order by n.d, n.id$q$, v_tbl)
+        using p_embedding, least(greatest(coalesce(p_limit, 5), 1), 50), p_at, p_max_distance;
+end;
+$$;
+
+-- What changed a question's answer between two dates: each claim whose latest stance at p_from differs from its
+-- latest at p_to -- added, withdrawn or changed -- with when the later one was made and by what kind of actor (a
+-- transaction's reason is not granted to readers, claims.tx). Invoker: an answer from a revision the caller cannot
+-- read is not part of the change they see.
+create or replace function claims.stance_changes(p_question uuid, p_from timestamptz, p_to timestamptz default now())
+returns table (claim uuid, revision_id uuid, claim_key text, stance_then text, stance_now text, change text,
+               changed_at timestamptz, actor_kind text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with at_from as (
+        select distinct on (a.claim_id) a.claim_id, a.stance, a.op
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id = p_question and t.at <= p_from
+         order by a.claim_id, t.at desc, a.id desc),
+    at_to as (
+        select distinct on (a.claim_id) a.claim_id, a.stance, a.op, a.evidence, a.claim_key, t.at, t.actor_kind
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id = p_question and t.at <= p_to
+         order by a.claim_id, t.at desc, a.id desc),
+    paired as (
+        select coalesce(n.claim_id, f.claim_id) as claim, n.evidence, n.claim_key,
+               case when f.op = 'assert' and f.stance <> 'unknown' then f.stance end as s_then,
+               case when n.op = 'assert' and n.stance <> 'unknown' then n.stance end as s_now,
+               n.at, n.actor_kind
+          from at_to n full join at_from f on f.claim_id = n.claim_id)
+    select p.claim, p.evidence, p.claim_key, p.s_then, p.s_now,
+           case when p.s_then is null then 'added' when p.s_now is null then 'withdrawn' else 'changed' end,
+           p.at, p.actor_kind
+      from paired p
+     where p.s_then is distinct from p.s_now
+     order by p.at, p.claim;
+$$;
+
+-- The workflow that keeps a model's space current: one `embed:` child per question the space lacks, landed by
+-- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
+--
+-- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
+-- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
+-- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
+-- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+create or replace function claims.install_question_embed_workflow(p_model text default null,
+                                                                  p_name text default 'embed_questions')
+returns text
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    v_model text := p_model;
+begin
+    if v_model is null then
+        select name into v_model from aiq.embedding_models where is_default;
+    end if;
+    if v_model is null or not exists (select 1 from aiq.embedding_models where name = v_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', coalesce(v_model, '(the default)'));
+    end if;
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: embed
+    matrix:
+      rows: "select chunk_id, text from claims.questions_to_embed('%2$s')"
+      max_fanout: 500
+      template:
+        embed:
+          text: '{{item.text}}'
+          model: %2$s
+  - id: land
+    needs: [embed]
+    sql: {function: land_embeddings, args: ['{{steps.embed.result.task_id}}']}
+$y$, p_name, v_model));
+    return format('%s: embeds the questions a %s space lacks', p_name, v_model);
+end;
+$$;
+
+grant execute on function claims.questions_to_embed(text, int),
+                          claims.find_question(vector, float8, int, text, timestamptz),
+                          claims.stance_changes(uuid, timestamptz, timestamptz)
+    to authenticated;
+revoke all on function claims.install_question_embed_workflow(text, text) from public;
+
+-- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
 --      by claims.study_key -- the application's REM-430 key, moved here -- so two packages that read one study
 --      cite one origin however they word it. An occurrence cites an origin through a source's origin text, its
@@ -36463,6 +37258,10 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
+        -- aiq.dream_runs: the watermark. Lost in a restore, the next dream
+        -- would start from -infinity -- harmless, since it is idempotent, but
+        -- the record of what each run did would be gone.
+        'aiq.dream_runs',
         'aiq.entity_registry',
         'aiq.embedding_models',
         'aiq.graph_vocabulary',
@@ -37361,6 +38160,10 @@ declare
     v_roles constant text[] := array['authenticated', 'web_anon', 'api_viewer'];
     v_dynamic constant text[] := array[
         'aiq.expand_embed_steps(jsonb)',
+        -- The judge it calls is a regproc from the operator's setting
+        -- percolate.link_judge, cast before format() so it names a function
+        -- that exists; the criterion goes in as %L (REM-997).
+        'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
@@ -37381,6 +38184,10 @@ declare
         -- LIMIT, and a caller asking for five would get however many of five
         -- survived and no sign that it had (specs/claims/graph.md §5 *Did you mean*).
         'claims.candidates(uuid,text,double precision,integer,vector,text)',
+        -- The same shape as candidates (REM-998): the space's name comes from aiq.embedding_space_name over a
+        -- registered model and goes through %I; the vector, limit, date and floor are bound parameters.
+        'claims.find_question(vector,double precision,integer,text,timestamp with time zone)',
+        'claims.questions_to_embed(text,integer)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant
