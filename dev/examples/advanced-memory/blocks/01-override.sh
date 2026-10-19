@@ -13,3 +13,4 @@ services:
       P8_CREDENTIAL_ORIGINS: ${P8_CREDENTIAL_ORIGINS}
 YML
 docker compose up -d query-mcp worker
+export P8_QUERY_MCP_PORT=8090
