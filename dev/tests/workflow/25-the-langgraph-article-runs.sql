@@ -130,8 +130,9 @@ $$ language sql;
 -- docker compose up -d --wait
 -- /live
 -- live: venv
--- python3 -m venv .venv && . .venv/bin/activate
--- pip install 'percolate-core[sample,agent]>=0.2.5'
+-- python3 -c 'import sys; sys.exit(sys.version_info < (3, 11) and "Percolate needs Python 3.11 or newer: use python3.11 or python3.13 in place of python3")' &&
+--   python3 -m venv .venv && . .venv/bin/activate &&
+--   pip install 'percolate-core[sample,agent]>=0.2.5'
 -- /live
 -- live: shell
 -- set -a; . ./.env; set +a
