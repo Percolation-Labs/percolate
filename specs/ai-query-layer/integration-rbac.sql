@@ -259,6 +259,8 @@ grant execute on function aiq.semantic_in(text, vector, text, int) to authentica
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
+-- aiq.query raises result exceptions through it as the caller (REM-948).
+grant execute on function aiq.result_exceptions(jsonb, int, int, boolean) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
 -- Diagnostic, and granted for the same reason the error messages name the fix:

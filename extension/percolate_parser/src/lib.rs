@@ -785,7 +785,9 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             "queue": "which worker pool claims it; in-database kinds ignore it",
             "rate_key": "a shared throttle this task consumes before being claimed -- workflow.queue_config holds the rate; two steps naming the same key share one budget",
             "compensate_with": "step id to run in reverse order if a saga member fails",
-            "saga_group": "groups tasks compensated together"
+            "saga_group": "groups tasks compensated together",
+            "repeat": "{max, until, steps}: the steps repeat until `until` holds, at most `max` times (1 to 20). Attempt n of an inner step `x` is the step `x_<n>`; inside, {{steps.x}} is this attempt's and {{previous.x}} the one before (on the first attempt NULL in SQL, removed elsewhere). Every attempt after the first is skipped once until held after the one before it. The repeat's own id is a final step: {{steps.<id>.result.0.attempts}}, .satisfied and .last.<inner>",
+            "when": "a SQL predicate over {{run.x}} and earlier results ({{steps.<id>.result...}}, each a bound value; a step it names must be in needs). Asked once, when the step's needs are done: false or null marks the step skipped, which counts as done for the steps after it, so a step after a skipped one runs unless it has a when of its own"
         },
         "actions": [
             {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
@@ -1287,6 +1289,15 @@ struct WfStep {
     compensate_with: Option<String>,
     #[serde(default)]
     saga_group: Option<String>,
+
+    // A conditional step (REM-967): a SQL predicate over the run's input and
+    // earlier results, carried as written. The engine asks it once, when the
+    // step's needs are done; false or null marks the step `skipped`, which
+    // counts as done for the steps after it. Its {{templates}} bind like a
+    // `sql:` statement's, and lint_spec holds it to the same rule: a step it
+    // names must be in `needs`.
+    #[serde(default)]
+    when: Option<String>,
 }
 
 // `sql:` HAS TWO SPELLINGS AND THE SHORT ONE IS THE DEFAULT.
@@ -1951,8 +1962,298 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
     Ok(("matrix", s.queue.clone().unwrap_or_else(|| "none".into()), input))
 }
 
+// `repeat:` (REM-968): steps that repeat until a check passes, up to a bound.
+//
+// A repeat is UNROLLED here, before the document is read as steps: attempt i
+// of an inner step `judge` becomes the ordinary step `judge_<i>`, attempt i+1
+// waits on attempt i, and every step of attempt i+1 carries
+// `when: not (<until over attempt i>)`. Once the check holds, the next
+// attempt is skipped; and since a skipped step's result is null (REM-967),
+// the attempt after a skipped one asks a null question and is skipped too.
+// So the workflow stays a DAG, every attempt is a task row, and the bound is
+// the number of attempts written out -- enforced by construction, not by a
+// counter the engine has to keep.
+//
+// Inside the group, {{steps.<inner>}} means this attempt's step and
+// {{previous.<inner>}} the attempt before. On the first attempt there is
+// nothing before it: in SQL (`sql:`, `p8ql:`, `when:`) the template becomes
+// NULL, the author's quotes around it included, and anywhere else -- an
+// agent's input -- it is removed, because the worker resolves those against
+// the run's context and an attempt-0 step is in nobody's context. The
+// group's own id becomes a final in-database step that waits for every
+// attempt and reports how many ran, whether the check held, and the last
+// attempt's results: {{steps.<id>.result.0.last.<inner>}}.
+const REPEAT_MAX: i64 = 20;
+
+// Rewrite the templates in one string for attempt `this`. Templates that do
+// not name an inner step are left exactly as written.
+fn rewrite_repeat_templates(s: &str, inner: &[String], this: i64, sql: bool) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let body = &after[..end];
+        let t = body.trim();
+        let (ns, back) = if let Some(p) = t.strip_prefix("steps.") {
+            (Some(p), 0)
+        } else if let Some(p) = t.strip_prefix("previous.") {
+            (Some(p), 1)
+        } else {
+            (None, 0)
+        };
+        match ns {
+            Some(path) => {
+                let name = path.split('.').next().unwrap_or("");
+                if inner.iter().any(|x| x == name) {
+                    if !(back == 1 && this == 1) {
+                        out.push_str(&format!("{{{{steps.{}_{}{}}}}}",
+                                              name, this - back, &path[name.len()..]));
+                    } else if sql {
+                        let tail = &after[end + 2..];
+                        if out.ends_with('\'') && tail.starts_with('\'') {
+                            out.pop();
+                            out.push_str("NULL");
+                            rest = &tail[1..];
+                            continue;
+                        }
+                        out.push_str("NULL");
+                    }
+                } else if back == 1 {
+                    return Err(format!(
+                        "{{{{previous.{}}}}} names '{}', which is not a step inside this repeat",
+                        path, name));
+                } else {
+                    out.push_str("{{");
+                    out.push_str(body);
+                    out.push_str("}}");
+                }
+            }
+            None => {
+                out.push_str("{{");
+                out.push_str(body);
+                out.push_str("}}");
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+// The names a string's templates give in one namespace (`steps.` or `previous.`).
+fn repeat_template_names(s: &str, ns: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        if let Some(path) = after[..end].trim().strip_prefix(ns) {
+            let name = path.split('.').next().unwrap_or("").to_string();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    names
+}
+
+fn rewrite_repeat_value(v: &mut serde_yaml::Value, inner: &[String], this: i64, sql: bool) -> Result<(), String> {
+    use serde_yaml::Value;
+    match v {
+        Value::String(s) => *s = rewrite_repeat_templates(s, inner, this, sql)?,
+        Value::Sequence(seq) => for x in seq.iter_mut() { rewrite_repeat_value(x, inner, this, sql)? },
+        Value::Mapping(m) => for (_, x) in m.iter_mut() { rewrite_repeat_value(x, inner, this, sql)? },
+        _ => {}
+    }
+    Ok(())
+}
+
+fn yaml_strings(v: &serde_yaml::Value) -> Vec<String> {
+    match v.as_sequence() {
+        Some(seq) => seq.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn expand_repeats(mut doc: serde_yaml::Value) -> Result<serde_yaml::Value, String> {
+    use serde_yaml::{Mapping, Value};
+    let key = |k: &str| Value::String(k.into());
+    let Some(steps) = doc.get_mut("steps").and_then(|s| s.as_sequence_mut()) else {
+        return Err("workflow has no steps".into());
+    };
+    let mut out: Vec<Value> = Vec::new();
+
+    for step in std::mem::take(steps) {
+        let Some(rep) = step.get("repeat").cloned() else {
+            out.push(step);
+            continue;
+        };
+        let id = step.get("id").and_then(|v| v.as_str())
+            .ok_or("a repeat step needs an id")?.to_string();
+        for k in step.as_mapping().map(|m| m.keys().collect::<Vec<_>>()).unwrap_or_default() {
+            let k = k.as_str().unwrap_or("");
+            if !["id", "needs", "repeat"].contains(&k) {
+                return Err(format!(
+                    "step '{id}' repeats a group of steps, so it takes only id, needs and repeat; \
+                     '{k}' belongs on a step inside repeat.steps"));
+            }
+        }
+        let outer_needs = step.get("needs").map(yaml_strings).unwrap_or_default();
+        for k in rep.as_mapping().map(|m| m.keys().collect::<Vec<_>>()).unwrap_or_default() {
+            let k = k.as_str().unwrap_or("");
+            if !["max", "until", "steps"].contains(&k) {
+                return Err(format!("step '{id}': repeat takes max, until and steps, not '{k}'"));
+            }
+        }
+        let max = rep.get("max").and_then(|v| v.as_i64()).ok_or(format!(
+            "step '{id}' repeats without max. A repeat is bounded when it is written: say how \
+             many attempts it may make, at most {REPEAT_MAX}."))?;
+        if !(1..=REPEAT_MAX).contains(&max) {
+            return Err(format!(
+                "step '{id}' repeats up to {max} times; max is 1 to {REPEAT_MAX}, because every \
+                 attempt is written out as task rows"));
+        }
+        let until = rep.get("until").and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(format!(
+                "step '{id}' repeats without until: the check that, once it holds, stops the \
+                 next attempt"))?.to_string();
+        let inner_steps = rep.get("steps").and_then(|v| v.as_sequence())
+            .filter(|s| !s.is_empty())
+            .ok_or(format!("step '{id}' repeats no steps: repeat.steps is the attempt"))?.clone();
+
+        let mut inner: Vec<String> = Vec::new();
+        for s in &inner_steps {
+            let sid = s.get("id").and_then(|v| v.as_str())
+                .ok_or(format!("a step inside '{id}'s repeat has no id"))?;
+            if s.get("repeat").is_some() {
+                return Err(format!("step '{sid}' repeats inside '{id}'s repeat; repeats do not nest"));
+            }
+            inner.push(sid.to_string());
+        }
+        let inner_needs: Vec<Vec<String>> = inner_steps.iter()
+            .map(|s| s.get("needs").map(yaml_strings).unwrap_or_default()).collect();
+        let sinks: Vec<String> = inner.iter()
+            .filter(|x| !inner_needs.iter().any(|n| n.contains(x))).cloned().collect();
+
+        if !repeat_template_names(&until, "previous.").is_empty() {
+            return Err(format!(
+                "step '{id}': until is asked of the attempt that just finished, so it names that \
+                 attempt's steps as {{{{steps.<id>...}}}}, not {{{{previous...}}}}"));
+        }
+        let until_names = repeat_template_names(&until, "steps.");
+        let until_inner: Vec<String> = until_names.iter().filter(|n| inner.contains(n)).cloned().collect();
+        let until_outer: Vec<String> = until_names.iter().filter(|n| !inner.contains(n)).cloned().collect();
+        if until_inner.is_empty() {
+            return Err(format!(
+                "step '{id}': until names no step inside the repeat, so no attempt could change \
+                 its answer"));
+        }
+        let mut prev_names: Vec<String> = Vec::new();
+        for s in &inner_steps {
+            let text = serde_yaml::to_string(s).unwrap_or_default();
+            for n in repeat_template_names(&text, "previous.") {
+                if !prev_names.contains(&n) { prev_names.push(n); }
+            }
+        }
+        let until_at = |i: i64| rewrite_repeat_templates(&until, &inner, i, true);
+
+        for i in 1..=max {
+            for (k, s) in inner_steps.iter().enumerate() {
+                let mut s2 = s.clone();
+                let m = s2.as_mapping_mut().ok_or(format!("a step inside '{id}'s repeat is not a mapping"))?;
+                let own_when = m.remove(key("when"));
+                m.remove(key("id"));
+                m.remove(key("needs"));
+                for (k2, v) in m.iter_mut() {
+                    let sql = matches!(k2.as_str(), Some("sql") | Some("p8ql"));
+                    rewrite_repeat_value(v, &inner, i, sql)?;
+                }
+
+                let mut needs: Vec<String> = inner_needs[k].iter()
+                    .map(|n| if inner.contains(n) { format!("{n}_{i}") } else { n.clone() }).collect();
+                let is_root = !inner_needs[k].iter().any(|n| inner.contains(n));
+                if is_root {
+                    needs.extend(outer_needs.iter().cloned());
+                    if i > 1 { needs.extend(sinks.iter().map(|n| format!("{n}_{}", i - 1))); }
+                }
+                if i > 1 {
+                    needs.extend(until_inner.iter().chain(prev_names.iter()).map(|n| format!("{n}_{}", i - 1)));
+                    needs.extend(until_outer.iter().cloned());
+                }
+                let mut seen = Vec::new();
+                needs.retain(|n| if seen.contains(n) { false } else { seen.push(n.clone()); true });
+
+                let mut when: Option<String> = None;
+                if let Some(w) = own_when.as_ref().and_then(|w| w.as_str()) {
+                    when = Some(rewrite_repeat_templates(w, &inner, i, true)?);
+                }
+                if i > 1 {
+                    let gate = format!("not ({})", until_at(i - 1)?);
+                    when = Some(match when { Some(w) => format!("({gate}) and ({w})"), None => gate });
+                }
+
+                let mut step_out = Mapping::new();
+                step_out.insert(key("id"), key(&format!("{}_{i}", inner[k])));
+                if !needs.is_empty() {
+                    step_out.insert(key("needs"), Value::Sequence(needs.into_iter().map(Value::String).collect()));
+                }
+                if let Some(w) = when { step_out.insert(key("when"), Value::String(w)); }
+                for (k2, v) in m.iter() { step_out.insert(k2.clone(), v.clone()); }
+                out.push(Value::Mapping(step_out));
+            }
+        }
+
+        // The group's own id: one in-database step after every attempt.
+        let mut needs: Vec<String> = sinks.iter().map(|n| format!("{n}_{max}")).collect();
+        for i in 1..=max {
+            needs.extend(until_inner.iter().map(|n| format!("{n}_{i}")));
+        }
+        needs.extend(until_outer.iter().cloned());
+        let mut seen = Vec::new();
+        needs.retain(|n| if seen.contains(n) { false } else { seen.push(n.clone()); true });
+        let mut checks = Vec::new();
+        for i in (1..=max).rev() { checks.push(format!("({})", until_at(i)?)); }
+        let spec = serde_json::json!({"group": id, "max": max, "steps": inner}).to_string();
+        let mut fin = Mapping::new();
+        fin.insert(key("id"), key(&id));
+        fin.insert(key("needs"), Value::Sequence(needs.into_iter().map(Value::String).collect()));
+        fin.insert(key("sql"), Value::String(format!(
+            "select * from workflow.repeat_outcome('{}'::jsonb, coalesce({}))",
+            spec.replace('\'', "''"), checks.join(", "))));
+        out.push(Value::Mapping(fin));
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    for s in &out {
+        if let Some(sid) = s.get("id").and_then(|v| v.as_str()) {
+            if ids.iter().any(|x| x == sid) {
+                return Err(format!(
+                    "step id '{sid}' is used twice once repeats are written out (an attempt is \
+                     named <step>_<n>); rename one of them"));
+            }
+            ids.push(sid.to_string());
+        }
+    }
+    *doc.get_mut("steps").unwrap() = serde_yaml::Value::Sequence(out);
+    Ok(doc)
+}
+
 pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
-    let doc: WfDoc = serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
+    let repeats = raw.get("steps").and_then(|s| s.as_sequence())
+        .map_or(false, |s| s.iter().any(|x| x.get("repeat").is_some()));
+    let doc: WfDoc = if repeats {
+        serde_yaml::from_value(expand_repeats(raw)?).map_err(|e| format!("invalid YAML: {e}"))?
+    } else {
+        serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?
+    };
     if doc.steps.is_empty() {
         return Err("workflow has no steps".into());
     }
@@ -2102,6 +2403,14 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
         if s.saga_group.is_some() || s.compensate_with.is_some() {
             step["saga_group"] = serde_json::json!(
                 s.saga_group.clone().unwrap_or_else(|| "default".into()));
+        }
+        if let Some(w) = &s.when {
+            if w.trim().is_empty() {
+                return Err(format!(
+                    "step '{}' declares an empty when:. Write the condition it runs under, \
+                     or leave the key out to run it always.", s.id));
+            }
+            step["when"] = serde_json::json!(w);
         }
         steps.push(step);
     }

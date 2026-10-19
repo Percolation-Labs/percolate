@@ -2017,6 +2017,60 @@ drop function if exists aiq.semantic(text, vector, int);
 -- ============================================================
 
 -- ------------------------------------------------------------
+-- 8z. Semantic exceptions the result raises, raised where the rows are (REM-948).
+--
+-- percolate-core's `semantic_exceptions` module answers a search with rows AND
+-- the exceptions they raise, each carrying a prompt the model reads. It runs in
+-- Python, outside the transaction, so it sees only what the envelope carries --
+-- and the envelope carries the rows returned, never how many matched. Its own
+-- comment says so: TRUNCATED_AT_LIMIT "also needs the total the envelope does
+-- not carry". The database is the one party that knows the total, so the kinds
+-- that need it are raised here, in the statement that ran the search, with no
+-- round trip.
+--
+-- ONE VOCABULARY. Codes, stages, severities and prompts are core's catalogue,
+-- copied verbatim between the markers below, and `dev/semantic-exceptions.py
+-- --check` fails when a copy differs from `core/percolate_core/semantic_exceptions/
+-- catalogue.py`. Moving the catalogue itself into the database is a later card;
+-- this is the three result kinds that only the store can raise honestly.
+--
+-- TOO_BROAD's bar is core's default (Limits.too_broad, 1000). A count is a
+-- bounded probe, never an unbounded scan: `p_total` is at most bar + 1, and
+-- `capped` says when it stopped counting.
+-- ------------------------------------------------------------
+create or replace function aiq.result_exceptions(
+    p_rows jsonb, p_limit int default null, p_total int default null,
+    p_capped boolean default false)
+returns jsonb as $$
+    with k(code, stage, severity, prompt) as (values
+        -- semantic-exception kinds: begin
+        ('EMPTY', 'result', 'warning', 'Nothing matched. Rephrase in the records'' own words, widen the filters, or report that the store holds nothing on this.'),
+        ('TRUNCATED_AT_LIMIT', 'result', 'warning', 'The result filled the limit, so more matches exist. The answer may be partial: page further or say so.'),
+        ('TOO_BROAD', 'result', 'warning', 'A very large number of records match. Add a filter or a time window.')
+        -- semantic-exception kinds: end
+    ), raised(code, evidence) as (
+        select 'EMPTY', '{}'::jsonb
+         where jsonb_array_length(coalesce(p_rows, '[]')) = 0
+        union all
+        select 'TOO_BROAD', jsonb_build_object('total', p_total, 'capped', p_capped)
+         where p_total > 1000
+        union all
+        -- Only when the store KNOWS more matched, as core's own rule says: a
+        -- ranked search always fills its limit, so without a total this would
+        -- fire on every search and mean nothing.
+        select 'TRUNCATED_AT_LIMIT',
+               jsonb_build_object('returned', jsonb_array_length(p_rows), 'limit', p_limit,
+                                  'total', p_total, 'capped', p_capped)
+         where p_limit is not null and p_total is not null
+           and jsonb_array_length(p_rows) >= p_limit and p_total > jsonb_array_length(p_rows)
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'code', k.code, 'stage', k.stage, 'severity', k.severity,
+               'prompt', k.prompt, 'evidence', r.evidence) order by k.code), '[]'::jsonb)
+      from raised r join k using (code);
+$$ language sql immutable;
+
+-- ------------------------------------------------------------
 -- 9. Single dispatch entry point.
 --
 -- One PostgREST RPC for the whole dialect, so an agent posts
@@ -2059,6 +2113,9 @@ declare
     v_out    jsonb;
     v_unresolved jsonb := '[]'::jsonb;
     v_exhausted  boolean := false;
+    v_limit      int;
+    v_total      bigint;
+    v_exceptions jsonb;
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
@@ -2092,6 +2149,7 @@ begin
             'answer is indistinguishable from "there is nothing to find"',
             p->>'limit';
     end if;
+    v_limit := coalesce((p->>'limit')::int, 10);   -- the per-mode functions' own default
 
     case p->>'mode'
     when 'LOOKUP' then
@@ -2273,12 +2331,24 @@ begin
         select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb) into v_out
         from aiq.semantic_in(p->>'source', p_embedding, p->>'model',
                              (p->>'limit')::int) s;
+        v_exceptions := aiq.result_exceptions(v_out);
 
     when 'TEXT' then
         -- Lexical only. Needs no embedding at all, which is exactly why it
         -- answers the rare-exact-token case (§11) that SEMANTIC misses.
-        select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
-        from aiq.lexical(p->>'source', p->>'arg', (p->>'limit')::int) l;
+        --
+        -- One scan answers both the rows and the count: the text index finds
+        -- every match and the sort keeps the top, so asking for up to 1001
+        -- ranked rows costs what asking for ten does, and the first LIMIT of
+        -- them are the rows. The count is what raises TRUNCATED_AT_LIMIT and
+        -- TOO_BROAD below (REM-948).
+        select coalesce(jsonb_agg(to_jsonb(l) - 'n' order by l.n) filter (where l.n <= v_limit), '[]'::jsonb),
+               count(*)
+          into v_out, v_total
+        from (select x.*, row_number() over (order by x.score desc) as n
+                from aiq.lexical(p->>'source', p->>'arg', greatest(v_limit, 1001)) x) l;
+        v_exceptions := aiq.result_exceptions(v_out, v_limit, least(v_total, 1001)::int,
+                                              v_total > 1000);
 
     when 'SEARCH' then
         if p_embedding is null then
@@ -2289,6 +2359,7 @@ begin
         select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
         from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
                         (p->>'limit')::int) h;
+        v_exceptions := aiq.result_exceptions(v_out);
 
     when 'SCHEMA' then
         -- The one mode that returns a document rather than rows, so it says
@@ -2426,6 +2497,12 @@ begin
         -- and a reader would stop looking at it on the one that can.
         || case when p->>'mode' in ('RELEVANCE', 'PATH')
                 then jsonb_build_object('exhausted', v_exhausted)
+                else '{}'::jsonb end
+        -- Only the retrieval modes raise result exceptions, and they always say
+        -- so: an empty list is "the store looked and found none to raise", which
+        -- a missing key could not distinguish from "this mode never looks".
+        || case when p->>'mode' in ('TEXT', 'SEMANTIC', 'SEARCH')
+                then jsonb_build_object('exceptions', coalesce(v_exceptions, '[]'::jsonb))
                 else '{}'::jsonb end;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
