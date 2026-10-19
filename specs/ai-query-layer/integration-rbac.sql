@@ -247,8 +247,8 @@ revoke execute on all functions in schema aiq from public;
 grant execute on function aiq.query(text, vector) to authenticated;
 grant execute on function aiq.lookup(text, boolean, int) to authenticated;
 grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
-grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
-grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
+grant execute on function aiq.graph_neighbors(uuid, text, int, timestamptz) to authenticated;
+grant execute on function aiq.graph_walk(uuid, int, text, int, timestamptz) to authenticated;
 -- aiq.edges_current is security_invoker and calls this, so a reader of the
 -- view needs it. Without the grant the view, and every GRAPH query over it,
 -- fails for exactly the roles it is granted to.

@@ -334,8 +334,8 @@ insert into expected (subsystem, kind, name, detail, why) values
  'graph-identity.md D11: every node and what it currently resolves to, following chains; an unmerged node maps to itself so it joins unconditionally'),
 ('ai-query-layer','function','aiq.resolve_nodes','uuid,uuid,text,text,jsonb','graph-identity.md D11: record a merge and move the merged node''s canonical keys onto the survivor as aliases'),
 ('ai-query-layer','function','aiq.unresolve_node','uuid,text','graph-identity.md D11: reverse a merge -- mechanical rather than reconstructive, because nothing was destroyed'),
-('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer','§7: GRAPH depth 1'),
-('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer','§7: GRAPH depth n>1'),
+('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer,timestamptz','§7: GRAPH depth 1, now or AS OF a time (REM-999)'),
+('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer,timestamptz','§7: GRAPH depth n>1, now or AS OF a time (REM-999)'),
 -- The compiled algorithms, and ONLY the ones graph-algorithms.md marks SAFE.
 -- Two of the five index proposals and one of the query ones are parked on a
 -- measurement; they are deliberately absent here, because a row in this list

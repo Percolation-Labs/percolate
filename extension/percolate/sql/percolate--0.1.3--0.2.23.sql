@@ -16272,13 +16272,25 @@ $$ language sql stable;
 -- graph-identity.md's rule is that a node is NAMED by its canonical key and
 -- traversal happens by id. Both halves are load-bearing, and the read path was
 -- keeping only the second.
+drop function if exists aiq.graph_neighbors(uuid, text, int);
 create or replace function aiq.graph_neighbors(
-    p_node_id uuid, p_relation text default null, p_limit int default 100
+    p_node_id uuid, p_relation text default null, p_limit int default 100,
+    p_at timestamptz default null
 ) returns table(neighbor_id uuid, key text, entity_type text, summary text,
                 relation text, weight real, direction text) as $$
+    -- WHICH EDGES: the ones that hold now, or with p_at the ones that held
+    -- then (REM-999, GRAPH ... AS OF). aiq.edge_periods carries an edge's
+    -- retracted gaps, so a fact that was withdrawn and revived is not read as
+    -- believed throughout. Periods are disjoint, so an edge appears once.
+    with e as (
+        select id, src_id, dst_id, relation, weight from aiq.edges_current where p_at is null
+        union all
+        select edge_id, src_id, dst_id, relation, weight from aiq.edge_periods
+         where p_at is not null and aiq.edge_is_current(valid_from, valid_to, p_at)
+    )
     select * from (
         select b.id, kb.key, b.entity_type, b.summary, e.relation, e.weight, 'out'::text
-        from aiq.edges_current e
+        from e
         join aiq.nodes b on b.id = e.dst_id
         left join lateral (select nk.key from aiq.node_keys nk
                             where nk.node_id = b.id and nk.kind = 'canonical'
@@ -16292,7 +16304,7 @@ create or replace function aiq.graph_neighbors(
                coalesce(rt.inverse_label, e.relation || '_by'), e.weight, 'in'::text
         -- edges_current on BOTH branches. The reverse half read aiq.edges
         -- raw, so an inbound edge answered after its retraction (REM-51).
-        from aiq.edges_current e
+        from e
         join aiq.nodes a on a.id = e.src_id
         join aiq.nodes b2 on b2.id = e.dst_id
         left join aiq.relation_types rt
@@ -16324,10 +16336,19 @@ $$ language sql stable;
 drop function if exists aiq.graph_walk(uuid, int, text, int);
 create or replace function aiq.graph_walk(
     p_node_id uuid, p_depth int default 2, p_relation text default null,
-    p_max_nodes int default 500
+    p_max_nodes int default 500, p_at timestamptz default null
 ) returns table(node_id uuid, key text, entity_type text, summary text,
                 depth int, path_relations text[], path_weight real) as $$
-    with recursive walk as (
+    -- WHICH EDGES: the ones that hold now, or with p_at the ones that held
+    -- then (REM-999, GRAPH ... AS OF). aiq.edge_periods carries an edge's
+    -- retracted gaps, so a fact that was withdrawn and revived is not read as
+    -- believed throughout. Periods are disjoint, so an edge appears once.
+    with recursive e as (
+        select id, src_id, dst_id, relation, weight from aiq.edges_current where p_at is null
+        union all
+        select edge_id, src_id, dst_id, relation, weight from aiq.edge_periods
+         where p_at is not null and aiq.edge_is_current(valid_from, valid_to, p_at)
+    ), walk as (
         select n.id, n.entity_type, n.summary, 0 as depth,
                array[]::text[] as rels, array[n.id] as seen, 1.0::real as score
         from aiq.nodes n where n.id = p_node_id
@@ -16351,7 +16372,7 @@ create or replace function aiq.graph_walk(
         from walk w
         -- What holds now, not the history: this read aiq.edges, so a walk
         -- went on crossing an edge its derivation had retracted (REM-51).
-        join aiq.edges_current e on (e.src_id = w.id or e.dst_id = w.id)
+        join e on (e.src_id = w.id or e.dst_id = w.id)
         join aiq.nodes nx on nx.id = case when e.src_id = w.id then e.dst_id else e.src_id end
         where w.depth < p_depth
           and not nx.id = any(w.seen)          -- cycle guard
@@ -16561,6 +16582,7 @@ declare
     v_node   uuid;
     v_n      int;
     v_seed   jsonb;
+    v_at     timestamptz;
     v_out    jsonb;
     v_unresolved jsonb := '[]'::jsonb;
     v_exhausted  boolean := false;
@@ -16704,6 +16726,16 @@ begin
         -- no FUZZY GRAPH to ask for it with -- `FUZZY` is refused on every
         -- mode but LOOKUP. On a miss the near matches come back as
         -- suggestions, so the affordance survives without the guess.
+        -- AS OF (REM-999): the parser checked its shape; this is the check
+        -- that it is a time, refused with the value rather than as a cast
+        -- error from inside the walk.
+        if p->>'as_of' is not null then
+            if not pg_input_is_valid(p->>'as_of', 'timestamptz') then
+                raise exception 'AS OF % is not a time', p->>'as_of';
+            end if;
+            v_at := (p->>'as_of')::timestamptz;
+        end if;
+
         select count(*), (array_agg(l.node_id))[1]
           into v_n, v_node
           from aiq.lookup(p->>'arg', false, 50) l;
@@ -16740,11 +16772,11 @@ begin
 
         if (p->>'depth')::int <= 1 then
             select coalesce(jsonb_agg(to_jsonb(g)), '[]'::jsonb) into v_out
-            from aiq.graph_neighbors(v_node, p->>'relation', (p->>'limit')::int) g;
+            from aiq.graph_neighbors(v_node, p->>'relation', (p->>'limit')::int, v_at) g;
         else
             select coalesce(jsonb_agg(to_jsonb(w)), '[]'::jsonb) into v_out
             from aiq.graph_walk(v_node, (p->>'depth')::int, p->>'relation',
-                                (p->>'limit')::int) w;
+                                (p->>'limit')::int, v_at) w;
         end if;
         return jsonb_build_object('mode','GRAPH','plan',p,'seed',v_seed,'rows',v_out);
 
@@ -19801,8 +19833,8 @@ revoke execute on all functions in schema aiq from public;
 grant execute on function aiq.query(text, vector) to authenticated;
 grant execute on function aiq.lookup(text, boolean, int) to authenticated;
 grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
-grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
-grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
+grant execute on function aiq.graph_neighbors(uuid, text, int, timestamptz) to authenticated;
+grant execute on function aiq.graph_walk(uuid, int, text, int, timestamptz) to authenticated;
 -- aiq.edges_current is security_invoker and calls this, so a reader of the
 -- view needs it. Without the grant the view, and every GRAPH query over it,
 -- fails for exactly the roles it is granted to.

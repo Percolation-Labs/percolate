@@ -64,7 +64,7 @@ pub extern "C-unwind" fn _PG_init() {
 //   SEMANTIC "<text>" FROM <source> [USING <model>] [LIMIT n]
 //   TEXT     "<text>" FROM <source> [LIMIT n]          -- lexical, ts_rank
 //   SEARCH   "<text>" FROM <source> [USING <model>] [LIMIT n]  -- RRF fusion
-//   GRAPH    "<key>"  [DEPTH n] [TYPE <relation>] [LIMIT n]
+//   GRAPH    "<key>"  [DEPTH n] [TYPE <relation>] [AS OF '<time>'] [LIMIT n]
 //   SCHEMA   ["<facet>"] [FROM <name>]              -- what this database IS
 //   LAKE FROM <dataset> [, <dataset> ...] <select>  -- DuckDB, in the lake
 //   <any ordinary SQL statement>
@@ -112,6 +112,9 @@ pub struct ParsedQuery {
     pub sources: Vec<String>,
     pub model: Option<String>,
     pub limit: i32,
+    /// GRAPH's `AS OF '<time>'`: walk the edges that held then rather than
+    /// now (REM-999). Kept as the caller wrote it; the database casts it.
+    pub as_of: Option<String>,
 }
 
 impl ParsedQuery {
@@ -239,6 +242,7 @@ fn parse_lake(input: &str) -> Result<ParsedQuery, ParseError> {
         sources: names,
         model: None,
         limit: LAKE_ROW_CAP,
+        as_of: None,
     })
 }
 
@@ -362,6 +366,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         sources: Vec::new(),
         model: None,
         limit: 20,
+        as_of: None,
     };
 
     // Ordinary SQL, recognised by how it starts rather than by an announcement.
@@ -431,7 +436,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         let is_keyword = !quoted[i]
             && matches!(
                 upper.as_str(),
-                "DEPTH" | "TYPE" | "FROM" | "USING" | "LIMIT" | "FUZZY"
+                "DEPTH" | "TYPE" | "FROM" | "USING" | "LIMIT" | "FUZZY" | "AS"
             );
         if is_keyword {
             break;
@@ -527,6 +532,32 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                 q.model = Some(v.clone());
                 i += 2;
             }
+            // AS OF '<time>': what held then (REM-999). Two words, because
+            // that is how SQL spells it; the time is quoted like every other
+            // argument. Only its shape is checked here -- a date first -- so
+            // `AS OF yesterday` is refused by the parser rather than reaching
+            // the database as a string it would cast to nothing useful.
+            "AS" => {
+                if !toks.get(i + 1).map_or(false, |t| t.eq_ignore_ascii_case("OF")) {
+                    return Err(ParseError::UnexpectedToken(toks[i].clone()));
+                }
+                let v = toks.get(i + 2).ok_or(ParseError::MissingArgument(
+                    "AS OF requires a time, e.g. AS OF '2026-03-01'",
+                ))?;
+                let b = v.as_bytes();
+                let dated = b.len() >= 10
+                    && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
+                    && b[5..7].iter().all(u8::is_ascii_digit) && b[7] == b'-'
+                    && b[8..10].iter().all(u8::is_ascii_digit);
+                if !dated {
+                    return Err(ParseError::MissingArgument(
+                        "AS OF requires a time that starts with a date, e.g. \
+                         AS OF '2026-03-01' or AS OF '2026-03-01T09:00:00Z'",
+                    ));
+                }
+                q.as_of = Some(v.clone());
+                i += 3;
+            }
             "LIMIT" => {
                 let v = toks.get(i + 1).ok_or(ParseError::MissingArgument(
                     "LIMIT requires a number",
@@ -591,6 +622,15 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
             }));
         }
     }
+    // AS OF reads the graph at a past time, and GRAPH is the mode that walks
+    // it. Refused elsewhere rather than ignored: a search or a lookup "as of
+    // March" that quietly answered for now is the failure this dialect's
+    // other refusals exist to prevent.
+    if q.as_of.is_some() && q.mode != "GRAPH" {
+        return Err(ParseError::MissingArgument(
+            "AS OF applies to GRAPH -- it walks the edges that held at that time",
+        ));
+    }
     // DEPTH's default of 1 is GRAPH's default, and it is wrong for PATH: a
     // one-hop route is a direct edge, so an unwritten DEPTH there would mean
     // "only tell me about things that are already adjacent" -- which is not
@@ -638,6 +678,7 @@ fn aiq_parse(query: &str) -> pgrx::JsonB {
             "sources": q.sources,
             "model": q.model,
             "limit": q.limit,
+            "as_of": q.as_of,
         })),
         Err(e) => pgrx::JsonB(serde_json::json!({
             "ok": false,
@@ -675,8 +716,8 @@ fn p8_query_grammar() -> pgrx::JsonB {
              "purpose": "Resolve one or more names to nodes. Takes a list because an agent almost never holds exactly one entity.",
              "example": "FUZZY LOOKUP \"acme\", \"globex\" LIMIT 5"},
             {"mode": "GRAPH",
-             "syntax": "GRAPH \"<key>\" [DEPTH n] [TYPE <relation>] [LIMIT n]",
-             "purpose": "Walk relationships out from a named node, to a bounded depth. The right mode for one and two hops.",
+             "syntax": "GRAPH \"<key>\" [DEPTH n] [TYPE <relation>] [AS OF '<time>'] [LIMIT n]",
+             "purpose": "Walk relationships out from a named node, to a bounded depth. The right mode for one and two hops. AS OF walks the edges that held at that time instead of now.",
              "example": "GRAPH \"acme\" DEPTH 2 TYPE competes_with"},
             {"mode": "PATH",
              "syntax": "PATH \"<a>\", \"<b>\" [, \"<c>\" ...] [DEPTH n] [TYPE <relation>] [LIMIT n]",
@@ -895,6 +936,25 @@ mod tests {
         let e = parse_query("RELEVANCE \"acme\" DEPTH 2").unwrap_err();
         assert!(e.message().contains("DEPTH does not apply to RELEVANCE"),
                 "got: {}", e.message());
+    }
+
+    /// AS OF reads the graph at a past time (REM-999): GRAPH only, a date
+    /// first, and the two words together.
+    #[pg_test]
+    fn graph_as_of_parses_and_is_refused_where_it_means_nothing() {
+        let q = parse_query("GRAPH \"soft/maya okafor\" AS OF '2026-03-01' LIMIT 5").unwrap();
+        assert_eq!(q.as_of.as_deref(), Some("2026-03-01"));
+        assert_eq!(q.limit, 5);
+        let q = parse_query("graph \"acme\" depth 2 as of \"2026-03-01T09:00:00Z\"").unwrap();
+        assert_eq!((q.depth, q.as_of.as_deref()), (2, Some("2026-03-01T09:00:00Z")));
+        assert!(parse_query("GRAPH \"acme\"").unwrap().as_of.is_none());
+
+        let e = parse_query("GRAPH \"acme\" AS OF yesterday").unwrap_err();
+        assert!(e.message().contains("starts with a date"), "got: {}", e.message());
+        let e = parse_query("LOOKUP \"acme\" AS OF '2026-03-01'").unwrap_err();
+        assert!(e.message().contains("AS OF applies to GRAPH"), "got: {}", e.message());
+        assert!(parse_query("GRAPH \"acme\" AS '2026-03-01'").is_err());
+        assert!(parse_query("GRAPH \"acme\" AS OF").is_err());
     }
 
     /// The modes that take one argument still take one. Adding a second
