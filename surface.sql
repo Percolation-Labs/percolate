@@ -380,6 +380,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.soft_nodes',null,'graph-index.md §4.4: an unresolved mention is a candidate, never an invented company'),
 ('ai-query-layer','table','aiq.lake_nodes',null,'graph-index.md §4.4: identity is always in Postgres, payload need not be'),
 ('ai-query-layer','function','aiq.upsert_graph','jsonb,jsonb','graph-index.md §5: one writer for an extracted graph, holding invariants 1-5'),
+('ai-query-layer','function','aiq.close_edge','jsonb,timestamptz,jsonb','activity-memory.md §2: a superseding memory closes exactly the fact it replaces, at the time stated (REM-963)'),
 ('ai-query-layer','function','aiq.land_graph','jsonb,uuid','graph-index.md §6.1: the whole-document shape, no fan-in'),
 ('ai-query-layer','function','aiq.land_graph_fanout','uuid','graph-index.md §6.2: the windowed shape''s fan-in'),
 ('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: the closed relation vocabulary, and the symmetry and inverses of each'),
