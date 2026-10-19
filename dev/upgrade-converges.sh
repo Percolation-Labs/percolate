@@ -215,6 +215,23 @@ load p8conv_fresh "create extension percolate version '$VERSION'"
 load p8conv_upg   "create extension percolate version '$FROM'"
 load p8conv_upg   "alter extension percolate update to '$TO'"
 
+# A FRESH INSTALL CAN GIVE AN ORDINARY ACCOUNT A ROLE (REM-993). This is the
+# one place a database is made by CREATE EXTENSION with no seed data after it,
+# which is what a reader of the docs has; every suite database carries
+# dev/init/02-seed.sql's `member`, and that hid its absence from the extension.
+# The install's documented first step makes it, so that step is what is run --
+# in a transaction that rolls back, so the comparison below sees no rows of it.
+member=$(docker exec "$CONTAINER" psql -U p8 -d p8conv_fresh -At -v ON_ERROR_STOP=1 \
+    -c "begin" \
+    -c "select from rbac.bootstrap_admin('first@example.test', 'a long first passphrase')" \
+    -c "select string_agg(resource||':'||action, ',' order by resource, action)
+          from rbac.role_permissions where role = 'member'" \
+    -c "rollback" | grep ':' || true)
+if [ "$member" != "agents:invoke,resources:create" ]; then
+    echo "==> after bootstrap_admin a fresh install's member role holds '${member:-nothing}', not agents:invoke and resources:create" >&2
+    exit 1
+fi
+
 # EVERY AXIS A REPLAY CAN GET WRONG, not just the ones that have gone wrong.
 #
 # `acl` and `proacl` are the reason this file exists and are the two nothing
