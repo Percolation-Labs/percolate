@@ -3,7 +3,9 @@ select e.relation, k.key as object, e.valid_from::date as held_from, e.valid_to:
        (select string_agg(left(coalesce(c.content, m.content), 60), ' | ')
           from jsonb_array_elements(e.provenance -> 'sources') src
           left join content.resource_chunks c on c.resource_id::text = src ->> 'resource_id'
-          left join agentic.messages m on src -> 'message_ids' ? m.id::text) as said
+          left join agentic.messages m on src -> 'message_ids' ? m.id::text) as said,
+       (select string_agg(distinct coalesce(src ->> 'agent', 'worker'), ', ')
+          from jsonb_array_elements(e.provenance -> 'sources') src) as by
   from aiq.edges e
   join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
  where e.src_id = (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id

@@ -73,5 +73,6 @@ for f in $(ls $B | sort); do
   echo "done $f"
 done
 if grep -rlF -e "$OK" $CAP; then echo "the key reached a capture"; fail=1; fi
+sed -i.bak 's/^OPENAI_API_KEY=.*/OPENAI_API_KEY=removed-after-run/' .env && rm -f .env.bak
 echo fail=$fail
 exit $fail

@@ -75,10 +75,16 @@ select aiq.upsert_graph($g$
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-support-2026-01'),
                     'valid_from', '2026-01-14T09:30:00Z')) ->> 'edges_new' as january;
 select aiq.upsert_graph($g$
- {"nodes": [{"k":"person","n":"A. Costa"}, {"k":"company","n":"Tagus Ceramics"}, {"k":"mode","n":"rail"}],
+ {"nodes": [{"k":"person","n":"A. Costa"}, {"k":"organization","n":"Tagus Ceramics"}, {"k":"mode","n":"rail"}],
   "edges": [{"s":0,"t":1,"r":"works_at"}, {"s":0,"t":2,"r":"prefers"}]}$g$,
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-email-2026-03'),
                     'valid_from', '2026-03-09T16:00:00Z')) ->> 'edges_new' as march;
+-- an older reader, reader-v0, read the same email and got it wrong
+select aiq.upsert_graph($g$
+ {"nodes": [{"k":"person","n":"A. Costa"}, {"k":"mode","n":"road"}],
+  "edges": [{"s":0,"t":1,"r":"prefers"}]}$g$,
+ jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-email-2026-03'),
+                    'agent', 'reader-v0', 'run_id', 'mar-09', 'valid_from', '2026-03-09T16:00:00Z')) ->> 'edges_new' as misread;
 -- What gpt-4o read from her message on the article's run, landed as reflect_session lands it: from now.
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Ana Costa"}, {"k":"port","n":"Felixstowe"}, {"k":"office","n":"Porto office"}],
@@ -123,8 +129,8 @@ select aiq.register_graph_vocabulary() ->> 'relations' as relations;
 
 -- §3 Dream.
 select pg_temp.check((select r - 'since' - 'until' = '{"superseded": 1, "promoted_exact": 2, "promotion_refused": 0,
-                              "soft_left_for_a_judge": 6}'::jsonb from aiq.dream() r),
-    '§3: dream ends Rotterdam and binds the two ports, and leaves six names for a judge');
+                              "soft_left_for_a_judge": 8}'::jsonb from aiq.dream() r),
+    '§3: dream ends Rotterdam and binds the two ports, and leaves eight names for a judge');
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() =
     'lives_in place/lisbon, ships_via felixstowe, works_at company/tagus ceramics, works_at office/porto office',
@@ -139,18 +145,37 @@ select aiq.promote_soft_node(
            where s.key = 'ana costa'),
          'gpt-4o', 'llm', :'verdict'::jsonb) ->> 'moved' as moved
  where (:'verdict'::jsonb ->> 'same')::boolean;
+\set company '{"same": true, "why": "Both notes reference Tagus Ceramics in the context of logistics and shipping."}'
+select aiq.promote_soft_node(
+         (select id from aiq.soft_nodes where key = 'tagus ceramics' and claimed_kind = 'organization'),
+         (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id
+           where s.key = 'tagus ceramics' and s.claimed_kind = 'company'),
+         'gpt-4o', 'llm', :'company'::jsonb) ->> 'merged' as merged
+ where (:'company'::jsonb ->> 'same')::boolean;
 :as_ana
-select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%', '§4: rail moved onto Ana with the alias');
+select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%' and pg_temp.ana_graph() like '%prefers mode/road%'
+                     and pg_temp.ana_graph() not like '%organization/tagus ceramics%',
+    '§4: rail and the misread road moved onto Ana, and the company typed two ways is one: ' || pg_temp.ana_graph());
+:as_operator
+-- The misreading reader's run is withdrawn: what only it said ends, and stays readable.
+select pg_temp.check((select r ->> 'retracted' = '1' and r ->> 'withdrawn' = '0' from aiq.retract_derived('reader-v0') r),
+    '§4: retracting reader-v0 ends its one fact');
+:as_ana
+select pg_temp.check(pg_temp.ana_graph() not like '%mode/road%', '§4: road is gone from the present graph');
 :as_operator
 
 -- §5 Why, as of, and her bookings beside her memory.
-select pg_temp.check((select string_agg(s.claimed_kind || '/' || s.key || ' ' || r.decided_by || ' ' || r.tier, ', '
-                                         order by r.at)
+select pg_temp.check((select count(*) filter (where r.tier = 'registry' and r.decided_by = 'dream') = 2
+                            and count(*) filter (where r.tier = 'llm' and r.decided_by = 'gpt-4o') = 2
                         from aiq.node_resolutions r join aiq.soft_nodes s on s.id = (r.evidence ->> 'soft_id')::uuid
-                       where s.key in ('rotterdam', 'felixstowe', 'a. costa'))
-                     in ('port/rotterdam dream registry, port/felixstowe dream registry, person/a. costa gpt-4o llm',
-                         'port/felixstowe dream registry, port/rotterdam dream registry, person/a. costa gpt-4o llm'),
-    '§5: three bindings, each with who made it');
+                       where s.key in ('rotterdam', 'felixstowe', 'a. costa', 'tagus ceramics')),
+    '§5: four bindings, each with who made it');
+-- REM-1013, scoped: a withdrawn fact is ended today, so a read of March still says she preferred road.
+-- This assertion records the gap; when retraction becomes an appended record it fails, and goes.
+select pg_temp.check((select e.valid_from = '2026-03-09T16:00:00Z' and e.valid_to is not null
+                        from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
+                       where e.relation = 'prefers' and k.key = 'mode/road'),
+    '§5: the withdrawn road fact reads as held from March (REM-1013)');
 select pg_temp.check((select e.valid_to is not null and e.valid_from = '2026-01-14T09:30:00Z'
                         from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
                        where e.relation = 'ships_via' and k.key = 'rotterdam'),
@@ -159,6 +184,10 @@ select pg_temp.check((select e.valid_to is not null and e.valid_from = '2026-01-
 select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q$) =
     'lives_in place/lisbon, ships_via rotterdam, works_at company/tagus ceramics',
     '§5: as of March she shipped via Rotterdam: ' || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q$), 'nothing'));
+select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$) =
+    'lives_in place/lisbon, prefers mode/rail, prefers mode/road, ships_via rotterdam, works_at company/tagus ceramics',
+    '§5: as of May the withdrawn road preference still reads as held (REM-1013): '
+    || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$), 'nothing'));
 select pg_temp.check((select string_agg(b.id || ' ' || p.name || ' ' || d.summary, ', ' order by b.departs)
                         from crm.bookings b
                         join crm.ports p on p.id = b.port_id
