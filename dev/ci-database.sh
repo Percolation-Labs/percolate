@@ -194,10 +194,22 @@ if [ -n "${PARSER_DIST:-}" ]; then
     [ -f "$PARSER_DIST/percolate_parser--$PV.sql" ] || {
         echo "$PARSER_DIST has no percolate_parser--$PV.sql for the version its control names" >&2
         exit 1; }
-    [ -f "$PARSER_DIST/percolate_parser.so" ] || {
-        echo "$PARSER_DIST has no percolate_parser.so" >&2; exit 1; }
-    docker cp "$PARSER_DIST/percolate_parser.so" \
-              "$CONTAINER:$LIBDIR/" >/dev/null
+    # TWO NAMES FOR ONE FILE. CI's parser job hands over percolate_parser.so;
+    # dev/build-image.sh writes one per architecture, percolate_parser-<arch>.so,
+    # because dist/ holds both. This header has long given the second as the
+    # local form of CI, and it stopped here on "has no percolate_parser.so".
+    # The architecture is the CONTAINER's: the .so must match the server that
+    # loads it, not the machine that built it.
+    case "$(docker exec "$CONTAINER" uname -m)" in
+        aarch64|arm64) PARCH=arm64 ;;
+        x86_64|amd64)  PARCH=amd64 ;;
+        *)             PARCH=$(docker exec "$CONTAINER" uname -m) ;;
+    esac
+    PSO="$PARSER_DIST/percolate_parser.so"
+    [ -f "$PSO" ] || PSO="$PARSER_DIST/percolate_parser-$PARCH.so"
+    [ -f "$PSO" ] || {
+        echo "$PARSER_DIST has neither percolate_parser.so nor percolate_parser-$PARCH.so" >&2; exit 1; }
+    docker cp "$PSO" "$CONTAINER:$LIBDIR/percolate_parser.so" >/dev/null
     # The old script is REMOVED, not left beside the new one. Two installable
     # versions of an extension is not an error Postgres reports -- it is an
     # offer, and build-image.sh carries the same rm for the same reason.

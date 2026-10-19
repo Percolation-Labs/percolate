@@ -1,0 +1,29 @@
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+percolate-search all            46    52%    80%        28%     0%
+percolate-search current        14    21%    57%        50%     0%
+percolate-search historical      8    12%    88%        75%     0%
+percolate-search stable         12    92%   100%         0%     0%
+percolate-search change          5    80%    80%         0%     0%
+percolate-search scoped_agent    7    71%    86%         0%     0%
+
+percolate-search-dream all            46    52%    80%        28%     0%
+percolate-search-dream current        14    21%    57%        50%     0%
+percolate-search-dream historical      8    12%    88%        75%     0%
+percolate-search-dream stable         12    92%   100%         0%     0%
+percolate-search-dream change          5    80%    80%         0%     0%
+percolate-search-dream scoped_agent    7    71%    86%         0%     0%
+
+percolate-valid  all            46    76%    87%         0%     0%
+percolate-valid  current        14    57%    79%         0%     0%
+percolate-valid  historical      8    75%    88%         0%     0%
+percolate-valid  stable         12    92%   100%         0%     0%
+percolate-valid  change          5    80%    80%         0%     0%
+percolate-valid  scoped_agent    7    86%    86%         0%     0%
+
+percolate-valid-dream all            46    72%    87%         4%     0%
+percolate-valid-dream current        14    43%    79%        14%     0%
+percolate-valid-dream historical      8    75%    88%         0%     0%
+percolate-valid-dream stable         12    92%   100%         0%     0%
+percolate-valid-dream change          5    80%    80%         0%     0%
+percolate-valid-dream scoped_agent    7    86%    86%         0%     0%
+

@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..contracts import AgentSpec, CanonicalTool, ToolInvocation, ToolResult, ToolServer
+from ..contracts.tools import InvocationTarget
 from ..db import Repository
 from .mcp import McpProvider
 from .openapi import OpenApiProvider
@@ -94,6 +95,37 @@ async def sync_server(repo: Repository, server: ToolServer) -> ToolServer:
     return await repo.upsert_tool_server(server)
 
 
+async def agent_catalogue(repo: Repository, server: ToolServer) -> list[CanonicalTool]:
+    """The agents a server that serves agents offers THIS caller, read as them.
+
+    Not the cache. A sync of the agent gateway asked it with no caller, so row
+    security showed only the agents nobody owns, and that one list was stored on
+    the server row for everyone (REM-971): an agent pushed with ``percolate
+    agent push`` is its pusher's, so a router naming it got ``Unknown tool
+    name``, and an agent shared with one org would have been offered to every
+    caller or to none. ``repo`` carries the caller's claims, so the catalogue is
+    whatever ``agentic.agents_api`` shows them, and who may reach an agent
+    through a router is the agent row's scope and nothing else.
+
+    No network, as resolution promises: the gateway is this runtime, and asking
+    it over MCP would only ask the same table with less of the caller.
+    """
+    from ..runtime.delegation import AGENT_TOOL_INPUT, TOOL_PREFIX, agent_tool_description
+
+    return [
+        CanonicalTool(
+            name=f"{TOOL_PREFIX}{agent.name}",
+            description=agent_tool_description(agent),
+            input_schema=AGENT_TOOL_INPUT,
+            server_id=server.id,
+            server_name=server.name,
+            kind=server.kind,
+            target=InvocationTarget(tool_name=f"{TOOL_PREFIX}{agent.name}"),
+        )
+        for agent in await repo.list_agents()
+    ]
+
+
 async def resolve_toolset(repo: Repository, agent: AgentSpec) -> ResolvedToolset:
     """Turn ``agent.tools`` references into one flat, canonical toolset.
 
@@ -116,11 +148,15 @@ async def resolve_toolset(repo: Repository, agent: AgentSpec) -> ResolvedToolset
             raise LookupError(
                 f"agent {agent.name!r} references unknown tool server {ref.server!r}"
             )
-        if not server.cached_tools and ref.tools != []:
+        if server.serves_agents:
+            catalogue = await agent_catalogue(repo, server)
+        elif not server.cached_tools and ref.tools != []:
             raise LookupError(f"tool server {server.name!r} has no discovered tools; sync its catalogue in Agents")
+        else:
+            catalogue = server.cached_tools
         servers[server.name] = server
         allow = set(ref.tools) if ref.tools is not None else None
-        for tool in server.cached_tools:
+        for tool in catalogue:
             if allow is not None and tool.name not in allow:
                 continue
             resolved = tool.model_copy(
