@@ -221,6 +221,9 @@ def check_raise_format(path, text):
 # cannot see is DML inside a DO block or a function a top-level SELECT calls;
 # those are named in the reason where they exist.
 REPLAYED_DML = {
+    ("claims/schema.sql", "insert claims.deciders"):
+        (1, "the shipped Jev decider row (REM-996), do nothing on conflict, so a deployment's own endpoint "
+            "or credential name is never overwritten"),
     ("workflow-engine/schema.sql", "insert workflow.lifecycle_states"):
         (1, "the status vocabulary, shipped, converged with do update"),
     ("workflow-engine/schema.sql", "update workflow.rate_limits"):

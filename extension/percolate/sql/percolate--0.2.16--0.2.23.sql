@@ -34799,6 +34799,413 @@ grant execute on function claims.questions_to_embed(text, int),
 revoke all on function claims.install_question_embed_workflow(text, text) from public;
 
 -- ------------------------------------------------------------
+-- 10a3. A remembered fact bears on a question (REM-996). The memory graph (aiq.edges: "Priya Raman prefers DuckDB")
+--       and the questions graph ("Should a small analytics team move its warehouse off Postgres?") sat side by side
+--       with nothing joining them. claims.bears_on is that join.
+--
+-- A LINK, NEVER A VERDICT. A row says a fact bears on a question, who proposed it and with what probability, and,
+-- later, whether a person confirmed or disputed it. It carries no stance: what the fact says about the question is
+-- read from the fact, by whoever reads it, and a stored stance would be a content verdict the graph made for them.
+-- Proposals come from a decider (Jev) through claims.install_fact_question_workflow; a person confirms. Later rows
+-- supersede earlier ones for the same pair, and none is rewritten.
+--
+-- READABLE WITH BOTH ENDS. A link is visible to a caller who may read the fact (aiq.edges' own policy, asked as the
+-- caller) and the question (claims.question_readable), so a link can never disclose either.
+--
+-- THE CANDIDATES ARE PICKED BY DISTANCE, THE LINK BY THE DECIDER. A fact (an aiq.edges row, as words through
+-- claims.fact_texts) is a semantic corpus like the questions; claims.facts_to_link offers each unlinked fact its nearest questions in one model's
+-- space, and the decider chooses among them or "none of these". Distance proposes where to look; it never links.
+-- ------------------------------------------------------------
+create or replace view claims.fact_texts with (security_invoker = true) as
+select e.id,
+       concat_ws(' ', coalesce(s.summary, sk.key), replace(e.relation, '_', ' '), coalesce(d.summary, dk.key)) as content,
+       e.src_id, e.dst_id, e.relation, e.valid_from, e.valid_to
+  from aiq.edges e
+  join aiq.nodes s on s.id = e.src_id
+  join aiq.nodes d on d.id = e.dst_id
+  left join lateral (select k.key from aiq.node_keys k where k.node_id = s.id and k.kind = 'canonical' limit 1) sk on true
+  left join lateral (select k.key from aiq.node_keys k where k.node_id = d.id and k.kind = 'canonical' limit 1) dk on true;
+comment on view claims.fact_texts is
+    'A remembered fact as words: its subject, relation and object, read through aiq.edges'' own policy.';
+grant select on claims.fact_texts to authenticated;
+
+do $$
+begin
+    if to_regclass('aiq.semantic_sources') is not null then
+        -- The source is aiq.edges itself, not the view: a semantic source is a table (its delete trigger
+        -- forgets the vector), and naming the edges makes a vector readable exactly when its edge is. The
+        -- content column is only the relation, so SEMANTIC FROM facts returns ids to read through fact_texts.
+        insert into aiq.semantic_sources (name, source_table, content_col)
+        values ('facts', 'aiq.edges', 'relation')
+        on conflict (name) do update
+           set source_table = excluded.source_table,
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
+    end if;
+end $$;
+
+create table if not exists claims.bears_on (
+    id          bigint generated always as identity primary key,
+    edge_id     uuid not null references aiq.edges(id) on delete cascade,
+    question_id uuid not null references claims.questions(id),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    p           real check (p between 0 and 1),
+    tx          bigint not null references claims.tx(id)
+);
+comment on table claims.bears_on is
+    'That a remembered fact bears on a question: proposed by a decider or a reader, confirmed or disputed by a person. Never a stance.';
+create index if not exists bears_on_edge on claims.bears_on (edge_id, question_id, id desc);
+create index if not exists bears_on_question on claims.bears_on (question_id, edge_id, id desc);
+-- Rows are never rewritten, and a later row supersedes. Deletes are not refused: the only delete is the cascade
+-- from an edge that was itself removed, and a link to a fact that no longer exists has nothing left to say.
+create or replace trigger trg_refuse_rewrite before update on claims.bears_on
+    for each row execute function research.refuse_rewrite();
+create or replace trigger trg_refuse_truncate before truncate on claims.bears_on
+    for each statement execute function research.refuse_rewrite();
+alter table claims.bears_on enable row level security;
+drop policy if exists bears_on_readable on claims.bears_on;
+create policy bears_on_readable on claims.bears_on for select
+    using (exists (select 1 from aiq.edges e where e.id = claims.bears_on.edge_id)
+           and claims.question_readable(question_id));
+grant select on claims.bears_on to authenticated;
+
+-- Whether the caller may read an edge, for the definers below, which see every row. It states aiq.edges'
+-- edges_via_endpoints policy in the terms of the node and resource policies it reads through, because a definer
+-- cannot ask a policy as its caller. A COPY, so research/38 compares it with the policy for each caller it tests.
+create or replace function claims.edge_readable(p_edge uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select exists (
+        select 1 from aiq.edges e
+          join aiq.nodes s on s.id = e.src_id
+          join aiq.nodes d on d.id = e.dst_id
+         where e.id = p_edge
+           and (s.visibility = 'public' or s.owner_id = rbac.current_user_id()
+                or (s.visibility = 'org' and s.org_id in (select rbac.current_org_ids())))
+           and (d.visibility = 'public' or d.owner_id = rbac.current_user_id()
+                or (d.visibility = 'org' and d.org_id in (select rbac.current_org_ids())))
+           and case
+                   when jsonb_typeof(e.provenance->'sources') is distinct from 'array' then true
+                   when jsonb_array_length(e.provenance->'sources') = 0 then true
+                   else exists (
+                       select 1 from jsonb_array_elements(e.provenance->'sources') src
+                        where not (src ? 'resource_id')
+                           or exists (select 1 from content.resources r
+                                       where r.id = case when pg_input_is_valid(src->>'resource_id', 'uuid')
+                                                         then (src->>'resource_id')::uuid end
+                                         and (r.visibility = 'public' or r.owner_id = rbac.current_user_id()
+                                              or (r.visibility = 'org' and r.org_id in (select rbac.current_org_ids())))))
+               end);
+$$;
+
+-- A proposed link, by anyone who may write research and read both ends. An agent's lands proposed; so does a
+-- person's, because proposing and confirming are different acts and one call should not do both.
+create or replace function claims.propose_bears_on(p_edge uuid, p_question uuid, p_p real default null,
+                                                   p_reason text default null) returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    t      bigint;
+    v_id   bigint;
+begin
+    if not claims.edge_readable(p_edge) then
+        raise no_data_found using message = 'Fact not found';
+    end if;
+    if not claims.question_readable(p_question) then
+        raise no_data_found using message = 'Question not found';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, reason)
+    values (v_user, rbac.current_actor(), rbac.current_credential_id(), coalesce(nullif(p_reason, ''), 'bears on'))
+    returning id into t;
+    insert into claims.bears_on (edge_id, question_id, status, p, tx)
+    values (p_edge, p_question, 'proposed', p_p, t) returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- A person's verdict on a link: confirmed or disputed, as a later row (the claims graph's own status words). Human only: whether a fact bears on a question
+-- is a judgement, and an agent's judgement is what `proposed` already records.
+create or replace function claims.review_bears_on(p_edge uuid, p_question uuid, p_status text,
+                                                  p_reason text default null) returns bigint
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    t      bigint;
+    v_id   bigint;
+begin
+    if rbac.current_actor() <> 'person' then
+        raise insufficient_privilege using message = 'Only a person confirms or disputes a link', hint = 'human_only';
+    end if;
+    if p_status is null or p_status not in ('confirmed', 'disputed') then
+        raise check_violation using message = 'A review is confirmed or disputed';
+    end if;
+    if not claims.edge_readable(p_edge) or not claims.question_readable(p_question) then
+        raise no_data_found using message = 'Link not found';
+    end if;
+    if not exists (select 1 from claims.bears_on where edge_id = p_edge and question_id = p_question) then
+        raise no_data_found using message = 'Nothing proposed links that fact to that question';
+    end if;
+    insert into claims.tx (actor_id, actor_kind, credential_id, reason)
+    values (v_user, 'person', rbac.current_credential_id(), coalesce(nullif(p_reason, ''), p_status))
+    returning id into t;
+    insert into claims.bears_on (edge_id, question_id, status, tx)
+    values (p_edge, p_question, p_status, t) returning id into v_id;
+    return v_id;
+end;
+$$;
+
+-- From a fact, the questions it bears on as of p_at, each with the link's current status and the question's stances.
+create or replace function claims.questions_of_fact(p_edge uuid, p_at timestamptz default now())
+returns table (question uuid, phrasing text, status text, p real, linked_at timestamptz,
+               yes int, no int, depends int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with link as (
+        select distinct on (b.question_id) b.question_id, b.status, b.p, t.at
+          from claims.bears_on b join claims.tx t on t.id = b.tx
+         where b.edge_id = p_edge and t.at <= p_at
+         order by b.question_id, t.at desc, b.id desc),
+    answer as (
+        select distinct on (a.claim_id, a.question_id) a.question_id, a.stance, a.op
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id in (select question_id from link) and t.at <= p_at
+         order by a.claim_id, a.question_id, t.at desc, a.id desc)
+    select l.question_id, q.search_text, l.status, l.p, l.at,
+           count(*) filter (where s.stance = 'yes' and s.op = 'assert')::int,
+           count(*) filter (where s.stance = 'no' and s.op = 'assert')::int,
+           count(*) filter (where s.stance = 'depends' and s.op = 'assert')::int
+      from link l join claims.questions q on q.id = l.question_id
+      left join answer s on s.question_id = l.question_id
+     where l.status <> 'disputed'
+     group by l.question_id, q.search_text, l.status, l.p, l.at
+     order by (l.status = 'confirmed') desc, l.p desc nulls last;
+$$;
+
+-- From a question, the facts that bear on it as of p_at, as words, with each link's status.
+create or replace function claims.facts_on_question(p_question uuid, p_at timestamptz default now())
+returns table (fact uuid, content text, relation text, status text, p real, linked_at timestamptz,
+               fact_valid_from timestamptz, fact_valid_to timestamptz)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with link as (
+        select distinct on (b.edge_id) b.edge_id, b.status, b.p, t.at
+          from claims.bears_on b join claims.tx t on t.id = b.tx
+         where b.question_id = p_question and t.at <= p_at
+         order by b.edge_id, t.at desc, b.id desc)
+    select l.edge_id, f.content, f.relation, l.status, l.p, l.at, f.valid_from, f.valid_to
+      from link l join claims.fact_texts f on f.id = l.edge_id
+     where l.status <> 'disputed'
+     order by (l.status = 'confirmed') desc, l.p desc nulls last;
+$$;
+
+-- The current facts a model's space has no vector for, as an `embed:` matrix's rows.
+create or replace function claims.facts_to_embed(p_model text, p_limit int default 500)
+returns table (chunk_id uuid, text text)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    v_tbl text;
+begin
+    if not exists (select 1 from aiq.embedding_models where name = p_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', p_model);
+    end if;
+    v_tbl := aiq.embedding_space_name(p_model);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        return query select f.id, f.content from claims.fact_texts f where f.valid_to is null
+                      order by f.id limit least(greatest(p_limit, 1), 5000);
+        return;
+    end if;
+    return query execute format(
+        'select f.id, f.content from claims.fact_texts f
+          where f.valid_to is null and not exists (select 1 from aiq.%I e where e.chunk_id = f.id)
+          order by f.id limit $1', v_tbl)
+        using least(greatest(p_limit, 1), 5000);
+end;
+$$;
+
+-- Each current fact with a vector and no link yet, with its k nearest questions in the same space: the options a
+-- decider chooses among, plus "none of these", already shaped as the decider's request body. The body names the
+-- decider's model from claims.deciders, so the workflow carries no model of its own to disagree with.
+create table if not exists claims.deciders (
+    name           text primary key,
+    endpoint       text not null check (endpoint ~ '^https://'),
+    model          text not null,
+    credential_ref text not null
+);
+comment on table claims.deciders is
+    'A typed-decision service the claims graph may ask to choose among options. A row is the configuration; the key is the worker''s, by name.';
+insert into claims.deciders (name, endpoint, model, credential_ref)
+values ('jev', 'https://api.typesafe.ai/v1/systemone', 'jev-1.13.0', 'JEV_API_KEY')
+on conflict (name) do nothing;
+-- Configuration every caller may read (it names services and a credential's name, never a secret), under a
+-- policy that says so, because a readable table with none is refused (rbac/05).
+alter table claims.deciders enable row level security;
+drop policy if exists deciders_readable on claims.deciders;
+create policy deciders_readable on claims.deciders for select using (true);
+grant select on claims.deciders to authenticated;
+
+create or replace function claims.facts_to_link(p_model text, p_decider text default 'jev', p_k int default 5,
+                                                p_limit int default 100)
+returns table (edge_id uuid, fact text, candidates jsonb, body jsonb)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    v_tbl text;
+    d     claims.deciders;
+begin
+    select * into d from claims.deciders where name = p_decider;
+    if not found then
+        raise no_data_found using message = format('no decider named %s is configured', coalesce(p_decider, '(none)')),
+            hint = 'insert a row into claims.deciders: its endpoint, model and the worker credential it calls with';
+    end if;
+    v_tbl := aiq.embedding_space_name(p_model);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise no_data_found using message = format('embedding model %s has no space', p_model);
+    end if;
+    return query execute format($q$
+        select f.id, f.content, c.candidates,
+               jsonb_build_object(
+                   'model', $4::text,
+                   'state', jsonb_build_object('fact', f.content),
+                   'questions', jsonb_build_object('bears_on', jsonb_build_object(
+                       'type', 'choice',
+                       'instructions', 'Which question does `fact` bear on, as evidence a person answering it would want?',
+                       'criteria', c.options || jsonb_build_object('none_of_these',
+                           'The fact bears on none of these questions.'))))
+          from claims.fact_texts f
+          join aiq.%1$I fe on fe.chunk_id = f.id
+          cross join lateral (
+              select jsonb_object_agg(k.key, jsonb_build_object('id', k.id, 'text', k.search_text)) as candidates,
+                     jsonb_object_agg(k.key, k.search_text) as options
+                from (select 'q' || lpad((row_number() over (order by e.embedding <=> fe.embedding))::text, 2, '0') as key,
+                             q.id, q.search_text
+                        from aiq.%1$I e join claims.questions q on q.id = e.chunk_id
+                       order by e.embedding <=> fe.embedding limit $1) k) c
+         where f.valid_to is null
+           and c.candidates is not null
+           and not exists (select 1 from claims.bears_on b where b.edge_id = f.id)
+         order by f.id limit $2$q$, v_tbl)
+        using least(greatest(coalesce(p_k, 5), 1), 20), least(greatest(coalesce(p_limit, 100), 1), 500),
+              p_decider, d.model;
+end;
+$$;
+
+-- The fan-in: each child's choice becomes a proposed link when it names a candidate at ASSIGN or above, the bar
+-- the application's question job calibrated on 6 October (0.5: recall 0.57, precision at least 0.86 of hand links).
+-- A child that chose none of these, or chose below the bar, proposes nothing.
+create or replace function claims.land_bears_on(p_matrix_task uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_run   uuid := workflow.assert_task_in_current_run(p_matrix_task);
+    v_owner uuid := workflow.run_owner_of(v_run);
+    c       record;
+    v_key   text;
+    v_p     real;
+    t       bigint;
+    n       int := 0;
+    none    int := 0;
+    p_bar   constant real := 0.5;
+begin
+    for c in
+        select ch.input->'item' as item, ch.output->'result'->'answers'->'bears_on' as answer
+          from workflow.tasks ch
+         where ch.matrix_parent_id = p_matrix_task and ch.status = 'succeeded'
+    loop
+        select k, v::real into v_key, v_p
+          from jsonb_each_text(coalesce(c.answer->'probabilities', '{}'::jsonb)) x(k, v)
+         where k <> 'none_of_these'
+         order by v::real desc limit 1;
+        if v_key is null or v_p < p_bar or not (c.item->'candidates' ? v_key) then
+            none := none + 1;
+            continue;
+        end if;
+        if t is null then
+            insert into claims.tx (actor_id, actor_kind, reason)
+            values (v_owner, 'agent', 'bears on, proposed by run ' || v_run::text)
+            returning id into t;
+        end if;
+        insert into claims.bears_on (edge_id, question_id, status, p, tx)
+        values ((c.item->>'edge_id')::uuid, (c.item->'candidates'->v_key->>'id')::uuid, 'proposed', v_p, t);
+        n := n + 1;
+    end loop;
+    return jsonb_build_object('proposed', n, 'no_link', none);
+end;
+$$;
+select workflow.register_step_function(
+    'land_bears_on', 'claims.land_bears_on', array['uuid'], 120000,
+    'Propose the links an earlier matrix of decider choices made, above the bar');
+revoke execute on function claims.land_bears_on(uuid) from public;
+
+-- The proposal step as a workflow: embed what the space lacks (questions and facts), offer each unlinked fact its
+-- nearest questions, ask the decider, and land what it chose. Refused, by name, when the decider is not configured.
+create or replace function claims.install_fact_question_workflow(p_model text, p_decider text default 'jev',
+                                                                 p_name text default 'link_facts_to_questions')
+returns text
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    d claims.deciders;
+begin
+    select * into d from claims.deciders where name = p_decider;
+    if not found then
+        raise no_data_found using message = format('no decider named %s is configured', coalesce(p_decider, '(none)')),
+            hint = 'insert a row into claims.deciders: its endpoint, model and the worker credential it calls with';
+    end if;
+    if not exists (select 1 from aiq.embedding_models where name = p_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', p_model);
+    end if;
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: embed_questions
+    matrix:
+      rows: "select chunk_id, text from claims.questions_to_embed('%2$s')"
+      max_fanout: 500
+      template:
+        embed:
+          text: '{{item.text}}'
+          model: %2$s
+  - id: land_questions
+    needs: [embed_questions]
+    sql: {function: land_embeddings, args: ['{{steps.embed_questions.result.task_id}}']}
+  - id: embed_facts
+    matrix:
+      rows: "select chunk_id, text from claims.facts_to_embed('%2$s')"
+      max_fanout: 500
+      template:
+        embed:
+          text: '{{item.text}}'
+          model: %2$s
+  - id: land_facts
+    needs: [embed_facts]
+    sql: {function: land_embeddings, args: ['{{steps.embed_facts.result.task_id}}']}
+  - id: link
+    needs: [land_questions, land_facts]
+    matrix:
+      rows: "select edge_id, fact, candidates, body from claims.facts_to_link('%2$s', '%3$s')"
+      max_fanout: 500
+      continue_on: failed
+      template:
+        rest:
+          url: %4$s
+          method: POST
+          credential_ref: %5$s
+          body: '{{item.body}}'
+  - id: land
+    needs: [link]
+    sql: {function: land_bears_on, args: ['{{steps.link.result.task_id}}']}
+$y$, p_name, p_model, p_decider, d.endpoint, d.credential_ref));
+    return format('%s: links facts to questions in the %s space, chosen by %s', p_name, p_model, p_decider);
+end;
+$$;
+revoke all on function claims.install_fact_question_workflow(text, text, text) from public;
+
+grant execute on function claims.propose_bears_on(uuid, uuid, real, text),
+                          claims.review_bears_on(uuid, uuid, text, text),
+                          claims.questions_of_fact(uuid, timestamptz),
+                          claims.facts_on_question(uuid, timestamptz),
+                          claims.facts_to_embed(text, int),
+                          claims.facts_to_link(text, text, int, int)
+    to authenticated;
+revoke all on function claims.edge_readable(uuid) from public;
+grant execute on function claims.edge_readable(uuid) to authenticated;
+
+-- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
 --      by claims.study_key -- the application's REM-430 key, moved here -- so two packages that read one study
 --      cite one origin however they word it. An occurrence cites an origin through a source's origin text, its
@@ -37210,6 +37617,8 @@ declare
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
         'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
+        -- Which remembered facts bear on which questions (REM-996): proposed links and who confirmed them.
+        'claims.bears_on',
         'agentic.agent_versions',
         'agentic.agents',
         'agentic.messages',
@@ -38156,6 +38565,9 @@ declare
         -- registered model and goes through %I; the vector, limit, date and floor are bound parameters.
         'claims.find_question(vector,double precision,integer,text,timestamp with time zone)',
         'claims.questions_to_embed(text,integer)',
+        -- REM-996, the same shape: a space name through %I, every caller value bound.
+        'claims.facts_to_embed(text,integer)',
+        'claims.facts_to_link(text,text,integer,integer)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant
