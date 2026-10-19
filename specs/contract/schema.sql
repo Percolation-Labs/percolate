@@ -541,6 +541,10 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
+        -- aiq.dream_runs: the watermark. Lost in a restore, the next dream
+        -- would start from -infinity -- harmless, since it is idempotent, but
+        -- the record of what each run did would be gone.
+        'aiq.dream_runs',
         'aiq.entity_registry',
         'aiq.embedding_models',
         'aiq.graph_vocabulary',

@@ -27088,6 +27088,23 @@ create table if not exists aiq.graph_vocabulary (
 comment on table aiq.graph_vocabulary is
     'The relation names an extractor may emit, and how much weight a machine-made one starts with.';
 
+-- SINGLE-VALUED: a subject holds one current value of this relation at a time,
+-- so a later edge for the same subject supersedes an earlier one (REM-961).
+-- `lives_in`, `works_at`, `manager_is` are; `prefers` is not, because a person
+-- prefers many things and which preference replaced which is a judgement. It is
+-- a property of the TERM, so it lives here and not per triple in
+-- aiq.relation_types.
+--
+-- NULLABLE for the reason relation_types.is_symmetric is: null is UNDECLARED and
+-- reads as false, so a writer that said nothing and a writer that said false
+-- stay distinguishable. aiq.dream() acts only on relations declared true.
+-- Measured on research-notes/mem0-baseline's fixture: the four relations that
+-- hold one value recover 7 of its 11 supersessions with no false one; treating
+-- every relation as single-valued recovers 8 and invents 22.
+alter table aiq.graph_vocabulary add column if not exists single_valued boolean;
+comment on column aiq.graph_vocabulary.single_valued is
+    'true: a subject holds one current value at a time, and aiq.dream() supersedes the older edge. null: undeclared, read as false.';
+
 -- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
 -- both, and a backup must carry the second kind only -- see the HEADER's
 -- `percolate.seeding` note and specs/contract/schema.sql section 4.
@@ -27224,7 +27241,8 @@ begin
 
         update aiq.graph_vocabulary g
            set machine_weight = coalesce((e->>'machine_weight')::real, g.machine_weight),
-               description    = coalesce(e->>'description',            g.description)
+               description    = coalesce(e->>'description',            g.description),
+               single_valued  = coalesce((e->>'single_valued')::boolean, g.single_valued)
           from jsonb_array_elements(p_relations) e
          where g.relation = e->>'relation';
     end if;
@@ -28500,6 +28518,164 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- DREAM: the graph reconciles itself on a schedule (REM-961).
+--
+-- Knit writes fast and loud: every session lands what it heard, and a name it
+-- cannot bind lands soft. Reconciling that was a pair of calls somebody made by
+-- hand -- promote_soft_node and retract_derived -- and nothing ran them, so
+-- "write fast, reconcile later" happened only when someone remembered.
+--
+-- aiq.dream() does the part that is known BY CONSTRUCTION, and only that. It
+-- makes no judgement about meaning, because a scheduled job inside the database
+-- has no way to make one it could show its working for:
+--
+--   1. Supersession, for relations declared single-valued
+--      (aiq.graph_vocabulary.single_valued). Where a subject holds more than one
+--      current edge of such a relation within one org, every one but the newest
+--      ends where the next begins: valid_to = the next edge's valid_from. The
+--      edge is not deleted and keeps its provenance, so an as-of read before
+--      the change still finds it.
+--   2. Soft nodes whose key is EXACTLY the canonical key of one node of the kind
+--      they claimed, in the same org: promoted through aiq.promote_soft_node at
+--      tier 'registry', which is what that tier means (a match on a registered
+--      entity's key, not a model's guess), so the move, the kept name and the
+--      resolution row are the ones a hand promotion makes.
+--
+-- Everything else is counted and left: an unresolved soft node with no exact
+-- match (an alias like "P. Raman" is a judge's call), and a relation nobody
+-- declared. The receipt carries counts only, never another owner's names.
+--
+-- Idempotent: a second run finds nothing to supersede and nothing to promote.
+-- Each run is recorded in aiq.dream_runs, whose `until` is the next run's
+-- `since`; supersession looks only at subjects with an edge written since then,
+-- and promotion at every soft node still unresolved, because an exact target
+-- can appear long after the soft node did.
+create table if not exists aiq.dream_runs (
+    id          uuid primary key default uuidv7(),
+    since       timestamptz not null,
+    until       timestamptz not null,
+    decided_by  text not null,
+    receipt     jsonb not null,
+    ran_at      timestamptz not null default now()
+);
+comment on table aiq.dream_runs is
+    'Each aiq.dream() run: the window it reconciled (since, until] and what it did. The newest until is the next run''s watermark.';
+create index if not exists idx_dream_runs_until on aiq.dream_runs (until desc);
+-- The engine's record, not a user's: the aiq schema's default grants give every
+-- web role SELECT, and a table they can read needs a policy and a declared
+-- surface. Nobody but the owner and an operator reads this, so the grants go.
+revoke all on aiq.dream_runs from public, authenticated, api_viewer;
+
+create or replace function aiq.dream(p_since timestamptz default null,
+                                     p_decided_by text default 'dream')
+returns jsonb as $$
+declare
+    v_until      timestamptz := clock_timestamp();
+    v_since      timestamptz;
+    v_superseded int := 0;
+    v_promoted   int := 0;
+    v_refused    int := 0;
+    v_left       int := 0;
+    r            record;
+    v_receipt    jsonb;
+begin
+    if coalesce(btrim(p_decided_by), '') = '' then
+        raise exception 'aiq.dream needs p_decided_by: who or what decided, for the resolution rows it writes';
+    end if;
+    v_since := coalesce(p_since, (select max(until) from aiq.dream_runs), '-infinity'::timestamptz);
+
+    -- 1. Supersession. One UPDATE: within each (subject, relation, org) of a
+    --    single-valued relation, an edge with a later current one after it ends
+    --    where that one begins. Only subjects touched since the watermark.
+    with groups as (
+        select distinct e.src_id, e.relation, e.org_id
+          from aiq.edges e
+          join aiq.graph_vocabulary v on v.relation = e.relation and v.single_valued
+         where e.created_at > v_since or e.valid_from > v_since
+    ), ordered as (
+        select e.id,
+               lead(e.valid_from) over (partition by e.src_id, e.relation, e.org_id
+                                        order by e.valid_from, e.created_at, e.id) as next_from
+          from aiq.edges e
+          join groups g on g.src_id = e.src_id and g.relation = e.relation
+                       and g.org_id is not distinct from e.org_id
+         where aiq.edge_is_current(e.valid_from, e.valid_to, v_until)
+    ), ended as (
+        update aiq.edges e set valid_to = o.next_from
+          from ordered o
+         where e.id = o.id and o.next_from is not null
+        returning 1
+    )
+    select count(*) into v_superseded from ended;
+
+    -- 2. Exact soft nodes. Each promotion runs on its own, so one the resolver
+    --    refuses (decided distinct, a scope mismatch) is counted, not fatal.
+    for r in
+        select s.id as soft_id,
+               array_agg(distinct t.id) filter (where t.id is not null) as targets
+          from aiq.soft_nodes s
+          join aiq.nodes sn on sn.entity_type = 'soft' and sn.entity_id = s.id
+          left join (aiq.node_keys k join aiq.nodes t on t.id = k.node_id)
+                 on k.kind = 'canonical' and k.key = lower(btrim(s.key))
+                and t.entity_type = s.claimed_kind
+                and t.org_id is not distinct from s.org_id
+         where s.resolved_node_id is null
+         group by s.id
+    loop
+        if cardinality(r.targets) = 1 then
+            begin
+                perform aiq.promote_soft_node(r.soft_id, r.targets[1], p_decided_by, 'registry',
+                                              jsonb_build_object('rule', 'exact canonical key, same kind, same org'));
+                v_promoted := v_promoted + 1;
+            exception when others then
+                v_refused := v_refused + 1;
+            end;
+        else
+            v_left := v_left + 1;
+        end if;
+    end loop;
+
+    v_receipt := jsonb_build_object(
+        'since', v_since, 'until', v_until,
+        'superseded', v_superseded,
+        'promoted_exact', v_promoted,
+        'promotion_refused', v_refused,
+        'soft_left_for_a_judge', v_left);
+    insert into aiq.dream_runs (since, until, decided_by, receipt)
+    values (v_since, v_until, p_decided_by, v_receipt);
+    return v_receipt;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The schedule, on the engine's own clock (workflow.schedules, ticked by
+-- workflow.tick()). Not installed by default: like every other schedule here,
+-- it is an operator's choice, and without the tick it would never fire anyway.
+-- Re-running it changes the cron and keeps one schedule.
+create or replace function aiq.schedule_dream(p_cron text default '*/15 * * * *',
+                                              p_enabled boolean default true)
+returns jsonb as $$
+declare v_id uuid;
+begin
+    perform workflow.register_step_function('dream', 'aiq.dream', '{}', 300000,
+        'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
+    perform workflow.define_yaml($y$
+name: dream
+steps:
+  - id: reconcile
+    sql: {function: dream, args: []}
+$y$);
+    select id into v_id from workflow.schedules where name = 'dream';
+    if v_id is null then
+        v_id := workflow.schedule_workflow('dream', 'dream', p_cron);
+    else
+        update workflow.schedules set cron_expr = p_cron where id = v_id;
+    end if;
+    perform workflow.set_schedule_enabled('dream', p_enabled);
+    return jsonb_build_object('schedule', 'dream', 'cron', p_cron, 'enabled', p_enabled, 'id', v_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 8b. "Not the same": the decision a resolver makes most often, recorded.
 --
 -- aiq.node_distinctions (ai-query-layer/schema.sql) holds it. A resolver that
@@ -28738,6 +28914,10 @@ revoke execute on function aiq.undo_distinct(uuid, text)                   from 
 revoke execute on function aiq.resolution_candidates(text, text, uuid, int, int, real) from public;
 revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
 revoke execute on function aiq.install_structure_null(text)                from public;
+-- Dream reconciles every owner's graph, so it is the engine's (a registered
+-- sql step runs as the engine owner) and an operator's, never a user's.
+revoke execute on function aiq.dream(timestamptz, text)                    from public;
+revoke execute on function aiq.schedule_dream(text, boolean)               from public;
 
 grant execute on function aiq.upsert_graph(jsonb, jsonb)      to worker;
 grant execute on function aiq.land_graph(jsonb, uuid)         to worker;
@@ -36510,6 +36690,10 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
+        -- aiq.dream_runs: the watermark. Lost in a restore, the next dream
+        -- would start from -infinity -- harmless, since it is idempotent, but
+        -- the record of what each run did would be gone.
+        'aiq.dream_runs',
         'aiq.entity_registry',
         'aiq.embedding_models',
         'aiq.graph_vocabulary',
