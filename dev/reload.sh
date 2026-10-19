@@ -36,7 +36,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 
-DB=${1:-p8dev}
+# The argument, else DB from the environment, else p8dev. It read only the
+# argument, so `DB=p8w dev/reload.sh` dropped and rebuilt p8dev -- the database
+# another session was using -- and said nothing (REM-989).
+DB=${1:-${DB:-p8dev}}
 
 # WHICH CONTAINER, ASKED RATHER THAN ASSUMED WHEN IT IS AMBIGUOUS (REM-131).
 # The predicate and the whole argument live in dev/lib/container.sh, beside
@@ -94,7 +97,7 @@ INSTALLED=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -tAc
   echo "the container offers percolate $INSTALLED, not $VERSION -- the control file did not land" >&2
   exit 1; }
 
-echo "==> recreating database $DB"
+echo "==> dropping and recreating database $DB in container $CONTAINER"
 docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -q \
   -c "drop database if exists $DB (force);" -c "create database $DB;"
 
