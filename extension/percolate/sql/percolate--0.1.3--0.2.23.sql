@@ -35123,6 +35123,11 @@ comment on table claims.deciders is
 insert into claims.deciders (name, endpoint, model, credential_ref)
 values ('jev', 'https://api.typesafe.ai/v1/systemone', 'jev-1.13.0', 'JEV_API_KEY')
 on conflict (name) do nothing;
+-- Configuration every caller may read (it names services and a credential's name, never a secret), under a
+-- policy that says so, because a readable table with none is refused (rbac/05).
+alter table claims.deciders enable row level security;
+drop policy if exists deciders_readable on claims.deciders;
+create policy deciders_readable on claims.deciders for select using (true);
 grant select on claims.deciders to authenticated;
 
 create or replace function claims.facts_to_link(p_model text, p_decider text default 'jev', p_k int default 5,
