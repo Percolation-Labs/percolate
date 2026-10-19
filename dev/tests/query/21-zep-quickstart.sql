@@ -1,4 +1,4 @@
--- PART THREE OF THE SERIES: ZEP'S QUICKSTART, CALL FOR CALL, ON PERCOLATE (REM-1018).
+-- PART TWO OF THE SERIES, FOR ZEP USERS: ZEP'S QUICKSTART, CALL FOR CALL, ON PERCOLATE (REM-1018).
 --
 -- The blocks of "Percolate for Zep users" that need no model, in the article's order, each followed by the
 -- assertion that keeps the article true:
