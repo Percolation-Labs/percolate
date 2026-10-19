@@ -256,6 +256,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.matrix_gate_passes','uuid','§21e: min_success is checked before the aggregate is released'),
 ('workflow-engine','function','workflow.compensation_keys','jsonb','§21d: compensations are not part of the forward graph'),
 ('workflow-engine','column','workflow.tasks.tolerate_failure',null,'§21e: a fan-out survives an ordinary 404'),
+('workflow-engine','column','workflow.tasks.when_sql',null,'REM-967: a step runs only when its condition holds, and is skipped otherwise'),
+('workflow-engine','function','workflow.repeat_outcome','jsonb,boolean','REM-968: a repeat reports how many attempts ran, whether its check held, and the last results'),
 -- integration-rbac.sql §c2. The read surface a caller needs to do anything
 -- with a workflow beyond starting one and polling it: what workflows exist,
 -- what a run actually did, the shape of its task graph, and the four
@@ -324,6 +326,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','column','aiq.embedding_models.credential_ref',null,'schema.sql §10: the env var name, never the token'),
 ('ai-query-layer','function','aiq.expand_embed_steps','jsonb','integration-workflow.sql: an embed step names a model, never a url -- and the model is pinned into both halves'),
 ('ai-query-layer','function','aiq.query','text,vector','§9: one RPC for the whole dialect'),
+('ai-query-layer','function','aiq.result_exceptions','jsonb,integer,integer,boolean','§8z: the result kinds only the store can raise, in core''s vocabulary (REM-948)'),
+('ai-query-layer','function','aiq.iterated_join','text,text,integer,integer,real,text,text[]','resolution.sql: a walk whose relation is a wildcard, each hop naming its link kind (REM-997)'),
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.extension_boundary','','§9b: every place the SQL half calls the compiled half, and whether it is there'),
 ('ai-query-layer','table','aiq.node_resolutions',null,
@@ -758,6 +762,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','function','claims.claim','uuid,timestamptz','specs/claims/graph.md §10: a claim, its occurrences and identity set; null when the caller may read no occurrence (REM-475)'),
 ('claims','function','claims.neighbourhood','uuid,text[],integer,timestamptz','specs/claims/graph.md §10: typed paths out of and into a claim, each hop an asserted relation (REM-475)'),
 ('claims','function','claims.candidates','uuid,text,double precision,integer,vector,text','specs/claims/graph.md §5: the claims nearest an occurrence that the caller may read, to be asked about; a distance and no score (REM-659)'),
+('claims','function','claims.find_question','vector,double precision,integer,text,timestamptz','specs/claims/schema.sql §10a2: the questions nearest a text''s vector that the caller may read, with their stances as of a date and whether each is inside the caller''s floor (REM-998)'),
+('claims','function','claims.stance_changes','uuid,timestamptz,timestamptz','specs/claims/schema.sql §10a2: the claims whose stance on a question differs between two dates, and the transaction that changed each (REM-998)'),
+('claims','function','claims.questions_to_embed','text,integer','specs/claims/schema.sql §10a2: the readable questions a model''s space has no vector for, as an embed matrix''s rows (REM-998)'),
 ('claims','function','claims.rests_on','uuid,timestamptz','specs/claims/graph.md §6: what a claim depends on through confirmed supports and motivates, as paths (REM-475)'),
 ('claims','function','claims.challenged_through','uuid,timestamptz','specs/claims/graph.md §6: challenges aimed at what a claim rests on, as paths, never as a challenge to the claim (REM-475)'),
 ('claims','function','claims.history','uuid','specs/claims/graph.md §10: every statement about a claim the caller may read, oldest first (REM-475)'),
@@ -1103,7 +1110,8 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 ('workflow.tasks_api', 'compensates_task_id',   'internal', 'compensation linkage'),
 ('workflow.tasks_api', 'decision_output_hash',  'internal', 'replay guard'),
 ('workflow.tasks_api', 'matrix_parent_id',      'internal', 'fan-out linkage'),
-('workflow.tasks_api', 'tolerate_failure',      'internal', 'engine flag');
+('workflow.tasks_api', 'tolerate_failure',      'internal', 'engine flag'),
+('workflow.tasks_api', 'when_sql',              'internal', 'the step''s when: as its definition wrote it; definitions_api shows it, and the status says what it decided');
 
 -- ------------------------------------------------------------
 -- (a) READ: every table column is in its *_api view, or declared out of it.
