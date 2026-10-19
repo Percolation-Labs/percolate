@@ -29454,8 +29454,17 @@ grant select on aiq.judgements to authenticated;
 grant update (status, claimed_by, claimed_from, lease_until, verdict, reason, decided_by, tier, decided_at)
     on aiq.judgements to authenticated;
 
--- A bind's evidence: the soft node and up to five candidates of the kind it
--- claimed, in its org or the shared one, not already decided distinct.
+-- A bind's evidence: the soft node and up to five candidates, in its org or the
+-- shared one, never itself, not already decided distinct:
+--   * typed nodes of the kind it claimed, by key or summary;
+--   * OTHER SOFT NODES (jack, 20 Oct): an alias claimed as the same kind ("A.
+--     Costa" beside "Ana Costa"), and the same name claimed as another kind
+--     ("Tagus Ceramics" as organization and as company). A soft name's twin is
+--     usually another soft name, and with typed rows only, all eight binds the
+--     Zep tutorial queued had no candidate. A bind to a soft target is what
+--     aiq.promote_soft_node does when a person merges two soft nodes by hand.
+-- Each candidate says which it is, so the judge can weigh a typed row above a
+-- name somebody else's extractor wrote.
 create or replace function aiq.soft_bind_evidence(p_soft_id uuid)
 returns jsonb language sql stable set search_path = pg_catalog, public as $$
     select jsonb_build_object(
@@ -29464,20 +29473,32 @@ returns jsonb language sql stable set search_path = pg_catalog, public as $$
         'candidates', coalesce((
             select jsonb_agg(jsonb_build_object('node_id', c.node_id, 'key', c.key,
                                                 'entity_type', c.entity_type, 'summary', c.summary,
+                                                'candidate', c.candidate,
                                                 'sim', round(c.sim::numeric, 3))
                              order by c.sim desc)
               from (select * from (
                       select distinct on (m.node_id) m.* from (
                           select n.id as node_id, k.key, n.entity_type, n.summary,
-                                 similarity(k.key, s.key) as sim
+                                 similarity(k.key, s.key) as sim, 'typed' as candidate
                             from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
                            where k.key % s.key and n.entity_type = s.claimed_kind
                              and n.org_id in (rbac.shared_org_id(), s.org_id)
                           union all
-                          select n.id, null, n.entity_type, n.summary, similarity(lower(n.summary), s.key)
+                          select n.id, null, n.entity_type, n.summary, similarity(lower(n.summary), s.key), 'typed'
                             from aiq.nodes n
                            where lower(n.summary) % s.key and n.entity_type = s.claimed_kind
-                             and n.org_id in (rbac.shared_org_id(), s.org_id)) m
+                             and n.org_id in (rbac.shared_org_id(), s.org_id)
+                          union all
+                          select n2.id, s2.key, n2.entity_type, n2.summary,
+                                 case when s2.key = s.key then 1.0 else similarity(s2.key, s.key) end,
+                                 case when s2.claimed_kind = s.claimed_kind then 'soft'
+                                      else 'soft, claimed as ' || s2.claimed_kind end
+                            from aiq.soft_nodes s2
+                            join aiq.nodes n2 on n2.entity_type = 'soft' and n2.entity_id = s2.id
+                           where s2.id <> s.id and s2.resolved_node_id is null
+                             and ((s2.claimed_kind = s.claimed_kind and s2.key % s.key)
+                                  or (s2.claimed_kind <> s.claimed_kind and s2.key = s.key))
+                             and n2.org_id in (rbac.shared_org_id(), s.org_id)) m
                        where not aiq.decided_distinct(sn.id, m.node_id)
                        order by m.node_id, m.sim desc) best
                      order by best.sim desc limit 5) c), '[]'::jsonb))
@@ -29486,8 +29507,9 @@ returns jsonb language sql stable set search_path = pg_catalog, public as $$
      where s.id = p_soft_id;
 $$;
 
--- Queue a bind for each soft node given, unless one is already live; mark moot
--- a bind whose soft node resolved some other way. Returns how many were added.
+-- Queue a bind for each soft node given, unless one is already live; refresh
+-- an open one's candidates; mark moot a bind whose soft node resolved some
+-- other way. Returns how many were added.
 -- dream is the one caller (freddie, 19 Oct: knit fires loud, dream reconciles
 -- -- a landing must not queue what a rule would settle).
 create or replace function aiq.enqueue_soft_judgements(p_soft_ids uuid[], p_queued_by text)
@@ -29504,6 +29526,14 @@ begin
         on conflict (kind, subject_node_id) where status in ('open','claimed','to_human') do nothing
         returning 1)
     select count(*) into v_n from ins;
+    -- AN OPEN ITEM'S EVIDENCE IS REFRESHED, because candidates appear after a
+    -- case is queued -- a typed row registered, or another soft name landed --
+    -- and an item queued with none could otherwise never be bound. Not a
+    -- claimed one, whose judge is reading what it was given.
+    update aiq.judgements j set evidence = aiq.soft_bind_evidence((j.evidence->>'soft_id')::uuid)
+     where j.kind = 'bind' and j.status in ('open','to_human')
+       and (j.evidence->>'soft_id')::uuid = any(p_soft_ids)
+       and j.evidence is distinct from aiq.soft_bind_evidence((j.evidence->>'soft_id')::uuid);
     update aiq.judgements j set status = 'moot', claimed_by = null, lease_until = null
      where j.kind = 'bind' and j.status in ('open','claimed','to_human')
        and not exists (select 1 from aiq.nodes n where n.id = j.subject_node_id and n.entity_type = 'soft');
@@ -29639,7 +29669,8 @@ begin
     v_ev := j.evidence || jsonb_build_object('candidates', coalesce(
         (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
           where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
-    select string_agg(c->>'node_id' || ' (' || coalesce(c->>'key', c->>'summary') || ')', ', ')
+    select string_agg(c->>'node_id' || ' (' || coalesce(c->>'key', c->>'summary')
+                      || coalesce(', ' || (c->>'candidate'), '') || ')', ', ')
       into v_ids from jsonb_array_elements(v_ev->'candidates') c;
     return jsonb_build_object(
         'id', j.id, 'kind', j.kind, 'status', j.status, 'lease_until', j.lease_until,

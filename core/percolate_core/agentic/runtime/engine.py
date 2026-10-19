@@ -13,8 +13,10 @@ server, or ``workflow-engine``).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
@@ -60,9 +62,32 @@ def _missing_provider(model: Any, err: ImportError) -> ImportError:
         f"installed in this process. Install it with "
         f"`pip install 'percolate-core[providers]'` (the published image "
         f"carries every provider), or point the row at an OpenAI-compatible "
-        f"endpoint -- set OPENAI_BASE_URL and use an `openai:` model, which "
-        f"needs no additional package. Original error: {err}"
+        f"endpoint -- set OPENAI_BASE_URL and use an `openai:` model, which is "
+        f"then sent to the endpoint's /chat/completions and needs no additional "
+        f"package. Original error: {err}"
     )
+
+
+def gateway_model(model: Any) -> Any:
+    """`openai:` behind OPENAI_BASE_URL means chat completions (REM-973).
+
+    pydantic-ai's `openai:` prefix calls the Responses API (`/v1/responses`).
+    OpenAI serves it; the OpenAI-compatible gateways the docs and the message
+    above point people at mostly do not, so the documented recipe -- set
+    OPENAI_BASE_URL, keep an `openai:` model -- failed every turn with
+    `ModelHTTPError: status_code: 404` (found live in REM-957 against a
+    chat-completions stub). Every such gateway serves /chat/completions, and so
+    does OpenAI, so with a base URL set an `openai:` model is sent there as
+    `openai-chat:`. A row that names `openai-chat:` or `openai-responses:`
+    keeps exactly what it asked for. Without a base URL, or with OpenAI's own
+    (get-percolate's compose file sets OPENAI_BASE_URL to
+    https://api.openai.com/v1 by default), nothing changes.
+    """
+    base = os.environ.get("OPENAI_BASE_URL") or ""
+    if (isinstance(model, str) and model.startswith("openai:") and base
+            and urlsplit(base).hostname != "api.openai.com"):
+        return "openai-chat:" + model.split(":", 1)[1]
+    return model
 
 
 @dataclass(slots=True)
@@ -112,9 +137,9 @@ class AgentEngine:
         """
         from pydantic_ai import Agent
 
-        chosen = model or agent.model or self.settings.default_model
+        chosen = gateway_model(model or agent.model or self.settings.default_model)
         try:
-            return Agent(
+            pai_agent = Agent(
                 chosen,
                 instructions=build_instructions(agent, context),
                 deps_type=AgentDeps,
@@ -126,6 +151,9 @@ class AgentEngine:
             )
         except ImportError as err:
             raise _missing_provider(chosen, err) from err
+        if agent.structured_output_schema:
+            pai_agent.output_validator(declared_output_check(agent.structured_output_schema))
+        return pai_agent
 
     def output_type(self, agent: AgentSpec) -> Any:
         """Turn ``structured_output_schema`` (JSON Schema) into an output type.
@@ -134,18 +162,30 @@ class AgentEngine:
         (``brief.md`` §2/§4), so this is not cosmetic: it decides whether a run
         can trigger a follow-on action at all.
 
-        pydantic-ai's ``StructuredDict`` takes the JSON Schema directly, which
-        is the whole conversion — no model generation, and deliberately no
-        validation layer of our own on top. The schema in the row is the
-        contract; pydantic-ai enforces it and retries the model against it,
-        which is exactly the part of the job §5 says stays pydantic-ai's.
+        pydantic-ai's ``StructuredDict`` takes the JSON Schema directly and asks
+        the model for it, but it ENFORCES only that the answer is a JSON object
+        (REM-970): `{"verdict": 42}` against `required: [verdict, vessel]`,
+        `verdict: string` finished as a successful turn. So the schema is asked
+        for here and checked by ``declared_output_check``, which ``build``
+        registers as the run's output validator: a reply that does not conform
+        is sent back to the model with what was wrong, and a turn that never
+        conforms fails.
+
+        A schema that is not an object -- a workflow step's `output_schema:
+        {type: array, ...}` arrives here as `response_format` -- is wrapped as
+        `{value: <schema>}`, because StructuredDict refuses anything else with
+        `Schema must be an object`, a configuration error the worker classified
+        as worth retrying five times. The validator unwraps it, so the answer is
+        the array the step declared.
         """
-        if not agent.structured_output_schema:
+        schema = agent.structured_output_schema
+        if not schema:
             return str
+        check_declared_output(schema)
         from pydantic_ai.output import StructuredDict
 
         return StructuredDict(
-            agent.structured_output_schema,
+            schema if _is_object(schema) else _wrapped(schema),
             name=f"{agent.name}_output",
         )
 
@@ -257,6 +297,65 @@ def _usage_of(result: Any) -> Any:
         return usage() if callable(usage) else usage
     except Exception:  # noqa: BLE001 -- see the docstring
         return None
+
+
+# The key a non-object declared output is wrapped under (see output_type).
+WRAPPED = "value"
+
+
+def _is_object(schema: dict[str, Any]) -> bool:
+    kind = schema.get("type")
+    return kind == "object" or (kind is None and "properties" in schema)
+
+
+def _wrapped(schema: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "properties": {WRAPPED: schema}, "required": [WRAPPED],
+            "additionalProperties": False}
+
+
+class DeclaredOutputInvalid(ValueError):
+    """A declared output that is not a JSON Schema at all. Raised before any model
+    call, so a turn is never spent on it, and never worth retrying."""
+
+
+def check_declared_output(schema: Any) -> None:
+    if not isinstance(schema, dict):
+        raise DeclaredOutputInvalid(f"the declared output is not a JSON Schema object: {schema!r}")
+    from jsonschema import exceptions, validators
+
+    try:
+        validators.validator_for(schema).check_schema(schema)
+    except exceptions.SchemaError as err:
+        raise DeclaredOutputInvalid(f"the declared output is not a valid JSON Schema: {err.message}") from err
+
+
+def declared_output_check(schema: dict[str, Any]) -> Any:
+    """The output validator that makes a declared output a contract (REM-970).
+
+    Unwraps a non-object answer, checks it against the schema the agent or the
+    request declared, and on a mismatch raises ModelRetry with every violation,
+    so the model is asked again with what was wrong; pydantic-ai fails the turn
+    once its retries are spent. The check is full JSON Schema, which the
+    workflow engine's own shape check (types, required, properties, enum,
+    items, additionalProperties) is a subset of, so an answer this accepts the
+    step that asked for it accepts too.
+    """
+    from jsonschema import validators
+    from pydantic_ai import ModelRetry
+
+    wrapped = not _is_object(schema)
+    validator = validators.validator_for(schema)(schema)
+
+    def check(output: Any) -> Any:
+        value = output.get(WRAPPED) if wrapped and isinstance(output, dict) else output
+        errors = sorted(validator.iter_errors(value), key=lambda e: list(e.absolute_path))
+        if errors:
+            raise ModelRetry("The answer does not match the declared output: " + "; ".join(
+                (".".join(str(p) for p in e.absolute_path) or "(the answer)") + ": " + e.message
+                for e in errors[:10]))
+        return value
+
+    return check
 
 
 def as_text(output: Any) -> str:
