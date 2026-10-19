@@ -256,6 +256,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.matrix_gate_passes','uuid','§21e: min_success is checked before the aggregate is released'),
 ('workflow-engine','function','workflow.compensation_keys','jsonb','§21d: compensations are not part of the forward graph'),
 ('workflow-engine','column','workflow.tasks.tolerate_failure',null,'§21e: a fan-out survives an ordinary 404'),
+('workflow-engine','column','workflow.tasks.when_sql',null,'REM-967: a step runs only when its condition holds, and is skipped otherwise'),
 -- integration-rbac.sql §c2. The read surface a caller needs to do anything
 -- with a workflow beyond starting one and polling it: what workflows exist,
 -- what a run actually did, the shape of its task graph, and the four
@@ -1099,7 +1100,8 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 ('workflow.tasks_api', 'compensates_task_id',   'internal', 'compensation linkage'),
 ('workflow.tasks_api', 'decision_output_hash',  'internal', 'replay guard'),
 ('workflow.tasks_api', 'matrix_parent_id',      'internal', 'fan-out linkage'),
-('workflow.tasks_api', 'tolerate_failure',      'internal', 'engine flag');
+('workflow.tasks_api', 'tolerate_failure',      'internal', 'engine flag'),
+('workflow.tasks_api', 'when_sql',              'internal', 'the step''s when: as its definition wrote it; definitions_api shows it, and the status says what it decided');
 
 -- ------------------------------------------------------------
 -- (a) READ: every table column is in its *_api view, or declared out of it.
