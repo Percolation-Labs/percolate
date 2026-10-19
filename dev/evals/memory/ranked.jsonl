@@ -1,0 +1,322 @@
+{"system": "mem0-add", "q": "q01", "ranked": ["f32", "f07", "f34", "f19", "f02", "f18", "f01", "f25", "f22", "f21"]}
+{"system": "mem0-add", "q": "q02", "ranked": ["f02", "f19", "f22", "f18", "f34", "f25", "f07", "f23", "f06", "f15"]}
+{"system": "mem0-add", "q": "q03", "ranked": ["f02", "f07", "f19", "f21", "f25", "f18", "f34", "f11", "f22", "f23"]}
+{"system": "mem0-add", "q": "q04", "ranked": ["f28", "f26", "f08", "f40", "f03", "f24", "f10", "f11", "f04", "f13"]}
+{"system": "mem0-add", "q": "q05", "ranked": ["f32", "f19", "f07", "f02", "f25", "f33", "f22", "f18", "f34", "f28"]}
+{"system": "mem0-add", "q": "q06", "ranked": ["f32", "f12", "f29", "f24", "f03", "f11", "f28", "f37", "f14", "f31"]}
+{"system": "mem0-add", "q": "q07", "ranked": ["f12", "f29", "f19", "f02", "f07", "f16", "f18", "f01", "f25", "f22"]}
+{"system": "mem0-add", "q": "q08", "ranked": ["f07", "f19", "f02", "f16", "f25", "f35", "f37", "f24", "f34", "f18"]}
+{"system": "mem0-add", "q": "q09", "ranked": ["f40", "f08", "f26", "f34", "f22", "f18", "f13", "f04", "f09", "f01"]}
+{"system": "mem0-add", "q": "q10", "ranked": ["f02", "f07", "f18", "f21", "f28", "f19", "f34", "f11", "f01", "f13"]}
+{"system": "mem0-add", "q": "q11", "ranked": ["f28", "f21", "f07", "f19", "f02", "f25", "f11", "f18", "f26", "f24"]}
+{"system": "mem0-add", "q": "q12", "ranked": ["f07", "f19", "f02", "f25", "f12", "f23", "f22", "f21", "f18", "f01"]}
+{"system": "mem0-add", "q": "q13", "ranked": ["f24", "f03", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31"]}
+{"system": "mem0-add", "q": "q14", "ranked": ["f09", "f07", "f19", "f02", "f22", "f25", "f33", "f34", "f18", "f26"]}
+{"system": "mem0-add", "q": "q15", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f08", "f02", "f22"]}
+{"system": "mem0-add", "q": "q16", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f22", "f08", "f02"]}
+{"system": "mem0-add", "q": "q17", "ranked": ["f15", "f34", "f18", "f06", "f26", "f23", "f19", "f02", "f08", "f22"]}
+{"system": "mem0-add", "q": "q18", "ranked": ["f12", "f29", "f19", "f02", "f07", "f18", "f34", "f01", "f26", "f25"]}
+{"system": "mem0-add", "q": "q19", "ranked": ["f26", "f08", "f04", "f24", "f10", "f34", "f18", "f27", "f03", "f09"]}
+{"system": "mem0-add", "q": "q20", "ranked": ["f07", "f19", "f12", "f29", "f02", "f25", "f22", "f34", "f18", "f26"]}
+{"system": "mem0-add", "q": "q21", "ranked": ["f19", "f07", "f02", "f22", "f25", "f33", "f34", "f18", "f26", "f01"]}
+{"system": "mem0-add", "q": "q22", "ranked": ["f32", "f24", "f03", "f26", "f38", "f31", "f35", "f08", "f34", "f28"]}
+{"system": "mem0-add", "q": "q23", "ranked": ["f04", "f20", "f08", "f26", "f09", "f10", "f22", "f18", "f25", "f34"]}
+{"system": "mem0-add", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f08", "f10", "f27", "f19", "f07"]}
+{"system": "mem0-add", "q": "q25", "ranked": ["f34", "f18", "f08", "f09", "f26", "f01", "f25", "f22", "f20", "f13"]}
+{"system": "mem0-add", "q": "q26", "ranked": ["f13", "f34", "f18", "f02", "f32", "f11", "f07", "f19", "f25", "f01"]}
+{"system": "mem0-add", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f03", "f26", "f08", "f28", "f13", "f25"]}
+{"system": "mem0-add", "q": "q28", "ranked": ["f16", "f07", "f34", "f19", "f26", "f18", "f10", "f25", "f01", "f02"]}
+{"system": "mem0-add", "q": "q29", "ranked": ["f21", "f25", "f07", "f19", "f02", "f11", "f28", "f23", "f03", "f32"]}
+{"system": "mem0-add", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f03", "f34", "f33", "f26", "f25", "f18"]}
+{"system": "mem0-add", "q": "q31", "ranked": ["f08", "f27", "f26", "f04", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "mem0-add", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "mem0-add", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "mem0-add", "q": "q34", "ranked": ["f29", "f12", "f28", "f27", "f36", "f17", "f26", "f02", "f08", "f19"]}
+{"system": "mem0-add", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "mem0-add", "q": "q36", "ranked": ["f27", "f24", "f26", "f03", "f10", "f32", "f14", "f08", "f31", "f37"]}
+{"system": "mem0-add", "q": "q37", "ranked": ["f32", "f37", "f35", "f31", "f30", "f05", "f17", "f24", "f03", "f39"]}
+{"system": "mem0-add", "q": "q38", "ranked": ["f31", "f35", "f30", "f37", "f05", "f17", "f39", "f24", "f26", "f03"]}
+{"system": "mem0-add", "q": "q39", "ranked": ["f11", "f21", "f12", "f29", "f28", "f07", "f25", "f19", "f02", "f18"]}
+{"system": "mem0-add", "q": "q40", "ranked": ["f36", "f18", "f01", "f34", "f19", "f07", "f22", "f02", "f25", "f28"]}
+{"system": "mem0-add", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "mem0-add", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "mem0-add", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "mem0-add", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "mem0-add", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "mem0-add", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "mem0-expire", "q": "q01", "ranked": ["f32", "f34", "f25", "f22", "f21", "f26", "f23", "f13", "f09", "f16"]}
+{"system": "mem0-expire", "q": "q02", "ranked": ["f22", "f34", "f25", "f23", "f33", "f26", "f29", "f09", "f20", "f04"]}
+{"system": "mem0-expire", "q": "q03", "ranked": ["f21", "f25", "f34", "f11", "f22", "f23", "f26", "f31", "f24", "f09"]}
+{"system": "mem0-expire", "q": "q04", "ranked": ["f28", "f26", "f40", "f24", "f10", "f11", "f04", "f13", "f32", "f27"]}
+{"system": "mem0-expire", "q": "q05", "ranked": ["f32", "f25", "f33", "f22", "f34", "f28", "f24", "f14", "f26", "f11"]}
+{"system": "mem0-expire", "q": "q06", "ranked": ["f32", "f29", "f24", "f11", "f28", "f37", "f14", "f31", "f35", "f21"]}
+{"system": "mem0-expire", "q": "q07", "ranked": ["f29", "f16", "f25", "f22", "f26", "f34", "f38", "f24", "f30", "f32"]}
+{"system": "mem0-expire", "q": "q08", "ranked": ["f16", "f25", "f35", "f37", "f24", "f34", "f30", "f32", "f26", "f22"]}
+{"system": "mem0-expire", "q": "q09", "ranked": ["f40", "f26", "f34", "f22", "f13", "f04", "f09", "f28", "f10", "f16"]}
+{"system": "mem0-expire", "q": "q10", "ranked": ["f21", "f28", "f34", "f11", "f13", "f24", "f35", "f25", "f22", "f23"]}
+{"system": "mem0-expire", "q": "q11", "ranked": ["f28", "f21", "f25", "f11", "f26", "f24", "f10", "f22", "f31", "f14"]}
+{"system": "mem0-expire", "q": "q12", "ranked": ["f25", "f23", "f22", "f21", "f34", "f26", "f09", "f11", "f13", "f29"]}
+{"system": "mem0-expire", "q": "q13", "ranked": ["f24", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31", "f14"]}
+{"system": "mem0-expire", "q": "q14", "ranked": ["f09", "f22", "f25", "f33", "f34", "f26", "f23", "f30", "f13", "f16"]}
+{"system": "mem0-expire", "q": "q15", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f08", "f02", "f22"]}
+{"system": "mem0-expire", "q": "q16", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f22", "f08", "f02"]}
+{"system": "mem0-expire", "q": "q17", "ranked": ["f15", "f34", "f18", "f06", "f26", "f23", "f19", "f02", "f08", "f22"]}
+{"system": "mem0-expire", "q": "q18", "ranked": ["f12", "f29", "f19", "f02", "f07", "f18", "f34", "f01", "f26", "f25"]}
+{"system": "mem0-expire", "q": "q19", "ranked": ["f26", "f08", "f04", "f24", "f10", "f34", "f18", "f27", "f03", "f09"]}
+{"system": "mem0-expire", "q": "q20", "ranked": ["f07", "f19", "f12", "f29", "f02", "f25", "f22", "f34", "f18", "f26"]}
+{"system": "mem0-expire", "q": "q21", "ranked": ["f19", "f07", "f02", "f22", "f25", "f33", "f34", "f18", "f26", "f01"]}
+{"system": "mem0-expire", "q": "q22", "ranked": ["f32", "f24", "f03", "f26", "f38", "f31", "f35", "f08", "f34", "f28"]}
+{"system": "mem0-expire", "q": "q23", "ranked": ["f04", "f20", "f26", "f09", "f10", "f22", "f25", "f34", "f13", "f24"]}
+{"system": "mem0-expire", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f10", "f27", "f24", "f21", "f38"]}
+{"system": "mem0-expire", "q": "q25", "ranked": ["f34", "f09", "f26", "f25", "f22", "f20", "f13", "f04", "f28", "f24"]}
+{"system": "mem0-expire", "q": "q26", "ranked": ["f13", "f34", "f32", "f11", "f25", "f33", "f24", "f36", "f28", "f21"]}
+{"system": "mem0-expire", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f26", "f28", "f13", "f25", "f32", "f16"]}
+{"system": "mem0-expire", "q": "q28", "ranked": ["f16", "f34", "f26", "f10", "f25", "f13", "f21", "f24", "f35", "f09"]}
+{"system": "mem0-expire", "q": "q29", "ranked": ["f21", "f25", "f11", "f28", "f23", "f32", "f22", "f34", "f24", "f33"]}
+{"system": "mem0-expire", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f34", "f33", "f26", "f25", "f13", "f31"]}
+{"system": "mem0-expire", "q": "q31", "ranked": ["f08", "f27", "f26", "f04", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "mem0-expire", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "mem0-expire", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "mem0-expire", "q": "q34", "ranked": ["f29", "f12", "f28", "f27", "f36", "f17", "f26", "f02", "f08", "f19"]}
+{"system": "mem0-expire", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "mem0-expire", "q": "q36", "ranked": ["f27", "f24", "f26", "f10", "f32", "f14", "f31", "f37", "f30", "f20"]}
+{"system": "mem0-expire", "q": "q37", "ranked": ["f32", "f37", "f35", "f31", "f30", "f17", "f24", "f39", "f27", "f26"]}
+{"system": "mem0-expire", "q": "q38", "ranked": ["f31", "f35", "f30", "f37", "f17", "f39", "f24", "f26", "f32", "f14"]}
+{"system": "mem0-expire", "q": "q39", "ranked": ["f11", "f21", "f29", "f28", "f25", "f13", "f34", "f33", "f23", "f22"]}
+{"system": "mem0-expire", "q": "q40", "ranked": ["f36", "f34", "f22", "f25", "f28", "f33", "f13", "f09", "f16", "f23"]}
+{"system": "mem0-expire", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "mem0-expire", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "mem0-expire", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "mem0-expire", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "mem0-expire", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "mem0-expire", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "mem0-update", "q": "q01", "ranked": ["f32", "f34", "f25", "f22", "f21", "f26", "f23", "f13", "f09", "f16"]}
+{"system": "mem0-update", "q": "q02", "ranked": ["f22", "f34", "f25", "f23", "f33", "f26", "f29", "f09", "f20", "f04"]}
+{"system": "mem0-update", "q": "q03", "ranked": ["f21", "f25", "f34", "f11", "f22", "f23", "f26", "f31", "f24", "f09"]}
+{"system": "mem0-update", "q": "q04", "ranked": ["f28", "f26", "f40", "f24", "f10", "f11", "f04", "f13", "f32", "f27"]}
+{"system": "mem0-update", "q": "q05", "ranked": ["f32", "f25", "f33", "f22", "f34", "f28", "f24", "f14", "f26", "f11"]}
+{"system": "mem0-update", "q": "q06", "ranked": ["f32", "f29", "f24", "f11", "f28", "f37", "f14", "f31", "f35", "f21"]}
+{"system": "mem0-update", "q": "q07", "ranked": ["f29", "f16", "f25", "f22", "f26", "f34", "f38", "f24", "f30", "f32"]}
+{"system": "mem0-update", "q": "q08", "ranked": ["f16", "f25", "f35", "f37", "f24", "f34", "f30", "f32", "f26", "f22"]}
+{"system": "mem0-update", "q": "q09", "ranked": ["f40", "f26", "f34", "f22", "f13", "f04", "f09", "f28", "f10", "f16"]}
+{"system": "mem0-update", "q": "q10", "ranked": ["f21", "f28", "f34", "f11", "f13", "f24", "f35", "f25", "f22", "f23"]}
+{"system": "mem0-update", "q": "q11", "ranked": ["f28", "f21", "f25", "f11", "f26", "f24", "f10", "f22", "f31", "f14"]}
+{"system": "mem0-update", "q": "q12", "ranked": ["f25", "f23", "f22", "f21", "f34", "f26", "f09", "f11", "f13", "f29"]}
+{"system": "mem0-update", "q": "q13", "ranked": ["f24", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31", "f14"]}
+{"system": "mem0-update", "q": "q14", "ranked": ["f09", "f22", "f25", "f33", "f34", "f26", "f23", "f30", "f13", "f16"]}
+{"system": "mem0-update", "q": "q15", "ranked": ["f34", "f36", "f26", "f22", "f20", "f16", "f13", "f09", "f25", "f04"]}
+{"system": "mem0-update", "q": "q16", "ranked": ["f34", "f36", "f26", "f22", "f23", "f20", "f09", "f16", "f27", "f13"]}
+{"system": "mem0-update", "q": "q17", "ranked": ["f34", "f26", "f23", "f22", "f27", "f29", "f30", "f39", "f33", "f09"]}
+{"system": "mem0-update", "q": "q18", "ranked": ["f29", "f34", "f26", "f25", "f23", "f11", "f22", "f21", "f27", "f20"]}
+{"system": "mem0-update", "q": "q19", "ranked": ["f26", "f04", "f24", "f10", "f34", "f27", "f09", "f32", "f20", "f16"]}
+{"system": "mem0-update", "q": "q20", "ranked": ["f29", "f25", "f22", "f33", "f34", "f26", "f23", "f16", "f30", "f39"]}
+{"system": "mem0-update", "q": "q21", "ranked": ["f22", "f25", "f33", "f34", "f26", "f23", "f16", "f29", "f36", "f09"]}
+{"system": "mem0-update", "q": "q22", "ranked": ["f32", "f24", "f26", "f38", "f31", "f35", "f34", "f28", "f11", "f37"]}
+{"system": "mem0-update", "q": "q23", "ranked": ["f04", "f20", "f26", "f09", "f10", "f22", "f25", "f34", "f13", "f24"]}
+{"system": "mem0-update", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f10", "f27", "f24", "f21", "f38"]}
+{"system": "mem0-update", "q": "q25", "ranked": ["f34", "f09", "f26", "f25", "f22", "f20", "f13", "f04", "f28", "f24"]}
+{"system": "mem0-update", "q": "q26", "ranked": ["f13", "f34", "f32", "f11", "f25", "f33", "f24", "f36", "f28", "f21"]}
+{"system": "mem0-update", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f26", "f28", "f13", "f25", "f32", "f16"]}
+{"system": "mem0-update", "q": "q28", "ranked": ["f16", "f34", "f26", "f10", "f25", "f13", "f21", "f24", "f35", "f09"]}
+{"system": "mem0-update", "q": "q29", "ranked": ["f21", "f25", "f11", "f28", "f23", "f32", "f22", "f34", "f24", "f33"]}
+{"system": "mem0-update", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f34", "f33", "f26", "f25", "f13", "f31"]}
+{"system": "mem0-update", "q": "q31", "ranked": ["f27", "f26", "f04", "f20", "f10", "f09", "f29", "f34", "f32", "f24"]}
+{"system": "mem0-update", "q": "q32", "ranked": ["f29", "f34", "f22", "f23", "f25", "f36", "f26", "f33", "f27", "f04"]}
+{"system": "mem0-update", "q": "q33", "ranked": ["f25", "f21", "f29", "f22", "f16", "f30", "f04", "f26", "f35", "f39"]}
+{"system": "mem0-update", "q": "q34", "ranked": ["f29", "f28", "f27", "f36", "f17", "f26", "f16", "f23", "f13", "f34"]}
+{"system": "mem0-update", "q": "q35", "ranked": ["f24", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f16", "f38"]}
+{"system": "mem0-update", "q": "q36", "ranked": ["f27", "f24", "f26", "f10", "f32", "f14", "f31", "f37", "f30", "f20"]}
+{"system": "mem0-update", "q": "q37", "ranked": ["f32", "f37", "f31", "f35", "f30", "f17", "f24", "f39", "f27", "f26"]}
+{"system": "mem0-update", "q": "q38", "ranked": ["f31", "f35", "f30", "f37", "f17", "f39", "f24", "f26", "f32", "f14"]}
+{"system": "mem0-update", "q": "q39", "ranked": ["f11", "f21", "f29", "f28", "f25", "f13", "f34", "f33", "f23", "f22"]}
+{"system": "mem0-update", "q": "q40", "ranked": ["f36", "f34", "f22", "f25", "f28", "f33", "f13", "f09", "f16", "f23"]}
+{"system": "mem0-update", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "mem0-update", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "mem0-update", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "mem0-update", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "mem0-update", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "mem0-update", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "percolate-search", "q": "q01", "ranked": ["f07", "f34", "f19", "f02", "f18", "f01", "f25", "f22", "f21", "f26"]}
+{"system": "percolate-valid", "q": "q01", "ranked": ["f34", "f25", "f22", "f21", "f26", "f23", "f13", "f09", "f16", "f24"]}
+{"system": "percolate-search", "q": "q02", "ranked": ["f02", "f19", "f22", "f18", "f34", "f25", "f07", "f23", "f06", "f15"]}
+{"system": "percolate-valid", "q": "q02", "ranked": ["f22", "f34", "f25", "f23", "f33", "f26", "f29", "f09", "f20", "f04"]}
+{"system": "percolate-search", "q": "q03", "ranked": ["f02", "f07", "f19", "f21", "f25", "f18", "f34", "f11", "f22", "f23"]}
+{"system": "percolate-valid", "q": "q03", "ranked": ["f21", "f25", "f34", "f11", "f22", "f23", "f26", "f31", "f24", "f09"]}
+{"system": "percolate-search", "q": "q04", "ranked": ["f26", "f08", "f40", "f03", "f24", "f28", "f10", "f11", "f04", "f13"]}
+{"system": "percolate-valid", "q": "q04", "ranked": ["f26", "f40", "f24", "f28", "f10", "f11", "f04", "f13", "f32", "f27"]}
+{"system": "percolate-search", "q": "q05", "ranked": ["f19", "f07", "f18", "f25", "f02", "f34", "f33", "f22", "f28", "f01"]}
+{"system": "percolate-valid", "q": "q05", "ranked": ["f25", "f34", "f33", "f22", "f28", "f24", "f14", "f32", "f26", "f11"]}
+{"system": "percolate-search", "q": "q06", "ranked": ["f24", "f03", "f32", "f11", "f28", "f37", "f14", "f31", "f35", "f21"]}
+{"system": "percolate-valid", "q": "q06", "ranked": ["f24", "f32", "f11", "f28", "f37", "f14", "f31", "f35", "f21", "f34"]}
+{"system": "percolate-search", "q": "q07", "ranked": ["f12", "f29", "f19", "f02", "f07", "f16", "f18", "f01", "f25", "f22"]}
+{"system": "percolate-valid", "q": "q07", "ranked": ["f29", "f16", "f25", "f22", "f26", "f34", "f38", "f24", "f30", "f32"]}
+{"system": "percolate-search", "q": "q08", "ranked": ["f07", "f19", "f02", "f16", "f25", "f35", "f37", "f24", "f34", "f18"]}
+{"system": "percolate-valid", "q": "q08", "ranked": ["f16", "f25", "f35", "f37", "f24", "f34", "f30", "f32", "f26", "f22"]}
+{"system": "percolate-search", "q": "q09", "ranked": ["f08", "f26", "f34", "f22", "f18", "f13", "f04", "f09", "f01", "f28"]}
+{"system": "percolate-valid", "q": "q09", "ranked": ["f26", "f34", "f22", "f13", "f04", "f09", "f28", "f40", "f10", "f16"]}
+{"system": "percolate-search", "q": "q10", "ranked": ["f02", "f07", "f18", "f21", "f28", "f19", "f34", "f11", "f01", "f13"]}
+{"system": "percolate-valid", "q": "q10", "ranked": ["f21", "f28", "f34", "f11", "f13", "f24", "f35", "f25", "f22", "f23"]}
+{"system": "percolate-search", "q": "q11", "ranked": ["f21", "f28", "f07", "f19", "f02", "f25", "f11", "f18", "f26", "f24"]}
+{"system": "percolate-valid", "q": "q11", "ranked": ["f21", "f28", "f25", "f11", "f26", "f24", "f10", "f22", "f31", "f14"]}
+{"system": "percolate-search", "q": "q12", "ranked": ["f07", "f19", "f02", "f25", "f12", "f23", "f22", "f21", "f18", "f01"]}
+{"system": "percolate-valid", "q": "q12", "ranked": ["f25", "f23", "f22", "f21", "f34", "f26", "f09", "f11", "f13", "f29"]}
+{"system": "percolate-search", "q": "q13", "ranked": ["f24", "f03", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31"]}
+{"system": "percolate-valid", "q": "q13", "ranked": ["f24", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31", "f14"]}
+{"system": "percolate-search", "q": "q14", "ranked": ["f07", "f19", "f02", "f22", "f34", "f25", "f33", "f18", "f26", "f23"]}
+{"system": "percolate-valid", "q": "q14", "ranked": ["f22", "f34", "f25", "f33", "f26", "f23", "f30", "f09", "f13", "f16"]}
+{"system": "percolate-search", "q": "q15", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f08", "f02", "f22"]}
+{"system": "percolate-valid", "q": "q15", "ranked": ["f01", "f07", "f08", "f02", "f09", "f04", "f10", "f11", "f05", "f06"]}
+{"system": "percolate-search", "q": "q16", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f22", "f08", "f02"]}
+{"system": "percolate-valid", "q": "q16", "ranked": ["f18", "f22", "f08", "f23", "f12", "f20", "f09", "f16", "f13", "f11"]}
+{"system": "percolate-search", "q": "q17", "ranked": ["f15", "f34", "f18", "f06", "f26", "f23", "f19", "f02", "f08", "f22"]}
+{"system": "percolate-valid", "q": "q17", "ranked": ["f06", "f02", "f08", "f01", "f07", "f12", "f05", "f09", "f11", "f04"]}
+{"system": "percolate-search", "q": "q18", "ranked": ["f19", "f02", "f07", "f18", "f34", "f01", "f26", "f25", "f23", "f11"]}
+{"system": "percolate-valid", "q": "q18", "ranked": ["f19", "f02", "f18", "f11", "f12", "f21", "f08", "f15", "f20", "f04"]}
+{"system": "percolate-search", "q": "q19", "ranked": ["f26", "f08", "f04", "f24", "f10", "f34", "f18", "f27", "f03", "f09"]}
+{"system": "percolate-valid", "q": "q19", "ranked": ["f08", "f04", "f10", "f03", "f09", "f01", "f11", "f12", "f02", "f07"]}
+{"system": "percolate-search", "q": "q20", "ranked": ["f07", "f19", "f02", "f25", "f34", "f22", "f18", "f12", "f26", "f23"]}
+{"system": "percolate-valid", "q": "q20", "ranked": ["f07", "f02", "f12", "f08", "f01", "f05", "f09", "f06", "f04", "f14"]}
+{"system": "percolate-search", "q": "q21", "ranked": ["f19", "f07", "f02", "f34", "f18", "f22", "f26", "f01", "f12", "f25"]}
+{"system": "percolate-valid", "q": "q21", "ranked": ["f19", "f02", "f18", "f12", "f08", "f16", "f15", "f09", "f11", "f05"]}
+{"system": "percolate-search", "q": "q22", "ranked": ["f24", "f03", "f32", "f26", "f38", "f31", "f35", "f08", "f34", "f28"]}
+{"system": "percolate-valid", "q": "q22", "ranked": ["f03", "f08", "f11", "f05", "f17", "f16", "f12", "f01", "f14", "f13"]}
+{"system": "percolate-search", "q": "q23", "ranked": ["f04", "f20", "f08", "f26", "f09", "f10", "f22", "f18", "f25", "f34"]}
+{"system": "percolate-valid", "q": "q23", "ranked": ["f04", "f20", "f26", "f09", "f10", "f22", "f25", "f34", "f13", "f24"]}
+{"system": "percolate-search", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f08", "f10", "f27", "f19", "f07"]}
+{"system": "percolate-valid", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f10", "f27", "f24", "f21", "f38"]}
+{"system": "percolate-search", "q": "q25", "ranked": ["f34", "f18", "f08", "f09", "f26", "f01", "f25", "f22", "f20", "f13"]}
+{"system": "percolate-valid", "q": "q25", "ranked": ["f34", "f09", "f26", "f25", "f22", "f20", "f13", "f04", "f28", "f24"]}
+{"system": "percolate-search", "q": "q26", "ranked": ["f13", "f34", "f18", "f02", "f32", "f11", "f07", "f19", "f25", "f01"]}
+{"system": "percolate-valid", "q": "q26", "ranked": ["f13", "f34", "f32", "f11", "f25", "f33", "f24", "f36", "f28", "f21"]}
+{"system": "percolate-search", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f03", "f26", "f08", "f28", "f13", "f25"]}
+{"system": "percolate-valid", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f26", "f28", "f13", "f25", "f32", "f16"]}
+{"system": "percolate-search", "q": "q28", "ranked": ["f16", "f07", "f34", "f19", "f26", "f18", "f10", "f25", "f01", "f02"]}
+{"system": "percolate-valid", "q": "q28", "ranked": ["f16", "f34", "f26", "f10", "f25", "f13", "f21", "f24", "f35", "f09"]}
+{"system": "percolate-search", "q": "q29", "ranked": ["f21", "f25", "f07", "f19", "f02", "f11", "f28", "f23", "f03", "f32"]}
+{"system": "percolate-valid", "q": "q29", "ranked": ["f21", "f25", "f11", "f28", "f23", "f32", "f22", "f34", "f24", "f33"]}
+{"system": "percolate-search", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f03", "f34", "f33", "f26", "f25", "f18"]}
+{"system": "percolate-valid", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f34", "f33", "f26", "f25", "f13", "f31"]}
+{"system": "percolate-search", "q": "q31", "ranked": ["f08", "f26", "f04", "f27", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "percolate-valid", "q": "q31", "ranked": ["f08", "f26", "f04", "f27", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "percolate-search", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "percolate-valid", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "percolate-search", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "percolate-valid", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "percolate-search", "q": "q34", "ranked": ["f29", "f12", "f27", "f36", "f17", "f26", "f02", "f08", "f19", "f07"]}
+{"system": "percolate-valid", "q": "q34", "ranked": ["f29", "f12", "f27", "f36", "f17", "f26", "f02", "f08", "f19", "f07"]}
+{"system": "percolate-search", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "percolate-valid", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "percolate-search", "q": "q36", "ranked": ["f27", "f24", "f26", "f03", "f10", "f32", "f14", "f08", "f31", "f37"]}
+{"system": "percolate-valid", "q": "q36", "ranked": ["f27", "f24", "f26", "f10", "f32", "f14", "f31", "f37", "f30", "f20"]}
+{"system": "percolate-search", "q": "q37", "ranked": ["f37", "f31", "f24", "f30", "f05", "f03", "f35", "f27", "f32", "f26"]}
+{"system": "percolate-valid", "q": "q37", "ranked": ["f37", "f31", "f24", "f30", "f35", "f27", "f32", "f26", "f14", "f17"]}
+{"system": "percolate-search", "q": "q38", "ranked": ["f31", "f35", "f24", "f30", "f37", "f26", "f03", "f05", "f17", "f32"]}
+{"system": "percolate-valid", "q": "q38", "ranked": ["f31", "f35", "f24", "f30", "f37", "f26", "f17", "f32", "f14", "f39"]}
+{"system": "percolate-search", "q": "q39", "ranked": ["f11", "f21", "f28", "f07", "f25", "f19", "f02", "f18", "f13", "f34"]}
+{"system": "percolate-valid", "q": "q39", "ranked": ["f11", "f21", "f28", "f25", "f13", "f34", "f33", "f23", "f22", "f09"]}
+{"system": "percolate-search", "q": "q40", "ranked": ["f18", "f36", "f01", "f34", "f19", "f07", "f22", "f02", "f25", "f28"]}
+{"system": "percolate-valid", "q": "q40", "ranked": ["f36", "f34", "f22", "f25", "f28", "f33", "f13", "f09", "f16", "f23"]}
+{"system": "percolate-search", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "percolate-valid", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "percolate-search", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "percolate-valid", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "percolate-search", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "percolate-valid", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "percolate-search", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "percolate-valid", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "percolate-search", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "percolate-valid", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "percolate-search", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "percolate-valid", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "orgless-search", "q": "q01", "ranked": ["f07", "f34", "f19", "f02", "f18", "f01", "f25", "f22", "f21", "f26"]}
+{"system": "orgless-valid", "q": "q01", "ranked": ["f34", "f25", "f22", "f21", "f26", "f23", "f13", "f09", "f16", "f24"]}
+{"system": "orgless-search", "q": "q02", "ranked": ["f02", "f19", "f22", "f18", "f34", "f25", "f07", "f23", "f06", "f15"]}
+{"system": "orgless-valid", "q": "q02", "ranked": ["f22", "f34", "f25", "f23", "f33", "f26", "f29", "f09", "f20", "f04"]}
+{"system": "orgless-search", "q": "q03", "ranked": ["f02", "f07", "f19", "f21", "f25", "f18", "f34", "f11", "f22", "f23"]}
+{"system": "orgless-valid", "q": "q03", "ranked": ["f21", "f25", "f34", "f11", "f22", "f23", "f26", "f31", "f24", "f09"]}
+{"system": "orgless-search", "q": "q04", "ranked": ["f26", "f08", "f40", "f03", "f24", "f28", "f10", "f11", "f04", "f13"]}
+{"system": "orgless-valid", "q": "q04", "ranked": ["f26", "f40", "f24", "f28", "f10", "f11", "f04", "f13", "f32", "f27"]}
+{"system": "orgless-search", "q": "q05", "ranked": ["f19", "f07", "f18", "f25", "f02", "f34", "f33", "f22", "f28", "f01"]}
+{"system": "orgless-valid", "q": "q05", "ranked": ["f25", "f34", "f33", "f22", "f28", "f24", "f14", "f32", "f26", "f11"]}
+{"system": "orgless-search", "q": "q06", "ranked": ["f24", "f03", "f32", "f11", "f28", "f37", "f14", "f31", "f35", "f21"]}
+{"system": "orgless-valid", "q": "q06", "ranked": ["f24", "f32", "f11", "f28", "f37", "f14", "f31", "f35", "f21", "f34"]}
+{"system": "orgless-search", "q": "q07", "ranked": ["f12", "f29", "f19", "f02", "f07", "f16", "f18", "f01", "f25", "f22"]}
+{"system": "orgless-valid", "q": "q07", "ranked": ["f29", "f16", "f25", "f22", "f26", "f34", "f38", "f24", "f30", "f32"]}
+{"system": "orgless-search", "q": "q08", "ranked": ["f07", "f19", "f02", "f16", "f25", "f35", "f37", "f24", "f34", "f18"]}
+{"system": "orgless-valid", "q": "q08", "ranked": ["f16", "f25", "f35", "f37", "f24", "f34", "f30", "f32", "f26", "f22"]}
+{"system": "orgless-search", "q": "q09", "ranked": ["f08", "f26", "f34", "f22", "f18", "f13", "f04", "f09", "f01", "f28"]}
+{"system": "orgless-valid", "q": "q09", "ranked": ["f26", "f34", "f22", "f13", "f04", "f09", "f28", "f40", "f10", "f16"]}
+{"system": "orgless-search", "q": "q10", "ranked": ["f02", "f07", "f18", "f21", "f28", "f19", "f34", "f11", "f01", "f13"]}
+{"system": "orgless-valid", "q": "q10", "ranked": ["f21", "f28", "f34", "f11", "f13", "f24", "f35", "f25", "f22", "f23"]}
+{"system": "orgless-search", "q": "q11", "ranked": ["f21", "f28", "f07", "f19", "f02", "f25", "f11", "f18", "f26", "f24"]}
+{"system": "orgless-valid", "q": "q11", "ranked": ["f21", "f28", "f25", "f11", "f26", "f24", "f10", "f22", "f31", "f14"]}
+{"system": "orgless-search", "q": "q12", "ranked": ["f07", "f19", "f02", "f25", "f12", "f23", "f22", "f21", "f18", "f01"]}
+{"system": "orgless-valid", "q": "q12", "ranked": ["f25", "f23", "f22", "f21", "f34", "f26", "f09", "f11", "f13", "f29"]}
+{"system": "orgless-search", "q": "q13", "ranked": ["f24", "f03", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31"]}
+{"system": "orgless-valid", "q": "q13", "ranked": ["f24", "f11", "f28", "f37", "f32", "f26", "f21", "f25", "f31", "f14"]}
+{"system": "orgless-search", "q": "q14", "ranked": ["f07", "f19", "f02", "f22", "f34", "f25", "f33", "f18", "f26", "f23"]}
+{"system": "orgless-valid", "q": "q14", "ranked": ["f22", "f34", "f25", "f33", "f26", "f23", "f30", "f09", "f13", "f16"]}
+{"system": "orgless-search", "q": "q15", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f08", "f02", "f22"]}
+{"system": "orgless-valid", "q": "q15", "ranked": ["f01", "f07", "f08", "f02", "f09", "f04", "f10", "f11", "f05", "f06"]}
+{"system": "orgless-search", "q": "q16", "ranked": ["f34", "f18", "f01", "f36", "f26", "f19", "f07", "f22", "f08", "f02"]}
+{"system": "orgless-valid", "q": "q16", "ranked": ["f18", "f22", "f08", "f23", "f12", "f20", "f09", "f16", "f13", "f11"]}
+{"system": "orgless-search", "q": "q17", "ranked": ["f15", "f34", "f18", "f06", "f26", "f23", "f19", "f02", "f08", "f22"]}
+{"system": "orgless-valid", "q": "q17", "ranked": ["f06", "f02", "f08", "f01", "f07", "f12", "f05", "f09", "f11", "f04"]}
+{"system": "orgless-search", "q": "q18", "ranked": ["f19", "f02", "f07", "f18", "f34", "f01", "f26", "f25", "f23", "f11"]}
+{"system": "orgless-valid", "q": "q18", "ranked": ["f19", "f02", "f18", "f11", "f12", "f21", "f08", "f15", "f20", "f04"]}
+{"system": "orgless-search", "q": "q19", "ranked": ["f26", "f08", "f04", "f24", "f10", "f34", "f18", "f27", "f03", "f09"]}
+{"system": "orgless-valid", "q": "q19", "ranked": ["f08", "f04", "f10", "f03", "f09", "f01", "f11", "f12", "f02", "f07"]}
+{"system": "orgless-search", "q": "q20", "ranked": ["f07", "f19", "f02", "f25", "f34", "f22", "f18", "f12", "f26", "f23"]}
+{"system": "orgless-valid", "q": "q20", "ranked": ["f07", "f02", "f12", "f08", "f01", "f05", "f09", "f06", "f04", "f14"]}
+{"system": "orgless-search", "q": "q21", "ranked": ["f19", "f07", "f02", "f34", "f18", "f22", "f26", "f01", "f12", "f25"]}
+{"system": "orgless-valid", "q": "q21", "ranked": ["f19", "f02", "f18", "f12", "f08", "f16", "f15", "f09", "f11", "f05"]}
+{"system": "orgless-search", "q": "q22", "ranked": ["f24", "f03", "f32", "f26", "f38", "f31", "f35", "f08", "f34", "f28"]}
+{"system": "orgless-valid", "q": "q22", "ranked": ["f03", "f08", "f11", "f05", "f17", "f16", "f12", "f01", "f14", "f13"]}
+{"system": "orgless-search", "q": "q23", "ranked": ["f04", "f20", "f08", "f26", "f09", "f10", "f22", "f18", "f25", "f34"]}
+{"system": "orgless-valid", "q": "q23", "ranked": ["f04", "f20", "f26", "f09", "f10", "f22", "f25", "f34", "f13", "f24"]}
+{"system": "orgless-search", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f08", "f10", "f27", "f19", "f07"]}
+{"system": "orgless-valid", "q": "q24", "ranked": ["f20", "f04", "f25", "f26", "f22", "f10", "f27", "f24", "f21", "f38"]}
+{"system": "orgless-search", "q": "q25", "ranked": ["f34", "f18", "f08", "f09", "f26", "f01", "f25", "f22", "f20", "f13"]}
+{"system": "orgless-valid", "q": "q25", "ranked": ["f34", "f09", "f26", "f25", "f22", "f20", "f13", "f04", "f28", "f24"]}
+{"system": "orgless-search", "q": "q26", "ranked": ["f13", "f34", "f18", "f02", "f32", "f11", "f07", "f19", "f25", "f01"]}
+{"system": "orgless-valid", "q": "q26", "ranked": ["f13", "f34", "f32", "f11", "f25", "f33", "f24", "f36", "f28", "f21"]}
+{"system": "orgless-search", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f03", "f26", "f08", "f28", "f13", "f25"]}
+{"system": "orgless-valid", "q": "q27", "ranked": ["f10", "f21", "f24", "f11", "f26", "f28", "f13", "f25", "f32", "f16"]}
+{"system": "orgless-search", "q": "q28", "ranked": ["f16", "f07", "f34", "f19", "f26", "f18", "f10", "f25", "f01", "f02"]}
+{"system": "orgless-valid", "q": "q28", "ranked": ["f16", "f34", "f26", "f10", "f25", "f13", "f21", "f24", "f35", "f09"]}
+{"system": "orgless-search", "q": "q29", "ranked": ["f21", "f25", "f07", "f19", "f02", "f11", "f28", "f23", "f03", "f32"]}
+{"system": "orgless-valid", "q": "q29", "ranked": ["f21", "f25", "f11", "f28", "f23", "f32", "f22", "f34", "f24", "f33"]}
+{"system": "orgless-search", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f03", "f34", "f33", "f26", "f25", "f18"]}
+{"system": "orgless-valid", "q": "q30", "ranked": ["f28", "f11", "f24", "f32", "f34", "f33", "f26", "f25", "f13", "f31"]}
+{"system": "orgless-search", "q": "q31", "ranked": ["f08", "f26", "f04", "f27", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "orgless-valid", "q": "q31", "ranked": ["f08", "f26", "f04", "f27", "f20", "f10", "f09", "f18", "f29", "f34"]}
+{"system": "orgless-search", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "orgless-valid", "q": "q32", "ranked": ["f29", "f12", "f02", "f07", "f34", "f19", "f18", "f22", "f23", "f01"]}
+{"system": "orgless-search", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "orgless-valid", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f21", "f12", "f29", "f22", "f16", "f30"]}
+{"system": "orgless-search", "q": "q34", "ranked": ["f29", "f12", "f27", "f36", "f17", "f26", "f02", "f08", "f19", "f07"]}
+{"system": "orgless-valid", "q": "q34", "ranked": ["f29", "f12", "f27", "f36", "f17", "f26", "f02", "f08", "f19", "f07"]}
+{"system": "orgless-search", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "orgless-valid", "q": "q35", "ranked": ["f24", "f03", "f28", "f32", "f11", "f26", "f14", "f27", "f37", "f12"]}
+{"system": "orgless-search", "q": "q36", "ranked": ["f27", "f24", "f26", "f03", "f10", "f32", "f14", "f08", "f31", "f37"]}
+{"system": "orgless-valid", "q": "q36", "ranked": ["f27", "f24", "f26", "f10", "f32", "f14", "f31", "f37", "f30", "f20"]}
+{"system": "orgless-search", "q": "q37", "ranked": ["f37", "f31", "f24", "f30", "f05", "f03", "f35", "f27", "f32", "f26"]}
+{"system": "orgless-valid", "q": "q37", "ranked": ["f37", "f31", "f24", "f30", "f35", "f27", "f32", "f26", "f14", "f17"]}
+{"system": "orgless-search", "q": "q38", "ranked": ["f31", "f35", "f24", "f30", "f37", "f26", "f03", "f05", "f17", "f32"]}
+{"system": "orgless-valid", "q": "q38", "ranked": ["f31", "f35", "f24", "f30", "f37", "f26", "f17", "f32", "f14", "f39"]}
+{"system": "orgless-search", "q": "q39", "ranked": ["f11", "f21", "f28", "f07", "f25", "f19", "f02", "f18", "f13", "f34"]}
+{"system": "orgless-valid", "q": "q39", "ranked": ["f11", "f21", "f28", "f25", "f13", "f34", "f33", "f23", "f22", "f09"]}
+{"system": "orgless-search", "q": "q40", "ranked": ["f18", "f36", "f01", "f34", "f19", "f07", "f22", "f02", "f25", "f28"]}
+{"system": "orgless-valid", "q": "q40", "ranked": ["f36", "f34", "f22", "f25", "f28", "f33", "f13", "f09", "f16", "f23"]}
+{"system": "orgless-search", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "orgless-valid", "q": "q41", "ranked": ["f41", "f42", "f47", "f44", "f43", "f46", "f48", "f45"]}
+{"system": "orgless-search", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "orgless-valid", "q": "q42", "ranked": ["f42", "f43", "f47", "f41", "f44", "f46", "f48", "f45"]}
+{"system": "orgless-search", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "orgless-valid", "q": "q43", "ranked": ["f43", "f42", "f41", "f47", "f46", "f44", "f48", "f45"]}
+{"system": "orgless-search", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "orgless-valid", "q": "q44", "ranked": ["f48", "f44", "f47", "f45", "f42", "f41", "f46", "f43"]}
+{"system": "orgless-search", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "orgless-valid", "q": "q45", "ranked": ["f45", "f48", "f44", "f46"]}
+{"system": "orgless-search", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
+{"system": "orgless-valid", "q": "q46", "ranked": ["f46", "f44", "f45", "f48"]}
