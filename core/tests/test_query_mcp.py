@@ -143,11 +143,14 @@ class QueryMcpTest(unittest.IsolatedAsyncioTestCase):
         with caller_credentials(BEARER, (server.url,)):
             return await McpProvider().invoke(server, tool, call)
 
-    async def test_an_agent_lists_one_tool_described_by_the_live_schema(self):
+    async def test_an_agent_lists_the_query_tool_described_by_the_live_schema(self):
         pg = self.pg()
         server = self.start(pg.url)
         tools = await McpProvider().list_tools(server)
-        self.assertEqual([t.name for t in tools], ["query"])
+        # query first; the six memory tools (REM-1056) follow, tested in
+        # test_the_persons_agent_reads_and_judges.py.
+        self.assertEqual([t.name for t in tools][:1], ["query"])
+        self.assertEqual(len(tools), 7)
         self.assertIn("every retrieval mode: LOOKUP, FUZZY.", tools[0].description)
         self.assertIn('LOOKUP \\"name\\"', tools[0].description)
         self.assertEqual(tools[0].input_schema["required"], ["query"])
@@ -156,7 +159,10 @@ class QueryMcpTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_failed_schema_read_lists_the_tool_and_names_no_modes(self):
         server = self.start(self.pg(status=401).url)
         tools = await McpProvider().list_tools(server)
-        self.assertEqual([t.name for t in tools], ["query"])
+        # query first; the six memory tools (REM-1056) follow, tested in
+        # test_the_persons_agent_reads_and_judges.py.
+        self.assertEqual([t.name for t in tools][:1], ["query"])
+        self.assertEqual(len(tools), 7)
         self.assertIn("see the grammar below", tools[0].description)
         self.assertIn("could not be read: 401", tools[0].description)
 

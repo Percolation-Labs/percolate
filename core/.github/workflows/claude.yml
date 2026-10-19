@@ -1,13 +1,16 @@
 # @claude in an issue or a review comment, and Claude Code picks it up.
 #
-# THIS FILE IS THE SAME IN ALL THREE REPOSITORIES -- p8-subsystems (the specs
-# and the extension), percolate-core (the Python services) and get-percolate
-# (the public face, docs and chart). That is deliberate: a release crosses all
-# three, so `@claude` has to work from whichever one you happen to be looking
-# at. Change one, change them all.
+# THIS FILE IS THE SAME IN percolate-core (the Python services, PRIVATE) and
+# get-percolate (the public face, docs and chart, PUBLIC). That is deliberate: a
+# release crosses both, so `@claude` has to work from whichever one you happen
+# to be looking at. Change one, change both. The extension and its specs live
+# in Percolation-Labs/percolate (PUBLIC), which carries no copy of this file;
+# its core/ directory mirrors this repository's tree, this file included.
 #
-# THIS REPOSITORY IS PUBLIC, so without the author check any GitHub user could
-# spend the owner's Claude subscription by typing four characters in a comment.
+# THE AUTHOR CHECK IS FOR THE PUBLIC REPOSITORIES: without it any GitHub user
+# could spend the owner's Claude subscription by typing four characters in a
+# comment on get-percolate. A private repository keeps it too, because the
+# file is the same everywhere it runs.
 name: Claude Code
 
 on:

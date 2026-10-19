@@ -6,13 +6,40 @@ and presenting the guesses as a record. What *is*
 known about the earlier tags is in [Released versions](#released-versions)
 below, and every field there was read out of git or the GitHub API.
 
-It exists because something depended on it and it did not:
-`p8-subsystems/PACKAGING.md` made bumping the `percolate-core` pin conditional
-on "the `percolate-core` release notes" — a precondition that had never been
-met and could not be, so the bump happened without it. A condition nobody can
-satisfy is not a safeguard; it is a sentence people learn to step over.
+It exists because something depended on it and it did not: the packaging
+decision record made bumping the `percolate-core` pin conditional on "the
+`percolate-core` release notes" — a precondition that had never been met and
+could not be, so the bump happened without it. A condition nobody can satisfy
+is not a safeguard; it is a sentence people learn to step over.
 
-## Unreleased, after 0.2.0
+**0.2.2 to 0.2.5 shipped without notes.** The sections below were written as
+"Unreleased, after <version>" and the release tail only renames a heading that
+says "(unreleased)", so each stayed unreleased after it shipped. They are now
+headed by the version that first carried them, which `git tag --contains` on
+each item's commit decided, not the heading's guess. Nothing has been written
+for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
+
+## 0.2.6
+
+**Pairing: extension 0.2.23.** Tag `v0.2.6`, commit `23c813b`.
+
+- **A router is offered the agents its caller may read** (REM-971, #106). A
+  `serves_agents` tool server's catalogue is built from `agentic.agents_api`
+  read as the caller, on every turn, instead of from the list a sync cached.
+  That list held only agents nobody owned, so a router whose writers were
+  private or an org's could not see them; and one cached list served every
+  caller. The gateway's `list_tools` lists as the verified caller too.
+  `tests/test_a_router_offers_what_its_caller_may_read.py`.
+- **A refused model key fails an agent step once, and says which key**
+  (REM-987, #107). `/chat` with `stream=false` answered every failed turn 502,
+  so a provider's `401 invalid_api_key` reached the worker as "worth
+  retrying" and an `agent:` step was retried five times. When
+  `core.provider_errors` classifies a provider failure as terminal (401/403,
+  402, and a 429 for an account with no credit), `/chat` answers with the
+  provider's own status and code, and the worker fails the step once.
+  `tests/test_a_refused_model_key_fails_the_step_once.py`.
+
+## 0.2.1
 
 ### Review fixes, 19 September
 
@@ -33,7 +60,7 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
   ingest handler's, the worker's artifact offload, and `http_call`'s egress lookup go through
   `asyncio.to_thread`, so a slow one no longer stalls other requests or the worker's heartbeat.
 
-## Unreleased, after 0.1.13
+## 0.2.0
 
 ### A writer puts an image in an article
 
@@ -44,10 +71,7 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
 - **`GET /research-images/{snapshot_id}` serves it to anybody who may read some revision that shows it**, signed out included, through `research.resolve_image`. Inline, `nosniff`, a sandboxing CSP, and the bytes
   are identified again before they leave. Needs p8-subsystems 0.2.11 with both functions.
 
-## Unreleased, after 0.1.12
-
-**Not published.** Changes on `main` since `v0.1.12`. Nothing here is in
-the 0.1.12 wheel or image.
+## 0.1.13
 
 ### A cited page can be kept as evidence
 

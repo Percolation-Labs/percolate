@@ -136,6 +136,11 @@ def from_json_schema(doc: dict[str, Any]) -> AgentSpec:
         for key in ("$defs", "additionalProperties"):
             if doc.get(key) is not None:
                 output[key] = doc[key]
+        # REM-970: a declared output that is not a JSON Schema is refused here,
+        # where `percolate agent push` reads the document, not at the first turn.
+        from .runtime.engine import check_declared_output
+
+        check_declared_output(output)
     return AgentSpec(
         name=doc.get("name") or doc.get("title", ""),
         system_prompt=doc.get("description", ""),

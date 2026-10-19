@@ -73,6 +73,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from . import memory_tools
+
 # The protocol revision this speaks. A client asking for a different one is
 # answered with this one rather than an error, which is what the spec asks for.
 PROTOCOL_VERSION = "2025-06-18"
@@ -660,18 +662,27 @@ class Handler(BaseHTTPRequestHandler):
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "p8-query", "version": "0.1.0"},
-                "instructions": "One tool. Ask the knowledge base in p8ql; read the "
-                                "returned plan to confirm the query was understood.",
+                "instructions": "Ask the knowledge base with query, in p8ql, and read the returned "
+                                "plan to confirm the query was understood. To build memory from a "
+                                "conversation, read_session then land_message_facts; to settle what "
+                                "is waiting, claim_judgement then decide_judgement.",
             })
 
         if method == "ping":
             return self._result(rid, {})
 
         if method == "tools/list":
-            return self._result(rid, {"tools": [describe_query_tool(up, auth, self.exceptions)]})
+            # The person's own agent reads conversations and judges with these
+            # (REM-1056); each is a pass-through to its SQL, as the caller.
+            return self._result(rid, {"tools": [describe_query_tool(up, auth, self.exceptions),
+                                                *memory_tools.describe()]})
 
         if method == "tools/call":
             params = msg.get("params") or {}
+            if params.get("name") in memory_tools.TOOLS:
+                args = params.get("arguments") or {}
+                return self._result(rid, memory_tools.call(
+                    up, params["name"], args if isinstance(args, dict) else {}, auth))
             if params.get("name") != "query":
                 return self._error(rid, -32602, f"unknown tool: {params.get('name')!r}")
             started = time.monotonic()

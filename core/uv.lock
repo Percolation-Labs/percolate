@@ -2136,7 +2136,7 @@ wheels = [
 
 [[package]]
 name = "percolate-core"
-version = "0.2.3"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
@@ -2147,6 +2147,7 @@ dependencies = [
 [package.optional-dependencies]
 agent = [
     { name = "fastapi" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
@@ -2159,6 +2160,7 @@ all = [
     { name = "duckdb" },
     { name = "fastapi" },
     { name = "fastembed" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
@@ -2229,6 +2231,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'ui'", specifier = ">=0.115" },
     { name = "fastembed", marker = "extra == 'embed'", specifier = ">=0.7" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "jsonschema", marker = "extra == 'agent'", specifier = ">=4.20" },
     { name = "kubernetes-asyncio", marker = "extra == 'manager'", specifier = ">=32.0" },
     { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.2" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.29" },

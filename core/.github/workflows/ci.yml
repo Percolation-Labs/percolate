@@ -406,6 +406,21 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_structured_stream.py
 
+      # The documented gateway recipe (OPENAI_BASE_URL and an `openai:` model)
+      # called /v1/responses, which most gateways do not serve, so every turn
+      # 404'd (REM-973).
+      - name: The gateway recipe reaches a chat-completions endpoint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_the_gateway_recipe_reaches_chat_completions.py
+
+      # A declared output was checked only for being a JSON object, so
+      # {"verdict": 42} against a string verdict finished as a successful
+      # turn, and a top-level array schema failed with `Schema must be an
+      # object` (REM-970).
+      - name: An agent's declared output is enforced at the turn
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_declared_output_is_enforced.py
+
       # A refused tool call reached the model as a successful result, so the
       # model called it again 54 times until request_limit stopped the run,
       # and TOOL_CALL_END said is_error: false while the rows said true.
@@ -433,6 +448,13 @@ jobs:
       - name: percolate query mcp keeps its three properties, and sample load syncs it
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_query_mcp.py
+
+      # The person's own agent reads a conversation and lands what it learned,
+      # and claims and decides queued judgements, through the same server as
+      # the person, with no model key (REM-1056).
+      - name: The person's own agent reads conversations and judges
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_the_persons_agent_reads_and_judges.py
 
       - name: Prose has one wrapping default and one measure
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
