@@ -129,7 +129,7 @@ select aiq.register_graph_vocabulary() ->> 'relations' as relations;
 
 -- §3 Dream.
 select pg_temp.check((select r - 'since' - 'until' = '{"superseded": 1, "promoted_exact": 2, "promotion_refused": 0,
-                              "soft_left_for_a_judge": 8}'::jsonb from aiq.dream() r),
+                              "soft_left_for_a_judge": 8, "queued_for_a_judge": 8}'::jsonb from aiq.dream() r),
     '§3: dream ends Rotterdam and binds the two ports, and leaves eight names for a judge');
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() =
