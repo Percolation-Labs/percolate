@@ -478,12 +478,11 @@ services:
     # change the object store under a test run without a commit, and
     # dev/tests/content would notice only by failing.
     #
-    # ROOT, because an existing `miniodata` holds MinIO's root-owned files.
-    # RustFS reads MinIO's layout, but as its own uid 10001 it exits with
-    # "Permission denied".
+    # As its own uid 10001; `minio-perms` below is the only root.
     image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
     container_name: ${P8_STACK:-p8-dev}-minio
-    user: "0:0"
+    depends_on:
+      minio-perms: {condition: service_completed_successfully}
     environment:
       RUSTFS_ACCESS_KEY: p8admin
       RUSTFS_SECRET_KEY: p8password
@@ -494,6 +493,26 @@ services:
       # `miniodata`, the name the published compose file uses, rather than the
       # `p8-minio` this file used to say. Compose prefixes it with the project,
       # so the real names are p8-dev_miniodata and p8-test_miniodata.
+      - miniodata:/data
+
+  minio-perms:
+    # ONE-SHOT. An existing `miniodata` holds MinIO's root-owned files; RustFS
+    # reads MinIO's layout, but as uid 10001 it exits with "Permission denied".
+    # This hands the volume to 10001 when anything in it belongs to someone
+    # else, and exits; a fresh volume starts as 10001 and is left alone. The
+    # same as get-percolate's compose file.
+    image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+    container_name: ${P8_STACK:-p8-dev}-minio-perms
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -n "$$(find /data ! -user 10001 -print -quit)" ]; then
+          echo "miniodata: files not owned by uid 10001 (a MinIO volume?), handing it to 10001"
+          chown -R 10001:10001 /data
+        fi
+    restart: "no"
+    volumes:
       - miniodata:/data
 
 volumes:
