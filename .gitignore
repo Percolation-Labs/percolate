@@ -1,0 +1,25 @@
+# Keys and local notes. A public repository is one `git add .` away from
+# publishing whatever sits in the working tree, so these are refused by name.
+.env
+.env.*
+!.env.example
+*.local.md
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# What the build writes (dev/build-image.sh, the pgrx toolchain).
+dev/dist/
+dev/pgrx-home*/
+extension/*/target/
+extension/*/target-*/
+extension/*/.pgrx/
+
+# Python, wherever it runs.
+**/__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+.DS_Store
