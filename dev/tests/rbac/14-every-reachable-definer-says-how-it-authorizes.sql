@@ -210,6 +210,8 @@ insert into t14_declared (fn, mechanism, why) values
  'each candidate the text index returns is kept only if the caller may read its revision (REM-500)'),
 ('research.search_sources(text,integer,integer)', 'research.revision_readable',
  'each candidate the text index returns is kept only if the caller may read its revision (REM-519)'),
+('claims.readable_links_of(uuid[],uuid[])', 'research.revision_readable',
+ 'returns only the links incident to the given origins that origin_links_readable would admit, by applying that policy''s own test to each (REM-1003)'),
 ('claims.execution_receipt(bigint)', 'research.revision_readable',
  'research:select plus the actor or a currently readable assertion; both relation inputs are required and every input hash is checked separately (REM-590)'),
 ('research.programme_owned(uuid)', 'owner',
