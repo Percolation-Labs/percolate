@@ -1,0 +1,414 @@
+{"system": "graphiti-search", "q": "q01", "ranked": ["f07", "f20", "f19", "f34", "f25", "f02", "f18", "f23", "f06", "f01"]}
+{"system": "graphiti-valid", "q": "q01", "ranked": ["f07", "f20", "f19", "f34", "f25", "f02", "f23", "f18", "f15", "f16"]}
+{"system": "graphiti-episodes", "q": "q01", "ranked": ["f32", "f20", "f04", "f19", "f07", "f25", "f15", "f23", "f06", "f16"]}
+{"system": "graphiti-search", "q": "q02", "ranked": ["f20", "f02", "f19", "f07", "f25", "f22", "f18", "f06", "f23", "f34"]}
+{"system": "graphiti-valid", "q": "q02", "ranked": ["f20", "f02", "f19", "f07", "f22", "f25", "f18", "f23", "f34", "f15"]}
+{"system": "graphiti-episodes", "q": "q02", "ranked": ["f04", "f20", "f07", "f19", "f25", "f15", "f06", "f23", "f16", "f30"]}
+{"system": "graphiti-search", "q": "q03", "ranked": ["f02", "f39", "f22", "f07", "f25", "f19", "f18", "f20", "f34", "f36"]}
+{"system": "graphiti-valid", "q": "q03", "ranked": ["f02", "f39", "f22", "f07", "f25", "f19", "f18", "f34", "f20", "f36"]}
+{"system": "graphiti-episodes", "q": "q03", "ranked": ["f29", "f39", "f02", "f22", "f33", "f25", "f40", "f04", "f20", "f31"]}
+{"system": "graphiti-search", "q": "q04", "ranked": ["f34", "f10", "f18", "f20", "f01", "f09", "f02", "f22", "f07"]}
+{"system": "graphiti-valid", "q": "q04", "ranked": ["f34", "f10", "f18", "f20", "f02", "f09", "f22", "f07", "f19"]}
+{"system": "graphiti-episodes", "q": "q04", "ranked": ["f03", "f24", "f18", "f34", "f01", "f20", "f22", "f04", "f11", "f08"]}
+{"system": "graphiti-search", "q": "q05", "ranked": ["f19", "f07", "f25", "f18", "f36", "f02", "f20", "f23", "f06", "f34"]}
+{"system": "graphiti-valid", "q": "q05", "ranked": ["f19", "f07", "f25", "f18", "f36", "f23", "f02", "f20", "f34", "f15"]}
+{"system": "graphiti-episodes", "q": "q05", "ranked": ["f32", "f07", "f19", "f25", "f28", "f36", "f33", "f13", "f27", "f04"]}
+{"system": "graphiti-search", "q": "q06", "ranked": ["f19", "f20", "f34", "f39", "f18", "f16", "f36", "f25", "f07", "f01"]}
+{"system": "graphiti-valid", "q": "q06", "ranked": ["f19", "f20", "f34", "f39", "f18", "f16", "f36", "f25", "f02", "f07"]}
+{"system": "graphiti-episodes", "q": "q06", "ranked": ["f29", "f12", "f20", "f04", "f31", "f27", "f39", "f36", "f16", "f30"]}
+{"system": "graphiti-search", "q": "q07", "ranked": ["f19", "f25", "f07", "f02", "f39", "f20", "f16", "f18", "f01", "f23"]}
+{"system": "graphiti-valid", "q": "q07", "ranked": ["f19", "f25", "f02", "f07", "f39", "f20", "f16", "f18", "f23", "f15"]}
+{"system": "graphiti-episodes", "q": "q07", "ranked": ["f25", "f29", "f40", "f39", "f20", "f04", "f19", "f07", "f15", "f23"]}
+{"system": "graphiti-search", "q": "q08", "ranked": ["f07", "f20", "f16", "f19", "f39", "f02", "f25", "f36", "f34", "f18"]}
+{"system": "graphiti-valid", "q": "q08", "ranked": ["f07", "f20", "f16", "f19", "f39", "f02", "f25", "f36", "f34", "f18"]}
+{"system": "graphiti-episodes", "q": "q08", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search", "q": "q09", "ranked": ["f34", "f09", "f22", "f36", "f18", "f01", "f02", "f20", "f10"]}
+{"system": "graphiti-valid", "q": "q09", "ranked": ["f34", "f09", "f22", "f36", "f18", "f02", "f20", "f10", "f16"]}
+{"system": "graphiti-episodes", "q": "q09", "ranked": ["f40", "f08", "f26", "f09", "f33", "f12", "f17", "f36", "f05", "f30"]}
+{"system": "graphiti-search", "q": "q10", "ranked": ["f15", "f02", "f06", "f07", "f23", "f16", "f18", "f19", "f34", "f01"]}
+{"system": "graphiti-valid", "q": "q10", "ranked": ["f15", "f02", "f23", "f07", "f16", "f18", "f19", "f34", "f25", "f22"]}
+{"system": "graphiti-episodes", "q": "q10", "ranked": ["f37", "f23", "f15", "f06", "f16", "f30", "f05", "f14"]}
+{"system": "graphiti-search", "q": "q11", "ranked": ["f07", "f36", "f20", "f19", "f02", "f18", "f39", "f16", "f25", "f34"]}
+{"system": "graphiti-valid", "q": "q11", "ranked": ["f07", "f36", "f20", "f19", "f02", "f18", "f39", "f16", "f25", "f10"]}
+{"system": "graphiti-episodes", "q": "q11", "ranked": ["f36", "f28", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f16"]}
+{"system": "graphiti-search", "q": "q12", "ranked": ["f19", "f07", "f15", "f25", "f23", "f06", "f02", "f16", "f22", "f18"]}
+{"system": "graphiti-valid", "q": "q12", "ranked": ["f19", "f07", "f23", "f25", "f15", "f02", "f16", "f22", "f18", "f34"]}
+{"system": "graphiti-episodes", "q": "q12", "ranked": ["f13", "f07", "f32", "f19", "f15", "f06", "f23", "f16", "f27", "f28"]}
+{"system": "graphiti-search", "q": "q13", "ranked": ["f25", "f09", "f19", "f18", "f36", "f34", "f01", "f07", "f22", "f02"]}
+{"system": "graphiti-valid", "q": "q13", "ranked": ["f25", "f09", "f19", "f18", "f36", "f34", "f02", "f07", "f22", "f20"]}
+{"system": "graphiti-episodes", "q": "q13", "ranked": ["f26", "f08", "f09", "f33", "f12", "f17", "f36", "f05", "f30", "f14"]}
+{"system": "graphiti-search", "q": "q14", "ranked": ["f25", "f07", "f19", "f22", "f02", "f39", "f34", "f20", "f23", "f18"]}
+{"system": "graphiti-valid", "q": "q14", "ranked": ["f25", "f07", "f19", "f22", "f02", "f39", "f20", "f34", "f23", "f18"]}
+{"system": "graphiti-episodes", "q": "q14", "ranked": ["f25", "f29", "f39", "f40", "f22", "f02", "f33", "f04", "f20", "f07"]}
+{"system": "graphiti-search", "q": "q15", "ranked": ["f34", "f02", "f18", "f01", "f22", "f36", "f19", "f20", "f07", "f09"]}
+{"system": "graphiti-valid", "q": "q15", "ranked": ["f01", "f02", "f07", "f10", "f09", "f06"]}
+{"system": "graphiti-episodes", "q": "q15", "ranked": ["f22", "f02", "f33", "f01", "f03", "f34", "f24", "f18", "f20", "f08"]}
+{"system": "graphiti-search", "q": "q16", "ranked": ["f18", "f34", "f01", "f02", "f36", "f19", "f39", "f22", "f20", "f07"]}
+{"system": "graphiti-valid", "q": "q16", "ranked": ["f18", "f02", "f19", "f20", "f22", "f07", "f09", "f10", "f23"]}
+{"system": "graphiti-episodes", "q": "q16", "ranked": ["f18", "f34", "f01", "f39", "f17", "f12", "f03", "f24", "f22", "f08"]}
+{"system": "graphiti-search", "q": "q17", "ranked": ["f15", "f06", "f23", "f34", "f18", "f16", "f19", "f02", "f22", "f01"]}
+{"system": "graphiti-valid", "q": "q17", "ranked": ["f06", "f02", "f01", "f07", "f09", "f10"]}
+{"system": "graphiti-episodes", "q": "q17", "ranked": ["f06", "f23", "f15", "f16", "f05", "f30", "f14", "f37"]}
+{"system": "graphiti-search", "q": "q18", "ranked": ["f02", "f19", "f22", "f20", "f07", "f18", "f39", "f34", "f01", "f36"]}
+{"system": "graphiti-valid", "q": "q18", "ranked": ["f02", "f19", "f20", "f18", "f16", "f07", "f10", "f15", "f09"]}
+{"system": "graphiti-episodes", "q": "q18", "ranked": ["f29", "f12", "f22", "f02", "f33", "f04", "f20", "f31", "f27", "f39"]}
+{"system": "graphiti-search", "q": "q19", "ranked": ["f34", "f10", "f18", "f01", "f20", "f02", "f09", "f22", "f16"]}
+{"system": "graphiti-valid", "q": "q19", "ranked": ["f01", "f10", "f02", "f09", "f07", "f06"]}
+{"system": "graphiti-episodes", "q": "q19", "ranked": ["f08", "f26", "f01", "f03", "f24", "f18", "f34", "f20", "f22", "f04"]}
+{"system": "graphiti-search", "q": "q20", "ranked": ["f19", "f07", "f25", "f02", "f22", "f34", "f18", "f39", "f01", "f23"]}
+{"system": "graphiti-valid", "q": "q20", "ranked": ["f07", "f02", "f01", "f09", "f10", "f06"]}
+{"system": "graphiti-episodes", "q": "q20", "ranked": ["f07", "f19", "f29", "f25", "f22", "f02", "f12", "f33", "f40", "f39"]}
+{"system": "graphiti-search", "q": "q21", "ranked": ["f02", "f19", "f22", "f07", "f01", "f18", "f34", "f20", "f25", "f10"]}
+{"system": "graphiti-valid", "q": "q21", "ranked": ["f02", "f19", "f18", "f07", "f20", "f10", "f09", "f16", "f15"]}
+{"system": "graphiti-episodes", "q": "q21", "ranked": ["f22", "f02", "f33", "f01", "f03", "f34", "f24", "f18", "f20", "f08"]}
+{"system": "graphiti-search", "q": "q22", "ranked": ["f34", "f39", "f18", "f25", "f19", "f01", "f16", "f20", "f22", "f36"]}
+{"system": "graphiti-valid", "q": "q22", "ranked": ["f01", "f16", "f10", "f02", "f07", "f09", "f15"]}
+{"system": "graphiti-episodes", "q": "q22", "ranked": ["f39", "f29", "f12", "f18", "f34", "f01", "f25", "f40", "f17", "f04"]}
+{"system": "graphiti-search", "q": "q23", "ranked": ["f20", "f34", "f18", "f09", "f01", "f10", "f22", "f02", "f25"]}
+{"system": "graphiti-valid", "q": "q23", "ranked": ["f20", "f34", "f18", "f09", "f02", "f10", "f22", "f25", "f19"]}
+{"system": "graphiti-episodes", "q": "q23", "ranked": ["f03", "f24", "f18", "f34", "f01", "f20", "f22", "f04", "f11", "f08"]}
+{"system": "graphiti-search", "q": "q24", "ranked": ["f20", "f25", "f16", "f22", "f39", "f19", "f07", "f10", "f36"]}
+{"system": "graphiti-valid", "q": "q24", "ranked": ["f20", "f25", "f16", "f22", "f39", "f19", "f10", "f36", "f07"]}
+{"system": "graphiti-episodes", "q": "q24", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search", "q": "q25", "ranked": ["f34", "f02", "f22", "f18", "f20", "f09", "f01", "f39", "f36", "f25"]}
+{"system": "graphiti-valid", "q": "q25", "ranked": ["f34", "f02", "f22", "f18", "f20", "f09", "f25", "f39", "f36", "f16"]}
+{"system": "graphiti-episodes", "q": "q25", "ranked": ["f37", "f02", "f22", "f33", "f04", "f20", "f31", "f29", "f27", "f12"]}
+{"system": "graphiti-search", "q": "q26", "ranked": ["f19", "f34", "f18", "f09", "f07", "f02", "f25", "f36", "f01", "f22"]}
+{"system": "graphiti-valid", "q": "q26", "ranked": ["f19", "f34", "f18", "f09", "f07", "f02", "f25", "f36", "f22", "f16"]}
+{"system": "graphiti-episodes", "q": "q26", "ranked": ["f37", "f19", "f13", "f32", "f07", "f28", "f27", "f25", "f08", "f26"]}
+{"system": "graphiti-search", "q": "q27", "ranked": ["f10", "f01", "f18", "f25", "f07", "f19", "f34", "f02", "f20"]}
+{"system": "graphiti-valid", "q": "q27", "ranked": ["f10", "f18", "f25", "f34", "f07", "f19", "f02", "f20", "f09"]}
+{"system": "graphiti-episodes", "q": "q27", "ranked": ["f10", "f34", "f01", "f18", "f03", "f24", "f22", "f04", "f20", "f11"]}
+{"system": "graphiti-search", "q": "q28", "ranked": ["f16", "f20", "f07", "f19", "f34", "f39", "f36", "f18", "f25", "f10"]}
+{"system": "graphiti-valid", "q": "q28", "ranked": ["f16", "f20", "f07", "f19", "f34", "f39", "f36", "f18", "f25", "f10"]}
+{"system": "graphiti-episodes", "q": "q28", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search", "q": "q29", "ranked": ["f25", "f20", "f07", "f39", "f19", "f36", "f02", "f16", "f18", "f34"]}
+{"system": "graphiti-valid", "q": "q29", "ranked": ["f25", "f20", "f07", "f39", "f19", "f36", "f02", "f16", "f18", "f34"]}
+{"system": "graphiti-episodes", "q": "q29", "ranked": ["f21", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f36", "f16"]}
+{"system": "graphiti-search", "q": "q30", "ranked": ["f34", "f36", "f25", "f20", "f18", "f01", "f39", "f16", "f19", "f02"]}
+{"system": "graphiti-valid", "q": "q30", "ranked": ["f34", "f36", "f20", "f25", "f18", "f39", "f16", "f19", "f02", "f07"]}
+{"system": "graphiti-episodes", "q": "q30", "ranked": ["f28", "f36", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f16"]}
+{"system": "graphiti-search", "q": "q31", "ranked": ["f20", "f34", "f18", "f10", "f01", "f09", "f02", "f22", "f36"]}
+{"system": "graphiti-valid", "q": "q31", "ranked": ["f20", "f34", "f18", "f10", "f02", "f09", "f22", "f19", "f36"]}
+{"system": "graphiti-episodes", "q": "q31", "ranked": ["f08", "f27", "f18", "f24", "f03", "f34", "f01", "f22", "f20", "f04"]}
+{"system": "graphiti-search", "q": "q32", "ranked": ["f02", "f20", "f07", "f39", "f34", "f36", "f18", "f19", "f16", "f22"]}
+{"system": "graphiti-valid", "q": "q32", "ranked": ["f02", "f20", "f07", "f39", "f34", "f36", "f18", "f19", "f16", "f22"]}
+{"system": "graphiti-episodes", "q": "q32", "ranked": ["f40", "f20", "f04", "f31", "f27", "f29", "f12", "f39", "f36", "f16"]}
+{"system": "graphiti-search", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f22", "f16", "f01", "f23", "f18", "f06"]}
+{"system": "graphiti-valid", "q": "q33", "ranked": ["f07", "f19", "f02", "f25", "f22", "f16", "f23", "f18", "f39", "f20"]}
+{"system": "graphiti-episodes", "q": "q33", "ranked": ["f07", "f19"]}
+{"system": "graphiti-search", "q": "q34", "ranked": ["f25", "f36", "f02", "f39", "f18", "f23", "f01", "f19", "f34", "f07"]}
+{"system": "graphiti-valid", "q": "q34", "ranked": ["f25", "f36", "f02", "f39", "f18", "f23", "f34", "f19", "f07", "f22"]}
+{"system": "graphiti-episodes", "q": "q34", "ranked": ["f29", "f12", "f25", "f39", "f40", "f03", "f24", "f18", "f34", "f01"]}
+{"system": "graphiti-search", "q": "q35", "ranked": ["f16", "f36", "f19", "f20", "f18", "f25", "f39", "f34", "f02", "f01"]}
+{"system": "graphiti-valid", "q": "q35", "ranked": ["f16", "f36", "f19", "f20", "f18", "f25", "f39", "f34", "f02", "f22"]}
+{"system": "graphiti-episodes", "q": "q35", "ranked": ["f28", "f36", "f40", "f04", "f20", "f31", "f27", "f29", "f39", "f12"]}
+{"system": "graphiti-search", "q": "q36", "ranked": ["f10", "f09", "f25", "f18", "f39", "f01", "f22", "f34", "f02"]}
+{"system": "graphiti-valid", "q": "q36", "ranked": ["f10", "f09", "f25", "f18", "f39", "f22", "f34", "f02", "f20"]}
+{"system": "graphiti-episodes", "q": "q36", "ranked": ["f28", "f27", "f09", "f25", "f29", "f40", "f39", "f34", "f03", "f01"]}
+{"system": "graphiti-search", "q": "q37", "ranked": ["f34", "f36", "f19", "f25", "f18", "f07", "f22", "f01", "f02", "f39"]}
+{"system": "graphiti-valid", "q": "q37", "ranked": ["f34", "f36", "f19", "f25", "f07", "f18", "f22", "f02", "f39", "f20"]}
+{"system": "graphiti-episodes", "q": "q37", "ranked": ["f32", "f28", "f35", "f40", "f31", "f36", "f17", "f07", "f19", "f13"]}
+{"system": "graphiti-search", "q": "q38", "ranked": ["f07", "f02", "f19", "f25", "f01", "f18", "f20", "f39", "f16", "f34"]}
+{"system": "graphiti-valid", "q": "q38", "ranked": ["f07", "f02", "f19", "f25", "f18", "f39", "f20", "f34", "f16", "f36"]}
+{"system": "graphiti-episodes", "q": "q38", "ranked": ["f27", "f32", "f07", "f19", "f13", "f28", "f25", "f20", "f04", "f31"]}
+{"system": "graphiti-search", "q": "q39", "ranked": ["f23", "f07", "f15", "f25", "f06", "f34", "f18", "f19", "f01", "f02"]}
+{"system": "graphiti-valid", "q": "q39", "ranked": ["f23", "f07", "f15", "f34", "f25", "f18", "f19", "f16", "f02", "f39"]}
+{"system": "graphiti-episodes", "q": "q39", "ranked": ["f12", "f11", "f29", "f21", "f18", "f01", "f34", "f15", "f23", "f06"]}
+{"system": "graphiti-search", "q": "q40", "ranked": ["f36", "f18", "f01", "f34", "f19", "f07", "f20", "f39", "f25", "f22"]}
+{"system": "graphiti-valid", "q": "q40", "ranked": ["f36", "f18", "f34", "f19", "f07", "f39", "f20", "f25", "f22", "f02"]}
+{"system": "graphiti-episodes", "q": "q40", "ranked": ["f36", "f18", "f28", "f34", "f01", "f12", "f39", "f17", "f04", "f20"]}
+{"system": "graphiti-search", "q": "q41", "ranked": ["f41", "f42", "f46", "f47"]}
+{"system": "graphiti-valid", "q": "q41", "ranked": ["f41", "f42", "f46", "f47"]}
+{"system": "graphiti-episodes", "q": "q41", "ranked": ["f41", "f46", "f45", "f42", "f44", "f47", "f43", "f48"]}
+{"system": "graphiti-search", "q": "q42", "ranked": ["f41", "f42", "f46", "f47"]}
+{"system": "graphiti-valid", "q": "q42", "ranked": ["f41", "f42", "f46", "f47"]}
+{"system": "graphiti-episodes", "q": "q42", "ranked": ["f45", "f41", "f42", "f44", "f46", "f47", "f48", "f43"]}
+{"system": "graphiti-search", "q": "q43", "ranked": ["f46", "f42", "f41", "f47"]}
+{"system": "graphiti-valid", "q": "q43", "ranked": ["f46", "f42", "f41", "f47"]}
+{"system": "graphiti-episodes", "q": "q43", "ranked": ["f43", "f48", "f46"]}
+{"system": "graphiti-search", "q": "q44", "ranked": ["f46", "f47", "f41", "f42"]}
+{"system": "graphiti-valid", "q": "q44", "ranked": ["f46", "f47", "f41", "f42"]}
+{"system": "graphiti-episodes", "q": "q44", "ranked": ["f46", "f45", "f41", "f42", "f44", "f47", "f43", "f48"]}
+{"system": "graphiti-search", "q": "q45", "ranked": ["f41", "f42", "f47", "f46"]}
+{"system": "graphiti-valid", "q": "q45", "ranked": ["f41", "f42", "f47", "f46"]}
+{"system": "graphiti-episodes", "q": "q45", "ranked": ["f43", "f48", "f41"]}
+{"system": "graphiti-search", "q": "q46", "ranked": ["f46", "f41", "f47", "f42"]}
+{"system": "graphiti-valid", "q": "q46", "ranked": ["f46", "f41", "f47", "f42"]}
+{"system": "graphiti-episodes", "q": "q46", "ranked": ["f46", "f48", "f43", "f45", "f41", "f42", "f44", "f47"]}
+{"system": "graphiti-search-oai", "q": "q01", "ranked": ["f19", "f04", "f18", "f20", "f07", "f01", "f02", "f25", "f34", "f15"]}
+{"system": "graphiti-valid-oai", "q": "q01", "ranked": ["f19", "f04", "f18", "f20", "f07", "f02", "f34", "f25", "f15", "f22"]}
+{"system": "graphiti-episodes-oai", "q": "q01", "ranked": ["f32", "f20", "f04", "f19", "f07", "f25", "f15", "f23", "f06", "f16"]}
+{"system": "graphiti-search-oai", "q": "q02", "ranked": ["f06", "f04", "f02", "f20", "f07", "f19", "f15", "f22", "f25", "f18"]}
+{"system": "graphiti-valid-oai", "q": "q02", "ranked": ["f02", "f04", "f22", "f20", "f15", "f07", "f19", "f18", "f25", "f23"]}
+{"system": "graphiti-episodes-oai", "q": "q02", "ranked": ["f04", "f20", "f07", "f19", "f25", "f15", "f06", "f23", "f16", "f30"]}
+{"system": "graphiti-search-oai", "q": "q03", "ranked": ["f39", "f15", "f22", "f02", "f06", "f25", "f04", "f19", "f20", "f12"]}
+{"system": "graphiti-valid-oai", "q": "q03", "ranked": ["f39", "f15", "f22", "f02", "f25", "f19", "f04", "f23", "f18", "f20"]}
+{"system": "graphiti-episodes-oai", "q": "q03", "ranked": ["f29", "f39", "f02", "f22", "f33", "f25", "f40", "f04", "f20", "f31"]}
+{"system": "graphiti-search-oai", "q": "q04", "ranked": ["f04", "f01", "f20", "f34", "f18", "f31", "f35", "f02", "f09"]}
+{"system": "graphiti-valid-oai", "q": "q04", "ranked": ["f04", "f34", "f20", "f18", "f31", "f02", "f35", "f22", "f09"]}
+{"system": "graphiti-episodes-oai", "q": "q04", "ranked": ["f03", "f24", "f18", "f34", "f01", "f20", "f22", "f04", "f11", "f08"]}
+{"system": "graphiti-search-oai", "q": "q05", "ranked": ["f19", "f07", "f25", "f22", "f02", "f36", "f06", "f20", "f04", "f23"]}
+{"system": "graphiti-valid-oai", "q": "q05", "ranked": ["f19", "f07", "f22", "f25", "f02", "f36", "f20", "f04", "f18", "f15"]}
+{"system": "graphiti-episodes-oai", "q": "q05", "ranked": ["f32", "f07", "f19", "f25", "f28", "f36", "f33", "f13", "f27", "f04"]}
+{"system": "graphiti-search-oai", "q": "q06", "ranked": ["f12", "f31", "f35", "f20", "f04", "f39", "f19", "f36", "f15"]}
+{"system": "graphiti-valid-oai", "q": "q06", "ranked": ["f12", "f31", "f35", "f20", "f04", "f39", "f19", "f36", "f02"]}
+{"system": "graphiti-episodes-oai", "q": "q06", "ranked": ["f29", "f12", "f20", "f04", "f31", "f27", "f39", "f36", "f16", "f30"]}
+{"system": "graphiti-search-oai", "q": "q07", "ranked": ["f25", "f12", "f39", "f19", "f07", "f04", "f20", "f22", "f18", "f01"]}
+{"system": "graphiti-valid-oai", "q": "q07", "ranked": ["f25", "f12", "f39", "f19", "f07", "f04", "f20", "f22", "f18", "f02"]}
+{"system": "graphiti-episodes-oai", "q": "q07", "ranked": ["f25", "f29", "f40", "f39", "f20", "f04", "f19", "f07", "f15", "f23"]}
+{"system": "graphiti-search-oai", "q": "q08", "ranked": ["f19", "f04", "f07", "f20", "f31", "f12", "f35", "f39", "f25"]}
+{"system": "graphiti-valid-oai", "q": "q08", "ranked": ["f19", "f04", "f07", "f20", "f31", "f12", "f35", "f39", "f25"]}
+{"system": "graphiti-episodes-oai", "q": "q08", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search-oai", "q": "q09", "ranked": ["f09", "f22", "f12", "f04", "f36", "f18", "f34", "f01", "f02", "f20"]}
+{"system": "graphiti-valid-oai", "q": "q09", "ranked": ["f22", "f09", "f12", "f04", "f36", "f18", "f34", "f02", "f20", "f19"]}
+{"system": "graphiti-episodes-oai", "q": "q09", "ranked": ["f40", "f08", "f26", "f09", "f33", "f12", "f17", "f36", "f05", "f30"]}
+{"system": "graphiti-search-oai", "q": "q10", "ranked": ["f15", "f18", "f23", "f34", "f06", "f01", "f02", "f19", "f22", "f07"]}
+{"system": "graphiti-valid-oai", "q": "q10", "ranked": ["f15", "f18", "f23", "f34", "f02", "f19", "f22", "f07", "f36", "f04"]}
+{"system": "graphiti-episodes-oai", "q": "q10", "ranked": ["f37", "f23", "f15", "f06", "f16", "f30", "f05", "f14"]}
+{"system": "graphiti-search-oai", "q": "q11", "ranked": ["f02", "f36", "f20", "f06", "f04", "f15", "f22", "f31", "f12", "f19"]}
+{"system": "graphiti-valid-oai", "q": "q11", "ranked": ["f02", "f36", "f20", "f15", "f22", "f04", "f19", "f31", "f12", "f39"]}
+{"system": "graphiti-episodes-oai", "q": "q11", "ranked": ["f36", "f28", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f16"]}
+{"system": "graphiti-search-oai", "q": "q12", "ranked": ["f19", "f15", "f23", "f07", "f06", "f12", "f25", "f22", "f02", "f34"]}
+{"system": "graphiti-valid-oai", "q": "q12", "ranked": ["f19", "f15", "f23", "f07", "f25", "f12", "f22", "f02", "f34", "f18"]}
+{"system": "graphiti-episodes-oai", "q": "q12", "ranked": ["f13", "f07", "f32", "f19", "f15", "f06", "f23", "f16", "f27", "f28"]}
+{"system": "graphiti-search-oai", "q": "q13", "ranked": ["f12", "f09", "f31", "f36", "f22", "f39", "f18", "f01", "f35", "f34"]}
+{"system": "graphiti-valid-oai", "q": "q13", "ranked": ["f12", "f09", "f31", "f36", "f22", "f39", "f18", "f34", "f35"]}
+{"system": "graphiti-episodes-oai", "q": "q13", "ranked": ["f26", "f08", "f09", "f33", "f12", "f17", "f36", "f05", "f30", "f14"]}
+{"system": "graphiti-search-oai", "q": "q14", "ranked": ["f25", "f19", "f02", "f07", "f39", "f22", "f04", "f09", "f15", "f20"]}
+{"system": "graphiti-valid-oai", "q": "q14", "ranked": ["f25", "f19", "f02", "f07", "f39", "f22", "f04", "f09", "f18", "f20"]}
+{"system": "graphiti-episodes-oai", "q": "q14", "ranked": ["f25", "f29", "f39", "f40", "f22", "f02", "f33", "f04", "f20", "f07"]}
+{"system": "graphiti-search-oai", "q": "q15", "ranked": ["f18", "f22", "f34", "f02", "f01", "f19", "f04", "f07", "f36", "f20"]}
+{"system": "graphiti-valid-oai", "q": "q15", "ranked": ["f01", "f02", "f07", "f04", "f09", "f06"]}
+{"system": "graphiti-episodes-oai", "q": "q15", "ranked": ["f22", "f02", "f33", "f01", "f03", "f34", "f24", "f18", "f20", "f08"]}
+{"system": "graphiti-search-oai", "q": "q16", "ranked": ["f34", "f18", "f01", "f12", "f22", "f36", "f19", "f39", "f02", "f07"]}
+{"system": "graphiti-valid-oai", "q": "q16", "ranked": ["f18", "f19", "f12", "f22", "f07", "f02", "f20", "f04", "f09", "f15"]}
+{"system": "graphiti-episodes-oai", "q": "q16", "ranked": ["f18", "f34", "f01", "f39", "f17", "f12", "f03", "f24", "f22", "f08"]}
+{"system": "graphiti-search-oai", "q": "q17", "ranked": ["f15", "f23", "f06", "f02", "f22", "f19", "f12", "f07", "f18", "f34"]}
+{"system": "graphiti-valid-oai", "q": "q17", "ranked": ["f06", "f02", "f12", "f07", "f04", "f09", "f01"]}
+{"system": "graphiti-episodes-oai", "q": "q17", "ranked": ["f06", "f23", "f15", "f16", "f05", "f30", "f14", "f37"]}
+{"system": "graphiti-search-oai", "q": "q18", "ranked": ["f12", "f19", "f02", "f22", "f06", "f04", "f15", "f20", "f18", "f31"]}
+{"system": "graphiti-valid-oai", "q": "q18", "ranked": ["f12", "f19", "f02", "f04", "f15", "f18", "f07", "f20", "f09"]}
+{"system": "graphiti-episodes-oai", "q": "q18", "ranked": ["f29", "f12", "f22", "f02", "f33", "f04", "f20", "f31", "f27", "f39"]}
+{"system": "graphiti-search-oai", "q": "q19", "ranked": ["f04", "f01", "f34", "f09", "f18", "f31", "f20", "f02", "f25", "f19"]}
+{"system": "graphiti-valid-oai", "q": "q19", "ranked": ["f04", "f01", "f09", "f02", "f12", "f07", "f06"]}
+{"system": "graphiti-episodes-oai", "q": "q19", "ranked": ["f08", "f26", "f01", "f03", "f24", "f18", "f34", "f20", "f22", "f04"]}
+{"system": "graphiti-search-oai", "q": "q20", "ranked": ["f19", "f07", "f25", "f02", "f12", "f22", "f18", "f01", "f34", "f39"]}
+{"system": "graphiti-valid-oai", "q": "q20", "ranked": ["f07", "f12", "f02", "f01", "f09", "f04", "f06"]}
+{"system": "graphiti-episodes-oai", "q": "q20", "ranked": ["f07", "f19", "f29", "f25", "f22", "f02", "f12", "f33", "f40", "f39"]}
+{"system": "graphiti-search-oai", "q": "q21", "ranked": ["f22", "f02", "f18", "f19", "f34", "f07", "f01", "f04", "f25", "f12"]}
+{"system": "graphiti-valid-oai", "q": "q21", "ranked": ["f02", "f18", "f19", "f04", "f07", "f20", "f09", "f12", "f15"]}
+{"system": "graphiti-episodes-oai", "q": "q21", "ranked": ["f22", "f02", "f33", "f01", "f03", "f34", "f24", "f18", "f20", "f08"]}
+{"system": "graphiti-search-oai", "q": "q22", "ranked": ["f39", "f31", "f12", "f35", "f25", "f34", "f18", "f04", "f19"]}
+{"system": "graphiti-valid-oai", "q": "q22", "ranked": ["f12", "f01", "f09", "f04", "f02", "f07", "f15"]}
+{"system": "graphiti-episodes-oai", "q": "q22", "ranked": ["f39", "f29", "f12", "f18", "f34", "f01", "f25", "f40", "f17", "f04"]}
+{"system": "graphiti-search-oai", "q": "q23", "ranked": ["f01", "f04", "f20", "f34", "f18", "f09", "f22", "f02", "f25", "f19"]}
+{"system": "graphiti-valid-oai", "q": "q23", "ranked": ["f04", "f34", "f20", "f18", "f09", "f02", "f22", "f25", "f19", "f31"]}
+{"system": "graphiti-episodes-oai", "q": "q23", "ranked": ["f03", "f24", "f18", "f34", "f01", "f20", "f22", "f04", "f11", "f08"]}
+{"system": "graphiti-search-oai", "q": "q24", "ranked": ["f04", "f20", "f25", "f31", "f12", "f22", "f19", "f18", "f39", "f09"]}
+{"system": "graphiti-valid-oai", "q": "q24", "ranked": ["f04", "f20", "f25", "f31", "f12", "f22", "f19", "f18", "f39", "f07"]}
+{"system": "graphiti-episodes-oai", "q": "q24", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search-oai", "q": "q25", "ranked": ["f02", "f09", "f22", "f36", "f04", "f18", "f01", "f20", "f34", "f31"]}
+{"system": "graphiti-valid-oai", "q": "q25", "ranked": ["f02", "f09", "f22", "f36", "f04", "f18", "f34", "f20", "f31", "f12"]}
+{"system": "graphiti-episodes-oai", "q": "q25", "ranked": ["f37", "f02", "f22", "f33", "f04", "f20", "f31", "f29", "f27", "f12"]}
+{"system": "graphiti-search-oai", "q": "q26", "ranked": ["f18", "f09", "f07", "f04", "f01", "f19", "f25", "f36", "f34", "f12"]}
+{"system": "graphiti-valid-oai", "q": "q26", "ranked": ["f18", "f09", "f07", "f04", "f34", "f25", "f19", "f36", "f12", "f02"]}
+{"system": "graphiti-episodes-oai", "q": "q26", "ranked": ["f37", "f19", "f13", "f32", "f07", "f28", "f27", "f25", "f08", "f26"]}
+{"system": "graphiti-search-oai", "q": "q27", "ranked": ["f09", "f01", "f34", "f12", "f04", "f02", "f18", "f25", "f22", "f31"]}
+{"system": "graphiti-valid-oai", "q": "q27", "ranked": ["f09", "f34", "f18", "f12", "f02", "f04", "f25", "f22", "f20", "f19"]}
+{"system": "graphiti-episodes-oai", "q": "q27", "ranked": ["f10", "f34", "f01", "f18", "f03", "f24", "f22", "f04", "f20", "f11"]}
+{"system": "graphiti-search-oai", "q": "q28", "ranked": ["f19", "f04", "f25", "f20", "f31", "f18", "f12", "f07", "f34", "f39"]}
+{"system": "graphiti-valid-oai", "q": "q28", "ranked": ["f19", "f04", "f25", "f20", "f31", "f18", "f12", "f07", "f34", "f39"]}
+{"system": "graphiti-episodes-oai", "q": "q28", "ranked": ["f04", "f20", "f16", "f30", "f05", "f14", "f37", "f07", "f19", "f31"]}
+{"system": "graphiti-search-oai", "q": "q29", "ranked": ["f25", "f20", "f31", "f04", "f19", "f18", "f22", "f39", "f12", "f36"]}
+{"system": "graphiti-valid-oai", "q": "q29", "ranked": ["f25", "f20", "f31", "f04", "f19", "f18", "f22", "f39", "f12", "f36"]}
+{"system": "graphiti-episodes-oai", "q": "q29", "ranked": ["f21", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f36", "f16"]}
+{"system": "graphiti-search-oai", "q": "q30", "ranked": ["f36", "f12", "f19", "f20", "f04", "f31", "f39", "f34", "f25", "f18"]}
+{"system": "graphiti-valid-oai", "q": "q30", "ranked": ["f36", "f12", "f19", "f20", "f04", "f39", "f34", "f31", "f25", "f18"]}
+{"system": "graphiti-episodes-oai", "q": "q30", "ranked": ["f28", "f36", "f04", "f20", "f31", "f29", "f27", "f12", "f39", "f16"]}
+{"system": "graphiti-search-oai", "q": "q31", "ranked": ["f04", "f01", "f20", "f34", "f18", "f12", "f09", "f02", "f36", "f22"]}
+{"system": "graphiti-valid-oai", "q": "q31", "ranked": ["f04", "f34", "f20", "f18", "f02", "f12", "f09", "f36", "f22", "f35"]}
+{"system": "graphiti-episodes-oai", "q": "q31", "ranked": ["f08", "f27", "f18", "f24", "f03", "f34", "f01", "f22", "f20", "f04"]}
+{"system": "graphiti-search-oai", "q": "q32", "ranked": ["f02", "f20", "f12", "f04", "f22", "f31", "f18", "f19", "f39", "f01"]}
+{"system": "graphiti-valid-oai", "q": "q32", "ranked": ["f02", "f20", "f12", "f04", "f22", "f31", "f18", "f19", "f39", "f36"]}
+{"system": "graphiti-episodes-oai", "q": "q32", "ranked": ["f40", "f20", "f04", "f31", "f27", "f29", "f12", "f39", "f36", "f16"]}
+{"system": "graphiti-search-oai", "q": "q33", "ranked": ["f07", "f19", "f02", "f39"]}
+{"system": "graphiti-valid-oai", "q": "q33", "ranked": ["f07", "f19", "f02", "f39"]}
+{"system": "graphiti-episodes-oai", "q": "q33", "ranked": ["f07", "f19"]}
+{"system": "graphiti-search-oai", "q": "q34", "ranked": ["f12", "f39", "f25", "f36", "f01", "f19", "f02", "f18", "f34", "f22"]}
+{"system": "graphiti-valid-oai", "q": "q34", "ranked": ["f12", "f39", "f25", "f36", "f34", "f18", "f02", "f19", "f22", "f04"]}
+{"system": "graphiti-episodes-oai", "q": "q34", "ranked": ["f29", "f12", "f25", "f39", "f40", "f03", "f24", "f18", "f34", "f01"]}
+{"system": "graphiti-search-oai", "q": "q35", "ranked": ["f36", "f12", "f35", "f20", "f39", "f04", "f31", "f19", "f18"]}
+{"system": "graphiti-valid-oai", "q": "q35", "ranked": ["f36", "f12", "f35", "f20", "f39", "f04", "f31", "f19", "f18"]}
+{"system": "graphiti-episodes-oai", "q": "q35", "ranked": ["f28", "f36", "f40", "f04", "f20", "f31", "f27", "f29", "f39", "f12"]}
+{"system": "graphiti-search-oai", "q": "q36", "ranked": ["f09", "f12", "f31", "f25", "f34", "f39", "f18", "f04", "f22", "f01"]}
+{"system": "graphiti-valid-oai", "q": "q36", "ranked": ["f09", "f12", "f31", "f25", "f34", "f39", "f04", "f18", "f22", "f36"]}
+{"system": "graphiti-episodes-oai", "q": "q36", "ranked": ["f28", "f27", "f09", "f25", "f29", "f40", "f39", "f34", "f03", "f01"]}
+{"system": "graphiti-search-oai", "q": "q37", "ranked": ["f35", "f31", "f36", "f19", "f07", "f39", "f12", "f18", "f34"]}
+{"system": "graphiti-valid-oai", "q": "q37", "ranked": ["f35", "f31", "f36", "f19", "f07", "f39", "f12", "f25", "f18"]}
+{"system": "graphiti-episodes-oai", "q": "q37", "ranked": ["f32", "f28", "f35", "f40", "f31", "f36", "f17", "f07", "f19", "f13"]}
+{"system": "graphiti-search-oai", "q": "q38", "ranked": ["f19", "f31", "f07", "f35", "f25", "f39", "f04", "f20", "f12"]}
+{"system": "graphiti-valid-oai", "q": "q38", "ranked": ["f19", "f31", "f07", "f35", "f25", "f39", "f04", "f20", "f12"]}
+{"system": "graphiti-episodes-oai", "q": "q38", "ranked": ["f27", "f32", "f07", "f19", "f13", "f28", "f25", "f20", "f04", "f31"]}
+{"system": "graphiti-search-oai", "q": "q39", "ranked": ["f12", "f19", "f23", "f02", "f15", "f06", "f18", "f34", "f25", "f01"]}
+{"system": "graphiti-valid-oai", "q": "q39", "ranked": ["f12", "f19", "f23", "f02", "f15", "f18", "f34", "f25", "f39", "f07"]}
+{"system": "graphiti-episodes-oai", "q": "q39", "ranked": ["f12", "f11", "f29", "f21", "f18", "f01", "f34", "f15", "f23", "f06"]}
+{"system": "graphiti-search-oai", "q": "q40", "ranked": ["f36", "f18", "f34", "f01", "f12", "f19", "f39", "f07", "f22", "f04"]}
+{"system": "graphiti-valid-oai", "q": "q40", "ranked": ["f36", "f18", "f34", "f12", "f19", "f39", "f07", "f22", "f04", "f20"]}
+{"system": "graphiti-episodes-oai", "q": "q40", "ranked": ["f36", "f18", "f28", "f34", "f01", "f12", "f39", "f17", "f04", "f20"]}
+{"system": "graphiti-search-oai", "q": "q41", "ranked": ["f41", "f42", "f46", "f43"]}
+{"system": "graphiti-valid-oai", "q": "q41", "ranked": ["f41", "f42", "f46", "f43"]}
+{"system": "graphiti-episodes-oai", "q": "q41", "ranked": ["f41", "f46", "f45", "f42", "f44", "f47", "f43", "f48"]}
+{"system": "graphiti-search-oai", "q": "q42", "ranked": ["f42", "f41", "f43", "f46"]}
+{"system": "graphiti-valid-oai", "q": "q42", "ranked": ["f42", "f41", "f43", "f46"]}
+{"system": "graphiti-episodes-oai", "q": "q42", "ranked": ["f45", "f41", "f42", "f44", "f46", "f47", "f48", "f43"]}
+{"system": "graphiti-search-oai", "q": "q43", "ranked": ["f43", "f46", "f42", "f41"]}
+{"system": "graphiti-valid-oai", "q": "q43", "ranked": ["f43", "f46", "f42", "f41"]}
+{"system": "graphiti-episodes-oai", "q": "q43", "ranked": ["f43", "f48", "f46"]}
+{"system": "graphiti-search-oai", "q": "q44", "ranked": ["f46", "f43", "f41", "f42"]}
+{"system": "graphiti-valid-oai", "q": "q44", "ranked": ["f46", "f43", "f41", "f42"]}
+{"system": "graphiti-episodes-oai", "q": "q44", "ranked": ["f46", "f45", "f41", "f42", "f44", "f47", "f43", "f48"]}
+{"system": "graphiti-search-oai", "q": "q45", "ranked": ["f43", "f41", "f42", "f46"]}
+{"system": "graphiti-valid-oai", "q": "q45", "ranked": ["f43", "f41", "f42", "f46"]}
+{"system": "graphiti-episodes-oai", "q": "q45", "ranked": ["f43", "f48", "f41"]}
+{"system": "graphiti-search-oai", "q": "q46", "ranked": ["f46", "f41", "f43", "f42"]}
+{"system": "graphiti-valid-oai", "q": "q46", "ranked": ["f46", "f41", "f43", "f42"]}
+{"system": "graphiti-episodes-oai", "q": "q46", "ranked": ["f46", "f48", "f43", "f45", "f41", "f42", "f44", "f47"]}
+{"system": "graphiti-search-oai-msg", "q": "q01", "ranked": ["f34", "f18", "f01", "f23", "f02", "f06", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q01", "ranked": ["f18", "f34", "f23", "f07", "f15", "f22", "f36", "f04"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q01", "ranked": ["f32", "f23", "f06", "f28", "f26", "f29", "f04", "f02", "f39", "f25"]}
+{"system": "graphiti-search-oai-msg", "q": "q02", "ranked": ["f06", "f18", "f02", "f34", "f09", "f15", "f01", "f22", "f23"]}
+{"system": "graphiti-valid-oai-msg", "q": "q02", "ranked": ["f34", "f18", "f15", "f09", "f23", "f22", "f36", "f04"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q02", "ranked": ["f09", "f18", "f27", "f23", "f06", "f28", "f30", "f24", "f26", "f29"]}
+{"system": "graphiti-search-oai-msg", "q": "q03", "ranked": ["f06", "f36", "f15", "f02", "f34", "f23", "f09", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q03", "ranked": ["f15", "f36", "f23", "f34", "f22", "f09", "f18", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q03", "ranked": ["f15", "f25", "f13", "f19", "f02", "f23", "f09", "f22", "f33", "f05"]}
+{"system": "graphiti-search-oai-msg", "q": "q04", "ranked": ["f04", "f22", "f09", "f34", "f06", "f01", "f02", "f18"]}
+{"system": "graphiti-valid-oai-msg", "q": "q04", "ranked": ["f04", "f34", "f09", "f22", "f07", "f18", "f36", "f15", "f39"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q04", "ranked": ["f28", "f03", "f24", "f35", "f11", "f22", "f04", "f32", "f10", "f05"]}
+{"system": "graphiti-search-oai-msg", "q": "q05", "ranked": ["f22", "f07", "f34", "f18", "f06", "f09", "f01", "f02"]}
+{"system": "graphiti-valid-oai-msg", "q": "q05", "ranked": ["f22", "f07", "f34", "f18", "f09", "f23", "f15", "f36"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q05", "ranked": ["f32", "f27", "f29", "f18", "f23", "f31", "f06", "f28", "f24", "f30"]}
+{"system": "graphiti-search-oai-msg", "q": "q06", "ranked": ["f09", "f15", "f34", "f06", "f07", "f02", "f18", "f22", "f36"]}
+{"system": "graphiti-valid-oai-msg", "q": "q06", "ranked": ["f09", "f15", "f34", "f07", "f22", "f18", "f39", "f36", "f04"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q06", "ranked": ["f03", "f13", "f15", "f33", "f12", "f24", "f29", "f37", "f07", "f21"]}
+{"system": "graphiti-search-oai-msg", "q": "q07", "ranked": ["f01", "f18", "f34", "f36", "f39", "f15", "f06", "f07", "f23"]}
+{"system": "graphiti-valid-oai-msg", "q": "q07", "ranked": ["f34", "f18", "f36", "f15", "f39", "f07", "f23", "f22"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q07", "ranked": ["f26", "f30", "f11", "f28", "f29", "f23", "f06", "f25", "f10", "f36"]}
+{"system": "graphiti-search-oai-msg", "q": "q08", "ranked": ["f01", "f34", "f39", "f09", "f07", "f15", "f36", "f02", "f06"]}
+{"system": "graphiti-valid-oai-msg", "q": "q08", "ranked": ["f34", "f39", "f09", "f07", "f15", "f36", "f18", "f22", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q08", "ranked": ["f39", "f01", "f23", "f12", "f06", "f28", "f09", "f26", "f05", "f29"]}
+{"system": "graphiti-search-oai-msg", "q": "q09", "ranked": ["f04", "f34", "f02", "f22", "f01", "f06", "f36", "f09"]}
+{"system": "graphiti-valid-oai-msg", "q": "q09", "ranked": ["f34", "f04", "f36", "f22", "f09", "f18", "f39", "f15", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q09", "ranked": ["f38", "f20", "f13", "f06", "f32", "f05", "f14", "f31", "f40", "f33"]}
+{"system": "graphiti-search-oai-msg", "q": "q10", "ranked": ["f39", "f01", "f06", "f34", "f23", "f18", "f07", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q10", "ranked": ["f39", "f34", "f23", "f18", "f07", "f22", "f36", "f15"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q10", "ranked": ["f14", "f40", "f30", "f01", "f11", "f19", "f12", "f22", "f04", "f10"]}
+{"system": "graphiti-search-oai-msg", "q": "q11", "ranked": ["f06", "f09", "f15", "f34", "f36", "f07", "f02", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q11", "ranked": ["f15", "f09", "f34", "f07", "f36", "f23", "f22", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q11", "ranked": ["f15", "f21", "f09", "f05", "f27", "f34", "f16", "f20", "f14", "f03"]}
+{"system": "graphiti-search-oai-msg", "q": "q12", "ranked": ["f06", "f07", "f15", "f39", "f23", "f22", "f34", "f01", "f02"]}
+{"system": "graphiti-valid-oai-msg", "q": "q12", "ranked": ["f07", "f15", "f39", "f23", "f34", "f22", "f04", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q12", "ranked": ["f07", "f31", "f25", "f32", "f27", "f22", "f35", "f29"]}
+{"system": "graphiti-search-oai-msg", "q": "q13", "ranked": ["f02", "f09", "f22", "f01", "f34", "f39", "f18", "f06"]}
+{"system": "graphiti-valid-oai-msg", "q": "q13", "ranked": ["f34", "f09", "f22", "f39", "f04", "f15", "f18", "f07", "f36"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q13", "ranked": ["f03", "f21", "f02", "f32", "f05", "f20", "f38", "f14", "f31", "f33"]}
+{"system": "graphiti-search-oai-msg", "q": "q14", "ranked": ["f07", "f18", "f15", "f02", "f34", "f06", "f01", "f23", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q14", "ranked": ["f07", "f18", "f34", "f15", "f22", "f23", "f36", "f39"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q14", "ranked": ["f19", "f29", "f23", "f25", "f07", "f28", "f15", "f33", "f24", "f30"]}
+{"system": "graphiti-search-oai-msg", "q": "q15", "ranked": ["f18", "f34", "f22", "f02", "f01", "f23"]}
+{"system": "graphiti-valid-oai-msg", "q": "q15", "ranked": ["f01", "f02", "f06", "f04", "f09", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q15", "ranked": ["f02", "f25", "f23", "f22", "f33", "f39", "f04", "f18", "f10", "f32"]}
+{"system": "graphiti-search-oai-msg", "q": "q16", "ranked": ["f18", "f39", "f01", "f34", "f22", "f06", "f02"]}
+{"system": "graphiti-valid-oai-msg", "q": "q16", "ranked": ["f18", "f22", "f15", "f04", "f09", "f07", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q16", "ranked": ["f01", "f39", "f18", "f11", "f03", "f08", "f30", "f26", "f04", "f02"]}
+{"system": "graphiti-search-oai-msg", "q": "q17", "ranked": ["f06", "f23", "f07", "f15", "f02", "f34", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q17", "ranked": ["f06", "f07", "f02", "f01", "f04", "f09"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q17", "ranked": ["f23", "f33", "f26"]}
+{"system": "graphiti-search-oai-msg", "q": "q18", "ranked": ["f15", "f34", "f06", "f09", "f02", "f36", "f23", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q18", "ranked": ["f15", "f09", "f02", "f18", "f07", "f04"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q18", "ranked": ["f12", "f02", "f23", "f25", "f09", "f22", "f33", "f05", "f27", "f20"]}
+{"system": "graphiti-search-oai-msg", "q": "q19", "ranked": ["f22", "f04", "f34", "f09", "f01", "f06", "f02", "f18"]}
+{"system": "graphiti-valid-oai-msg", "q": "q19", "ranked": ["f04", "f01", "f02", "f09", "f06", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q19", "ranked": ["f39", "f04", "f02", "f23", "f18", "f25", "f10", "f05", "f17", "f32"]}
+{"system": "graphiti-search-oai-msg", "q": "q20", "ranked": ["f07", "f22", "f02", "f34", "f06", "f15", "f18", "f39"]}
+{"system": "graphiti-valid-oai-msg", "q": "q20", "ranked": ["f07", "f02", "f06", "f01", "f04", "f09"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q20", "ranked": ["f07", "f25", "f12", "f19", "f22", "f35", "f31", "f29", "f02", "f23"]}
+{"system": "graphiti-search-oai-msg", "q": "q21", "ranked": ["f34", "f02", "f22", "f18", "f06", "f23", "f01"]}
+{"system": "graphiti-valid-oai-msg", "q": "q21", "ranked": ["f02", "f18", "f07", "f15", "f04", "f09"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q21", "ranked": ["f33", "f30", "f03", "f19", "f24", "f02", "f25", "f23", "f22", "f04"]}
+{"system": "graphiti-search-oai-msg", "q": "q22", "ranked": ["f09", "f36", "f39", "f15", "f34", "f22", "f01", "f18", "f07"]}
+{"system": "graphiti-valid-oai-msg", "q": "q22", "ranked": ["f09", "f15", "f01", "f07", "f04", "f02"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q22", "ranked": ["f30", "f03", "f13", "f28", "f33", "f15", "f08", "f11", "f19", "f01"]}
+{"system": "graphiti-search-oai-msg", "q": "q23", "ranked": ["f22", "f04", "f34", "f01", "f06", "f18", "f02", "f09"]}
+{"system": "graphiti-valid-oai-msg", "q": "q23", "ranked": ["f34", "f04", "f22", "f09", "f18", "f15", "f39", "f36", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q23", "ranked": ["f39", "f04", "f02", "f23", "f18", "f25", "f10", "f05", "f17", "f32"]}
+{"system": "graphiti-search-oai-msg", "q": "q24", "ranked": ["f34", "f04", "f09", "f06", "f15", "f01", "f36", "f18", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q24", "ranked": ["f34", "f04", "f09", "f15", "f36", "f22", "f18", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q24", "ranked": ["f20", "f23", "f06", "f28", "f09", "f26", "f05", "f29", "f27", "f34"]}
+{"system": "graphiti-search-oai-msg", "q": "q25", "ranked": ["f09", "f15", "f06", "f34", "f04", "f18", "f36", "f02", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q25", "ranked": ["f09", "f15", "f34", "f04", "f36", "f07", "f22", "f23", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q25", "ranked": ["f09", "f04", "f15", "f37", "f24", "f02", "f25", "f23", "f22", "f33"]}
+{"system": "graphiti-search-oai-msg", "q": "q26", "ranked": ["f01", "f39", "f06", "f02", "f34", "f22", "f04", "f15", "f18"]}
+{"system": "graphiti-valid-oai-msg", "q": "q26", "ranked": ["f34", "f39", "f04", "f22", "f15", "f18", "f36", "f07", "f09"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q26", "ranked": ["f13", "f38", "f31", "f32", "f14", "f21", "f40", "f07", "f29", "f15"]}
+{"system": "graphiti-search-oai-msg", "q": "q27", "ranked": ["f22", "f09", "f34", "f01", "f04", "f02", "f06", "f36"]}
+{"system": "graphiti-valid-oai-msg", "q": "q27", "ranked": ["f34", "f09", "f04", "f22", "f36", "f18", "f15", "f39", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q27", "ranked": ["f10", "f22", "f04", "f32", "f05", "f20", "f38", "f16", "f28", "f14"]}
+{"system": "graphiti-search-oai-msg", "q": "q28", "ranked": ["f01", "f34", "f39", "f02", "f06", "f09", "f36", "f15", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q28", "ranked": ["f34", "f39", "f09", "f36", "f07", "f15", "f18", "f23", "f22"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q28", "ranked": ["f39", "f01", "f23", "f12", "f06", "f28", "f09", "f26", "f05", "f29"]}
+{"system": "graphiti-search-oai-msg", "q": "q29", "ranked": ["f34", "f15", "f09", "f06", "f36", "f01", "f18", "f22"]}
+{"system": "graphiti-valid-oai-msg", "q": "q29", "ranked": ["f34", "f15", "f09", "f36", "f22", "f07", "f04", "f18", "f39"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q29", "ranked": ["f03", "f13", "f09", "f05", "f20", "f34", "f16", "f27", "f15", "f14"]}
+{"system": "graphiti-search-oai-msg", "q": "q30", "ranked": ["f07", "f09", "f34", "f06", "f22", "f15", "f36", "f01"]}
+{"system": "graphiti-valid-oai-msg", "q": "q30", "ranked": ["f09", "f07", "f34", "f22", "f15", "f36", "f39", "f18", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q30", "ranked": ["f28", "f07", "f09", "f05", "f20", "f27", "f16", "f34", "f14", "f15"]}
+{"system": "graphiti-search-oai-msg", "q": "q31", "ranked": ["f22", "f04", "f34", "f15", "f01", "f18", "f06", "f02"]}
+{"system": "graphiti-valid-oai-msg", "q": "q31", "ranked": ["f34", "f04", "f15", "f22", "f09", "f18", "f36", "f39", "f23"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q31", "ranked": ["f08", "f30", "f02", "f39", "f04", "f23", "f18", "f25", "f32", "f10"]}
+{"system": "graphiti-search-oai-msg", "q": "q32", "ranked": ["f18", "f06", "f36", "f02", "f34", "f22", "f15", "f09"]}
+{"system": "graphiti-valid-oai-msg", "q": "q32", "ranked": ["f22", "f18", "f34", "f36", "f15", "f09", "f23", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q32", "ranked": ["f28", "f27", "f30", "f29", "f09", "f05", "f20", "f34", "f16", "f14"]}
+{"system": "graphiti-search-oai-msg", "q": "q33", "ranked": ["f07", "f22", "f02", "f34"]}
+{"system": "graphiti-valid-oai-msg", "q": "q33", "ranked": ["f07", "f34"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q33", "ranked": ["f07", "f19", "f30"]}
+{"system": "graphiti-search-oai-msg", "q": "q34", "ranked": ["f18", "f06", "f36", "f15", "f22", "f39", "f34", "f07", "f02"]}
+{"system": "graphiti-valid-oai-msg", "q": "q34", "ranked": ["f36", "f18", "f15", "f34", "f39", "f07", "f04", "f22", "f09"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q34", "ranked": ["f28", "f30", "f12", "f29", "f25", "f10", "f36", "f35", "f15", "f07"]}
+{"system": "graphiti-search-oai-msg", "q": "q35", "ranked": ["f09", "f34", "f18", "f36", "f22", "f15", "f01", "f07"]}
+{"system": "graphiti-valid-oai-msg", "q": "q35", "ranked": ["f09", "f34", "f36", "f22", "f15", "f07", "f39", "f04", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q35", "ranked": ["f27", "f30", "f24", "f09", "f05", "f20", "f34", "f16", "f14", "f15"]}
+{"system": "graphiti-search-oai-msg", "q": "q36", "ranked": ["f07", "f39", "f22", "f34", "f36", "f09", "f15", "f18", "f06", "f04"]}
+{"system": "graphiti-valid-oai-msg", "q": "q36", "ranked": ["f07", "f39", "f22", "f34", "f36", "f09", "f15", "f04", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q36", "ranked": ["f07", "f28", "f21", "f30", "f25", "f10", "f29", "f36", "f15", "f35"]}
+{"system": "graphiti-search-oai-msg", "q": "q37", "ranked": ["f06", "f07", "f09", "f39", "f22", "f02", "f01", "f34"]}
+{"system": "graphiti-valid-oai-msg", "q": "q37", "ranked": ["f09", "f07", "f22", "f39", "f34", "f04", "f18", "f15", "f36"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q37", "ranked": ["f32", "f27", "f06", "f31", "f25", "f22", "f07", "f35", "f29", "f02"]}
+{"system": "graphiti-search-oai-msg", "q": "q38", "ranked": ["f34", "f39", "f22", "f07", "f09", "f02", "f06", "f36", "f15"]}
+{"system": "graphiti-valid-oai-msg", "q": "q38", "ranked": ["f34", "f39", "f22", "f07", "f09", "f04", "f15", "f36", "f18"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q38", "ranked": ["f31", "f17", "f27", "f09", "f25", "f32", "f22", "f07", "f35", "f05"]}
+{"system": "graphiti-search-oai-msg", "q": "q39", "ranked": ["f07", "f06", "f09", "f01", "f15", "f18", "f23", "f34"]}
+{"system": "graphiti-valid-oai-msg", "q": "q39", "ranked": ["f07", "f09", "f18", "f15", "f23", "f34", "f39", "f22"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q39", "ranked": ["f11", "f33", "f31", "f12", "f15", "f29", "f03", "f37", "f07", "f30"]}
+{"system": "graphiti-search-oai-msg", "q": "q40", "ranked": ["f18", "f01", "f36", "f09", "f39", "f34", "f06", "f23"]}
+{"system": "graphiti-valid-oai-msg", "q": "q40", "ranked": ["f18", "f36", "f09", "f34", "f39", "f23", "f22", "f07"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q40", "ranked": ["f18", "f11", "f26", "f36", "f23", "f06", "f28", "f01", "f39", "f29"]}
+{"system": "graphiti-search-oai-msg", "q": "q41", "ranked": ["f41", "f43", "f42", "f47"]}
+{"system": "graphiti-valid-oai-msg", "q": "q41", "ranked": ["f41", "f43", "f42", "f47"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q41", "ranked": ["f46", "f41", "f43", "f47", "f45", "f44", "f42", "f48"]}
+{"system": "graphiti-search-oai-msg", "q": "q42", "ranked": ["f43", "f41", "f42", "f47"]}
+{"system": "graphiti-valid-oai-msg", "q": "q42", "ranked": ["f43", "f41", "f42", "f47"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q42", "ranked": ["f48", "f46", "f43", "f41", "f47", "f45", "f44", "f42"]}
+{"system": "graphiti-search-oai-msg", "q": "q43", "ranked": ["f47", "f43", "f41", "f42"]}
+{"system": "graphiti-valid-oai-msg", "q": "q43", "ranked": ["f47", "f43", "f41", "f42"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q43", "ranked": []}
+{"system": "graphiti-search-oai-msg", "q": "q44", "ranked": ["f41", "f43", "f42", "f47"]}
+{"system": "graphiti-valid-oai-msg", "q": "q44", "ranked": ["f41", "f43", "f42", "f47"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q44", "ranked": ["f46", "f43", "f41", "f47", "f45", "f44", "f42", "f48"]}
+{"system": "graphiti-search-oai-msg", "q": "q45", "ranked": ["f41", "f47", "f42", "f43"]}
+{"system": "graphiti-valid-oai-msg", "q": "q45", "ranked": ["f41", "f47", "f42", "f43"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q45", "ranked": ["f41", "f46", "f42", "f45"]}
+{"system": "graphiti-search-oai-msg", "q": "q46", "ranked": ["f41", "f47", "f42", "f43"]}
+{"system": "graphiti-valid-oai-msg", "q": "q46", "ranked": ["f41", "f47", "f42", "f43"]}
+{"system": "graphiti-episodes-oai-msg", "q": "q46", "ranked": ["f45", "f46", "f43", "f41", "f47", "f44", "f42", "f48"]}

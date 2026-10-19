@@ -61,6 +61,29 @@ What it says, and what it does not:
 - **No leaks** on either side. `orgless-*` in `scores.txt` is Percolate with every memory registered with no org,
   the path REM-962 was about; it scores the same, and each user's graph reach stays their own.
 
+## Graphiti (REM-1018)
+
+`graphiti_run.py` loads the same facts into Graphiti 0.31.1, the open-source engine behind Zep, on Neo4j 5.26,
+each fact one episode with its `said_at` as the reference time. Graphiti's own LLM (gpt-4o-mini, its default)
+extracts the facts and decides which earlier ones a new episode invalidates. Unlike the rows above, nothing tells
+it what supersedes what. From `scores-graphiti.txt` (`python3 -I score.py fixture.json ranked-graphiti.jsonl`):
+
+| system | hit@1 | rec@5 | stale>gold | historical hit@1 |
+|---|---|---|---|---|
+| graphiti-search (fact search) | 24% | 35% | 15% | 25% |
+| graphiti-valid (facts that held at the question's time) | 30% | 37% | 9% | 62% |
+| graphiti-episodes (episode search, BM25) | 35% | 59% | 9% | 50% |
+| graphiti-valid-oai (Graphiti's default embedder, text-embedding-3-small) | 33% | 46% | 15% | 62% |
+| graphiti-valid-oai-msg (each fact written as a chat message, "Maya: ...") | 22% | 33% | 11% | 75% |
+
+- **The graph holds less than it was given.** From 48 episodes Graphiti wrote about 21 facts and folded the rest
+  into entity summaries, which a fact search does not reach.
+- **It invalidated 2 of the 11 supersessions** from one-sentence facts and 5 from chat messages. "Maya lives in
+  Manchester" still held after she moved to Lisbon.
+- **The embedder is not the cause:** its own embedder, which its 0.6 similarity floor was tuned for, moved the
+  best path by three points. Episode search is BM25 only, so it scores the same with either.
+- Only gpt-4o-mini has been run. A larger extraction model has not.
+
 ## Rerun
 
 ```bash
@@ -77,3 +100,15 @@ python3 -I score.py fixture.json mem0.jsonl percolate.jsonl
 `percolate_run.py` prints each user's graph reach as it goes (`maya reads 40 of Maya's facts and 0 of Leo's`).
 `ORGLESS=1` registers every memory with no org. A fresh reader reproduced the Percolate rows exactly on the
 published `19-0.2.23` image, 19 October 2026.
+
+Graphiti, with the OpenAI key in the environment (this sends the fixture's text to OpenAI):
+
+```bash
+uv pip install -p env graphiti-core==0.31.1
+docker run -d --name memory-bench-neo4j -e NEO4J_AUTH=neo4j/<password> -p 57687:7687 neo4j:5.26
+NEO4J_URI=bolt://localhost:57687 NEO4J_USER=neo4j NEO4J_PASSWORD=<password> \
+  env/bin/python -I graphiti_run.py fixture.json > graphiti.jsonl
+```
+
+`EMBEDDER=openai` keeps Graphiti's default embedder, `EPISODES=message` writes each fact as a chat message, and
+`QUERY_ONLY=1` asks the questions again of a graph already built (clear it between loads).

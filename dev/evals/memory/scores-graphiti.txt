@@ -1,0 +1,64 @@
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+graphiti-episodes all            46    35%    59%         9%     0%
+graphiti-episodes current        14     7%    36%        21%     0%
+graphiti-episodes historical      8    50%    75%        12%     0%
+graphiti-episodes stable         12    42%    75%         0%     0%
+graphiti-episodes change          5    60%    40%         0%     0%
+graphiti-episodes scoped_agent    7    43%    71%         0%     0%
+
+graphiti-episodes-oai all            46    35%    59%         9%     0%
+graphiti-episodes-oai current        14     7%    36%        21%     0%
+graphiti-episodes-oai historical      8    50%    75%        12%     0%
+graphiti-episodes-oai stable         12    42%    75%         0%     0%
+graphiti-episodes-oai change          5    60%    40%         0%     0%
+graphiti-episodes-oai scoped_agent    7    43%    71%         0%     0%
+
+graphiti-episodes-oai-msg all            46    24%    43%        24%     0%
+graphiti-episodes-oai-msg current        14     0%    14%        50%     0%
+graphiti-episodes-oai-msg historical      8    12%    38%        50%     0%
+graphiti-episodes-oai-msg stable         12    42%    58%         0%     0%
+graphiti-episodes-oai-msg change          5    40%    40%         0%     0%
+graphiti-episodes-oai-msg scoped_agent    7    43%    86%         0%     0%
+
+graphiti-search  all            46    24%    35%        15%     0%
+graphiti-search  current        14     7%    21%        29%     0%
+graphiti-search  historical      8    25%    62%        38%     0%
+graphiti-search  stable         12    33%    42%         0%     0%
+graphiti-search  change          5    40%    20%         0%     0%
+graphiti-search  scoped_agent    7    29%    29%         0%     0%
+
+graphiti-search-oai all            46    20%    41%        28%     0%
+graphiti-search-oai current        14     7%    21%        50%     0%
+graphiti-search-oai historical      8     0%    62%        75%     0%
+graphiti-search-oai stable         12    25%    50%         0%     0%
+graphiti-search-oai change          5    60%    40%         0%     0%
+graphiti-search-oai scoped_agent    7    29%    43%         0%     0%
+
+graphiti-search-oai-msg all            46    17%    30%        15%     0%
+graphiti-search-oai-msg current        14     7%    14%        43%     0%
+graphiti-search-oai-msg historical      8    50%    75%        12%     0%
+graphiti-search-oai-msg stable         12    17%    42%         0%     0%
+graphiti-search-oai-msg change          5    20%     0%         0%     0%
+graphiti-search-oai-msg scoped_agent    7     0%    14%         0%     0%
+
+graphiti-valid   all            46    30%    37%         9%     0%
+graphiti-valid   current        14     7%    29%        29%     0%
+graphiti-valid   historical      8    62%    62%         0%     0%
+graphiti-valid   stable         12    33%    42%         0%     0%
+graphiti-valid   change          5    40%    20%         0%     0%
+graphiti-valid   scoped_agent    7    29%    29%         0%     0%
+
+graphiti-valid-oai all            46    33%    46%        15%     0%
+graphiti-valid-oai current        14     7%    29%        50%     0%
+graphiti-valid-oai historical      8    62%    75%         0%     0%
+graphiti-valid-oai stable         12    33%    50%         0%     0%
+graphiti-valid-oai change          5    60%    40%         0%     0%
+graphiti-valid-oai scoped_agent    7    29%    43%         0%     0%
+
+graphiti-valid-oai-msg all            46    22%    33%        11%     0%
+graphiti-valid-oai-msg current        14     0%    21%        36%     0%
+graphiti-valid-oai-msg historical      8    75%    75%         0%     0%
+graphiti-valid-oai-msg stable         12    17%    42%         0%     0%
+graphiti-valid-oai-msg change          5    40%     0%         0%     0%
+graphiti-valid-oai-msg scoped_agent    7     0%    14%         0%     0%
+
