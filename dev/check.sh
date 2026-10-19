@@ -130,8 +130,45 @@ TREE_GATES=(
   "No cache key is a prefix of another::tree_cache_keys_cannot_prefix"
   "Every file that should be text is text::tree_text_is_text"
   "No screenshot is committed::tree_no_screenshots"
+  "dev/reload.sh drops only the database it was told to::tree_reload_honours_db"
   "An extension bump moves every versioned reference, or changes nothing::$PY .github/scripts/test_bump_extension_version.py"
 )
+
+# RELOAD DROPS ONLY THE DATABASE IT WAS TOLD TO (REM-989). Run against a stub
+# `docker` that records every call and a no-op interpreter, so it needs no
+# container and writes nothing. It asserts on the DROP the script sends, not on
+# its exit code: past the drop the stub answers nothing and the script fails,
+# which is fine here.
+tree_reload_honours_db() {
+    local d v
+    d=$(mktemp -d)
+    cat > "$d/docker" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SHIM_LOG"
+case "$*" in *default_version*) printf '%s\n' "$SHIM_VERSION" ;; esac
+exit 0
+SHIM
+    chmod +x "$d/docker"
+    v=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
+    for how in env arg; do
+        : > "$d/log"
+        if [ "$how" = env ]; then
+            env SHIM_LOG="$d/log" SHIM_VERSION="$v" PATH="$d:$PATH" PY=true CONTAINER=shim DB=p8w \
+                ./dev/reload.sh >/dev/null 2>&1 || true
+        else
+            env SHIM_LOG="$d/log" SHIM_VERSION="$v" PATH="$d:$PATH" PY=true CONTAINER=shim \
+                ./dev/reload.sh p8w >/dev/null 2>&1 || true
+        fi
+        if ! grep -q 'drop database if exists p8w (force)' "$d/log" \
+           || grep -q 'drop database if exists p8dev' "$d/log"; then
+            echo "FAILED: dev/reload.sh with p8w given by $how dropped:"
+            grep -o 'drop database if exists [^ ]*' "$d/log" || echo "  nothing"
+            rm -rf "$d"; return 1
+        fi
+    done
+    rm -rf "$d"
+    echo "ok    DB=p8w and \`reload.sh p8w\` each drop p8w, and never p8dev"
+}
 
 # NO NUL IN A FILE THAT IS SUPPOSED TO BE TEXT, and it is here because the class
 # cost two CI round trips in one hour.

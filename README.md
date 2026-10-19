@@ -10,7 +10,7 @@ This repository holds the source of both halves:
 | `extension/percolate` | the `percolate` extension: pure SQL, installable by a non-superuser so row-level security is real |
 | `extension/percolate_parser` | the `percolate_parser` extension: the compiled parsers, in Rust with [pgrx](https://github.com/pgcentralfoundation/pgrx) |
 | `specs/*/*.sql` | the schema the extension is generated from, one directory per subsystem |
-| `core/` | percolate-core, the Python processes in front of the database: worker, Content Server, Agent Runtime |
+| `core/` | a read-only mirror of percolate-core (a private repository), the Python processes in front of the database: worker, Content Server, Agent Runtime. percolate-core releases from its own repository (PyPI's trusted publisher is bound there), and `core/` follows it; change it there, not here, or the next sync overwrites the change |
 | `dev/` | the image build, the install CI runs, the tests and the upgrade gates |
 
 To install and run Percolate, use [get-percolate](https://github.com/Percolation-Labs/get-percolate). It has the
