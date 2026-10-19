@@ -3941,9 +3941,14 @@ begin
     loop
         v_val    := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
         v_params := v_params || jsonb_build_object(v_ref, v_val);
+        -- A JSON null -- a skipped step's result (REM-967), or a null a step
+        -- returned -- binds as an untyped NULL, so it takes the type its place
+        -- in the statement needs: `{{x}} >= 2` over a skipped step is null,
+        -- not "operator does not exist: text >= numeric".
         v_slot   := case jsonb_typeof(v_val)
                         when 'number'  then '(($1->>' || quote_literal(v_ref) || ')::numeric)'
                         when 'boolean' then '(($1->>' || quote_literal(v_ref) || ')::boolean)'
+                        when 'null'    then 'NULL'
                         else                '($1->>' || quote_literal(v_ref) || ')'
                     end;
         v_pat := '\{\{\s*' || regexp_replace(v_ref, '([.$\\])', '\\\1', 'g') || '\s*\}\}';

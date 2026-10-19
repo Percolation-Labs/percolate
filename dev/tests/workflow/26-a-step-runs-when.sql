@@ -64,7 +64,7 @@ steps:
   - id: review
     needs: [score]
     when: "{{steps.score.result.0.v}} > 0.5"
-    sql: "select 'reviewed' as r"
+    sql: "select 'reviewed' as r, 2 as n"
   - id: notify
     needs: [review]
     sql: "select 'notified' as n"
@@ -76,6 +76,10 @@ steps:
     needs: [review]
     when: "'{{steps.review.result.0.r}}' = 'reviewed'"
     sql: "select 'filed' as f"
+  - id: if_counted
+    needs: [review]
+    when: "{{steps.review.result.0.n}} > 1"
+    sql: "select 'counted' as c"
 $y$);
 
 do $$
@@ -91,12 +95,15 @@ begin
         '3 a skipped step''s result reads as null, so is null holds');
     perform pg_temp.check(pg_temp.status(low, 'if_reviewed_ok') = 'skipped',
         '3 and a comparison with it is null, which skips');
+    perform pg_temp.check(pg_temp.status(low, 'if_counted') = 'skipped',
+        '3 a numeric comparison with a skipped result is null too, not a type error');
     perform pg_temp.check(pg_temp.run_status(low) = 'succeeded', '3 a run of successes and a skip succeeded');
 
     perform pg_temp.check(pg_temp.status(high, 'review') = 'succeeded', '3 true runs the step');
     perform pg_temp.check(pg_temp.status(high, 'notify') = 'succeeded'
         and pg_temp.status(high, 'if_unreviewed') = 'skipped'
         and pg_temp.status(high, 'if_reviewed_ok') = 'succeeded'
+        and pg_temp.status(high, 'if_counted') = 'succeeded'
         and pg_temp.run_status(high) = 'succeeded', '3 and the run finishes as before');
 end $$;
 
