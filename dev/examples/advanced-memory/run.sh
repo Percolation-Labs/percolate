@@ -7,7 +7,7 @@
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
 # This runs the rest too: linking facts to questions with Jev, embedding notes, SEARCH and SEMANTIC in a workflow.
-# Each block's input and output land in <workdir>/captures. The keys go into the stack's .env only, and the script
+# Each block's input and output land in <workdir>/captures. The keys go into the stack's .env and worker.env only; the script
 # fails if either appears in a capture. The project is its own (advanced-memory), so `down -v` touches nothing else.
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
@@ -28,6 +28,7 @@ P8_AGENT_PORT=5783
 P8_CONTENT_PORT=5784
 P8_MINIO_PORT=5785
 P8_MINIO_CONSOLE_PORT=5786
+P8_QUERY_MCP_PORT=5787
 OPENAI_API_KEY=$OK
 ENV
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
@@ -80,14 +81,11 @@ for f in $(ls $B | grep -v '^00-' | sort); do
       # same MCP calls their Claude makes, as the same signed-in person.
       { sed 's/^/$ /' $B/$f; echo "(not run here: it connects the reader's own Claude)"; } > $out ;;
     *.sh)
-      if [ "$f" = 01-override.sh ]; then
-        sed -e "s#your-jev-key#$JK#" -e "s#P8_QUERY_MCP_PORT=8090#P8_QUERY_MCP_PORT=5787#" $B/$f > $W/blk.sh
-      else
-        cp $B/$f $W/blk.sh
-      fi
+      # the documented deviations again: the real Jev key, and this stack's own query-mcp port
+      sed -e "s#your-jev-key#$JK#" -e "s#localhost:8090#localhost:$P8_QUERY_MCP_PORT#" $B/$f > $W/blk.sh
       { sed 's/^/$ /' $B/$f; . $W/blk.sh 2>&1; } > $out
       rm -f $W/blk.sh
-      [ "$f" = 01-override.sh ] && { set -a; . ./.env; set +a; sleep 5; } ;;
+      [ "$f" = 01-jev.sh ] && sleep 5 ;;
     *.sql)
       echo "$B/$f $out" >&3
       read -r verdict <&4
