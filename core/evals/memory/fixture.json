@@ -1,0 +1,1246 @@
+{
+ "people": [
+  "maya",
+  "leo"
+ ],
+ "facts": [
+  {
+   "id": "f01",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r01",
+   "said_at": "2026-01-05T09:00:00Z",
+   "text": "Maya lives in Leeds.",
+   "subject": "maya",
+   "relation": "lives_in",
+   "object": "Leeds",
+   "supersedes": null,
+   "quote": "I'm up in Leeds, so anything in town works for me."
+  },
+  {
+   "id": "f02",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r01",
+   "said_at": "2026-01-05T09:05:00Z",
+   "text": "Maya works at Northwind Analytics.",
+   "subject": "maya",
+   "relation": "works_at",
+   "object": "Northwind Analytics",
+   "supersedes": null,
+   "quote": "I'm a data engineer at Northwind Analytics."
+  },
+  {
+   "id": "f03",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r01",
+   "said_at": "2026-01-05T18:00:00Z",
+   "text": "Maya prefers morning workouts.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "morning workouts",
+   "supersedes": null,
+   "quote": "I like to get my run in before work, around 6:30."
+  },
+  {
+   "id": "f04",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r01",
+   "said_at": "2026-01-05T18:05:00Z",
+   "text": "Maya is allergic to peanuts.",
+   "subject": "maya",
+   "relation": "allergic_to",
+   "object": "peanuts",
+   "supersedes": null,
+   "quote": "No peanut anything, I carry an EpiPen."
+  },
+  {
+   "id": "f05",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r01",
+   "said_at": "2026-01-05T18:10:00Z",
+   "text": "Maya's goal is to run a half marathon.",
+   "subject": "maya",
+   "relation": "goal",
+   "object": "run a half marathon",
+   "supersedes": null,
+   "quote": "This year I want to finish a half marathon."
+  },
+  {
+   "id": "f06",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T10:00:00Z",
+   "text": "Maya's manager is Priya Shah.",
+   "subject": "maya",
+   "relation": "manager_is",
+   "object": "Priya Shah",
+   "supersedes": null,
+   "quote": "Priya Shah is my manager, she signs off my leave."
+  },
+  {
+   "id": "f07",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T10:05:00Z",
+   "text": "Maya is working on Project Atlas.",
+   "subject": "maya",
+   "relation": "working_on",
+   "object": "Project Atlas",
+   "supersedes": null,
+   "quote": "Most of my week goes on Project Atlas, the pipeline rebuild."
+  },
+  {
+   "id": "f08",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r02",
+   "said_at": "2026-01-26T19:00:00Z",
+   "text": "Maya follows a vegetarian diet.",
+   "subject": "maya",
+   "relation": "diet",
+   "object": "vegetarian",
+   "supersedes": null,
+   "quote": "I've been vegetarian since uni, so no meat in the meal plans."
+  },
+  {
+   "id": "f09",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T10:10:00Z",
+   "text": "Maya has a cat named Biscuit.",
+   "subject": "maya",
+   "relation": "has_pet",
+   "object": "a cat named Biscuit",
+   "supersedes": null,
+   "quote": "I need to be home by seven to feed Biscuit, my cat."
+  },
+  {
+   "id": "f10",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r02",
+   "said_at": "2026-01-26T19:05:00Z",
+   "text": "Maya prefers green tea over coffee.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "green tea over coffee",
+   "supersedes": null,
+   "quote": "Skip the coffee suggestions, I only drink green tea."
+  },
+  {
+   "id": "f11",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T10:15:00Z",
+   "text": "Maya prefers meetings before noon.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "meetings before noon",
+   "supersedes": null,
+   "quote": "Put anything with people in the morning, my afternoons are for focus."
+  },
+  {
+   "id": "f12",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r03",
+   "said_at": "2026-02-16T09:30:00Z",
+   "text": "Maya decided to enrol in a part-time MBA.",
+   "subject": "maya",
+   "relation": "decided",
+   "object": "enrol in a part-time MBA",
+   "supersedes": null,
+   "quote": "I've made up my mind, I'm applying for the part-time MBA this autumn."
+  },
+  {
+   "id": "f13",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r03",
+   "said_at": "2026-02-16T09:35:00Z",
+   "text": "Maya prefers window seats on flights.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "window seats on flights",
+   "supersedes": null,
+   "quote": "Always book me a window seat, I like to sleep against the wall."
+  },
+  {
+   "id": "f14",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r03",
+   "said_at": "2026-02-16T20:00:00Z",
+   "text": "Maya's goal is to sleep eight hours a night.",
+   "subject": "maya",
+   "relation": "goal",
+   "object": "sleep eight hours a night",
+   "supersedes": null,
+   "quote": "I want to actually get eight hours a night for once."
+  },
+  {
+   "id": "f15",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r04",
+   "said_at": "2026-03-16T11:00:00Z",
+   "text": "Maya's manager is Tom Reyes.",
+   "subject": "maya",
+   "relation": "manager_is",
+   "object": "Tom Reyes",
+   "supersedes": "f06",
+   "quote": "After the reorg I report to Tom Reyes instead of Priya."
+  },
+  {
+   "id": "f16",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r04",
+   "said_at": "2026-03-16T11:05:00Z",
+   "text": "Maya's goal is to learn Portuguese.",
+   "subject": "maya",
+   "relation": "goal",
+   "object": "learn Portuguese",
+   "supersedes": null,
+   "quote": "I want to learn Portuguese properly, not just holiday phrases."
+  },
+  {
+   "id": "f17",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r04",
+   "said_at": "2026-03-16T19:30:00Z",
+   "text": "Maya prefers running alone rather than in a group.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "running alone",
+   "supersedes": null,
+   "quote": "Group runs stress me out, I'd rather go solo."
+  },
+  {
+   "id": "f18",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r05",
+   "said_at": "2026-04-13T09:00:00Z",
+   "text": "Maya lives in Manchester.",
+   "subject": "maya",
+   "relation": "lives_in",
+   "object": "Manchester",
+   "supersedes": "f01",
+   "quote": "We finally moved, I'm in Manchester now, Ancoats."
+  },
+  {
+   "id": "f19",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r05",
+   "said_at": "2026-04-13T09:05:00Z",
+   "text": "Maya is working on Project Meridian.",
+   "subject": "maya",
+   "relation": "working_on",
+   "object": "Project Meridian",
+   "supersedes": "f07",
+   "quote": "Atlas got renamed to Project Meridian, same work, new name for the client."
+  },
+  {
+   "id": "f20",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r05",
+   "said_at": "2026-04-13T18:30:00Z",
+   "text": "Maya is allergic to penicillin.",
+   "subject": "maya",
+   "relation": "allergic_to",
+   "object": "penicillin",
+   "supersedes": null,
+   "quote": "If a doctor ever asks, I react badly to penicillin."
+  },
+  {
+   "id": "f21",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r05",
+   "said_at": "2026-04-13T09:10:00Z",
+   "text": "Maya prefers async written updates over status meetings.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "async written updates over status meetings",
+   "supersedes": null,
+   "quote": "Send me a written update instead of a call whenever you can."
+  },
+  {
+   "id": "f22",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r06",
+   "said_at": "2026-05-11T10:00:00Z",
+   "text": "Maya works at Harbour Health.",
+   "subject": "maya",
+   "relation": "works_at",
+   "object": "Harbour Health",
+   "supersedes": "f02",
+   "quote": "I left Northwind, I started at Harbour Health on Monday."
+  },
+  {
+   "id": "f23",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r06",
+   "said_at": "2026-05-11T10:05:00Z",
+   "text": "Maya's manager is Daniel Osei.",
+   "subject": "maya",
+   "relation": "manager_is",
+   "object": "Daniel Osei",
+   "supersedes": "f15",
+   "quote": "My new boss at Harbour is Daniel Osei."
+  },
+  {
+   "id": "f24",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r06",
+   "said_at": "2026-05-11T19:00:00Z",
+   "text": "Maya prefers evening workouts.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "evening workouts",
+   "supersedes": "f03",
+   "quote": "The new commute kills my mornings, so I train after work now, around 7pm."
+  },
+  {
+   "id": "f25",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r06",
+   "said_at": "2026-05-11T10:10:00Z",
+   "text": "Maya is working on the patient intake app.",
+   "subject": "maya",
+   "relation": "working_on",
+   "object": "the patient intake app",
+   "supersedes": "f19",
+   "quote": "At Harbour I'm on the patient intake app."
+  },
+  {
+   "id": "f26",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r07",
+   "said_at": "2026-06-08T18:00:00Z",
+   "text": "Maya follows a pescatarian diet.",
+   "subject": "maya",
+   "relation": "diet",
+   "object": "pescatarian",
+   "supersedes": "f08",
+   "quote": "My GP said my iron is low, so I'm adding fish back in. Still no meat."
+  },
+  {
+   "id": "f27",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r07",
+   "said_at": "2026-06-08T18:05:00Z",
+   "text": "Maya decided to stop drinking alcohol on weeknights.",
+   "subject": "maya",
+   "relation": "decided",
+   "object": "stop drinking alcohol on weeknights",
+   "supersedes": null,
+   "quote": "I've decided, no drinks Monday to Thursday from now on."
+  },
+  {
+   "id": "f28",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r07",
+   "said_at": "2026-06-08T09:00:00Z",
+   "text": "Maya prefers planning her week on Sunday evenings.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "planning her week on Sunday evenings",
+   "supersedes": null,
+   "quote": "Sunday night is when I sit down and plan the week."
+  },
+  {
+   "id": "f29",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r08",
+   "said_at": "2026-07-06T09:30:00Z",
+   "text": "Maya decided to drop the part-time MBA.",
+   "subject": "maya",
+   "relation": "decided",
+   "object": "drop the part-time MBA",
+   "supersedes": "f12",
+   "quote": "I'm pulling out of the MBA, the new job is too much on top of it and it costs too much."
+  },
+  {
+   "id": "f30",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r08",
+   "said_at": "2026-07-06T19:00:00Z",
+   "text": "Maya's goal is to run a full marathon.",
+   "subject": "maya",
+   "relation": "goal",
+   "object": "run a full marathon",
+   "supersedes": "f05",
+   "quote": "I did the half in June, so now I'm going for the full marathon."
+  },
+  {
+   "id": "f31",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r08",
+   "said_at": "2026-07-06T19:05:00Z",
+   "text": "Maya prefers listening to podcasts while running.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "podcasts while running",
+   "supersedes": null,
+   "quote": "Music bores me on long runs, I put a podcast on."
+  },
+  {
+   "id": "f32",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r09",
+   "said_at": "2026-08-03T18:00:00Z",
+   "text": "Maya prefers yoga on rest days.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "yoga on rest days",
+   "supersedes": null,
+   "quote": "On rest days I just do a yoga session."
+  },
+  {
+   "id": "f33",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r09",
+   "said_at": "2026-08-03T09:00:00Z",
+   "text": "Maya prefers working at a standing desk.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "a standing desk",
+   "supersedes": null,
+   "quote": "I work at a standing desk, sitting all day wrecks my back."
+  },
+  {
+   "id": "f34",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r10",
+   "said_at": "2026-08-24T10:00:00Z",
+   "text": "Maya lives in Lisbon.",
+   "subject": "maya",
+   "relation": "lives_in",
+   "object": "Lisbon",
+   "supersedes": "f18",
+   "quote": "I've moved to Lisbon, Harbour let me go fully remote."
+  },
+  {
+   "id": "f35",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r10",
+   "said_at": "2026-08-24T19:00:00Z",
+   "text": "Maya prefers trail running over road running.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "trail running over road running",
+   "supersedes": null,
+   "quote": "Lisbon roads are brutal, I'd much rather be on the trails."
+  },
+  {
+   "id": "f36",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r11",
+   "said_at": "2026-09-14T09:00:00Z",
+   "text": "Maya decided to keep her Manchester flat as a rental.",
+   "subject": "maya",
+   "relation": "decided",
+   "object": "keep her Manchester flat as a rental",
+   "supersedes": null,
+   "quote": "I'm not selling the Manchester place, I'll rent it out."
+  },
+  {
+   "id": "f37",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r11",
+   "said_at": "2026-09-14T18:30:00Z",
+   "text": "Maya's goal is to stretch for ten minutes after every run.",
+   "subject": "maya",
+   "relation": "goal",
+   "object": "stretch for ten minutes after every run",
+   "supersedes": null,
+   "quote": "My physio wants ten minutes of stretching after each run."
+  },
+  {
+   "id": "f38",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r12",
+   "said_at": "2026-09-30T09:00:00Z",
+   "text": "Maya prefers Pilates over spin classes.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "Pilates over spin classes",
+   "supersedes": null,
+   "quote": "Book me Pilates if there's a choice, I hate spin."
+  },
+  {
+   "id": "f39",
+   "user": "maya",
+   "agent": "coach",
+   "run": "r12",
+   "said_at": "2026-09-30T18:00:00Z",
+   "text": "Maya decided to run the Porto Marathon in November.",
+   "subject": "maya",
+   "relation": "decided",
+   "object": "run the Porto Marathon in November",
+   "supersedes": null,
+   "quote": "I've signed up, Porto Marathon in November."
+  },
+  {
+   "id": "f40",
+   "user": "maya",
+   "agent": "planner",
+   "run": "r12",
+   "said_at": "2026-09-30T09:05:00Z",
+   "text": "Maya prefers quiet restaurant tables away from the kitchen.",
+   "subject": "maya",
+   "relation": "prefers",
+   "object": "quiet restaurant tables",
+   "supersedes": null,
+   "quote": "Ask for a quiet table, I can't hear anyone near the kitchen."
+  },
+  {
+   "id": "f41",
+   "user": "leo",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T14:00:00Z",
+   "text": "Leo lives in Leeds.",
+   "subject": "leo",
+   "relation": "lives_in",
+   "object": "Leeds",
+   "supersedes": null,
+   "quote": "I'm in Leeds, near the station."
+  },
+  {
+   "id": "f42",
+   "user": "leo",
+   "agent": "planner",
+   "run": "r02",
+   "said_at": "2026-01-26T14:05:00Z",
+   "text": "Leo works at Northwind Analytics.",
+   "subject": "leo",
+   "relation": "works_at",
+   "object": "Northwind Analytics",
+   "supersedes": null,
+   "quote": "I'm on the sales side at Northwind Analytics."
+  },
+  {
+   "id": "f43",
+   "user": "leo",
+   "agent": "planner",
+   "run": "r04",
+   "said_at": "2026-03-16T14:00:00Z",
+   "text": "Leo's manager is Priya Shah.",
+   "subject": "leo",
+   "relation": "manager_is",
+   "object": "Priya Shah",
+   "supersedes": null,
+   "quote": "Priya Shah manages me too."
+  },
+  {
+   "id": "f44",
+   "user": "leo",
+   "agent": "coach",
+   "run": "r05",
+   "said_at": "2026-04-13T20:00:00Z",
+   "text": "Leo follows a vegan diet.",
+   "subject": "leo",
+   "relation": "diet",
+   "object": "vegan",
+   "supersedes": null,
+   "quote": "I'm fully vegan, no dairy or eggs either."
+  },
+  {
+   "id": "f45",
+   "user": "leo",
+   "agent": "coach",
+   "run": "r06",
+   "said_at": "2026-05-11T20:00:00Z",
+   "text": "Leo prefers morning workouts.",
+   "subject": "leo",
+   "relation": "prefers",
+   "object": "morning workouts",
+   "supersedes": null,
+   "quote": "I train at 6am, before anything else."
+  },
+  {
+   "id": "f46",
+   "user": "leo",
+   "agent": "coach",
+   "run": "r07",
+   "said_at": "2026-06-08T20:00:00Z",
+   "text": "Leo is allergic to shellfish.",
+   "subject": "leo",
+   "relation": "allergic_to",
+   "object": "shellfish",
+   "supersedes": null,
+   "quote": "Shellfish puts me in hospital."
+  },
+  {
+   "id": "f47",
+   "user": "leo",
+   "agent": "planner",
+   "run": "r09",
+   "said_at": "2026-08-03T14:00:00Z",
+   "text": "Leo has a dog named Rufus.",
+   "subject": "leo",
+   "relation": "has_pet",
+   "object": "a dog named Rufus",
+   "supersedes": null,
+   "quote": "Rufus, my dog, needs walking at lunchtime."
+  },
+  {
+   "id": "f48",
+   "user": "leo",
+   "agent": "coach",
+   "run": "r11",
+   "said_at": "2026-09-14T20:00:00Z",
+   "text": "Leo's goal is to run a half marathon.",
+   "subject": "leo",
+   "relation": "goal",
+   "object": "run a half marathon",
+   "supersedes": null,
+   "quote": "I'm aiming for my first half marathon next spring."
+  }
+ ],
+ "questions": [
+  {
+   "id": "q01",
+   "user": "maya",
+   "ask": "Where is Maya based these days?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f34"
+   ],
+   "stale": [
+    "f01",
+    "f18"
+   ]
+  },
+  {
+   "id": "q02",
+   "user": "maya",
+   "ask": "Who is Maya employed by now?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f22"
+   ],
+   "stale": [
+    "f02"
+   ]
+  },
+  {
+   "id": "q03",
+   "user": "maya",
+   "ask": "Who does Maya report to at the moment?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f23"
+   ],
+   "stale": [
+    "f06",
+    "f15"
+   ]
+  },
+  {
+   "id": "q04",
+   "user": "maya",
+   "ask": "Are there foods Maya avoids that I should plan meals around?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f26"
+   ],
+   "stale": [
+    "f08"
+   ]
+  },
+  {
+   "id": "q05",
+   "user": "maya",
+   "ask": "What is Maya spending her working days on right now?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f25"
+   ],
+   "stale": [
+    "f07",
+    "f19"
+   ]
+  },
+  {
+   "id": "q06",
+   "user": "maya",
+   "ask": "What time of day does Maya like to train?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f24"
+   ],
+   "stale": [
+    "f03"
+   ]
+  },
+  {
+   "id": "q07",
+   "user": "maya",
+   "ask": "Is Maya still going ahead with the business school course?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f29"
+   ],
+   "stale": [
+    "f12"
+   ]
+  },
+  {
+   "id": "q08",
+   "user": "maya",
+   "ask": "What distance is Maya training up to?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f30"
+   ],
+   "stale": [
+    "f05"
+   ]
+  },
+  {
+   "id": "q09",
+   "user": "maya",
+   "ask": "If I book Maya a seafood restaurant, will she eat there?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f26"
+   ],
+   "stale": [
+    "f08"
+   ]
+  },
+  {
+   "id": "q10",
+   "user": "maya",
+   "ask": "Which city should I use for Maya's local weather forecast?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f34"
+   ],
+   "stale": [
+    "f01",
+    "f18"
+   ]
+  },
+  {
+   "id": "q11",
+   "user": "maya",
+   "ask": "Who should Maya send her weekly report to?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f23"
+   ],
+   "stale": [
+    "f06",
+    "f15"
+   ]
+  },
+  {
+   "id": "q12",
+   "user": "maya",
+   "ask": "Which organisation goes on Maya's conference badge?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f22"
+   ],
+   "stale": [
+    "f02"
+   ]
+  },
+  {
+   "id": "q13",
+   "user": "maya",
+   "ask": "Would a 6:30am gym slot suit Maya?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f24"
+   ],
+   "stale": [
+    "f03"
+   ]
+  },
+  {
+   "id": "q14",
+   "user": "maya",
+   "ask": "What's the name of the thing Maya is building at work?",
+   "kind": "current",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f25"
+   ],
+   "stale": [
+    "f07",
+    "f19"
+   ]
+  },
+  {
+   "id": "q15",
+   "user": "maya",
+   "ask": "Where was Maya living at that point?",
+   "kind": "historical",
+   "as_of": "2026-02-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f01"
+   ],
+   "stale": [
+    "f18",
+    "f34"
+   ]
+  },
+  {
+   "id": "q16",
+   "user": "maya",
+   "ask": "Which city was Maya living in then?",
+   "kind": "historical",
+   "as_of": "2026-06-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f18"
+   ],
+   "stale": [
+    "f01",
+    "f34"
+   ]
+  },
+  {
+   "id": "q17",
+   "user": "maya",
+   "ask": "Who was Maya's boss back then?",
+   "kind": "historical",
+   "as_of": "2026-03-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f06"
+   ],
+   "stale": [
+    "f15",
+    "f23"
+   ]
+  },
+  {
+   "id": "q18",
+   "user": "maya",
+   "ask": "Who was Maya reporting to at that time?",
+   "kind": "historical",
+   "as_of": "2026-04-20T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f15"
+   ],
+   "stale": [
+    "f06",
+    "f23"
+   ]
+  },
+  {
+   "id": "q19",
+   "user": "maya",
+   "ask": "What was Maya eating then, diet-wise?",
+   "kind": "historical",
+   "as_of": "2026-03-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f08"
+   ],
+   "stale": [
+    "f26"
+   ]
+  },
+  {
+   "id": "q20",
+   "user": "maya",
+   "ask": "What was the project Maya worked on called at that time?",
+   "kind": "historical",
+   "as_of": "2026-03-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f07"
+   ],
+   "stale": [
+    "f19",
+    "f25"
+   ]
+  },
+  {
+   "id": "q21",
+   "user": "maya",
+   "ask": "Where did Maya work at that point?",
+   "kind": "historical",
+   "as_of": "2026-05-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f02"
+   ],
+   "stale": [
+    "f22"
+   ]
+  },
+  {
+   "id": "q22",
+   "user": "maya",
+   "ask": "When in the day did Maya like to exercise then?",
+   "kind": "historical",
+   "as_of": "2026-04-01T00:00:00Z",
+   "agent": null,
+   "gold": [
+    "f03"
+   ],
+   "stale": [
+    "f24"
+   ]
+  },
+  {
+   "id": "q23",
+   "user": "maya",
+   "ask": "Does Maya have any food allergies?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f04"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q24",
+   "user": "maya",
+   "ask": "Is there any medication Maya reacts badly to?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f20"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q25",
+   "user": "maya",
+   "ask": "Does Maya have an animal to look after at home?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f09"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q26",
+   "user": "maya",
+   "ask": "What kind of seat should I book for Maya on a flight?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f13"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q27",
+   "user": "maya",
+   "ask": "Should I offer Maya coffee or something else?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f10"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q28",
+   "user": "maya",
+   "ask": "Which language is Maya trying to pick up?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f16"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q29",
+   "user": "maya",
+   "ask": "How does Maya like to receive status updates?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f21"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q30",
+   "user": "maya",
+   "ask": "When does Maya sit down to organise her week?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f28"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q31",
+   "user": "maya",
+   "ask": "Why did Maya stop being vegetarian?",
+   "kind": "change",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f26",
+    "f08"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q32",
+   "user": "maya",
+   "ask": "When did Maya switch employers, and from where to where?",
+   "kind": "change",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f22",
+    "f02"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q33",
+   "user": "maya",
+   "ask": "What did Project Atlas become?",
+   "kind": "change",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f19",
+    "f07"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q34",
+   "user": "maya",
+   "ask": "Why did Maya abandon the MBA plan?",
+   "kind": "change",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f29",
+    "f12"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q35",
+   "user": "maya",
+   "ask": "Why did Maya move her training from mornings to evenings?",
+   "kind": "change",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f24",
+    "f03"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q36",
+   "user": "maya",
+   "ask": "What has Maya told you about drinking during the week?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "coach",
+   "gold": [
+    "f27"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q37",
+   "user": "maya",
+   "ask": "What does Maya do on her days off from running?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "coach",
+   "gold": [
+    "f32"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q38",
+   "user": "maya",
+   "ask": "What does Maya listen to on long runs?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "coach",
+   "gold": [
+    "f31"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q39",
+   "user": "maya",
+   "ask": "What time of day should I put Maya's meetings in?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "planner",
+   "gold": [
+    "f11"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q40",
+   "user": "maya",
+   "ask": "What is Maya doing with her old flat in Manchester?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "planner",
+   "gold": [
+    "f36"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q41",
+   "user": "leo",
+   "ask": "Which city is Leo based in?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f41"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q42",
+   "user": "leo",
+   "ask": "What company does Leo work for?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f42"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q43",
+   "user": "leo",
+   "ask": "Who is Leo's line manager?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f43"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q44",
+   "user": "leo",
+   "ask": "What race is Leo training towards?",
+   "kind": "stable",
+   "as_of": null,
+   "agent": null,
+   "gold": [
+    "f48"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q45",
+   "user": "leo",
+   "ask": "When in the day should I schedule Leo's training sessions?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "coach",
+   "gold": [
+    "f45"
+   ],
+   "stale": []
+  },
+  {
+   "id": "q46",
+   "user": "leo",
+   "ask": "Is there anything Leo is allergic to that I should keep off his plate?",
+   "kind": "scoped_agent",
+   "as_of": null,
+   "agent": "coach",
+   "gold": [
+    "f46"
+   ],
+   "stale": []
+  }
+ ]
+}
