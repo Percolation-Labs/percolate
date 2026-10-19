@@ -2,7 +2,7 @@
 # Every block of "Percolate for Zep users", in order, from an empty directory, on part one's stack (the LangGraph
 # tour), against a real model:
 #
-#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.24 dev/examples/zep-memory/run.sh [workdir]
+#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.25 dev/examples/zep-memory/run.sh [workdir]
 #
 # The SQL blocks that need no model are asserted by dev/tests/query/21-zep-quickstart.sql. This runs the rest too:
 # the assistant's turns, reflect_session with gpt-4o, and gpt-4o judging an alias. Each block's input and output
@@ -14,7 +14,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.24}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.25}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY
