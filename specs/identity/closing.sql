@@ -198,6 +198,9 @@ declare
         -- registered model and goes through %I; the vector, limit, date and floor are bound parameters.
         'claims.find_question(vector,double precision,integer,text,timestamp with time zone)',
         'claims.questions_to_embed(text,integer)',
+        -- REM-996, the same shape: a space name through %I, every caller value bound.
+        'claims.facts_to_embed(text,integer)',
+        'claims.facts_to_link(text,text,integer,integer)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant

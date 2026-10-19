@@ -85,24 +85,17 @@ select set_config('mem0.m_food', :'m_food', true) \g /dev/null
 set local role worker;
 -- as the worker
 select aiq.upsert_graph('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n":"Leeds"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}',
- json_build_object('resource_id', :'m_home', 'agent', 'planner', 'run_id', 'r01', 'org_id', :maya_org)::jsonb);
+ json_build_object('resource_id', :'m_home', 'agent', 'planner', 'run_id', 'r01', 'valid_from', '2026-01-05T09:00:00Z', 'org_id', :maya_org)::jsonb);
 select aiq.upsert_graph(g::jsonb, c::jsonb) from (values
   ('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n":"Northwind Analytics"}],"edges":[{"s":0,"t":1,"r":"works_at"}]}',
-   json_build_object('resource_id', :'m_work', 'agent', 'planner', 'run_id', 'r01', 'org_id', :maya_org)::text),
+   json_build_object('resource_id', :'m_work', 'agent', 'planner', 'run_id', 'r01', 'valid_from', '2026-01-05T09:00:00Z', 'org_id', :maya_org)::text),
   ('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n":"vegetarian"}],"edges":[{"s":0,"t":1,"r":"diet"}]}',
-   json_build_object('resource_id', :'m_food', 'agent', 'coach', 'run_id', 'r02', 'org_id', :maya_org)::text),
+   json_build_object('resource_id', :'m_food', 'agent', 'coach', 'run_id', 'r02', 'valid_from', '2026-01-05T09:00:00Z', 'org_id', :maya_org)::text),
   ('{"nodes":[{"k":"soft","n":"Leo Brandt"},{"k":"soft","n":"Leeds"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}',
-   json_build_object('resource_id', :'l_home', 'agent', 'planner', 'run_id', 'r09', 'org_id', :leo_org)::text)
+   json_build_object('resource_id', :'l_home', 'agent', 'planner', 'run_id', 'r09', 'valid_from', '2026-01-05T09:00:00Z', 'org_id', :leo_org)::text)
 ) x(g, c) \g /dev/null
 reset role;
 
-do $$
-begin
-    -- GAP: upsert_graph cannot say WHEN a fact became true; valid_from is the
-    -- moment of the write. A backfilled memory reads as said today.
-    raise notice 'GAP REM-963: aiq.upsert_graph cannot state valid_from; an edge holds from the write';
-end $$;
-update aiq.edges set valid_from = '2026-01-05T09:00:00Z';
 
 -- ---------------------------------------------------------------------
 -- 2. SEARCH.  m.search("where does Maya live?", filters={"user_id": "maya"})
@@ -172,15 +165,14 @@ select (content.register_text('memory', 'm-home-2', '[{"content":"Maya lives in 
 :as_operator
 insert into "aiq"."emb_mem0_demo_3d" (chunk_id, embedding)
 select id, '[1,0,0]' from content.resource_chunks where resource_id = :'m_home2';
--- GAP REM-963 again: nothing closes ONE edge, so the supersession is an update.
-update aiq.edges e set valid_to = '2026-06-01T10:00:00Z'
- where e.relation = 'lives_in' and e.provenance->'sources' @> jsonb_build_array(jsonb_build_object('resource_id', :'m_home'));
+-- The new memory closes exactly the fact it replaces, at the time it was said,
+-- and states when the new one began (REM-963).
 set local role worker;
+select aiq.close_edge(json_build_object('resource_id', :'m_home', 'relation', 'lives_in')::jsonb,
+    '2026-06-01T10:00:00Z', json_build_object('resource_id', :'m_home2', 'agent', 'planner', 'run_id', 'r07')::jsonb);
 select aiq.upsert_graph('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n":"Lisbon"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}',
-    json_build_object('resource_id', :'m_home2', 'agent', 'planner', 'run_id', 'r07', 'org_id', :maya_org)::jsonb);
+    json_build_object('resource_id', :'m_home2', 'agent', 'planner', 'run_id', 'r07', 'valid_from', '2026-06-01T10:00:00Z', 'org_id', :maya_org)::jsonb);
 reset role;
-update aiq.edges e set valid_from = '2026-06-01T10:00:00Z'
- where e.provenance->'sources' @> jsonb_build_array(jsonb_build_object('resource_id', :'m_home2'));
 
 -- In place: the text is replaced and the old text is gone.
 :as_maya

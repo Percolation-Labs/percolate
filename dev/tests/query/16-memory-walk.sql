@@ -13,7 +13,7 @@
 --
 -- Two behaviours are asserted AS THEY ARE, because the article prints them and
 -- a reader will hit them: a relation outside the vocabulary is dropped until
--- registered, and a soft node answers LOOKUP only by its kind-prefixed key.
+-- registered, and a soft node answers LOOKUP by its bare name (REM-995).
 -- If either changes, this file fails and the article is corrected with it.
 --
 -- Every comparison is `is distinct from`, not `<>`: a missing row is NULL, and
@@ -127,8 +127,8 @@ select pg_temp.check((select array_agg(r->>'key' order by r->>'key')
     'the walk after reconcile should see the moved DuckDB edge and no MySQL');
 
 select aiq.query('LOOKUP "Harbour Rewrite"');
-select pg_temp.check(jsonb_array_length(aiq.query('LOOKUP "Harbour Rewrite"')->'rows') = 0,
-    'a soft node now answers its bare name: correct the article''s gap and this assertion');
+select pg_temp.check(aiq.query('LOOKUP "Harbour Rewrite"')->'rows'->0->>'key' = 'project/harbour rewrite',
+    'a soft node does not answer its bare name (REM-995)');
 select aiq.query('LOOKUP "project/harbour rewrite"');
 select pg_temp.check(aiq.query('LOOKUP "project/harbour rewrite"')->'rows'->0->>'key' = 'project/harbour rewrite',
     'a soft node does not answer its kind-prefixed key');

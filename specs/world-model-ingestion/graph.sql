@@ -653,6 +653,10 @@ declare
     -- (graph-demo.sql §2) rather than a nicety -- and fuzzy is available
     -- per-call for a caller that has a reason.
     v_fuzzy   boolean := coalesce((p_context->>'fuzzy')::boolean, false);
+    -- WHEN THE FACTS BEGAN, if the writer knows (REM-963). A memory loaded
+    -- today about something said in January holds from January; without this
+    -- every edge held from the moment of the write. Checked in the body.
+    v_valid_from timestamptz;
     v_e       jsonb;
     v_node    jsonb;
     v_k       text; v_scheme text; v_kind text; v_name text; v_key text;
@@ -693,6 +697,18 @@ begin
             coalesce(p_context->>'agent','?');
     end if;
     v_n := jsonb_array_length(v_nodes);
+
+    if nullif(p_context->>'valid_from', '') is not null then
+        if not pg_input_is_valid(p_context->>'valid_from', 'timestamptz') then
+            raise exception 'aiq.upsert_graph: valid_from % is not a time (agent %)',
+                p_context->>'valid_from', coalesce(p_context->>'agent','?');
+        end if;
+        v_valid_from := (p_context->>'valid_from')::timestamptz;
+        if v_valid_from > now() then
+            raise exception 'aiq.upsert_graph: valid_from % is in the future; a fact is written '
+                'once it holds (agent %)', v_valid_from, coalesce(p_context->>'agent','?');
+        end if;
+    end if;
 
     -- ---- A FACT IS NO MORE VISIBLE THAN THE MEMORY IT CAME FROM (REM-962).
     --
@@ -1049,6 +1065,7 @@ begin
                 'agent',       p_context->>'agent',
                 'run_id',      p_context->>'run_id',
                 'window',      p_context->'window',
+                'valid_from',  to_char(v_valid_from,'YYYY-MM-DD"T"HH24:MI:SSOF'),
                 'attrs',       nullif(v_e->'a','{}'::jsonb),
                 'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF')))));
 
@@ -1066,8 +1083,8 @@ begin
           from aiq.edges
          where src_id = v_ids[v_s+1] and dst_id = v_ids[v_t+1] and relation = v_rel;
 
-        insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
-        values (v_ids[v_s+1], v_ids[v_t+1], v_rel, v_w, v_prov, v_org)
+        insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id, valid_from)
+        values (v_ids[v_s+1], v_ids[v_t+1], v_rel, v_w, v_prov, v_org, coalesce(v_valid_from, now()))
         -- THE SAME EDGE FROM TWO DOCUMENTS IS ONE ROW, because edge identity is
         -- (src, dst, relation). The second assertion merges into the
         -- provenance list rather than replacing it -- and the resulting count
@@ -1085,7 +1102,10 @@ begin
             -- it here only by luck; on a nullable column it would have been a
             -- silent data loss on the most ordinary event there is, a machine
             -- agreeing with a human. Found by asserting §11.
-            set provenance = aiq.edges.provenance || jsonb_build_object(
+            -- `- 'closed'`: a fact aiq.close_edge ended and a source now
+            -- asserts again holds again, and the hole between is recorded by
+            -- trg_record_edge_retraction, not by a stale closing entry.
+            set provenance = (aiq.edges.provenance - 'closed') || jsonb_build_object(
                     'sources',
                     coalesce(aiq.edges.provenance->'sources', '[]'::jsonb)
                     || (case when coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
@@ -1128,7 +1148,11 @@ begin
                 -- every consumer relying on `unique (src_id, dst_id, relation)`
                 -- to keep one channel to one row -- so it is a version's worth
                 -- of work, not a line, and it is not smuggled in under a bug fix.
-                valid_to = null;
+                valid_to = null,
+                -- The earliest time any source says the fact held. A later
+                -- source cannot move it forward, which would shorten a belief
+                -- somebody else stated.
+                valid_from = least(aiq.edges.valid_from, excluded.valid_from);
 
         if v_before > 0 then
             v_merged := v_merged + 1;
@@ -1170,6 +1194,77 @@ begin
         'node_ids', to_jsonb(v_ids));
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 6b. Close one fact at a stated time (REM-963).
+--
+-- A superseding memory ends exactly the fact it replaces: "Maya lives in
+-- Lisbon", said in June, closes the lives_in edge "Maya lives in Leeds"
+-- asserted, at June, and touches nothing else. The only retraction there was,
+-- aiq.retract_derived, withdraws everything one agent derived, so the Mem0
+-- quickstart closed the edge with an operator UPDATE.
+--
+-- p_edge names ONE current edge, and anything else is refused, so a close
+-- cannot spread:
+--   {"edge_id": "<uuid>"}
+--   {"resource_id": "<memory>", "relation": "lives_in"}  -- the fact that
+--      memory asserted, which is what a superseding writer knows. The worker
+--      cannot read aiq.edges, so it names an edge by what it wrote.
+--
+-- The edge keeps its provenance, and `closed` records who ended it, from which
+-- memory and when; history (aiq.edge_periods) then reads as "held from
+-- January to June, said in r01, ended in r07". A later source asserting the
+-- fact again revives it, and upsert_graph drops the stale `closed`.
+-- ------------------------------------------------------------
+create or replace function aiq.close_edge(
+    p_edge jsonb, p_valid_to timestamptz, p_context jsonb default '{}'::jsonb
+) returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_ids uuid[];
+    v_e   aiq.edges;
+begin
+    if p_valid_to is null then
+        raise exception 'aiq.close_edge needs the time the fact stopped holding';
+    end if;
+    if p_valid_to > now() then
+        raise exception 'aiq.close_edge: % is in the future; a fact is closed once it has ended', p_valid_to;
+    end if;
+    if not (p_edge ? 'edge_id' or (p_edge ? 'resource_id' and p_edge ? 'relation')) then
+        raise exception 'aiq.close_edge names an edge by {"edge_id"} or by {"resource_id", "relation"}, got %', p_edge;
+    end if;
+
+    select array_agg(e.id) into v_ids
+      from aiq.edges e
+     where aiq.edge_is_current(e.valid_from, e.valid_to, now())
+       and case when p_edge ? 'edge_id'
+                then e.id = (p_edge->>'edge_id')::uuid
+                else e.relation = p_edge->>'relation'
+                     and e.provenance->'sources' @> jsonb_build_array(
+                             jsonb_build_object('resource_id', p_edge->>'resource_id'))
+           end;
+    if coalesce(cardinality(v_ids), 0) <> 1 then
+        raise exception 'aiq.close_edge: % names % current edges, and it closes exactly one',
+            p_edge, coalesce(cardinality(v_ids), 0);
+    end if;
+
+    update aiq.edges e
+       set valid_to = p_valid_to,
+           provenance = e.provenance || jsonb_build_object('closed', jsonb_strip_nulls(jsonb_build_object(
+               'resource_id', p_context->>'resource_id',
+               'agent',       p_context->>'agent',
+               'run_id',      p_context->>'run_id',
+               'valid_to',    to_char(p_valid_to,'YYYY-MM-DD"T"HH24:MI:SSOF'),
+               'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF'))))
+     where e.id = v_ids[1] and e.valid_from < p_valid_to
+    returning * into v_e;
+    if not found then
+        raise exception 'aiq.close_edge: edge % began after %, so it cannot end then', v_ids[1], p_valid_to;
+    end if;
+
+    return jsonb_build_object('edge_id', v_e.id, 'relation', v_e.relation,
+                              'valid_from', v_e.valid_from, 'valid_to', v_e.valid_to);
+end;
+$$;
 
 -- ------------------------------------------------------------
 -- 7. The two workflow entry points (graph-index.md §5).
@@ -1856,6 +1951,7 @@ select workflow.register_step_function(
 -- worker-facing, so the grant IS the authorization -- but only once the
 -- default one is taken away.
 revoke execute on function aiq.upsert_graph(jsonb, jsonb)                  from public;
+revoke execute on function aiq.close_edge(jsonb, timestamptz, jsonb)        from public;
 revoke execute on function aiq.land_graph(jsonb, uuid)                     from public;
 revoke execute on function aiq.land_graph_fanout(uuid)                     from public;
 revoke execute on function aiq.promote_soft_node(uuid, uuid, text, text, jsonb) from public;
@@ -1870,6 +1966,7 @@ revoke execute on function aiq.dream(timestamptz, text)                    from 
 revoke execute on function aiq.schedule_dream(text, boolean)               from public;
 
 grant execute on function aiq.upsert_graph(jsonb, jsonb)      to worker;
+grant execute on function aiq.close_edge(jsonb, timestamptz, jsonb) to worker;
 grant execute on function aiq.land_graph(jsonb, uuid)         to worker;
 grant execute on function aiq.land_graph_fanout(uuid)         to worker;
 -- promote_soft_node is entity resolution's write path, which is background
