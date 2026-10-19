@@ -27,7 +27,7 @@
 -- and runs it as the reader would, in one shell whose variables and functions carry from block to block, with the
 -- SQL in one psql session. It changes only what this machine forces: the project and directory name, the ports in
 -- the stack's .env (and the content and MinIO ports, taken here too), the image (a local 0.2.23 build until
--- percolationlabs/percolate-postgres:19-0.2.23 is published), the virtualenv's path, and the model. dev/faultsrv
+-- percolationlabs/percolate-postgres:19-0.2.23 is published), and the model. dev/faultsrv
 -- joins the stack through COMPOSE_FILE, OPENAI_BASE_URL points the agents at it, and the agent rows script it,
 -- so every request is the reader's word for word.
 --
@@ -108,7 +108,7 @@ $$ language sql;
 -- /live
 -- live: shell
 -- # Percolate: the shell, in the same directory. The CLI needs Python 3.11 or newer; jq is for start.
--- python3 -m venv ~/.percolate && . ~/.percolate/bin/activate
+-- python3 -m venv .venv && . .venv/bin/activate
 -- pip install 'percolate-core[sample,agent]>=0.2.5'
 --
 -- set -a; . ./.env; set +a
@@ -136,9 +136,18 @@ $$ language sql;
 --   done
 --   psql "$P8_DSN" -c "select status, compensation_state from workflow.runs where id = '$1'" \
 --     -c "select step_key, status, left(output->>'result', 60) as result,
---                left(coalesce(error->>'error', error::text), 60) as error
+--                left(coalesce(error->>'error', error::text), 120) as error
 --         from workflow.tasks where run_id = '$1'
 --         order by completed_at nulls last, step_key"
+-- }
+--
+-- waiting() { # waiting <run id> <step> waits up to a minute for the step to need a person, then prints its status
+--   for i in $(seq 30); do
+--     s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
+--     case $s in waiting_external|succeeded|failed|cancelled) break ;; esac
+--     sleep 2
+--   done
+--   echo "$s"
 -- }
 -- /live
 
@@ -321,7 +330,8 @@ create function land_extractions(p_matrix_task uuid) returns jsonb language sql 
     returning 1)
   select jsonb_build_object('landed', count(*)) from done
 $$;
-select workflow.register_step_function('land_extractions', 'public.land_extractions', array['uuid']);
+select 'land_extractions registered'
+from workflow.register_step_function('land_extractions', 'public.land_extractions', array['uuid']);
 -- /block
 
 -- block: extract_reports
@@ -480,7 +490,7 @@ begin
 end $$;
 
 -- live: waiting
--- psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$RUN' and step_key = 'approve'"
+-- waiting $RUN approve
 -- /live
 -- The reader finds the run by its workflow's name, and says who they are before signing, as the published
 -- first-workflow page does.
@@ -576,7 +586,8 @@ insert into claims values (7, 'POL-1', false);
 
 create function check_coverage(policy_id text) returns jsonb language sql
   as $$ select jsonb_build_object('policy', policy_id, 'covered', true) $$;
-select workflow.register_step_function('check_coverage', 'public.check_coverage', array['text']);
+select 'check_coverage registered'
+from workflow.register_step_function('check_coverage', 'public.check_coverage', array['text']);
 -- /block
 
 -- block: insurance_claim
@@ -650,7 +661,7 @@ begin
 end $$;
 
 -- live: adjuster_waiting
--- psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$RUN' and step_key = 'adjuster'"
+-- waiting $RUN adjuster
 -- /live
 -- block: adjuster
 select r.id as run_id from workflow.runs r
