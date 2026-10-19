@@ -11,10 +11,12 @@
 # restating it, and the bump script moves it along with percolate_parser's
 # control file and Cargo.toml.
 #
-# The BUILD lives in get-percolate, and that split is not arbitrary: the .so is
-# compiled natively per platform on runners this repository cannot reach (macOS
-# and arm64), the release has to be PUBLIC for `install.sh` to curl it, and
-# this repository is private. So this workflow owns the number and dispatches
+# The BUILD lives in get-percolate: its parser.yml compiles the .so natively per
+# platform (linux amd64 and arm64, macOS arm64), and install.sh and the docs
+# fetch the release from get-percolate, so that is where the assets have to be
+# published. This repository was private when the split was made; it is public
+# now, and the split stays because the install path names get-percolate.
+# So this workflow owns the number and dispatches
 # the build, then waits for it -- waiting rather than firing and forgetting,
 # because a green run here that means "a build started somewhere" is worse than
 # no signal at all.
