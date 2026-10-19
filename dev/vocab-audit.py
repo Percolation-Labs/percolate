@@ -134,14 +134,58 @@ VOCAB_INSERT = re.compile(
     re.I | re.S)
 
 
+def mask_literals(text: str) -> str:
+    """The text with the inside of every single-quoted literal blanked to `_`.
+
+    Same length and same line breaks, so a position in the mask is a position
+    in the text. The patterns below look for structure -- a `;` that ends a
+    statement, a `)` that closes a list, a `--` that starts a comment -- and
+    all three are ordinary characters inside a literal. Reading the raw text,
+    a note such as `'quota hit; retry later'` ended its INSERT at the `;`, and
+    every row after it vanished from the audit, which then reported drift that
+    was not there (REM-990). Postgres reads `''` inside a literal as one quote,
+    and so does this.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "-" and text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "'":
+            i += 1
+            while i < n:
+                if text[i] == "'":
+                    if text.startswith("''", i):
+                        out[i] = out[i + 1] = "_"
+                        i += 2
+                        continue
+                    break
+                if text[i] != "\n":
+                    out[i] = "_"
+                i += 1
+        i += 1
+    return "".join(out)
+
+
 def strip_comments(text: str) -> str:
-    """Remove `--` comments so a vocabulary quoted in prose is not extracted.
+    """Blank `--` comments so a vocabulary quoted in prose is not extracted.
 
     Every one of these files explains its vocabularies at length in comments,
     listing the members inline; extracting those would pair a comment against
     the constraint it describes and report perfect agreement forever.
+
+    A `--` INSIDE A LITERAL IS NOT A COMMENT, and positions are kept: a comment
+    becomes spaces, so `line_of` and the mask still line up with the text.
     """
-    return re.sub(r"--[^\n]*", "", text)
+    mask = mask_literals(text)
+    out = list(text)
+    for m in re.finditer(r"--[^\n]*", mask):
+        for k in range(m.start(), m.end()):
+            out[k] = " "
+    return "".join(out)
 
 
 def line_of(text: str, pos: int) -> int:
@@ -171,56 +215,95 @@ def sql_vocabs() -> list[Vocab]:
         # and build-sql.py does not ship it (NOT_SHIPPED).
         if "percolate-application" in path.parts:
             continue
-        rel = path.relative_to(ROOT).as_posix()
-        raw = path.read_text()
-        text = strip_comments(raw)
-
-        for m in CHECK_IN.finditer(text):
-            vals = re.findall(r"'([^']*)'", m.group(2))
-            if len(vals) >= 2:
-                tbl = owning_table(text, m.start())
-                out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
-                                 m.group(1), vals, "sql",
-                                 column=f"{tbl}.{m.group(1)}" if tbl else None))
-
-        for m in BODY_IN.finditer(text):
-            vals = re.findall(r"'([^']*)'", m.group(3))
-            if len(vals) >= 2:
-                out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
-                                 f"{m.group(1)}.{m.group(2)}", vals, "sql"))
-
-        for m in VOCAB_INSERT.finditer(text):
-            table, cols, body = m.group(1), m.group(2), m.group(3)
-            first = [c.strip() for c in cols.split(",")][0]
-            # The first column of a vocabulary table is its key by convention
-            # here (state, class, provider, term). Take the leading literal of
-            # each VALUES tuple.
-            #
-            # ONLY WHERE THE TUPLE IS ACTUALLY A ROW OF LITERALS. This pattern
-            # targets the lifecycle_states shape -- a seed table whose VALUES
-            # are constants -- and `insert into <table> (cols) values (...)` is
-            # also every ordinary INSERT, including the ones inside an upsert
-            # function. There, the leading literal of each tuple is a JSON KEY
-            # (`p_spec->>'name'`), so the extractor harvested one table's column
-            # names and another table's column names and reported them as two
-            # disagreeing copies of one vocabulary. They are two tables, and
-            # neither is a vocabulary.
-            #
-            # The predicate that matches the intent: every value in the tuple is
-            # a bare literal. A tuple containing `->>`, `->`, `::` or a function
-            # call is a computed row, which a seed table does not have. Cheaper
-            # and more honest than naming the false pair in DISTINCT, which
-            # would have to be extended for the next upsert somebody writes.
-            computed = re.compile(r"->>|->|::|\w\s*\(")
-            vals = [t[0] for t in
-                    (re.findall(r"'([^']*)'", row) for row in
-                     (r for r in re.findall(r"\(([^()]*(?:\([^()]*\)[^()]*)*)\)", body)
-                        if not computed.search(r)))
-                    if t]
-            if len(vals) >= 2:
-                out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
-                                 f"{table}.{first}", vals, "sql"))
+        out += vocabs_in(path.relative_to(ROOT).as_posix(), path.read_text())
     return out
+
+
+def vocabs_in(rel: str, raw: str) -> list[Vocab]:
+    """The vocabularies one SQL file writes down."""
+    out: list[Vocab] = []
+    text = strip_comments(raw)
+    # Structure is matched on the mask, values are read from the text at
+    # the same span -- see mask_literals.
+    mask = mask_literals(text)
+
+    def span(m, g):
+        return text[m.start(g):m.end(g)]
+
+    for m in CHECK_IN.finditer(mask):
+        vals = re.findall(r"'((?:[^']|'')*)'", span(m, 2))
+        if len(vals) >= 2:
+            tbl = owning_table(text, m.start())
+            out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
+                             m.group(1), vals, "sql",
+                             column=f"{tbl}.{m.group(1)}" if tbl else None))
+
+    for m in BODY_IN.finditer(mask):
+        vals = re.findall(r"'((?:[^']|'')*)'", span(m, 3))
+        if len(vals) >= 2:
+            out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
+                             f"{span(m, 1)}.{span(m, 2)}", vals, "sql"))
+
+    for m in VOCAB_INSERT.finditer(mask):
+        table, cols, body = m.group(1), m.group(2), span(m, 3)
+        body_mask = m.group(3)
+        first = [c.strip() for c in cols.split(",")][0]
+        # The first column of a vocabulary table is its key by convention
+        # here (state, class, provider, term). Take the leading literal of
+        # each VALUES tuple.
+        #
+        # ONLY WHERE THE TUPLE IS ACTUALLY A ROW OF LITERALS. This pattern
+        # targets the lifecycle_states shape -- a seed table whose VALUES
+        # are constants -- and `insert into <table> (cols) values (...)` is
+        # also every ordinary INSERT, including the ones inside an upsert
+        # function. There, the leading literal of each tuple is a JSON KEY
+        # (`p_spec->>'name'`), so the extractor harvested one table's column
+        # names and another table's column names and reported them as two
+        # disagreeing copies of one vocabulary. They are two tables, and
+        # neither is a vocabulary.
+        #
+        # The predicate that matches the intent: every value in the tuple is
+        # a bare literal. A tuple containing `->>`, `->`, `::` or a function
+        # call is a computed row, which a seed table does not have. Cheaper
+        # and more honest than naming the false pair in DISTINCT, which
+        # would have to be extended for the next upsert somebody writes.
+        computed = re.compile(r"->>|->|::|\w\s*\(")
+        rows = [body[r.start(1):r.end(1)] for r in
+                re.finditer(r"\(([^()]*(?:\([^()]*\)[^()]*)*)\)", body_mask)
+                if not computed.search(r.group(1))]
+        vals = [t[0] for t in
+                (re.findall(r"'((?:[^']|'')*)'", row) for row in rows)
+                if t]
+        if len(vals) >= 2:
+            out.append(Vocab(f"{rel}:{line_of(text, m.start())}",
+                             f"{table}.{first}", vals, "sql"))
+    return out
+
+
+# THE SPLITTER, TESTED ON THE CASE THAT BROKE IT (REM-990). `--check` runs this
+# first, so the gate that trusts the audit cannot run on an audit that drops
+# rows. A note holding `;` ended the INSERT early and `quota_exceeded` vanished
+# from lifecycle_states; a `--` inside a literal would have blanked the rest of
+# its line as a comment.
+SELF_TEST_SQL = """
+insert into workflow.lifecycle_states (state, note) values
+    ('pending',        'waiting; not yet claimed'),
+    ('quota_exceeded', 'refused -- the plan''s limit; try later'),
+    ('done',           'finished')
+on conflict (state) do nothing;
+"""
+
+
+def self_test() -> bool:
+    got = [v for v in vocabs_in("self-test.sql", SELF_TEST_SQL)
+           if v.name == "workflow.lifecycle_states.state"]
+    want = ["pending", "quota_exceeded", "done"]
+    if len(got) != 1 or list(got[0].values) != want:
+        print("vocab-audit self-test: lifecycle_states read as "
+              f"{[list(v.values) for v in got]}, not {want} -- a ';' or '--' inside a "
+              "literal is being read as SQL", file=sys.stderr)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +552,16 @@ def main() -> int:
                          "'docker exec p8-dev-db psql -U p8 -d p8dev'")
     ap.add_argument("--unpaired", action="store_true",
                     help="also list vocabularies written down exactly once")
+    ap.add_argument("--self-test", action="store_true",
+                    help="only test the SQL splitter on a literal holding ';' and '--'")
     a = ap.parse_args()
+
+    if a.self_test or a.check:
+        if not self_test():
+            return 1
+        if a.self_test:
+            print("vocab-audit self-test: a ';' and a '--' inside a literal stay text")
+            return 0
 
     vocabs = sql_vocabs()
     core = ROOT / "percolate-core" / "percolate_core"
