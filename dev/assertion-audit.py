@@ -126,7 +126,16 @@ def findings_in(path: pathlib.Path) -> list[tuple[int, str]]:
     # WHERE of a SELECT INTO, the comparison that follows is against a counted
     # integer, and neither can be silenced by anything. A lint that cries wolf
     # gets skimmed, and a skimmed lint is the thing it was written to replace.
-    for m in re.finditer(r"(?<!end )\b(?:els)?if\b(.*?)\bthen\b", s, re.S | re.I):
+    #
+    # THE LOOKAHEAD IS THE SAME MISTAKE THE OTHER WAY. DDL says `if exists` and
+    # `if not exists` too -- `drop policy if exists owner_reads on fleet.vessels`
+    # -- and the scan ran from there to the next `then`, reporting three
+    # `create policy ... using (owner_id = (select rbac.current_user_id()))`
+    # lines in query/16 as assertions (REM-984). A DDL clause is followed by a
+    # NAME; a plpgsql condition `if exists (select ...)` by a parenthesis, so the
+    # name is what tells them apart, and every real condition is still scanned.
+    for m in re.finditer(r"(?<!end )\b(?:els)?if\b(?!\s+(?:not\s+)?exists\s+[a-z_\"])(.*?)\bthen\b",
+                         s, re.S | re.I):
         cond = m.group(1)
         base = m.start(1)
         for sub in re.finditer(r"\(\s*select\b", cond, re.I):
