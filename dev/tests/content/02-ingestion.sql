@@ -434,24 +434,30 @@ begin
     select array_agg(s->>'key' order by ord) into v_keys
       from jsonb_array_elements(v_spec->'steps') with ordinality t(s, ord);
 
-    if v_keys is distinct from array['parse','embed','graph','land_graph'] then
-        raise exception 'the two-index pipeline is not parse/embed/graph/land_graph: %', v_keys;
+    -- extractor_format computes the extractor's response_format when the run
+    -- starts, so a relation registered after install is offered (REM-1057).
+    if v_keys is distinct from array['parse','embed','extractor_format','graph','land_graph'] then
+        raise exception 'the two-index pipeline is not parse/embed/extractor_format/graph/land_graph: %', v_keys;
     end if;
 
-    -- SIBLINGS, not a chain: both index branches wait on the parse and on
-    -- nothing else.
+    -- SIBLINGS, not a chain: both index branches wait on the parse, and the
+    -- graph branch on its output shape too, never on the embedding.
     if (v_spec->'steps'->1->'depends_on')::text <> '["parse"]'
-       or (v_spec->'steps'->2->'depends_on')::text <> '["parse"]' then
+       or (v_spec->'steps'->3->'depends_on')::text <> '["parse", "extractor_format"]' then
         raise exception
             'the two indexes are not siblings -- one waits on the other: % / %',
-            v_spec->'steps'->1->'depends_on', v_spec->'steps'->2->'depends_on';
+            v_spec->'steps'->1->'depends_on', v_spec->'steps'->3->'depends_on';
     end if;
 
-    -- The extractor's prompt and schema come from the AGENT ROW, so the agent
-    -- is still the unit of authorship even though the transport is a rest call.
-    v_tmpl := v_spec->'steps'->2->'input'->'template'->'input';
-    if v_tmpl->'body'->'response_format'->'json_schema'->'schema' is null then
-        raise exception 'the extractor call carries no output shape: %', v_tmpl;
+    -- The extractor's prompt comes from the AGENT ROW, so the agent is still the
+    -- unit of authorship even though the transport is a rest call. Its output
+    -- shape is the run's extractor_format step, resolved when the task is sent.
+    v_tmpl := v_spec->'steps'->3->'input'->'template'->'input';
+    if v_tmpl->'body'->>'response_format' is distinct from '{{steps.extractor_format.result}}' then
+        raise exception 'the extractor call does not take its output shape from the run: %', v_tmpl->'body'->'response_format';
+    end if;
+    if v_spec->'steps'->2->'input'->'args'->>0 <> 'structure_null' then
+        raise exception 'extractor_format does not name the extractor: %', v_spec->'steps'->2;
     end if;
     if (v_tmpl->'body'->'messages'->0->>'content') not like '%Assert nothing the document does not state%' then
         raise exception
@@ -465,12 +471,12 @@ begin
 
     -- The row source is windows, and the fan-in is the one that parses and
     -- cleans -- see ingestion.sql for why it is not aiq.land_graph_fanout.
-    if v_spec->'steps'->2->'input'->'rows'->>'function' <> 'windows_to_index' then
+    if v_spec->'steps'->3->'input'->'rows'->>'function' <> 'windows_to_index' then
         raise exception 'the graph matrix does not fan out over windows: %',
-            v_spec->'steps'->2->'input'->'rows';
+            v_spec->'steps'->3->'input'->'rows';
     end if;
-    if v_spec->'steps'->3->'input'->>'function' <> 'land_graph_windows' then
-        raise exception 'nothing lands the graphs: %', v_spec->'steps'->3;
+    if v_spec->'steps'->4->'input'->>'function' <> 'land_graph_windows' then
+        raise exception 'nothing lands the graphs: %', v_spec->'steps'->4;
     end if;
 
     if v_msg not like '%graph-index%' then

@@ -1157,6 +1157,15 @@ begin
             referencing old table as old_rows
             for each statement execute function aiq.%2$s();
     $f$, p_source_table, v_del);
+
+    -- ROWS ALREADY IN THE TABLE become nodes now (REM-1057). The triggers above
+    -- project what is written from here on, and nothing projected what was
+    -- there before, so a table registered after it was loaded held no nodes at
+    -- all, and every name in it stayed unresolvable -- dream counted them as
+    -- left for a judge. The Zep tutorial hit it by inserting its ports first.
+    -- rebuild_entity_type runs the live trigger's own statements over the
+    -- whole table, so the backfill and the trigger cannot disagree.
+    perform aiq.rebuild_entity_type(p_entity_type);
 end;
 -- `drop trigger if exists` raises a NOTICE per trigger it did not find, so a
 -- first registration emitted three lines of "does not exist, skipping" that
