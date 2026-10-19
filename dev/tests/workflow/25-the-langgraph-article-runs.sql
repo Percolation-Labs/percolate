@@ -23,7 +23,9 @@
 -- by step name. The live run behind this file used the published compose stack with dev/faultsrv as the model.
 --
 -- What does not run here runs live: the article's shell and compose blocks, between `-- live: <name>` and
--- `-- /live` where the article has them, each line behind "-- ". The live run takes each out, drops that prefix,
+-- `-- /live` where the article has them, each line behind "-- ". A shell block carries no `#` comment: macOS's
+-- interactive zsh does not treat `#` as one, so an apostrophe in a comment opened a quote and the first block
+-- never ran (REM-957's fifth reader); the live run parses each in `zsh -f -i -n` first. It takes each out, drops that prefix,
 -- and runs it as the reader would, in one shell whose variables and functions carry from block to block, with the
 -- SQL in one psql session. It changes only what this machine forces: the project and directory name, the ports in
 -- the stack's .env (and the content and MinIO ports, taken here too), the image (a local 0.2.23 build until
@@ -91,7 +93,6 @@ $$ language sql;
 
 -- Before you start -----------------------------------------------------------------------------------------------
 -- live: stack
--- # Percolate: the stack, get-percolate's compose file, in a project of its own
 -- mkdir langgraph-tour && cd langgraph-tour
 -- curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml \
 --   -o docker-compose.yml
@@ -107,7 +108,6 @@ $$ language sql;
 -- docker compose up -d --wait
 -- /live
 -- live: shell
--- # Percolate: the shell, in the same directory. The CLI needs Python 3.11 or newer; jq is for start.
 -- python3 -m venv .venv && . .venv/bin/activate
 -- pip install 'percolate-core[sample,agent]>=0.2.5'
 --
@@ -122,14 +122,14 @@ $$ language sql;
 -- export P8_USER_ID=$(psql "$P8_DSN" -Atc "select id from rbac.users where email = 'me@example.com'")
 -- export TOKEN=$(percolate auth token --email me@example.com)
 --
--- start() {   # start <workflow> '<input as JSON>' prints the run id
+-- start() {
 --   curl -s $REST/rpc/start_workflow \
 --     -H 'Content-Profile: workflow' -H "Authorization: Bearer $TOKEN" \
 --     -H 'Content-Type: application/json' \
 --     -d "{\"p_name\": \"$1\", \"p_input\": $2}" | jq -r .
 -- }
 --
--- show() {    # show <run id> waits up to a minute for the run to settle, then prints it
+-- show() {
 --   for i in $(seq 30); do
 --     [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$1'")" != running ] && break
 --     sleep 2
@@ -141,7 +141,7 @@ $$ language sql;
 --         order by completed_at nulls last, step_key"
 -- }
 --
--- waiting() { # waiting <run id> <step> waits up to a minute for the step to need a person, then prints its status
+-- waiting() {
 --   for i in $(seq 30); do
 --     s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
 --     case $s in waiting_external|succeeded|failed|cancelled) break ;; esac
