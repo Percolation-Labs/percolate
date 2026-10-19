@@ -2989,9 +2989,39 @@ begin
             'references it by surrogate; created per registered model')
     on conflict (schema_name, table_name) do nothing;
 
+    -- OWNED BY app_owner, WHOEVER REGISTERS IT (REM-1009). A space is created
+    -- as its caller, and the documented install runs from psql as the
+    -- superuser, so the table belonged to `p8`: the content plane, which
+    -- writes and forgets vectors as app_owner, was refused ("permission denied
+    -- for table emb_text_embedding_3_small" on a member's first register_text),
+    -- and app_owner's default grants never applied, so police_embedding_spaces
+    -- below found no reading role and wrote no policy -- SEARCH refused every
+    -- user. Only a superuser can hand a table over, so this is where it
+    -- happens; an upgrade runs as app_owner and cannot. Registering again as a
+    -- superuser repairs a space a release before this one left wrong.
+    if (select rolsuper from pg_roles where rolname = current_user)
+       and exists (select 1 from pg_roles where rolname = 'app_owner') then
+        execute format('alter table aiq.%I owner to app_owner', aiq.embedding_space_name(m.name));
+    end if;
+    -- The grants app_owner's default privileges give a table it creates, said
+    -- explicitly so a space made by anyone else gets them too. A grant only
+    -- lets a role reach the table; the policies below decide which rows.
+    execute format('grant select on aiq.%I to %s', aiq.embedding_space_name(m.name),
+        (select string_agg(quote_ident(r), ', ') from unnest(array['authenticated', 'api_viewer']) r
+          where exists (select 1 from pg_roles where rolname = r)));
+
     -- RLS and its read policies (§10a-iii, REM-567). A space created without
     -- them would be every tenant's vectors to every caller the grant reaches.
-    perform aiq.police_embedding_spaces();
+    -- As the space's owner, which is the condition police_embedding_spaces
+    -- states: run as anybody else it warns and changes nothing.
+    if current_user <> 'app_owner' and exists (select 1 from pg_roles where rolname = 'app_owner')
+       and (select rolsuper from pg_roles where rolname = current_user) then
+        set local role app_owner;
+        perform aiq.police_embedding_spaces();
+        reset role;
+    else
+        perform aiq.police_embedding_spaces();
+    end if;
 end;
 $$ language plpgsql;
 
