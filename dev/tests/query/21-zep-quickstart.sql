@@ -67,7 +67,9 @@ select content.register_text('memory', 'ana-chat-2026-10',
   ->> 'status' as conversation;
 :as_operator
 
--- The article's history block, verbatim.
+-- The article's history block (dev/examples/zep-memory/blocks/03), pasted as a reader pastes it.
+-- block: zep-history
+-- psql, as p8: the worker writes what each memory says, from when it was said
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Ana Costa"}, {"k":"company","n":"Tagus Ceramics"},
             {"k":"place","n":"Lisbon"}, {"k":"port","n":"Rotterdam"}],
@@ -85,6 +87,7 @@ select aiq.upsert_graph($g$
   "edges": [{"s":0,"t":1,"r":"prefers"}]}$g$,
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-email-2026-03'),
                     'agent', 'reader-v0', 'run_id', 'mar-09', 'valid_from', '2026-03-09T16:00:00Z')) ->> 'edges_new' as misread;
+-- /block
 -- What gpt-4o read from her message on the article's run, landed as reflect_session lands it: from now.
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Ana Costa"}, {"k":"port","n":"Felixstowe"}, {"k":"office","n":"Porto office"}],
@@ -197,7 +200,9 @@ select pg_temp.check((select string_agg(b.id || ' ' || p.name || ' ' || d.summar
     '§5: the 3 November booking routes via Rotterdam after she moved to Felixstowe');
 :as_operator
 
--- §6 The article's context block, verbatim.
+-- §6 The article's context block (blocks/12), pasted as a reader pastes it.
+-- block: zep-context
+-- psql, as p8: a context block is a query, so it is a function anyone may call and that runs as its caller
 create schema if not exists memory;
 grant usage on schema memory to authenticated;
 create or replace function memory.context(p_name text) returns text
@@ -211,6 +216,7 @@ language sql stable security invoker as $$
     join aiq.nodes d on d.id = e.dst_id
 $$;
 grant execute on function memory.context(text) to authenticated;
+-- /block
 :as_ana
 select pg_temp.check(memory.context('Ana Costa') like '- Ana Costa ships via Rotterdam (2026-01-14 to %)%'
                      and memory.context('Ana Costa') like '%- Ana Costa ships via Felixstowe (% to now)%'
