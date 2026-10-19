@@ -1636,7 +1636,11 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
                 "timeout_ms": 120000,
                 "body": {
                     "model": a.agent.clone().unwrap(),
-                    "session": session,
+                    // `session_id`, the name the Agent Runtime reads. This
+                    // was `session`, which the runtime ignored, so steps in
+                    // one session_group each opened their own conversation
+                    // (REM-957).
+                    "session_id": session,
                     "messages": [{"role": "user", "content": content}]
                 },
                 // The assistant text is what almost every step wants, so it

@@ -2974,6 +2974,21 @@ begin
                                v_task.input->>'session_group')::text)
                       else '{}'::jsonb end;
 
+    -- THE SESSION HAS TO EXIST BEFORE THE RUNTIME IS ASKED TO CONTINUE IT
+    -- (REM-957). The id above is derived, and the Agent Runtime answers 404 for
+    -- a `session_id` it has no row for, because it cannot tell an id the engine
+    -- minted from one a caller guessed. So the row is made here, as the run's
+    -- owner, the person whose token the worker signs for the call. Two steps in
+    -- one group then land in one conversation. Before this, every step opened a
+    -- conversation of its own. An ownerless run has nobody to own the row, and
+    -- its agent steps are refused before they reach the runtime anyway.
+    if v_run.owner_id is not null
+       and v_task.input::text like '%{{run.$session}}%' then
+        insert into agentic.sessions (id, owner_id, org_id)
+        values ((v_meta->>'$session')::uuid, v_run.owner_id, v_run.org_id)
+        on conflict (id) do nothing;
+    end if;
+
     return jsonb_build_object(
         'run_id',      v_run.id,
         -- Still merged, so a worker that DOES admit `$` sees them as ordinary
@@ -2999,7 +3014,7 @@ begin
         'span_id',     v_task.span_id
     );
 end;
-$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
 
 -- (b) Deny by default, then grant only the entry points -- same rule and same
 -- reasoning as user-rbac/schema.sql §9(a).

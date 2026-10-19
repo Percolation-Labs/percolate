@@ -291,7 +291,10 @@ fn step_detail(kind: &str, input: &Value) -> Value {
                 // messages, because that is where the runtime reads it --
                 // `session_group` and `output_schema` are the task's own
                 // business and sit at the top. Two homes, so two lookups.
-                if let Some(v) = input.pointer("/body/session") {
+                // `session_id` since REM-957; a definition stored before it
+                // still says `session`.
+                if let Some(v) = input.pointer("/body/session_id")
+                    .or_else(|| input.pointer("/body/session")) {
                     d.insert("session".into(), v.clone());
                 }
                 for k in ["session_group", "output_schema"] {
