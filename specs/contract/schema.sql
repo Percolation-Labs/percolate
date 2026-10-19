@@ -547,6 +547,10 @@ declare
         -- would start from -infinity -- harmless, since it is idempotent, but
         -- the record of what each run did would be gone.
         'aiq.dream_runs',
+        -- aiq.judgements: every verdict a judge gave, with its reason and
+        -- tier, and what it wrote. Lost in a restore, the resolutions stay but
+        -- nothing says who decided them or why.
+        'aiq.judgements',
         'aiq.entity_registry',
         'aiq.embedding_models',
         'aiq.graph_vocabulary',

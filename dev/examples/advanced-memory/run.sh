@@ -2,7 +2,7 @@
 # Every block of "Advanced Percolate memory and semantic iteration", in order, from an empty directory, on part one's
 # stack (the LangGraph tour), against a real model and a real decider:
 #
-#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.23 \
+#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.24 \
 #         dev/examples/advanced-memory/run.sh [workdir]
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
@@ -12,16 +12,16 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.23}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.24}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}" "${JEV_API_KEY:?set JEV_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY; JK=$JEV_API_KEY
 # part one's stack block, with the documented deviations: image, project name, ports
 curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
-sed -i.bak "s#percolationlabs/percolate-postgres:19-0.2.22#$IMG#" docker-compose.yml
 umask 077
 cat > .env <<ENV
 COMPOSE_PROJECT_NAME=advanced-memory
+P8_DB_IMAGE=$IMG
 P8_PG_PORT=5781
 P8_REST_PORT=5782
 P8_AGENT_PORT=5783
@@ -59,6 +59,18 @@ show() {
         from workflow.tasks where run_id = '$1'
         order by completed_at nulls last, step_key"
 }
+# One psql session for every SQL block, each pasted whole, as a reader pastes it (psqlpaste.py says why).
+mkfifo $W/cmd $W/ack
+python3 -I "$(dirname "$B")/psqlpaste.py" "$P8_DSN" $W/cmd $W/ack &
+exec 3> $W/cmd 4< $W/ack
+waiting() {
+  for i in $(seq 90); do
+    s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
+    case $s in waiting_external|succeeded|skipped|failed|cancelled) break ;; esac
+    sleep 2
+  done
+  echo "$s"
+}
 fail=0
 for f in $(ls $B | grep -v '^00-' | sort); do
   out=$CAP/${f%.*}.txt
@@ -70,16 +82,16 @@ for f in $(ls $B | grep -v '^00-' | sort); do
         cp $B/$f $W/blk.sh
       fi
       { sed 's/^/$ /' $B/$f; . $W/blk.sh 2>&1; } > $out
+      rm -f $W/blk.sh
       [ "$f" = 01-override.sh ] && { set -a; . ./.env; set +a; sleep 5; } ;;
     *.sql)
-      n=${f%%-*}; n=${n//[!0-9]/}
-      if [ $n -ge 11 ]; then pre=$B/00-signin.sql; skip=5; else pre=/dev/null; skip=0; fi
-      { sed 's/^/=# /' $B/$f; cat $pre $B/$f | psql "$P8_DSN" -X -v ON_ERROR_STOP=1 -f - 2>&1 | sed "1,${skip}d"; } > $out
-      grep -q '^psql:.*ERROR' $out && { echo "FAIL $f"; fail=1; } ;;
+      echo "$B/$f $out" >&3
+      read -r verdict <&4
+      [ "$verdict" = ok ] || { echo "FAIL $f"; fail=1; } ;;
   esac
-  [ "$f" = 15-notes.sql ] && sleep 20
   echo "done $f"
 done
+exec 3>&-; wait
 if grep -rlF -e "$OK" -e "$JK" $CAP; then echo "a key reached a capture"; fail=1; fi
 echo fail=$fail
 exit $fail

@@ -278,6 +278,48 @@
     },
     {
       "admits": [
+        "bind",
+        "merge",
+        "withdraw"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "judgements",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "open",
+        "claimed",
+        "to_human",
+        "decided",
+        "moot"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "judgements",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "llm",
+        "decision_model",
+        "agent",
+        "human"
+      ],
+      "column": "tier",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "judgements",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "org",
         "private",
         "public"
@@ -296,6 +338,7 @@
         "embedding",
         "llm",
         "decision_model",
+        "agent",
         "human"
       ],
       "column": "tier",
@@ -325,6 +368,7 @@
         "embedding",
         "llm",
         "decision_model",
+        "agent",
         "human"
       ],
       "column": "tier",

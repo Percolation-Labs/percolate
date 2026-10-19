@@ -145,6 +145,63 @@ $$ language plpgsql stable;
 revoke execute on function aiq.extractor_call(text, text, text, text, text) from public;
 grant execute on function aiq.extractor_call(text, text, text, text, text) to authenticated;
 
+-- THE RELATIONS AN EXTRACTOR MAY USE ARE READ WHEN A RUN STARTS, not when its
+-- workflow was installed (REM-1057). extractor_call builds the whole request,
+-- and the response_format in it carries the relation enum from
+-- aiq.graph_vocabulary at the moment it is called. The ingest and reflect
+-- workflows used to call it once, at install, and bake the request into the
+-- definition, so a relation registered afterwards was never offered to the
+-- model: the Zep tutorial registered ships_via after installing reflect, and
+-- gpt-4o wrote `located_in` for a sentence about shipping, because ships_via
+-- was not in the list it was given.
+--
+-- So the definition keeps the request with its response_format replaced by a
+-- reference, and the run's first step computes it. The worker resolves a
+-- whole-string reference to its native type (percolate-core worker/templates),
+-- so the model is sent an object, not a JSON string.
+--
+-- THE AGENT ROW HAD THE SAME SNAPSHOT. install_structure_null stores
+-- aiq.graph_schema() as the agent's structured_output_schema, so its enum is the
+-- vocabulary on the day the agent was installed, and computing the request at
+-- run time from that row only moved the snapshot. An agent tagged
+-- `null-extractor` is the vocabulary's own extractor -- that is what
+-- install_structure_null makes -- so its schema is taken from graph_schema() at
+-- the run. Any other extractor keeps the schema its author wrote, which may
+-- narrow the relations on purpose.
+create or replace function aiq.extractor_response_format(p_agent text, p_model text)
+returns jsonb as $$
+    select case when 'null-extractor' = any(a.tags)
+                then jsonb_set(f, '{json_schema,schema}', aiq.graph_schema())
+                else f end
+      from (select aiq.extractor_call(p_agent, p_model, '') -> 'body' -> 'response_format' as f) c
+      cross join (select tags from agentic.agents where name = p_agent) a
+$$ language sql stable;
+revoke execute on function aiq.extractor_response_format(text, text) from public;
+grant execute on function aiq.extractor_response_format(text, text) to authenticated, worker;
+
+do $$ begin
+    perform workflow.register_step_function('extractor_format', 'aiq.extractor_response_format',
+        array['text', 'text'], 30000,
+        'the extractor''s response_format, with the relations aiq.graph_vocabulary holds now');
+end $$;
+
+-- The request a workflow template sends, as extractor_call builds it, with the
+-- response_format left to the run's extractor_format step.
+create or replace function aiq.extractor_call_at_run(p_agent text, p_model text, p_text text)
+returns jsonb as $$
+    select jsonb_set(aiq.extractor_call(p_agent, p_model, p_text), '{body,response_format}',
+                     to_jsonb('{{steps.extractor_format.result}}'::text))
+$$ language sql stable;
+revoke execute on function aiq.extractor_call_at_run(text, text, text) from public;
+
+-- The step that computes it, as YAML, for the workflows that send it.
+create or replace function aiq.extractor_format_step(p_agent text, p_model text)
+returns text as $$
+    select format(E'  - id: extractor_format\n    sql: {function: extractor_format, args: %s}\n',
+                  jsonb_build_array(p_agent, p_model))
+$$ language sql immutable;
+revoke execute on function aiq.extractor_format_step(text, text) from public;
+
 -- ------------------------------------------------------------
 -- WHETHER A MODEL'S QUOTE IS IN ITS SOURCE, decided once (extraction.md §4.2).
 --
@@ -573,9 +630,9 @@ $y$, v_model, p_queue);
         -- function is defined: a matrix template cannot declare output_schema,
         -- and a model mis-numbers an edge ordinal often enough that raising on
         -- it fails ordinary ingestion.
-        v_graph := format($y$
+        v_graph := aiq.extractor_format_step(p_graph_agent, p_graph_model) || format($y$
   - id: graph
-    needs: [parse]
+    needs: [parse, extractor_format]
     matrix:
       rows: {function: windows_to_index, args: ['{{run.resource_id}}']}
       max_fanout: 200
@@ -587,7 +644,7 @@ $y$, v_model, p_queue);
   - id: land_graph
     needs: [graph]
     sql: {function: land_graph_windows, args: ['{{steps.graph.result.task_id}}']}
-$y$, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::text);
+$y$, (aiq.extractor_call_at_run(p_graph_agent, p_graph_model, '{{item.content}}'))::text);
     end if;
 
     if v_model is null and not p_graph_index then
@@ -803,7 +860,9 @@ begin
     perform workflow.define_yaml(format($y$
 name: %1$s
 steps:
+%3$s
   - id: graph
+    needs: [extractor_format]
     matrix:
       rows: {function: session_windows, args: ['{{run.session_id}}', '{{run.$id}}']}
       max_fanout: 200
@@ -815,7 +874,8 @@ steps:
   - id: land_graph
     needs: [graph]
     sql: {function: land_graph_windows, args: ['{{steps.graph.result.task_id}}']}
-$y$, p_name, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::text));
+$y$, p_name, (aiq.extractor_call_at_run(p_graph_agent, p_graph_model, '{{item.content}}'))::text,
+       rtrim(aiq.extractor_format_step(p_graph_agent, p_graph_model), E'\n')));
 
     return p_name || ': each message the user wrote, graph-indexed with ' || p_graph_agent
                   || ' (' || coalesce(p_graph_model, 'the agent''s own model') || ')';
