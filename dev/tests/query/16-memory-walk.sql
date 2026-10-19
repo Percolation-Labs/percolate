@@ -49,10 +49,12 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- (Each knit names its run, not a resource: since REM-962 a resource_id must
+--  name a real resource, whose owner and visibility the facts then take.)
 -- 1. THE VOCABULARY IS CLOSED UNTIL YOU OPEN IT. The first session's two
 --    relations are dropped and named in the receipt, and its nodes land.
 -- ---------------------------------------------------------------------
-select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1","resource_id":"session-1"}') as receipt \gset
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1"}') as receipt \gset
 \echo :receipt
 select pg_temp.check(:'receipt'::jsonb->'node_residence' = '["pg","soft","soft"]'::jsonb,
     'Priya Raman did not land on her typed row, or the new names did not land soft: ' || :'receipt');
@@ -62,7 +64,7 @@ select pg_temp.check((:'receipt'::jsonb->>'edges_new')::int = 0
 
 select aiq.register_graph_vocabulary('[{"relation":"works_on"},{"relation":"prefers"}]');
 
-select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1","resource_id":"session-1"}') as receipt \gset
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1"}') as receipt \gset
 \echo :receipt
 select pg_temp.check((:'receipt'::jsonb->>'edges_new')::int = 2, 'the registered relations did not land: ' || :'receipt');
 
@@ -70,17 +72,17 @@ select pg_temp.check((:'receipt'::jsonb->>'edges_new')::int = 2, 'the registered
 -- 2. KNIT: a second session repeats one fact, which is one edge with two
 --    sources, and names an alias. A third, from a bad extractor, is wrong.
 -- ---------------------------------------------------------------------
-select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"person","n":"P. Raman"},{"k":"tool","n":"DuckDB"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":2,"t":3,"r":"prefers"}]}', '{"agent":"knit","run_id":"r2","resource_id":"session-2"}') as receipt \gset
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"person","n":"P. Raman"},{"k":"tool","n":"DuckDB"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":2,"t":3,"r":"prefers"}]}', '{"agent":"knit","run_id":"r2"}') as receipt \gset
 \echo :receipt
 select pg_temp.check((:'receipt'::jsonb->>'edges_merged')::int = 1 and (:'receipt'::jsonb->>'edges_new')::int = 1,
     'the repeated fact did not merge into the existing edge: ' || :'receipt');
-select pg_temp.check((select array_agg(s->>'run_id' || '/' || (s->>'resource_id') order by s->>'run_id')
+select pg_temp.check((select array_agg(s->>'run_id' order by s->>'run_id')
                         from aiq.edges e join aiq.node_keys k on k.node_id = e.src_id and k.key = 'priya raman',
                              jsonb_array_elements(e.provenance->'sources') s
-                       where e.relation = 'works_on') = '{r1/session-1,r2/session-2}',
+                       where e.relation = 'works_on') = '{r1,r2}',
     'one fact from two sessions is not one edge with both sources');
 
-select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"tool","n":"MySQL"}], "edges":[{"s":0,"t":1,"r":"prefers"}]}', '{"agent":"knit-bad","run_id":"r3","resource_id":"session-3"}');
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"tool","n":"MySQL"}], "edges":[{"s":0,"t":1,"r":"prefers"}]}', '{"agent":"knit-bad","run_id":"r3"}');
 
 -- This walk takes seconds, so the three sessions are dated a day back to give
 -- the as-of read in §5 a past to read.
