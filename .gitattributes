@@ -35,6 +35,11 @@ extension/percolate/sql/*.sql  -diff  linguist-generated=true  merge=percolate-s
 #     git config merge.percolate-sql.name   "regenerate the extension SQL"
 #     git config merge.percolate-sql.driver "dev/merge-generated-sql.sh %A %O %B %P"
 #
+# A MERGE, NOT A REBASE. A rebase pick regenerates from the wrong specs and
+# leaves the tree dirty for the next pick; rebase with `dev/rebase.sh <upstream>`,
+# which regenerates and amends at each commit (REM-992,
+# dev/rebase-over-generated-sql.sh).
+#
 # MEASURED, on a real conflict rather than assumed. Two branches appending to
 # the same place in specs/identity/declarations.sql, so the generated files
 # conflict in the same region:
