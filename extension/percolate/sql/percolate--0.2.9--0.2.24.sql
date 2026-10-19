@@ -2334,6 +2334,17 @@ begin
         v_prev_comp_id := v_new_id;
     end loop;
 
+    -- REM-974: a saga whose first step fails has nothing to undo, so no
+    -- compensation task exists, and check_compensation_completion (which
+    -- settles only once at least one exists, so a rollback is never claimed
+    -- before it is created) left the run `compensating` for good. Nothing to
+    -- undo is a finished rollback: settle it in the statement that failed it.
+    if v_prev_comp_id is null then
+        update workflow.runs set compensation_state = 'compensated'
+        where id = p_run_id and compensation_state = 'compensating';
+        return;
+    end if;
+
     -- A `sql` compensation is INSERTED ready, and the autorun trigger fires
     -- only on a transition INTO ready -- the same hazard §20 hit with matrix
     -- children. Without this an in-database rollback never starts.
