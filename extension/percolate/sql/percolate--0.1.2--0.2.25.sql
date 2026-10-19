@@ -35140,8 +35140,16 @@ create policy expresses_readable on claims.expresses for select using (research.
 
 alter table claims.claims enable row level security;
 drop policy if exists claims_readable on claims.claims;
-create policy claims_readable on claims.claims for select
-    using (exists (select 1 from claims.expresses e where e.claim_id = claims.id));
+-- Through a function and not an inline EXISTS, for the reason origins_readable below gives (REM-1003): once a
+-- database has been analysed, the planner may hash the policy's subquery, and a lookup of one claim then checked
+-- every readable occurrence in the graph -- 157 shared hits with 10 unrelated packages and 2,126 with 100 (REM-1006).
+-- A function with SET is never inlined, so each claim asks only about its own occurrences, through expresses_claim.
+create or replace function claims.claim_readable(p_claim uuid) returns boolean
+language sql stable security invoker cost 1000 set search_path = pg_catalog, public as $$
+    select exists (select 1 from claims.expresses e where e.claim_id = p_claim);
+$$;
+grant execute on function claims.claim_readable(uuid) to authenticated;
+create policy claims_readable on claims.claims for select using (claims.claim_readable(id));
 
 alter table claims.tx enable row level security;
 
