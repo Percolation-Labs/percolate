@@ -511,6 +511,7 @@ db_gates() {
     "Nothing deferred on a database where the halves agree::db_deferrals_gone"
     "A journey somebody could complete last month still completes::db_evals"
     "The worked examples still do what the cookbook says they do::db_examples"
+    "Every tutorial block survives a reader's paste::$PY dev/pastecheck.py --container '$CONTAINER'"
     "...and the contract is still current once the suite has written::$PY dev/contract-export.py --check --psql '$psql'"
     "A backup of this database would contain its data::./dev/backup-carries-the-data.sh"
     # THE OTHER HALF OF THAT ROUND TRIP. The line above proves a dump would
