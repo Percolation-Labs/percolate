@@ -462,10 +462,11 @@ select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
 
 -- A second person, and a harbour office you both belong to
-select rbac.create_user_with_password('crew@example.com', 'a-long-crew-password-123') as crew_id \gset
-select rbac.grant_role(:'crew_id', 'member');
-select rbac.create_org('harbour-office', 'Harbour office') as office \gset
-select rbac.add_org_member(:'office', :'crew_id');
+select rbac.create_user_with_password('crew@example.com', 'a-long-crew-password-123') is not null as crew_created;
+select rbac.grant_role((select id from rbac.users where email = 'crew@example.com'), 'member');
+select rbac.create_org('harbour-office', 'Harbour office') is not null as office_created;
+select rbac.add_org_member((select id from rbac.orgs where slug = 'harbour-office'),
+                           (select id from rbac.users where email = 'crew@example.com'));
 
 -- Your three writers stay yours. The router is shared with the office.
 select (agentic.upsert_agent(jsonb_build_object('name', w,
@@ -475,7 +476,7 @@ select (agentic.upsert_agent(jsonb_build_object('name', w,
 
 select (agentic.upsert_agent(jsonb_build_object('name', 'router',
           'system_prompt', 'Hand the request to the story, joke or poem writer.',
-          'org_id', :'office', 'visibility', 'org',
+          'org_id', (select id from rbac.orgs where slug = 'harbour-office'), 'visibility', 'org',
           'tools', '[{"server": "p8-agents",
                       "tools": ["agent__story", "agent__joke", "agent__poem"]}]'::jsonb))).name;
 
@@ -484,7 +485,8 @@ select name, visibility, agentic.may_invoke(name) as you_may_invoke
   from agentic.agents_api where name in ('router', 'story', 'joke', 'poem') order by name;
 
 -- The same question, asked as crew
-select set_config('request.jwt.claims', json_build_object('sub', :'crew_id')::text, false) is not null as signed_in_as_crew;
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'crew@example.com'))::text, false) is not null as signed_in_as_crew;
 select name, visibility, agentic.may_invoke(name) as crew_may_invoke
   from agentic.agents_api where name in ('router', 'story', 'joke', 'poem') order by name;
 -- /block
@@ -764,11 +766,11 @@ savepoint crew_signs;
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'crew@example.com'))::text, false);
 
-select r.id as run_id from workflow.runs r
-  join workflow.definitions d on d.id = r.workflow_def_id
- where d.name = 'release_vessel' order by r.created_at desc limit 1 \gset
-
-select workflow.signal_task(:'run_id', 'approve', '{"decision":"released","by":"crew"}'::jsonb);
+select workflow.signal_task(
+  (select r.id from workflow.runs r
+     join workflow.definitions d on d.id = r.workflow_def_id
+    where d.name = 'release_vessel' order by r.created_at desc limit 1),
+  'approve', '{"decision":"released","by":"crew"}'::jsonb);
 -- /block
 rollback to savepoint crew_signs;
 \set ON_ERROR_STOP on
@@ -779,15 +781,14 @@ select pg_temp.check(pg_temp.status(current_setting('run.id')::uuid, 'approve') 
 -- The reader finds the run by its workflow's name, and says who they are before signing, as the published
 -- first-workflow page does.
 -- block: signal
-select r.id as run_id from workflow.runs r
-  join workflow.definitions d on d.id = r.workflow_def_id
- where d.name = 'release_vessel' order by r.created_at desc limit 1 \gset
-
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false);
 
-select workflow.signal_task(:'run_id', 'approve',
-  '{"decision":"released","by":"harbourmaster"}'::jsonb);
+select workflow.signal_task(
+  (select r.id from workflow.runs r
+     join workflow.definitions d on d.id = r.workflow_def_id
+    where d.name = 'release_vessel' order by r.created_at desc limit 1),
+  'approve', '{"decision":"released","by":"harbourmaster"}'::jsonb);
 -- /block
 select set_config('request.jwt.claims', '', false);
 -- live: released
@@ -950,14 +951,14 @@ end $$;
 -- waiting $RUN adjuster
 -- /live
 -- block: adjuster
-select r.id as run_id from workflow.runs r
-  join workflow.definitions d on d.id = r.workflow_def_id
- where d.name = 'insurance_claim' order by r.created_at desc limit 1 \gset
-
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false);
 
-select workflow.signal_task(:'run_id', 'adjuster', '{"decision": "approved"}');
+select workflow.signal_task(
+  (select r.id from workflow.runs r
+     join workflow.definitions d on d.id = r.workflow_def_id
+    where d.name = 'insurance_claim' order by r.created_at desc limit 1),
+  'adjuster', '{"decision": "approved"}');
 -- /block
 select set_config('request.jwt.claims', '', false);
 -- live: claim_done
