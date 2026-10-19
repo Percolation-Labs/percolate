@@ -1,6 +1,6 @@
 [project]
 name = "percolate-core"
-version = "0.2.7"
+version = "0.2.8"
 description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -75,6 +75,9 @@ agent = [
     "mcp>=1.2",
     "pyyaml>=6.0",
     "rich>=13.9",
+    # A declared output is checked against its JSON Schema at the turn
+    # (REM-970). mcp already brings it; named here because the runtime calls it.
+    "jsonschema>=4.20",
 ]
 # OpenTelemetry, opt-in and off unless configured (see `agentic/telemetry.py`).
 #

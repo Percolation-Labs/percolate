@@ -118,7 +118,7 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
 
     async def test_off_changes_nothing(self):
         server = self.start("off")
-        [tool] = await McpProvider().list_tools(server)
+        tool = (await McpProvider().list_tools(server))[0]   # query; the memory tools follow it (REM-1056)
         self.assertNotIn("question", tool.input_schema["properties"])
         result = await self.call(server, {"query": SEARCH})
         self.assertEqual(result.content, SEARCH_DOC)
@@ -126,7 +126,7 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
     async def test_on_the_answer_carries_typed_exceptions_and_a_receipt(self):
         jev = StubJev({"NEGATION": 0.99})
         server = self.start("on", jev)
-        [tool] = await McpProvider().list_tools(server)
+        tool = (await McpProvider().list_tools(server))[0]   # query; the memory tools follow it (REM-1056)
         self.assertIn("question", tool.input_schema["properties"])
         self.assertIn("SEMANTIC EXCEPTIONS", tool.description)
         result = await self.call(server, {"query": SEARCH,
@@ -215,7 +215,7 @@ class QuerySemanticExceptions(unittest.IsolatedAsyncioTestCase):
     async def test_shadow_computes_them_and_shows_nothing(self):
         log = ListLog()
         server = self.start("shadow", StubJev({"NEGATION": 0.99}), log)
-        [tool] = await McpProvider().list_tools(server)
+        tool = (await McpProvider().list_tools(server))[0]   # query; the memory tools follow it (REM-1056)
         self.assertIn("question", tool.input_schema["properties"])
         self.assertNotIn("SEMANTIC EXCEPTIONS", tool.description)
         result = await self.call(server, {"query": SEARCH})

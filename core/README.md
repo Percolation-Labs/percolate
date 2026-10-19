@@ -1,8 +1,8 @@
 # percolate-core
 
-The processes that sit in front of the database. The database itself, and the
-specs all of this is built against, live in
-[p8-subsystems](https://github.com/Percolation-Labs/p8-subsystems); nothing
+The processes that sit in front of the database. The database itself (the
+Percolate Postgres extension), and the specs all of this is built against, live
+in [Percolation-Labs/percolate](https://github.com/Percolation-Labs/percolate), under `extension/` and `specs/`; nothing
 here is required to use it.
 
 ```bash
@@ -115,9 +115,8 @@ a database, a stack or a key:
 
     percolate ingest file ./notice.pdf --policy '{"chunking":{"target_tokens":300}}'
 
-The contract, the per-format argument and the six defects that running it
-found are `specs/world-model-ingestion/ingestion.md` in
-[p8-subsystems](https://github.com/Percolation-Labs/p8-subsystems).
+The tables and functions it writes to are `specs/world-model-ingestion/` in
+[Percolation-Labs/percolate](https://github.com/Percolation-Labs/percolate/tree/main/specs/world-model-ingestion).
 
 ---
 
@@ -221,14 +220,10 @@ the worker's `LLM_API_KEY`. A model stored on an agent overrides the default.
 In this working tree, the standalone runtime accepts a comma-separated
 `P8_CORS_ORIGINS` allowlist, e.g. `http://localhost:8082`. It defaults to no
 cross-origin access and rejects wildcards; bearer verification and RLS are
-unchanged. Hosts mounting the router own their CORS policy. This change is not
-in the published 0.1.8 image yet.
+unchanged. Hosts mounting the router own their CORS policy.
 
-For source development, `p8-subsystems/dev/stacks.sh ui` loads that repo's
-ignored `.env` and runs the UI plus runtime on the dev Docker network using
-this working package. See its `applications/percolate-ui/README.md` for the
-complete setup and persisted-turn check. Never expose a dev signing secret or
-provider key in production UI configuration.
+Never expose a dev signing secret or provider key in production UI
+configuration.
 
 ### Service variables
 
@@ -331,10 +326,10 @@ images would be separate builds of the same base and separate tags to keep in
 step. `ENTRYPOINT ["percolate"]`, and the command selects the service:
 
 ```yaml
-content: { image: percolationlabs/percolate-core:0.2.6, command: ["content","serve"] }
-agent:   { image: percolationlabs/percolate-core:0.2.6, command: ["agent","serve"] }
-gateway: { image: percolationlabs/percolate-core:0.2.6, command: ["agent","gateway"] }
-worker:  { image: percolationlabs/percolate-core:0.2.6, command: ["worker","--queue","http"] }
+content: { image: percolationlabs/percolate-core:0.2.7, command: ["content","serve"] }
+agent:   { image: percolationlabs/percolate-core:0.2.7, command: ["agent","serve"] }
+gateway: { image: percolationlabs/percolate-core:0.2.7, command: ["agent","gateway"] }
+worker:  { image: percolationlabs/percolate-core:0.2.7, command: ["worker","--queue","http"] }
 ```
 
 Neither delegation nor scheduled runs need the gateway. `agent serve` answers
@@ -346,11 +341,8 @@ worker sends the run owner's token to that origin only. Give it
 dispatched by. `agent gateway` serves both routes on its own, for a deployment
 that puts delegation on replicas of its own.
 
-For the packaging decision record see
-[PACKAGING.md](https://github.com/Percolation-Labs/p8-subsystems/blob/main/PACKAGING.md);
-for what packaging *requires of the design*, `specs/agentic/brief.md` §10. For
-which commit each published version was cut from — and the one tag that is off
-by one — see [RELEASES.md](RELEASES.md).
+For which commit each published version was cut from — and the one tag that
+is off by one — see [RELEASES.md](RELEASES.md).
 
 ---
 
@@ -363,20 +355,22 @@ by one — see [RELEASES.md](RELEASES.md).
   a live model, covering streaming, what is and is not persisted, the delegation
   and span trees, the reload round trip, mounting, session resume, tenant
   isolation, and a scheduled run completing its own workflow task).
-- Still open: no service-surface entries in the specs repo's `surface.sql`,
-  which by `meta/skills/spec-driven-development` §7 should exist **before** the
-  endpoints they describe; and no startup check that the deployed schema is the
-  one this version expects (`specs/agentic/brief.md` §10.4).
+- Still open: no service-surface entries in percolate's `surface.sql`, which
+  covers the database's surface and says outright that it does not cover
+  `POST /chat` or the other service endpoints; and no startup check that the
+  deployed schema is the one this version expects.
 
 ## Development
 
 ```bash
 . dev/env.sh          # DSN, test user, JWT, and the LLM key
-./dev/db.sh up        # a PG19 cluster of its own, loaded from the specs repo
+./dev/db.sh up        # a PG19 cluster of its own, loaded from percolate's specs
 ./dev/stack.sh up     # PostgREST, the retrieval service, the agent gateway
 uv run --all-extras python dev/verify.py
 ```
 
-`dev/db.sh` loads `specs/*/schema.sql` from a p8-subsystems checkout directly —
-never a copy — so a schema that only works because a harness did something extra
-fails here. Set `P8_SPECS` if your checkout is elsewhere.
+`dev/db.sh` loads `specs/*/schema.sql` from a checkout of
+[Percolation-Labs/percolate](https://github.com/Percolation-Labs/percolate)
+beside this one (`../percolate`) directly — never a copy — so a schema that only
+works because a harness did something extra fails here. Set `P8_SPECS` if your
+checkout is elsewhere.

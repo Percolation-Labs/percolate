@@ -3,7 +3,7 @@
 What was published, and which commit each published version was cut from.
 
 This file exists because a tag is not self-describing once one of them is
-wrong, and because `p8-subsystems/PACKAGING.md` makes the core pin bump
+wrong, and because the packaging decision record made the core pin bump
 conditional on "the `percolate-core` release notes" — a precondition that had
 never existed. The generated GitHub Release bodies are bare compare links;
 this is the account that is written on purpose.
@@ -53,6 +53,7 @@ silently.
 | 0.2.4 | `v0.2.4` | `959af85` | yes |
 | 0.2.5 | `v0.2.5` | `346dcaf` | yes |
 | 0.2.6 | `v0.2.6` | `23c813b` | yes |
+| 0.2.7 | `v0.2.7` | `428d597` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
@@ -119,6 +120,22 @@ answer, and the quota gate asks core. `CHANGELOG.md` has the operator-facing
 list, one section per fix. `v0.1.12` names `c8e6878`, whose `pyproject.toml`
 says `0.1.12`. It was the last release whose tail was written by hand. That
 happened in REM-150's own PR, by running the script the workflow now runs.
+
+0.1.13 to 0.2.5 have no paragraph here. Each is in the table, and
+`CHANGELOG.md` has sections for 0.1.13, 0.2.0 and 0.2.1; nothing was written for
+0.2.2 to 0.2.5, and nothing is reconstructed for them now.
+
+0.2.6 exists for the LangGraph tour's fresh readers, who ran it against
+extension 0.2.23. A router's catalogue was one list cached at sync, holding only
+agents nobody owned, so a router whose writers were private or an org's could
+not reach them (REM-971, #106); and a provider's refused key reached the worker
+as a retryable 502, so an `agent:` step was retried five times before saying
+nothing useful (REM-987, #107). `v0.2.6` names `23c813b`, whose
+`pyproject.toml` says `0.2.6`. Its run (39314270944) published to PyPI and
+Docker Hub and tagged, then its `publish` job failed checking out get-percolate
+with `Bad credentials`. So the step that points the chart and the docs at
+0.2.6 did not run, and get-percolate still names 0.2.5 until it does. The tail
+on this repository (`b1b6bc8`) did land.
 
 0.1.4 and 0.1.5 were tagged correctly and had no Release page; both were created
 on 2026-09-12 and say so in their own text, so nobody reads a 2026-09-12

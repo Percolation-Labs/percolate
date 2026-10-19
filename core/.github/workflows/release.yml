@@ -22,9 +22,9 @@
 #   gh secret set DOCKERHUB_USERNAME
 #   gh secret set DOCKERHUB_TOKEN
 #
-#   gh secret set P8_RELEASE_TOKEN   # PAT, issues:write on get-percolate
-#                                   # and on p8-subsystems. ONE token for all
-#                                   # three repos -- @claude uses the same one
+#   gh secret set P8_RELEASE_TOKEN   # PAT: contents and pull-requests write on
+#                                   # get-percolate and percolate. ONE token for
+#                                   # the repos -- @claude uses the same one
 #                                   # to reach across them (see claude.yml).
 #
 # The last one is a PAT and not the built-in GITHUB_TOKEN for a reason that is
@@ -471,7 +471,7 @@ jobs:
           echo "::error::chart $CHART is committed on get-percolate but $INDEX does not list it after 25 minutes. Its scheduled docs.yml run should have published it; check get-percolate's docs runs." >&2
           exit 1
 
-      # p8-subsystems gets a PULL REQUEST, and a person still merges it (REM-540). What is stale over there, the dev
+      # The dev stack gets a PULL REQUEST, and a person still merges it (REM-540). What is stale over there, the dev
       # harness `dev/docker-compose.yml` and every `percolate-core:<version>` literal, is a choice about what its tests
       # run against, so it is not pushed. But it used to be an issue asking @claude to find the pins, and meanwhile
       # `dev/references.sh` §3 refused every p8-subsystems push for the mismatch: 13 minutes on 18 September, until a
@@ -480,45 +480,39 @@ jobs:
       - uses: actions/checkout@v7
         if: inputs.publish
         with:
-          repository: ${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}
+          repository: ${{ vars.EXTENSION_REPO || 'Percolation-Labs/percolate' }}
           token: ${{ secrets.P8_RELEASE_TOKEN }}
-          path: p8-subsystems
-          # The full history: dev/references.sh resolves in-tree citations through git, and on a shallow clone 24 of
-          # them read as missing (checked while writing this step).
+          path: percolate
           fetch-depth: 0
-      - name: Open the p8-subsystems pin PR
+      # THE PIN PR GOES TO PERCOLATE, where the extension and its dev stack now
+      # live (REM-958). It went to p8-subsystems, which is frozen for those
+      # paths. core/ there is a mirror of this repository and is synced on its
+      # own, so the sweep leaves it alone; what it moves is the dev stack's
+      # `percolate-core:<v>` literal (dev/docker-compose.yml).
+      - name: Open the percolate pin PR
         if: inputs.publish
-        working-directory: p8-subsystems
+        working-directory: percolate
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           V: ${{ needs.version.outputs.version }}
           PREV: ${{ needs.version.outputs.previous }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ vars.EXTENSION_REPO || 'Percolation-Labs/percolate' }}
         run: |
           branch="percolate-core-$V"
           git checkout -q -b "$branch"
-          sed -i "s/^core = \"[0-9.]*\"/core = \"$V\"/" versions.toml
-          # PINS, NOT RECORDS. A card log, a dated probe or a demo says what was true
-          # when it was written; moving the version inside it makes it false. The
-          # list is p8-subsystems' own (the gate that refuses such a rewrite prints
-          # it), so this sweep and that gate cannot disagree. Without it the 0.2.4
-          # and 0.2.5 pin PRs rewrote nine cards, a probe and the demo, and failed
-          # that gate (2 October).
-          mapfile -t records < <(python3 dev/a-sweep-moves-pins-not-records.py --record-paths | sed 's|^|:(exclude)|')
-          git grep -l -E "percolate-core:[0-9]+\.[0-9]+\.[0-9]+" -- . "${records[@]}" | while read -r f; do
+          git grep -l -E "percolate-core:[0-9]+\.[0-9]+\.[0-9]+" -- . ':(exclude)core' | while read -r f; do
             sed -i -E "s/percolate-core:[0-9]+\.[0-9]+\.[0-9]+/percolate-core:$V/g" "$f"
           done
-          git diff --quiet && { echo "p8-subsystems already pins $V"; exit 0; }
+          git diff --quiet && { echo "percolate already pins $V"; exit 0; }
           git --no-pager diff --stat
-          dev/references.sh
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -qam "percolate-core $V is published, so every pin and versions.toml follow it"
+          git commit -qam "percolate-core $V is published, so the dev stack's core pin follows it"
           git push -q origin "$branch"
-          gh pr create --repo "${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}" --head "$branch" \
-            --title "percolate-core $V: the pins and versions.toml follow it" \
-            --body "percolate-core **$V** is published ([release]($RUN)). This moves \`versions.toml\` and every \`percolate-core:$PREV\` literal to $V; \`dev/references.sh\` passed on it. Merging is the judgement: the dev harness then runs its tests against $V (REM-540)."
-
+          gh pr create --repo "$REPO" --head "$branch" \
+            --title "percolate-core $V: the dev stack's core pin follows it" \
+            --body "percolate-core **$V** is published ([release]($RUN)). This moves every \`percolate-core:$PREV\` literal outside core/ to $V. Merging is the judgement: the dev stack then runs against $V."
 
   # The same tail on a dry run, against a tag that exists only in this runner.
   # Without it a rehearsal would say nothing about the part of a release that

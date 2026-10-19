@@ -239,7 +239,13 @@ def agent_push(path: Path) -> None:
     if not isinstance(doc, dict):
         console.print("[red]an agent is a JSON Schema document — a mapping, not a list[/red]")
         raise typer.Exit(code=1)
-    authoring.from_json_schema(doc)  # reads as an agent at all; sent as written
+    from .runtime.engine import DeclaredOutputInvalid
+
+    try:
+        authoring.from_json_schema(doc)  # reads as an agent at all; sent as written
+    except DeclaredOutputInvalid as err:
+        console.print(f"[red]{err}[/red]")
+        raise typer.Exit(code=1) from err
 
     async def _run() -> None:
         async with repo_for_cli() as repo:

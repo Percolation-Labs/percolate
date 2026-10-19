@@ -20,12 +20,13 @@ NAME=p8-agentic-pg
 PORT=${P8_PG_PORT:-5500}
 DB=p8agentic
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# The specs live in the sibling repo -- this loads the ACTUAL spec files, never
-# copies, so a schema that only works because the harness did something extra
-# fails here. Overridable for a checkout in a different place.
-SPECS="${P8_SPECS:-$HERE/../../p8-subsystems/specs}"
+# The specs live in Percolation-Labs/percolate, checked out beside this repo --
+# this loads the ACTUAL spec files, never copies, so a schema that only works
+# because the harness did something extra fails here. Overridable for a
+# checkout in a different place.
+SPECS="${P8_SPECS:-$HERE/../../percolate/specs}"
 if [[ ! -d "$SPECS" ]]; then
-  echo "specs not found at $SPECS -- set P8_SPECS to your p8-subsystems/specs" >&2
+  echo "specs not found at $SPECS -- set P8_SPECS to your percolate/specs" >&2
   exit 1
 fi
 SPECS="$(cd "$SPECS" && pwd)"
