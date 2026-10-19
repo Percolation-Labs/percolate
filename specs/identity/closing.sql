@@ -170,6 +170,10 @@ declare
     v_roles constant text[] := array['authenticated', 'web_anon', 'api_viewer'];
     v_dynamic constant text[] := array[
         'aiq.expand_embed_steps(jsonb)',
+        -- The judge it calls is a regproc from the operator's setting
+        -- percolate.link_judge, cast before format() so it names a function
+        -- that exists; the criterion goes in as %L (REM-997).
+        'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
