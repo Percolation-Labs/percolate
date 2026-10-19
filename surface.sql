@@ -385,7 +385,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.lake_nodes',null,'graph-index.md §4.4: identity is always in Postgres, payload need not be'),
 ('ai-query-layer','function','aiq.upsert_graph','jsonb,jsonb','graph-index.md §5: one writer for an extracted graph, holding invariants 1-5'),
 ('ai-query-layer','function','aiq.close_edge','jsonb,timestamptz,jsonb','activity-memory.md §2: a superseding memory closes exactly the fact it replaces, at the time stated (REM-963)'),
-('agentic','function','agentic.session_windows','uuid','activity-memory.md §2 Gap 1: a conversation is read into the graph one user message at a time (REM-969)'),
+('agentic','function','agentic.session_windows','uuid,uuid','activity-memory.md §2 Gap 1: a conversation is read into the graph one user message at a time (REM-969)'),
 ('agentic','function','agentic.install_reflect_workflow','text,text,text','activity-memory.md §2 Gap 1: reflect_session is installed like the ingest pipeline (REM-969)'),
 ('agentic','function','agentic.session_readable','uuid','a fact from a conversation is read through the session it was said in (REM-969)'),
 ('ai-query-layer','function','aiq.land_graph','jsonb,uuid','graph-index.md §6.1: the whole-document shape, no fan-in'),

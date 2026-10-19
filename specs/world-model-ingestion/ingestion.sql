@@ -674,16 +674,39 @@ revoke execute on function content.install_ingest_workflow(text, text, text, boo
 -- evidence about the user". The assistant's turns are context and are not
 -- windows, so an agent saying "you live in Leeds" never becomes the fact.
 --
--- Started per session, by whoever may read it:
---     select workflow.start_workflow('reflect_session', '{"session_id": "..."}');
+-- Started per session, by whoever may read it, naming who spoke:
+--     select workflow.start_workflow('reflect_session',
+--                                    '{"session_id": "...", "speaker": "Maya Okafor"}');
 -- ------------------------------------------------------------
-create or replace function agentic.session_windows(p_session uuid)
+-- WHO IS SPEAKING, because a person talks in the first person. "I am
+-- vegetarian and allergic to peanuts" read alone gave the extractor no
+-- subject, and on a real run (gpt-4o-mini, 0.2.23) it wrote `vegetarian
+-- -allergic_to-> peanuts`. A window now reads "<speaker> wrote: <words>", the
+-- speaker coming from the run's input ({"speaker": "Maya Okafor"}), so the
+-- facts attach to the same person node her other memories name. Without one
+-- it says "The person", which is honest and names nobody. `said` keeps the
+-- words alone.
+--
+-- THE RUN, NOT THE SPEAKER, IS THE ARGUMENT. A step template that names a run
+-- input the caller did not send fails the run ("template 'run.speaker'
+-- resolved to nothing"), so an optional input cannot be a template argument.
+-- The run's own id always resolves ({{run.$id}}), and the speaker is read from
+-- its input here.
+drop function if exists agentic.session_windows(uuid);
+drop function if exists agentic.session_windows(uuid, text);
+create or replace function agentic.session_windows(p_session uuid, p_run uuid default null)
 returns jsonb as $$
+    with speaker as (
+        select coalesce(nullif(btrim((select r.input->>'speaker' from workflow.runs r where r.id = p_run)), ''),
+                        'The person') as name
+    )
     select coalesce(jsonb_agg(jsonb_build_object(
                'session_id', m.session_id,
                'message_id', m.id,
                'at',         m.created_at,
-               'content',    m.content) order by m.seq), '[]'::jsonb)
+               'said',       m.content,
+               'content',    format('%s wrote: %s', (select name from speaker), m.content))
+               order by m.seq), '[]'::jsonb)
     from agentic.messages m
     where m.session_id = p_session
       and m.role = 'user'
@@ -691,11 +714,11 @@ returns jsonb as $$
       -- The session's read rule, as windows_to_index applies its resource's.
       and (rbac.is_operator() or agentic.session_readable(p_session));
 $$ language sql stable security definer set search_path = pg_catalog, public;
-revoke execute on function agentic.session_windows(uuid) from public;
+revoke execute on function agentic.session_windows(uuid, uuid) from public;
 
 select workflow.register_step_function(
-    'session_windows', 'agentic.session_windows', array['uuid'], 30000,
-    'One window per message the user wrote in a session, with the message id and when it was said');
+    'session_windows', 'agentic.session_windows', array['uuid', 'uuid'], 30000,
+    'One window per message the user wrote in a session, naming who wrote it, with the message id and when');
 
 create or replace function agentic.install_reflect_workflow(
     p_graph_model text default null,
@@ -712,7 +735,7 @@ name: %1$s
 steps:
   - id: graph
     matrix:
-      rows: {function: session_windows, args: ['{{run.session_id}}']}
+      rows: {function: session_windows, args: ['{{run.session_id}}', '{{run.$id}}']}
       max_fanout: 200
       template:
         queue: http
