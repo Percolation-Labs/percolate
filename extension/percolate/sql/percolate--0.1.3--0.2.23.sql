@@ -7111,6 +7111,54 @@ create or replace trigger trg_apply_when
     before update of status on workflow.tasks
     for each row execute function workflow.apply_when();
 
+-- ------------------------------------------------------------
+-- REPEATS: `repeat:` (REM-968)
+-- ------------------------------------------------------------
+-- The compiler unrolls a repeat into attempts (`<step>_<n>`), each skipped by
+-- `when:` once the check held after the one before, and ends it with a step
+-- named for the repeat that calls this. It reports how many attempts ran,
+-- whether the check held, and the last attempt's results, so the steps after
+-- a repeat read {{steps.<id>.result.0.last.<step>}} without knowing which
+-- attempt that was.
+--
+-- p_satisfied is the check over the last attempt that ran: the compiler
+-- passes coalesce(check over attempt max, ..., check over attempt 1), and a
+-- skipped attempt's check is null (its results are), so the first answer
+-- that is not null belongs to the last attempt that ran.
+--
+-- It reads only the run whose step is calling it (workflow.current_run_id,
+-- which a caller cannot set: set_config is revoked from them), so it needs no
+-- access check of its own and leaks nothing about another run.
+create or replace function workflow.repeat_outcome(p_spec jsonb, p_satisfied boolean)
+returns table (attempts int, max_attempts int, satisfied boolean, last jsonb) as $$
+#variable_conflict use_column
+declare
+    v_run uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+    v_max int  := (p_spec->>'max')::int;
+    v_n   int;
+begin
+    if v_run is null then
+        raise exception 'repeat_outcome reports on the repeat a step belongs to, and is '
+                        'only called by the step the compiler writes at the end of one';
+    end if;
+
+    select coalesce(max(i), 0) into v_n
+    from generate_series(1, v_max) i
+    where exists (
+        select 1 from workflow.tasks t
+        join jsonb_array_elements_text(p_spec->'steps') s(step) on t.step_key = s.step || '_' || i
+        where t.run_id = v_run and t.status <> 'skipped');
+
+    return query
+    select v_n, v_max, coalesce(p_satisfied, false),
+           (select jsonb_object_agg(s.step, t.output->'result')
+            from jsonb_array_elements_text(p_spec->'steps') s(step)
+            left join workflow.tasks t on t.run_id = v_run and t.step_key = s.step || '_' || v_n);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.repeat_outcome(jsonb, boolean) to authenticated;
+
 
 -- ------------------------------------------------------------
 -- 21f. Agent steps with a declared output shape.
@@ -7528,6 +7576,7 @@ begin
             ('timer',        E'name: c\nsteps:\n  - id: s\n    timer: 1'),
             ('sub_workflow', E'name: c\nsteps:\n  - id: s\n    workflow: other'),
             ('when',         E'name: c\nsteps:\n  - id: s\n    work: true\n    when: \'true\''),
+            ('repeat',       E'name: c\nsteps:\n  - id: r\n    repeat:\n      max: 2\n      until: \'{{steps.s.result}} is not null\'\n      steps: [{id: s, work: true}]'),
 
             ('continue_on',  E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      continue_on: failed\n      min_success: 0.5\n      template: {work: true}'),
 

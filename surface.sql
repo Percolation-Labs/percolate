@@ -257,6 +257,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.compensation_keys','jsonb','§21d: compensations are not part of the forward graph'),
 ('workflow-engine','column','workflow.tasks.tolerate_failure',null,'§21e: a fan-out survives an ordinary 404'),
 ('workflow-engine','column','workflow.tasks.when_sql',null,'REM-967: a step runs only when its condition holds, and is skipped otherwise'),
+('workflow-engine','function','workflow.repeat_outcome','jsonb,boolean','REM-968: a repeat reports how many attempts ran, whether its check held, and the last results'),
 -- integration-rbac.sql §c2. The read surface a caller needs to do anything
 -- with a workflow beyond starting one and polling it: what workflows exist,
 -- what a run actually did, the shape of its task graph, and the four
