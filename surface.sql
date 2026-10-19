@@ -394,6 +394,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: the closed relation vocabulary, and the symmetry and inverses of each'),
 ('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
 ('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- an OpenAI-shaped chat call, built as a row'),
+('ai-query-layer','function','aiq.extractor_response_format','text,text','REM-1057: the extractor''s response_format, read from the vocabulary when a run starts; the extractor_format step of ingest and reflect calls it as the run''s owner'),
 ('world-model-ingestion','function','aiq.edge_sources_readable','jsonb','graph.sql §10a: the half of aiq.edges'' read policy that reads a fact through the memories it was extracted from, any of them (REM-962)'),
 ('world-model-ingestion','function','aiq.quote_occurs','text,text','extraction.md §4.2: whether a model''s quote is in its source, by the one rule every extractor uses'),
 ('agentic','function','agentic.agent_call','text,text,text,text,text','the general form of the above: the chat-completions request ANY agent row describes, so a consumer with its own agent does not hand-assemble a body'),
