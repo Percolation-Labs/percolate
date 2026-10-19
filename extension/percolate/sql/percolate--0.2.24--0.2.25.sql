@@ -30561,6 +30561,76 @@ select workflow.register_step_function(
     'session_windows', 'agentic.session_windows', array['uuid', 'uuid'], 30000,
     'One window per message the user wrote in a session, naming who wrote it, with the message id and when');
 
+-- ------------------------------------------------------------
+-- THE PERSON'S OWN AGENT READS A CONVERSATION AND LANDS WHAT IT LEARNED (REM-1056).
+--
+-- reflect_session makes Percolate call a model of its own to read a session.
+-- A person whose agent is already connected (their own Claude, over MCP) has a
+-- reader in hand: these two calls let that agent do the reading, so a memory
+-- tutorial runs with no second API key. The rule is reflect_session's, item by
+-- item, so the two paths cannot disagree about what a conversation may teach:
+--
+--   * whoever may read the session may reflect on it (agentic.session_readable);
+--   * only what the user wrote is evidence, never the assistant's turns;
+--   * a fact cites the one message it came from and holds from when it was said;
+--   * it lands through aiq.upsert_graph, so residence, vocabulary and the soft
+--     tier are the same, and a bind upsert_graph leaves soft reaches the
+--     judgement queue at the next aiq.dream like any other.
+--
+-- What differs is the name on it. The extractor is recorded as
+-- `agent:<user id>`, the person whose agent read it, never a model's row name,
+-- so an agent's facts can be told from structure_null's and undone as a set.
+-- ------------------------------------------------------------
+
+-- The windows, for the person's own agent. session_windows is the engine's
+-- (it reads a reflect run's input for the speaker); this is the caller's,
+-- with no run, so it reads nothing but the session it was asked about, and
+-- session_windows already refuses a session the caller may not read.
+create or replace function agentic.session_messages(p_session uuid)
+returns jsonb as $$
+    select agentic.session_windows(p_session, null);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+revoke execute on function agentic.session_messages(uuid) from public;
+grant execute on function agentic.session_messages(uuid) to authenticated;
+
+-- One message's facts, landed as the caller's agent. The graph is the
+-- extractor's own shape ({"nodes":[{"k","n"}...], "edges":[{"s","t","r"}...]}),
+-- the one land_graph_fanout passes to upsert_graph.
+create or replace function agentic.land_message_facts(p_message_id uuid, p_graph jsonb)
+returns jsonb as $$
+declare
+    v_uid uuid := rbac.current_user_id();
+    m     agentic.messages;
+begin
+    if v_uid is null then
+        raise exception 'land_message_facts: sign in first; the facts are recorded as your agent''s'
+            using errcode = '42501';
+    end if;
+    select * into m from agentic.messages where id = p_message_id;
+    -- One answer for a message that does not exist and one the caller may not
+    -- read, so the error tells nobody which ids are real.
+    if m.id is null or not agentic.session_readable(m.session_id) then
+        raise exception 'land_message_facts: no message % that you may read', p_message_id
+            using errcode = '42501';
+    end if;
+    if m.role <> 'user' then
+        raise exception 'land_message_facts: message % is the %''s, and only what the user wrote is evidence about them',
+            p_message_id, m.role using errcode = '22023';
+    end if;
+    if jsonb_typeof(p_graph->'nodes') is distinct from 'array' then
+        raise exception 'land_message_facts: the graph needs a nodes array, as {"nodes":[...],"edges":[...]}'
+            using errcode = '22023';
+    end if;
+    return aiq.upsert_graph(p_graph, jsonb_build_object(
+        'session_id',  m.session_id,
+        'message_ids', jsonb_build_array(m.id),
+        'valid_from',  m.created_at,
+        'agent',       'agent:' || v_uid));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+revoke execute on function agentic.land_message_facts(uuid, jsonb) from public;
+grant execute on function agentic.land_message_facts(uuid, jsonb) to authenticated;
+
 create or replace function agentic.install_reflect_workflow(
     p_graph_model text default null,
     p_graph_agent text default 'structure_null',
