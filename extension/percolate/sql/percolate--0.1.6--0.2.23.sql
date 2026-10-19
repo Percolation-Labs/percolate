@@ -2492,6 +2492,10 @@ begin
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;
+    -- A signal can be a run's last step, and nothing else asks the question
+    -- complete_task asks: so a run ending on a person's decision stayed
+    -- `running` with every task succeeded (REM-957).
+    perform workflow.check_run_completion(p_run_id);
 end;
 $$ language plpgsql;
 
@@ -2767,7 +2771,7 @@ create or replace function workflow.promote_due_timers() returns int as $$
 declare r record; v_n int := 0;
 begin
     for r in
-        select id from workflow.tasks
+        select id, run_id from workflow.tasks
         where kind = 'timer' and status = 'ready' and run_after <= now()
         for update skip locked
     loop
@@ -2781,6 +2785,9 @@ begin
             output = '{"result": {"fired": true}}'::jsonb,
             completed_at = clock_timestamp()
         where id = r.id;
+        -- signal_task's defect too: a run whose last step is a timer would
+        -- otherwise stay `running` once it fired (REM-957).
+        perform workflow.check_run_completion(r.run_id);
         v_n := v_n + 1;
     end loop;
     return v_n;
@@ -13873,6 +13880,10 @@ begin
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;
+    -- A signal can be a run's last step, and nothing else asks the question
+    -- complete_task asks: so a run ending on a person's decision stayed
+    -- `running` with every task succeeded (REM-957).
+    perform workflow.check_run_completion(p_run_id);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 

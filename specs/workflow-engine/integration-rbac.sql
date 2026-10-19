@@ -1116,6 +1116,10 @@ begin
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;
+    -- A signal can be a run's last step, and nothing else asks the question
+    -- complete_task asks: so a run ending on a person's decision stayed
+    -- `running` with every task succeeded (REM-957).
+    perform workflow.check_run_completion(p_run_id);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
