@@ -1618,6 +1618,7 @@ begin
                   and t2.id in (select task_id from workflow.task_dependencies
                                 where depends_on_task_id = new.matrix_parent_id);
                 update workflow.runs set status = 'failed' where id = new.run_id;
+                perform workflow.stop_failed_run(new.run_id);   -- REM-980
                 return new;
             end if;
         end if;
@@ -2201,7 +2202,10 @@ begin
     -- 21k: no work lands under a cancelled run. complete_decision_task and
     -- add_task have always refused; this path never did, so a worker finishing
     -- in-flight work resurrected a cancelled graph one step at a time.
-    if exists (select 1 from workflow.runs where id = t.run_id and status = 'cancelled') then
+    -- REM-980: nor under a failed one, unless it is a compensation, which is
+    -- the work a failed saga still has to do (see stop_failed_run).
+    if exists (select 1 from workflow.runs where id = t.run_id
+               and (status = 'cancelled' or (status = 'failed' and t.compensates_task_id is null))) then
         update workflow.tasks set status = 'cancelled'
         where id = p_task_id and status in ('running', 'ready');
         return;
@@ -2316,6 +2320,55 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Defaulted to false so every existing call site keeps its previous behaviour.
 drop function if exists workflow.fail_task(uuid, jsonb);
 drop function if exists workflow.fail_task(uuid, jsonb, boolean);
+
+-- REM-980: A FAILED RUN STOPS ITS OTHER BRANCHES. A failing step cancelled
+-- only the steps that depended on it. Its siblings on other branches carried
+-- on: a ready one was still claimed and run, a running one finished, and its
+-- answer released its own successors -- a run reading `failed` kept doing
+-- work, and spending an agent's calls on it (REM-957's third fresh reader saw
+-- compare `failed` with story still `running`). A failed run is over, as a
+-- cancelled one is, so this applies cancel_run_unchecked's three statements
+-- to the forward steps: pending, ready and waiting steps are cancelled, a
+-- running step is asked to stop (heartbeat_task returns false and fail_task
+-- stops retrying it), and a running sub-workflow's child run is cancelled. A
+-- running step that answers anyway lands as `cancelled`, its answer
+-- discarded: complete_task refuses work under a failed run as under a
+-- cancelled one.
+--
+-- Compensations are the exception, and the reason this is not a status check
+-- in claim_task: they are the work a failed saga has left to do, created
+-- after the run failed (compensates_task_id set), and must still run. A side
+-- effect a cancelled step had already made outside the database is not
+-- undone: nothing recorded it, the same as under cancel_run.
+--
+-- p_except is the step being failed by a BEFORE trigger (apply_when), whose
+-- row may not be updated again by the statement updating it.
+create or replace function workflow.stop_failed_run(p_run_id uuid, p_except uuid default null)
+returns void as $$
+declare v_child uuid;
+begin
+    update workflow.tasks set status = 'cancelled'
+    where run_id = p_run_id and compensates_task_id is null
+      and id is distinct from p_except
+      and status in ('pending', 'ready', 'waiting_external');
+    update workflow.tasks set cancel_requested = true
+    where run_id = p_run_id and compensates_task_id is null
+      and id is distinct from p_except
+      and status = 'running';
+    -- A child run is cancelled, not failed: nothing in it went wrong. Written
+    -- here rather than calling cancel_run_unchecked, which only an install
+    -- with integration-rbac.sql has.
+    for v_child in select child_run_id from workflow.tasks
+                   where run_id = p_run_id and child_run_id is not null
+                     and id is distinct from p_except and status = 'running'
+    loop
+        update workflow.runs set status = 'cancelled', cancel_requested = true
+        where id = v_child and status = 'running';
+        perform workflow.stop_failed_run(v_child);
+    end loop;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
 -- Current form. It reached this shape in section 21e (A fan-out that survives a failed child.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.fail_task(
@@ -2380,6 +2433,7 @@ begin
 
     if not t.tolerate_failure then
         update workflow.runs set status = 'failed' where id = t.run_id;
+        perform workflow.stop_failed_run(t.run_id);   -- REM-980
     end if;
 
     if t.saga_group is not null and t.compensates_task_id is null
@@ -2709,7 +2763,11 @@ declare
 begin
     select run_id into v_run_id from workflow.tasks where id = p_task_id;
 
-    if exists (select 1 from workflow.runs where id = v_run_id and status = 'cancelled') then
+    -- REM-980: a failed run takes no decision either, as complete_task.
+    if exists (select 1 from workflow.runs r where r.id = v_run_id
+               and (r.status = 'cancelled'
+                    or (r.status = 'failed' and (select compensates_task_id from workflow.tasks
+                                                  where id = p_task_id) is null))) then
         update workflow.tasks set status = 'cancelled' where id = p_task_id and status = 'running';
         return;   -- fix #4: run was cancelled while this decision was executing
     end if;
@@ -7003,6 +7061,7 @@ begin
         new.error  := jsonb_build_object('error', 'when: ' || sqlerrm, 'sqlstate', sqlstate);
         update workflow.runs set status = 'failed'
         where id = new.run_id and status = 'running';
+        perform workflow.stop_failed_run(new.run_id, new.id);   -- REM-980
         return new;
     end;
     perform set_config('workflow.current_run_id', coalesce(v_prev, ''), true);
