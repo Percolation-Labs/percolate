@@ -18776,6 +18776,13 @@ begin
         nullif(current_setting('percolate.sql_passthrough_max_rows', true), '')::int,
         10000);
 
+    -- ONE TRAILING SEMICOLON IS PUNCTUATION, not a second statement (REM-1019).
+    -- Models end SQL with `;` by habit, and inside the subquery bracket below it
+    -- is a syntax error: 7 of 11 tool calls in one fresh-reader run were refused
+    -- for it. Stripping it changes nothing the cursor guards -- `select 1;
+    -- select 2` still holds a `;` after the strip and SPI still refuses it.
+    p_statement := regexp_replace(p_statement, ';[[:space:]]*$', '');
+
     begin
         set local transaction_read_only = on;
         begin
@@ -18789,8 +18796,10 @@ begin
             raise exception
                 'the SQL passthrough runs a single read query, and this is not (%)', sqlerrm
                 using errcode = 'syntax_error',
-                      hint = 'a SET or a second statement would change whose rows are read; '
-                             'write the read as one query';
+                      hint = case when strpos(p_statement, ';') > 0
+                                  then 'it holds two statements; send the one read query alone'
+                                  else 'a SET or a second statement would change whose rows are read; '
+                                       'write the read as one query' end;
         end;
         if jsonb_array_length(v_result) > v_max then
             raise exception
