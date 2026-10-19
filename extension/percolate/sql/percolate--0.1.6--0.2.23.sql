@@ -24906,6 +24906,68 @@ select rbac.add_scope_columns('agentic.skills', 'public');
 select rbac.add_scope_policy ('agentic.skills',       'skills');
 select rbac.add_scope_columns('agentic.plugins', 'public');
 select rbac.add_scope_policy ('agentic.plugins',      'plugins');
+
+-- ------------------------------------------------------------
+-- An agent's past versions (REM-983). An agent is a row, so changing its
+-- prompt is an UPDATE, and an UPDATE kept nothing: what the agent said before,
+-- who changed it and when were gone. Each change now keeps the row it
+-- replaced, whole, so "edit the prompt, ask again, select the history" is
+-- three statements and no deploy.
+--
+-- The whole row as jsonb rather than a column per agent column: a column added
+-- to agentic.agents is versioned the day it is added, with nothing here to
+-- forget. system_prompt is drawn out because it is what a reader asks about.
+--
+-- Readable exactly when the agent is: the policy asks agentic.agents, so its
+-- row policy decides, and a version cannot be shared more or less widely than
+-- the agent it belongs to. The versions go with the agent when it is deleted.
+-- ------------------------------------------------------------
+create table if not exists agentic.agent_versions (
+    agent_id         uuid not null references agentic.agents(id) on delete cascade,
+    version          int  not null,
+    agent            jsonb not null,
+    system_prompt    text generated always as (agent->>'system_prompt') stored,
+    -- When this version was written, and when it was replaced and by whom.
+    -- replaced_by is the signed-in user, null for an operator in psql;
+    -- replaced_by_role is the database login either way.
+    held_from        timestamptz not null,
+    replaced_at      timestamptz not null default now(),
+    replaced_by      uuid,
+    replaced_by_role text not null default session_user,
+    primary key (agent_id, version)
+);
+comment on table agentic.agent_versions is
+    'Each earlier version of an agent row, whole, with when it held and who replaced it.';
+
+-- An UPDATE that changes nothing but updated_at is not a version. The schema
+-- replays `update agentic.agents set model = model` on every upgrade, which
+-- without this would write a version of every agent at every upgrade.
+-- DEFINER so the row is written whoever updated the agent; nobody else can
+-- insert, since the table has no insert policy and no grant.
+create or replace function agentic.keep_agent_version() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if to_jsonb(old) - 'updated_at' = to_jsonb(new) - 'updated_at' then
+        return null;
+    end if;
+    insert into agentic.agent_versions (agent_id, version, agent, held_from, replaced_by)
+    values (old.id,
+            coalesce((select max(v.version) from agentic.agent_versions v
+                       where v.agent_id = old.id), 0) + 1,
+            to_jsonb(old), old.updated_at, rbac.current_user_id());
+    return null;
+end;
+$$;
+
+create or replace trigger trg_agents_keep_version
+    after update on agentic.agents
+    for each row execute function agentic.keep_agent_version();
+
+alter table agentic.agent_versions enable row level security;
+drop policy if exists agent_versions_with_agent on agentic.agent_versions;
+create policy agent_versions_with_agent on agentic.agent_versions
+    for select using (
+        exists (select 1 from agentic.agents a where a.id = agent_versions.agent_id));
 -- ------------------------------------------------------------
 -- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
 --
@@ -26616,9 +26678,18 @@ create or replace view agentic.agents_api as
            plugin, created_at, owner_id, org_id, visibility
       from agentic.agents;
 
+-- The versions as a reader sees them. Owned by api_viewer below like every
+-- view here, so the policy on agent_versions, and through it the one on
+-- agentic.agents, applies to whoever reads it.
+create or replace view agentic.agent_versions_api as
+    select v.agent_id, a.name, v.version, v.system_prompt, v.agent,
+           v.held_from, v.replaced_at, v.replaced_by, v.replaced_by_role
+      from agentic.agent_versions v
+      join agentic.agents a on a.id = v.agent_id;
+
 grant select on agentic.sessions, agentic.runs, agentic.messages,
                 agentic.agents, agentic.tool_servers,
-                agentic.skills, agentic.plugins to api_viewer;
+                agentic.skills, agentic.plugins, agentic.agent_versions to api_viewer;
 grant execute on function rbac.current_user_id() to api_viewer;
 
 -- Temporary CREATE, exactly as user-rbac does it: needed only for the
@@ -26629,6 +26700,7 @@ alter view agentic.runs_api         owner to api_viewer;
 alter view agentic.messages_api     owner to api_viewer;
 alter view agentic.tool_servers_api owner to api_viewer;
 alter view agentic.agents_api       owner to api_viewer;
+alter view agentic.agent_versions_api owner to api_viewer;
 alter view agentic.skills_api       owner to api_viewer;
 alter view agentic.plugins_api      owner to api_viewer;
 -- agents_pickable too, and it was not: owned by app_owner, which owns
@@ -26641,7 +26713,8 @@ revoke create on schema agentic from api_viewer;
 
 grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
                 agentic.tool_servers_api, agentic.agents_api,
-                agentic.skills_api, agentic.plugins_api to authenticated;
+                agentic.skills_api, agentic.plugins_api,
+                agentic.agent_versions_api to authenticated;
 grant select on agentic.agents_pickable to authenticated, api_viewer;
 
 grant execute on function agentic.create_session(text) to authenticated;
@@ -36416,6 +36489,7 @@ declare
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
         'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
+        'agentic.agent_versions',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

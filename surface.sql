@@ -493,6 +493,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- declares no expectations, so the audit passes by not asking.
 ('agentic','schema','agentic',null,'brief.md: conversations and delegation live in Postgres'),
 ('agentic','table','agentic.agents',null,'brief.md §2: every agent is a row, never runtime code'),
+('agentic','table','agentic.agent_versions',null,'brief.md §2: an agent is a row, so its past versions are rows too (REM-983)'),
+('agentic','view','agentic.agent_versions_api',null,'brief.md §2: a reader selects an agent''s history under the agent''s own row policy (REM-983)'),
 ('agentic','table','agentic.sessions',null,'brief.md §3: the conversation'),
 ('agentic','table','agentic.runs',null,'brief.md §3: interactive and scheduled runs are one primitive'),
 ('agentic','table','agentic.messages',null,'brief.md §4: the turn record'),

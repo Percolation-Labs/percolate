@@ -525,6 +525,7 @@ declare
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
         'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
         'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
+        'agentic.agent_versions',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',
