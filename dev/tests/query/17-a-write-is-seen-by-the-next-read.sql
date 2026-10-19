@@ -1,4 +1,7 @@
 -- A write to the graph is seen by the next read on the same connection (REM-994).
+-- requires-parser: 0.2.23
+-- (p8_graph_snapshot_invalidate is new in 0.2.23: on an older .so the trigger has
+--  nothing to call, the read stays stale as it was, and this file is deferred.)
 --
 -- The compiled snapshot is reused while the caller's identity and the tables'
 -- modification counters are unchanged, and the counters come from the stats
@@ -79,8 +82,8 @@ begin
         raise exception 'aiq.graph_snapshot_invalidate is not SECURITY DEFINER: a writer without the graph '
             'algorithms would fail on it';
     end if;
-    if not has_function_privilege(v_owner, 'p8_graph_snapshot_drop()', 'execute') then
-        raise exception 'aiq.graph_snapshot_invalidate''s owner % cannot run p8_graph_snapshot_drop()', v_owner;
+    if not has_function_privilege(v_owner, 'p8_graph_snapshot_invalidate()', 'execute') then
+        raise exception 'aiq.graph_snapshot_invalidate''s owner % cannot run p8_graph_snapshot_invalidate()', v_owner;
     end if;
     if (select count(*) from pg_trigger where tgname = 'graph_snapshot_invalidate'
           and tgrelid in ('aiq.nodes'::regclass, 'aiq.edges'::regclass, 'rbac.org_members'::regclass)) <> 3 then

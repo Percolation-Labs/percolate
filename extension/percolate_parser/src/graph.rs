@@ -2729,6 +2729,33 @@ fn p8_graph_snapshot_drop() -> JsonB {
     JsonB(json!({ "ok": true, "dropped": had }))
 }
 
+/// What `counters()` can never return, so a snapshot carrying it is rebuilt on
+/// its next use. `counters()` yields digits or the empty string.
+const INVALIDATED: &str = "invalidated";
+
+/// Mark this backend's snapshot stale without forgetting what it was built over.
+///
+/// A write on this connection is invisible to `counters()` until its stats are
+/// flushed, and never visible inside its own open transaction, so the snapshot
+/// was reused and the read after a write answered from before it (REM-994). The
+/// graph tables' statement triggers call this. It does NOT drop: the next
+/// `snapshot()` sees counters that cannot match, rebuilds for the same identity,
+/// and carries the caller's build filter forward -- the same path a counter
+/// change takes. Dropping lost the filter, which dev/tests/query/11 refuses: an
+/// operator who built over a subset because the whole graph does not fit the
+/// ceiling would have it undone by their own insert.
+#[pg_extern]
+fn p8_graph_snapshot_invalidate() -> JsonB {
+    let marked = match cached() {
+        Some(s) => {
+            s.counters = INVALIDATED.to_string();
+            true
+        }
+        None => false,
+    };
+    JsonB(json!({ "ok": true, "marked": marked }))
+}
+
 /// Personalised PageRank from one or more seeds.
 #[pg_extern]
 #[allow(clippy::too_many_arguments)]
