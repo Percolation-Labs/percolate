@@ -25687,21 +25687,29 @@ declare
     v_pspan   text;
     v_trace   text := p_trace_id;
 begin
-    select * into v_agent from agentic.agents where name = p_agent_name;
-    if not found then
-        raise exception 'no agent named %', p_agent_name;
-    end if;
-
     -- The gate is HERE and not in the HTTP layer, and that is the load-bearing
     -- part. An interactive turn, a delegated sub-agent through the gateway, a
     -- scheduled run and a workflow-triggered run all begin by calling this
     -- function; a check on POST /chat would gate one of the four. Delegation
     -- especially: a chain that starts as somebody permitted must not become a
     -- way to invoke an agent they are not.
+    --
+    -- And it comes BEFORE the lookup. This function is SECURITY DEFINER, so the
+    -- lookup sees every agent; looking first answered "no agent named %" for a
+    -- name that does not exist and "not authorized" for somebody else's private
+    -- one, which told any signed-in caller that the private agent existed
+    -- (REM-988, the probe 2e5995e closed in may_invoke). may_invoke is false
+    -- for both, so both now hear the same sentence.
     if not agentic.may_invoke(p_agent_name) then
         raise exception 'not authorized to invoke agent %', p_agent_name
             using errcode = 'insufficient_privilege',
                   hint = 'needs agents:invoke, and the agent must be visible to you';
+    end if;
+
+    select * into v_agent from agentic.agents where name = p_agent_name;
+    if not found then
+        -- Reachable only if the agent was deleted between the two statements.
+        raise exception 'no agent named %', p_agent_name;
     end if;
 
     if p_session_id is not null then
