@@ -30708,9 +30708,22 @@ begin
                 'valid_from', v_child.item->>'at',
                 'run_id', v_run, 'agent', 'structure_null'));
         else
+            -- A DOCUMENT SAYS WHEN IT WAS WRITTEN (REM-1022). register_text has
+            -- always stored p_metadata, and a caller that knows when the text
+            -- was said puts it there as said_at; nothing read it, so a note
+            -- written last January and uploaded today had every fact hold
+            -- from today, and the Mem0 and Zep tutorials typed their history
+            -- as graph JSON by hand to date it. A said_at that is not a time,
+            -- or is in the future, is ignored rather than failing the upload:
+            -- the document is still worth reading, and its facts then hold
+            -- from when they were read, as before.
             v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
                 'resource_id', v_child.rid, 'run_id', v_run,
                 'org_id', (select r.org_id from content.resources r where r.id = v_child.rid),
+                'valid_from', (select r.metadata->>'said_at' from content.resources r
+                                where r.id = v_child.rid
+                                  and pg_input_is_valid(r.metadata->>'said_at', 'timestamptz')
+                                  and (r.metadata->>'said_at')::timestamptz <= now()),
                 'window', v_child.win, 'agent', 'structure_null'));
         end if;
 
