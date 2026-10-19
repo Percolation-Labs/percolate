@@ -22,8 +22,21 @@
 -- the worker: it claims each task, reads its context through get_task_context as the worker does, and answers
 -- by step name. The live run behind this file used the published compose stack with dev/faultsrv as the model.
 --
--- What does not run here, and was run live instead: `percolate agent push` (a CLI) and the /chat turns of §1,
--- §4 and §7, which need the runtime.
+-- What does not run here, and was run live instead: `percolate agent push` (a CLI), the /chat turns of §1, §4 and
+-- §7, which need the runtime, and the two HTTP calls below, as the article prints them. The live run reads each
+-- from between its markers, drops the leading "-- ", and runs it with the compose stack's ports in place of 3000
+-- and 8080.
+--
+-- live: start_workflow (§2)
+-- curl -s http://localhost:3000/rpc/start_workflow \
+--   -H 'Content-Profile: workflow' -H "Authorization: Bearer $TOKEN" \
+--   -H 'Content-Type: application/json' \
+--   -d '{"p_name": "joke", "p_input": {"topic": "harbours"}}'
+-- /live
+-- live: sync (§4)
+-- curl -s -X POST http://localhost:8080/tools/p8-agents/sync \
+--   -H "Authorization: Bearer $TOKEN"
+-- /live
 --
 -- One transaction, rolled back.
 
@@ -31,8 +44,10 @@
 
 begin;
 
+-- The article's reader. A stack the article was followed on already has them.
 insert into rbac.users (id, email, status) values
-    ('00000000-0000-4000-8000-0000000025a1', 'wf25-reader@example.test', 'active');
+    ('00000000-0000-4000-8000-0000000025a1', 'me@example.com', 'active')
+on conflict (email) do nothing;
 
 create function pg_temp.check(p_ok boolean, p_what text) returns void as $$
 begin
@@ -45,8 +60,8 @@ end $$ language plpgsql;
 create function pg_temp.start(p_name text, p_input jsonb default '{}') returns uuid as $$
 declare v_run uuid;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub": "00000000-0000-4000-8000-0000000025a1", "role": "authenticated"}', true);
+    perform set_config('request.jwt.claims', json_build_object('sub',
+        (select id from rbac.users where email = 'me@example.com'), 'role', 'authenticated')::text, true);
     v_run := workflow.start_workflow(p_name, p_input);
     perform set_config('request.jwt.claims', '', true);
     return v_run;
@@ -303,7 +318,7 @@ begin
     perform pg_temp.check((v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid,
         '§7 the step sends the group''s session as session_id');
     perform pg_temp.check(exists (select 1 from agentic.sessions where id = v_sid
-                                   and owner_id = '00000000-0000-4000-8000-0000000025a1'),
+                                   and owner_id = (select id from rbac.users where email = 'me@example.com')),
         '§7 the session row exists, owned by the person who started the run');
     perform workflow.complete_task(t.id, '{"status": 200, "result": "safety"}', 'wf25');
 
@@ -348,14 +363,16 @@ begin
     perform set_config('run.id', r::text, true);
 end $$;
 
-select set_config('request.jwt.claims',
-    '{"sub": "00000000-0000-4000-8000-0000000025a1", "role": "authenticated"}', true);
 select current_setting('run.id') as run_id \gset
+-- From psql the reader says who they are before signing, as the published first-workflow page does.
 -- block: signal
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'me@example.com'))::text, false);
+
 select workflow.signal_task(:'run_id', 'approve',
   '{"decision":"released","by":"harbourmaster"}'::jsonb);
 -- /block
-select set_config('request.jwt.claims', '', true);
+select set_config('request.jwt.claims', '', false);
 
 select pg_temp.check((select status from workflow.runs where id = current_setting('run.id')::uuid) = 'succeeded',
     '§8 the signal finishes the run');
@@ -485,8 +502,8 @@ begin
     perform set_config('run.id', r::text, true);
 end $$;
 
-select set_config('request.jwt.claims',
-    '{"sub": "00000000-0000-4000-8000-0000000025a1", "role": "authenticated"}', true);
+select set_config('request.jwt.claims', json_build_object('sub',
+    (select id from rbac.users where email = 'me@example.com'), 'role', 'authenticated')::text, true);
 select workflow.signal_task(current_setting('run.id')::uuid, 'adjuster', '{"decision": "approved"}');
 select set_config('request.jwt.claims', '', true);
 
