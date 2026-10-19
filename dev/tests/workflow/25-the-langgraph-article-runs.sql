@@ -135,8 +135,10 @@ $$ language sql;
 --     sleep 2
 --   done
 --   psql "$P8_DSN" -c "select status, compensation_state from workflow.runs where id = '$1'" \
---     -c "select step_key, status, left(output->>'result', 100) as result from workflow.tasks
---         where run_id = '$1' order by completed_at nulls last, step_key"
+--     -c "select step_key, status, left(output->>'result', 60) as result,
+--                left(coalesce(error->>'error', error::text), 60) as error
+--         from workflow.tasks where run_id = '$1'
+--         order by completed_at nulls last, step_key"
 -- }
 -- /live
 
@@ -159,9 +161,9 @@ $$ language sql;
 -- required: [verdict, vessel]
 -- /live
 -- block: tool-server
-select agentic.upsert_tool_server($j${
+select (agentic.upsert_tool_server($j${
   "name": "harbour-query", "kind": "mcp", "url": "http://query-mcp:8090"
-}$j$::jsonb);
+}$j$::jsonb)).name;
 -- /block
 
 select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'harbour-query'),
@@ -170,7 +172,7 @@ select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'ha
 -- percolate agent push harbourmaster.yaml
 -- /live
 -- live: chat
--- curl -s -X POST $AGENT/tools/harbour-query/sync -H "Authorization: Bearer $TOKEN"
+-- curl -s -X POST $AGENT/tools/harbour-query/sync -H "Authorization: Bearer $TOKEN"; echo
 --
 -- curl -sN $AGENT/chat -D headers.txt \
 --   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -182,9 +184,9 @@ select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'ha
 -- §2 ------------------------------------------------------------------------------------------------------------
 -- The agents every workflow below names. The draft used them and never made them; define_yaml only warns.
 -- block: agents
-select agentic.upsert_agent(jsonb_build_object(
+select (agentic.upsert_agent(jsonb_build_object(
          'name', a, 'model', 'openai:gpt-4o-mini',
-         'system_prompt', 'You are the ' || replace(a, '_', ' ') || '. Answer briefly.'))
+         'system_prompt', 'You are the ' || replace(a, '_', ' ') || '. Answer briefly.'))).name
 from unnest(array['joker', 'writer', 'editor', 'planner', 'psc_report_extractor', 'classifier',
                   'researcher', 'fraud_scorer', 'document_reviewer', 'assessor']) a;
 -- /block
@@ -273,26 +275,26 @@ end $$;
 -- The writers are made here rather than pushed: the runtime lists agents nobody owns, and `percolate agent push`
 -- makes an agent its pusher's own (see the card linked from the article).
 -- block: router
-select agentic.upsert_tool_server($j${
+select (agentic.upsert_tool_server($j${
   "name": "p8-agents", "kind": "mcp",
   "url": "http://agent:8080/mcp", "serves_agents": true
-}$j$::jsonb);
+}$j$::jsonb)).name;
 
-select agentic.upsert_agent(jsonb_build_object('name', w, 'model', 'openai:gpt-4o-mini',
-         'system_prompt', 'Write a short ' || w || ' about what you are given.'))
+select (agentic.upsert_agent(jsonb_build_object('name', w, 'model', 'openai:gpt-4o-mini',
+         'system_prompt', 'Write a short ' || w || ' about what you are given.'))).name
 from unnest(array['story', 'joke', 'poem']) w;
 
-select agentic.upsert_agent($j${
+select (agentic.upsert_agent($j${
   "name": "router", "model": "openai:gpt-4o-mini",
   "system_prompt": "Hand the request to the story, joke or poem writer.",
   "tools": [{"server": "p8-agents",
              "tools": ["agent__story", "agent__joke", "agent__poem"]}]
-}$j$::jsonb);
+}$j$::jsonb)).name;
 -- /block
 
 -- live: sync
 -- curl -s -X POST $AGENT/tools/p8-agents/sync \
---   -H "Authorization: Bearer $TOKEN"
+--   -H "Authorization: Bearer $TOKEN"; echo
 -- /live
 -- live: router_chat
 -- curl -sN $AGENT/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -451,7 +453,7 @@ steps:
     sql: "select 'detention notice served' as notice"
   - id: cooling_off
     needs: [notice]
-    timer: 3600
+    timer: 5            # seconds; a real cooling-off would be 3600 or more
   - id: approve
     needs: [cooling_off]
     signal: true
@@ -466,7 +468,7 @@ declare r uuid := pg_temp.start('release_vessel', '{}');
 begin
     perform pg_temp.check(pg_temp.status(r, 'cooling_off') = 'ready'
         and (select run_after from workflow.tasks where run_id = r and step_key = 'cooling_off')
-            > now() + interval '59 minutes', '§8 the timer holds for an hour');
+            > now(), '§8 the timer holds the step');
     perform pg_temp.check(pg_temp.status(r, 'approve') = 'pending', '§8 the signal waits behind the timer');
 
     -- An hour passes.
