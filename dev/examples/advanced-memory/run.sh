@@ -2,7 +2,7 @@
 # Every block of "Advanced Percolate memory and semantic iteration", in order, from an empty directory, on part one's
 # stack (the LangGraph tour), against a real model and a real decider:
 #
-#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.24 \
+#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.25 \
 #         dev/examples/advanced-memory/run.sh [workdir]
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
@@ -12,7 +12,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.24}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.25}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}" "${JEV_API_KEY:?set JEV_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY; JK=$JEV_API_KEY
@@ -75,9 +75,13 @@ fail=0
 for f in $(ls $B | grep -v '^00-' | sort); do
   out=$CAP/${f%.*}.txt
   case $f in
+    01b-connect.sh)
+      # Connecting the reader's own Claude edits their client's config, so the run does not; 03-judge.sh makes the
+      # same MCP calls their Claude makes, as the same signed-in person.
+      { sed 's/^/$ /' $B/$f; echo "(not run here: it connects the reader's own Claude)"; } > $out ;;
     *.sh)
       if [ "$f" = 01-override.sh ]; then
-        sed "s#your-jev-key#$JK#" $B/$f > $W/blk.sh
+        sed -e "s#your-jev-key#$JK#" -e "s#P8_QUERY_MCP_PORT=8090#P8_QUERY_MCP_PORT=5787#" $B/$f > $W/blk.sh
       else
         cp $B/$f $W/blk.sh
       fi

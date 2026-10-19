@@ -17,11 +17,8 @@ select aiq.upsert_graph($g$
  '{"agent":"knit","run_id":"jun-02","valid_from":"2026-06-02T08:30:00Z"}') ->> 'edges_new' as jun_02;
 
 insert into team.people (name) values ('Priya Raman') on conflict do nothing;
-select aiq.dream() ->> 'promoted_exact' as bound_by_rule;
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'p. raman'),
-         (select node_id from aiq.lookup('Priya Raman')),
-         'harbour-lead', 'human', '{"why": "P. Raman is Priya"}') ->> 'moved' as bound_by_judge;
+select jsonb_pretty(aiq.dream() - 'since' - 'until') as dream;
 
-select relation, key from jsonb_to_recordset(aiq.query('GRAPH "Priya Raman" DEPTH 1') -> 'rows')
-    as r(relation text, key text) order by relation, key;
+select kind, evidence ->> 'key' as name, status,
+       (select string_agg(c ->> 'key', ', ') from jsonb_array_elements(evidence -> 'candidates') c) as candidates
+  from aiq.judgements order by queued_at, name;
