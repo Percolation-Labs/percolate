@@ -41,6 +41,20 @@ TOOL_PREFIX = "agent__"
 name so a delegation is legible in a message row and in an AG-UI stream without
 having to cross-reference the agents table."""
 
+AGENT_TOOL_INPUT = {
+    "type": "object",
+    "properties": {"prompt": {"type": "string", "description": "What this agent should do."}},
+    "required": ["prompt"],
+}
+"""Every agent-as-tool takes one argument. Stated once, for the gateway's
+``list_tools`` and for the catalogue a turn builds, so the two cannot differ."""
+
+
+def agent_tool_description(agent) -> str:
+    """What a router is told about one agent: the first line of its prompt."""
+    return (agent.system_prompt.splitlines() or [""])[0] or f"Delegate a task to the {agent.name} agent."
+
+
 SESSION_HEADER = "x-p8-session-id"
 PARENT_RUN_HEADER = "x-p8-parent-run-id"
 DELEGATED_BY_HEADER = "x-p8-delegated-by-message-id"
