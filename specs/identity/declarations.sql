@@ -58,7 +58,15 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
 -- indexes are partial and the interaction is subtle.
  ('agentic','agents','extracts_source','absence','an extractor with no source configured yet'),
  ('agentic','agents','extracts_doctype','absence','an extractor with no doctype configured yet'),
- ('agentic','messages','session_id','absence','a summary not attached to a session')
+ ('agentic','messages','session_id','absence','a summary not attached to a session'),
+
+-- owner_scope (REM-962): NULL is a VALUE, not a gap. It is "one node for this
+-- scope" -- an org or a public candidate -- and the identity indexes read it
+-- NULLS NOT DISTINCT so that every such row competes for the one slot, while a
+-- private candidate carries its owner and takes a slot of its own.
+ ('aiq','soft_nodes','owner_scope','value','one candidate for its org or public scope; a private candidate carries its owner'),
+ ('aiq','lake_nodes','owner_scope','value','one reference for its org or public scope; a private one carries its owner'),
+ ('aiq','node_keys','owner_scope','value','the key of a node that is not private; a private node''s key carries its owner')
 on conflict (schema_name, table_name, column_name) do update
   set means = excluded.means, why = excluded.why;
 

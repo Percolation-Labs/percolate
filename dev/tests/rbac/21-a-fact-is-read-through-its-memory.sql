@@ -19,8 +19,11 @@
 --   4. reference data is unchanged: an extraction with no resource stays
 --      public, nodes and edge;
 --   5. a context naming a different org from its resource is refused;
+--   7. two owners naming the same things: Leo reads all 8 of his facts and none
+--      of Maya's, though Maya named five of his entities first, because a thing
+--      named in a private memory is its owner's node;
 --   6. the control: with the edge's source gate removed, Leo reads Maya's fact,
---      so §1 can fail.
+--      so §1 can fail. (Last, because it rewrites the policy.)
 --
 -- One transaction, rolled back.
 
@@ -42,8 +45,16 @@ insert into rbac.orgs (id, slug, name) values (:org, 'rem962-org', 'REM-962 org'
 insert into rbac.org_members (org_id, user_id) values (:org, :maya), (:org, :leo);
 insert into content.channels (name, kind, org_id, visibility)
     values ('rem962', 'manual', rbac.shared_org_id(), 'public') on conflict do nothing;
+-- Two public places as a typed table, so a private memory that names them
+-- lands on PUBLIC nodes: the case where the edge's own sources are the only
+-- gate (§1's rem962_visited, §3).
+create table public.rem962_place (id uuid primary key default gen_random_uuid(),
+                                  name text not null, org_id uuid);
+select aiq.register_entity_table('rem962_place', 'public.rem962_place', 'n.name', 'n.name', 'n.org_id') \g /dev/null
+insert into public.rem962_place (name) values ('Harbour Town rem962'), ('Northland rem962');
 select aiq.register_graph_vocabulary('[{"relation":"rem962_allergic_to"},{"relation":"rem962_lives_in"},
-    {"relation":"rem962_works_at"},{"relation":"rem962_capital_of"},{"relation":"rem962_visited"}]') \g /dev/null
+    {"relation":"rem962_works_at"},{"relation":"rem962_capital_of"},{"relation":"rem962_visited"},
+    {"relation":"rem962_fact"}]') \g /dev/null
 
 -- The memories, written directly as their owners' rows: what register_text
 -- writes for a caller with no org (private, owned) and with one (scoped to it).
@@ -69,7 +80,7 @@ select aiq.upsert_graph(
       "edges":[{"s":0,"t":1,"r":"rem962_allergic_to"}]}',
     '{"resource_id":"00000000-0000-4000-8000-0000000962d1","agent":"coach"}') \g /dev/null
 select aiq.upsert_graph(
-    '{"nodes":[{"k":"soft","n":"Harbour Town rem962"},{"k":"soft","n":"Northland rem962"}],
+    '{"nodes":[{"k":"rem962_place","n":"Harbour Town rem962"},{"k":"rem962_place","n":"Northland rem962"}],
       "edges":[{"s":0,"t":1,"r":"rem962_lives_in"},{"s":0,"t":1,"r":"rem962_visited"}]}',
     '{"resource_id":"00000000-0000-4000-8000-0000000962d2","agent":"planner"}') \g /dev/null
 select aiq.upsert_graph(
@@ -84,7 +95,7 @@ reset role;
 -- Run as app_owner, the way an install or a migration lands reference data.
 set local role app_owner;
 select aiq.upsert_graph(
-    '{"nodes":[{"k":"soft","n":"Harbour Town rem962"},{"k":"soft","n":"Northland rem962"}],
+    '{"nodes":[{"k":"rem962_place","n":"Harbour Town rem962"},{"k":"rem962_place","n":"Northland rem962"}],
       "edges":[{"s":0,"t":1,"r":"rem962_capital_of"}]}',
     '{"agent":"gazetteer"}') \g /dev/null
 reset role;
@@ -132,8 +143,8 @@ begin
     if exists (select 1 from aiq.soft_nodes where key in ('peanuts rem962', 'maya o. rem962')) then
         raise exception 'Leo read a candidate extracted from Maya''s private memory from aiq.soft_nodes (REM-962)';
     end if;
-    -- Both names are public by now (the gazetteer named them), so only the
-    -- edge's own sources stand between Leo and Maya's fact about them.
+    -- Both places are public typed nodes, so only the edge's own sources
+    -- stand between Leo and Maya's fact about them.
     if pg_temp.rem962_facts('rem962_visited') <> 0 then
         raise exception 'Leo read Maya''s private fact between two public names: the edge is gated by its endpoints only (REM-962)';
     end if;
@@ -170,12 +181,12 @@ end $$;
 reset role;
 
 -- 3. The same edge from Leo's own memory: one row, two sources, and Leo reads
--- it through his. Its endpoints are public by now -- the gazetteer named both
--- -- so the edge's sources are the only gate left, and this is where reading
--- through ANY of them is tested rather than through the first.
+-- it through his. Its endpoints are the public places, so the edge's sources
+-- are the only gate, and this is where reading through ANY of them is tested
+-- rather than through the first.
 set local role worker;
 select aiq.upsert_graph(
-    '{"nodes":[{"k":"soft","n":"Harbour Town rem962"},{"k":"soft","n":"Northland rem962"}],
+    '{"nodes":[{"k":"rem962_place","n":"Harbour Town rem962"},{"k":"rem962_place","n":"Northland rem962"}],
       "edges":[{"s":0,"t":1,"r":"rem962_lives_in"}]}',
     '{"resource_id":"00000000-0000-4000-8000-0000000962d3","agent":"planner"}') \g /dev/null
 reset role;
@@ -218,6 +229,81 @@ exception when others then
     if sqlerrm not like '%names no resource%' then raise; end if;
 end $$;
 reset role;
+
+-- 7. Two owners, eight memories each, five entities in common, Maya first:
+-- the shape of jack's 48-fact fixture, where one shared node per name left Leo
+-- 3 of his 8. Each memory is private and has no org.
+set local role app_owner;
+insert into content.resources (id, channel_id, external_id, uri, status, org_id, visibility, owner_id)
+select ('00000000-0000-4000-8962-' || lpad(o.n || i::text, 12, '0'))::uuid, c.id,
+       'rem962-' || o.who || '-' || i, 'memo://rem962/' || o.who || '/' || i, 'ready',
+       rbac.shared_org_id(), 'private', o.owner::uuid
+  from content.channels c, generate_series(1, 8) i,
+       (values ('1', 'maya', :maya), ('2', 'leo', :leo)) o(n, who, owner)
+ where c.name = 'rem962';
+reset role;
+set local role worker;
+do $$
+declare
+    shared text[] := array['Leeds', 'Northwind Analytics', 'Priya Shah',
+                           'morning workouts', 'the half-marathon goal'];
+    who text; n text; i int; thing text;
+begin
+    foreach who in array array['maya', 'leo'] loop
+        n := case who when 'maya' then '1' else '2' end;
+        for i in 1 .. 8 loop
+            thing := case when i <= 5 then shared[i] else who || ' own thing ' || i end;
+            perform aiq.upsert_graph(
+                jsonb_build_object(
+                    'nodes', jsonb_build_array(
+                        jsonb_build_object('k', 'soft', 'n', who || ' rem962'),
+                        jsonb_build_object('k', 'soft', 'n', thing)),
+                    'edges', jsonb_build_array(jsonb_build_object('s', 0, 't', 1, 'r', 'rem962_fact'))),
+                jsonb_build_object('resource_id', '00000000-0000-4000-8962-' || lpad(n || i::text, 12, '0'),
+                                   'agent', 'planner'));
+        end loop;
+    end loop;
+end $$;
+reset role;
+
+create function pg_temp.rem962_own_facts(p_owner uuid) returns table (own int, others int) as $$
+    select count(*) filter (where mine)::int, count(*) filter (where not mine)::int
+      from (select exists (select 1 from jsonb_array_elements(e.provenance->'sources') src
+                             join content.resources r on r.id = (src->>'resource_id')::uuid
+                            where r.owner_id = p_owner) as mine
+              from aiq.edges e where e.relation = 'rem962_fact') x
+$$ language sql;
+grant execute on function pg_temp.rem962_own_facts(uuid) to authenticated;
+
+:as_leo
+do $$
+declare v record;
+begin
+    select * into v from pg_temp.rem962_own_facts('00000000-0000-4000-8000-0000000962b2');
+    if v.own <> 8 or v.others <> 0 then
+        raise exception 'Leo reads % of his 8 facts and % of Maya''s -- a thing Maya named first '
+                        'took his facts about it with it (REM-962)', v.own, v.others;
+    end if;
+    if (select count(*) from aiq.soft_nodes where key = 'leeds') <> 1 then
+        raise exception 'Leo does not read exactly his own Leeds candidate';
+    end if;
+end $$;
+:as_maya
+do $$
+declare v record;
+begin
+    select * into v from pg_temp.rem962_own_facts('00000000-0000-4000-8000-0000000962a1');
+    if v.own <> 8 or v.others <> 0 then
+        raise exception 'Maya reads % of her 8 facts and % of Leo''s', v.own, v.others;
+    end if;
+end $$;
+reset role;
+do $$
+begin
+    if (select count(*) from aiq.soft_nodes where key = 'leeds' and org_id = rbac.shared_org_id()) <> 2 then
+        raise exception 'two owners naming Leeds in private memory should hold two candidates';
+    end if;
+end $$;
 
 -- 6. The control: the policy as it was before this fix, endpoints only. Leo
 -- then reads Maya's private fact between public names, so §1 can fail.

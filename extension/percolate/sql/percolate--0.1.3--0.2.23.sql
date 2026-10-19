@@ -10551,20 +10551,6 @@ returns text as $$
     end;
 $$ language sql stable parallel safe;
 
--- THE WIDER OF TWO SCOPES, for a row that more than one source writes. A
--- graph candidate is named by every memory that mentions it, and its name is
--- as readable as the widest of them (REM-962, world-model-ingestion/graph.sql
--- upsert_graph). A scope this ranking does not know keeps what the row had:
--- widening into a scope nobody ranked would be a decision made by omission.
-create or replace function rbac.wider_visibility(p_have text, p_new text)
-returns text as $$
-    select case
-        when p_have = 'public' or p_new = 'public' then 'public'
-        when p_have = 'org' or p_new = 'org' then 'org'
-        else p_have
-    end;
-$$ language sql immutable parallel safe;
-
 -- AND THE SAME RULE AT A LAYER NOTHING CAN ROUTE AROUND.
 --
 -- The write policy holds it for callers arriving through RLS. Every SECURITY
@@ -14633,8 +14619,26 @@ comment on column aiq.nodes.entity_type is
 -- at NULLS NOT DISTINCT with no note has to work out for themselves whether it
 -- is load-bearing. It is not. Anything that makes org_id nullable again makes
 -- it load-bearing again.
+--
+-- AND owner_scope MADE IT LOAD-BEARING AGAIN (REM-962). A thing named in a
+-- PRIVATE memory is its owner's node, so two owners naming "Leeds" on one tier
+-- hold two nodes with one canonical key -- one shared node meant the second
+-- owner's facts landed on a node only the first could read, and Leo lost five
+-- of his eight. owner_scope is the node's owner when the node is private and
+-- NULL otherwise, so org and public scopes keep one node per key, and for them
+-- NULLS NOT DISTINCT is the whole constraint once more. Copied from the node by
+-- every writer, as org_id is, so the index needs no join.
+alter table aiq.node_keys add column if not exists owner_scope uuid;
+do $$
+begin
+    if exists (select 1 from pg_indexes
+                where schemaname = 'aiq' and indexname = 'idx_node_keys_canonical'
+                  and indexdef not like '%owner_scope%') then
+        drop index aiq.idx_node_keys_canonical;
+    end if;
+end $$;
 create unique index if not exists idx_node_keys_canonical
-    on aiq.node_keys (org_id, key, entity_type) nulls not distinct
+    on aiq.node_keys (org_id, key, entity_type, owner_scope) nulls not distinct
     where kind = 'canonical';
 create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
 -- AND THE SAME KEY FOLDED, because the exact tier asks for it folded and this
@@ -15440,12 +15444,14 @@ begin
         --    existing key row silently corrupts that scoping after a tenancy
         --    change.
         format($q$
-            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
+            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+            select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s),
+                   case when nd.visibility = 'private' then nd.owner_id end
             from %4$s n
             join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
             where %5$s
-            on conflict (node_id, key, kind) do update set org_id = excluded.org_id
+            on conflict (node_id, key, kind) do update
+                set org_id = excluded.org_id, owner_scope = excluded.owner_scope
         $q$, r.entity_type, r.key_expr, r.org_expr, p_rows, r.include_where),
 
         -- 4. Superseded canonical keys. Runs AFTER the insert, so a key_expr
@@ -15817,10 +15823,12 @@ begin
     -- entity_type and org_id are COPIED from the node for the same reason the
     -- projection copies them: the canonical-key unique index reads them
     -- without a join, and a hand-supplied value could disagree with the node.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select v_node_id, n.entity_type, v_norm, p_kind, n.org_id
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select v_node_id, n.entity_type, v_norm, p_kind, n.org_id,
+           case when n.visibility = 'private' then n.owner_id end
     from aiq.nodes n where n.id = v_node_id
-    on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
+    on conflict (node_id, key, kind) do update
+        set org_id = excluded.org_id, owner_scope = excluded.owner_scope;
 
     return v_node_id;
 end;
@@ -16052,8 +16060,9 @@ begin
     -- The survivor answers to the merged node's name. `alias`, never
     -- `canonical`: the canonical slot is unique per (org, key, entity_type) and
     -- the survivor already holds its own.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select p_canonical, n.entity_type, k.key, 'alias', n.org_id
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select p_canonical, n.entity_type, k.key, 'alias', n.org_id,
+           case when n.visibility = 'private' then n.owner_id end
       from aiq.node_keys k, aiq.nodes n
      where k.node_id = p_merged and k.kind = 'canonical' and n.id = p_canonical
     on conflict (node_id, key, kind) do nothing;
@@ -16102,10 +16111,11 @@ begin
     -- ...and the merged node takes it back as canonical, which is the operation
     -- D11 calls mechanical. It is mechanical because the row it belongs to was
     -- never deleted.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select r.merged_id, m->>'entity_type', m->>'key', m->>'kind',
-           (select org_id from aiq.nodes where id = r.merged_id)
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select r.merged_id, m->>'entity_type', m->>'key', m->>'kind', nd.org_id,
+           case when nd.visibility = 'private' then nd.owner_id end
       from jsonb_array_elements(r.evidence->'moved_keys') m
+      join aiq.nodes nd on nd.id = r.merged_id
     on conflict (node_id, key, kind) do nothing;
 
     -- The row is never deleted: an undone merge is part of the record, and a
@@ -27412,6 +27422,11 @@ end $$;
 -- written down rather than left silent, because a reader who finds the flag
 -- with no note has to derive for themselves whether it still matters. It does
 -- not, unless somebody makes org_id nullable again.
+--
+-- AND IT IS LOAD-BEARING AGAIN: §10 re-creates this index with owner_scope,
+-- which is NULL for every candidate that is not private (REM-962). This first
+-- shape is what a fresh install has until §10 adds the column it needs; on an
+-- existing database the name is already taken and this line does nothing.
 create unique index if not exists idx_soft_nodes_key
     on aiq.soft_nodes (org_id, claimed_kind, key) nulls not distinct;
 create index if not exists idx_soft_nodes_unresolved
@@ -27709,8 +27724,6 @@ declare
     v_vis     text;
     v_owner   uuid;
     v_res_org uuid;
-    v_got_vis text; v_got_owner uuid;
-    v_held    int := 0;         -- candidates another owner's private memory holds
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -27893,16 +27906,12 @@ begin
             insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     v_vis, v_owner)
-            on conflict (org_id, dataset, row_key) do update
+            -- Per owner when private, as a soft candidate is: see below.
+            on conflict (org_id, dataset, row_key, owner_scope) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.lake_nodes.label, excluded.label),
-                    attrs = content.merge_policy(aiq.lake_nodes.attrs, excluded.attrs),
-                    -- Widened, never narrowed: see the soft branch below.
-                    visibility = rbac.wider_visibility(aiq.lake_nodes.visibility, excluded.visibility)
-            returning id, visibility, owner_id into v_lake, v_got_vis, v_got_owner;
-            if v_vis = 'private' and v_got_vis = 'private' and v_got_owner is distinct from v_owner then
-                v_held := v_held + 1;
-            end if;
+                    attrs = content.merge_policy(aiq.lake_nodes.attrs, excluded.attrs)
+            returning id into v_lake;
             -- The projection fired with the statement above, so the node
             -- exists NOW -- invariant 4, with no special case.
             select id into v_id from aiq.nodes
@@ -27965,31 +27974,24 @@ begin
                 v_novel_kinds := v_novel_kinds || v_kind;
             end if;
 
-            -- A candidate's NAME is as visible as the widest memory that
-            -- named it: a public mention publishes a name a private one had
-            -- kept, because the public document published it first. Never
-            -- narrowed, because a name another reader already holds cannot be
-            -- taken back by a later private mention of it.
-            --
-            -- Two PRIVATE memories of different owners naming one thing on one
-            -- tier cannot both own the candidate, because its identity is
-            -- (org_id, claimed_kind, key) and carries no owner. It stays with
-            -- the first, the second owner's facts about it stay unreadable to
-            -- them as well as to everyone else, and the receipt counts it as
-            -- `nodes_held_by_another_owner`. Closed rather than open: the
-            -- alternative is publishing a name neither memory published.
+            -- A THING NAMED IN A PRIVATE MEMORY IS ITS OWNER'S CANDIDATE, so
+            -- identity is (org_id, claimed_kind, key, owner_scope) and
+            -- owner_scope is the owner of a private candidate, NULL otherwise
+            -- (§10). Maya's "Leeds" and Leo's "Leeds" are two nodes, each read
+            -- by its own owner; an org or public mention is one node for its
+            -- scope, as before. One node shared by all of them was measured on
+            -- jack's 48-fact fixture: whoever named a thing first owned it, and
+            -- Leo read 3 of his own 8 facts. Joining the two Leeds is
+            -- resolution's decision, made where it can be seen, not a side
+            -- effect of who wrote first.
             insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     v_vis, v_owner)
-            on conflict (org_id, claimed_kind, key) do update
+            on conflict (org_id, claimed_kind, key, owner_scope) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.soft_nodes.label, excluded.label),
-                    attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs),
-                    visibility = rbac.wider_visibility(aiq.soft_nodes.visibility, excluded.visibility)
-            returning id, visibility, owner_id into v_soft, v_got_vis, v_got_owner;
-            if v_vis = 'private' and v_got_vis = 'private' and v_got_owner is distinct from v_owner then
-                v_held := v_held + 1;
-            end if;
+                    attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs)
+            returning id into v_soft;
             select id into v_id from aiq.nodes
              where entity_type = 'soft' and entity_id = v_soft;
             v_counts := jsonb_set(v_counts, '{soft}', to_jsonb((v_counts->>'soft')::int + 1));
@@ -28210,7 +28212,6 @@ begin
         -- Beside the dropped relations, because they are the same fact about
         -- an extractor seen from the two halves of the graph.
         'node_kinds_unregistered', to_jsonb(v_novel_kinds),
-        'nodes_held_by_another_owner', v_held,
         'node_ids', to_jsonb(v_ids));
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -28343,7 +28344,7 @@ create or replace function aiq.promote_soft_node(p_soft_id uuid, p_target_node_i
 returns jsonb as $$
 declare
     v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int; v_res uuid;
-    v_key text; v_type text; v_same_org boolean; v_name jsonb;
+    v_key text; v_type text; v_same_org boolean; v_same_owner boolean; v_name jsonb;
     v_moved_keys jsonb := '[]'::jsonb;
 begin
     -- No default for either: a promotion attributed to nobody reads as evidence that
@@ -28458,13 +28459,24 @@ begin
     --     tenant's candidate promoted onto a shared node would publish the tenant's
     --     spelling to every reader of that node. Across orgs the name is not moved, and
     --     the evidence says so rather than leaving the absence to be guessed at.
-    select s.key, cn.org_id is not distinct from tn.org_id, tn.entity_type
-      into v_key, v_same_org, v_type
+    --
+    --     AND ONLY FROM ONE OWNER'S PRIVATE CANDIDATE ONTO THAT OWNER'S OWN NODE
+    --     (REM-962). A private candidate is one person's spelling from one
+    --     person's memory; aliased onto a shared node it becomes a key every
+    --     reader of that node resolves, which is the same publication the org
+    --     rule refuses. The edges still move, and stay gated by their sources.
+    select s.key, cn.org_id is not distinct from tn.org_id, tn.entity_type,
+           cn.visibility <> 'private'
+               or (tn.visibility = 'private' and tn.owner_id is not distinct from cn.owner_id)
+      into v_key, v_same_org, v_type, v_same_owner
       from aiq.soft_nodes s, aiq.nodes cn, aiq.nodes tn
      where s.id = p_soft_id and cn.id = v_cand and tn.id = p_target_node_id;
     if not v_same_org then
         v_name := jsonb_build_object('kept', false,
                                      'why', 'candidate and target are in different orgs');
+    elsif not v_same_owner then
+        v_name := jsonb_build_object('kept', false,
+                                     'why', 'the candidate is private to its owner and the target is not theirs');
     elsif exists (select 1 from aiq.node_keys where node_id = p_target_node_id and key = v_key) then
         v_name := jsonb_build_object('kept', true, 'already', true);
     else
@@ -28787,6 +28799,34 @@ select rbac.add_scope_columns('aiq.soft_nodes', 'public');
 select rbac.add_scope_policy ('aiq.soft_nodes');
 select rbac.add_scope_columns('aiq.lake_nodes', 'public');
 select rbac.add_scope_policy ('aiq.lake_nodes');
+
+-- A PRIVATE CANDIDATE IS ITS OWNER'S, AND THE KEY SAYS SO (REM-962).
+--
+-- owner_scope is the owner of a private candidate and NULL for an org or a
+-- public one, so the identity index keeps one node per scope for those and one
+-- per owner for private memory. GENERATED, so no writer can set it out of step
+-- with the scope it describes, and here rather than beside the tables because
+-- it reads the columns add_scope_columns() adds just above. Each index is
+-- re-created only while it lacks the column, so a replay leaves it alone.
+alter table aiq.soft_nodes add column if not exists owner_scope uuid
+    generated always as (case when visibility = 'private' then owner_id end) stored;
+alter table aiq.lake_nodes add column if not exists owner_scope uuid
+    generated always as (case when visibility = 'private' then owner_id end) stored;
+do $$
+begin
+    if exists (select 1 from pg_indexes where schemaname = 'aiq'
+                and indexname = 'idx_soft_nodes_key' and indexdef not like '%owner_scope%') then
+        drop index aiq.idx_soft_nodes_key;
+    end if;
+    if exists (select 1 from pg_indexes where schemaname = 'aiq'
+                and indexname = 'idx_lake_nodes_key' and indexdef not like '%owner_scope%') then
+        drop index aiq.idx_lake_nodes_key;
+    end if;
+end $$;
+create unique index if not exists idx_soft_nodes_key
+    on aiq.soft_nodes (org_id, claimed_kind, key, owner_scope) nulls not distinct;
+create unique index if not exists idx_lake_nodes_key
+    on aiq.lake_nodes (org_id, dataset, row_key, owner_scope) nulls not distinct;
 
 -- RE-PROJECTED WHERE A NODE'S SCOPE DIFFERS FROM ITS ROW'S, which is what the
 -- registration change above leaves behind on an existing database (REM-962):
@@ -37036,7 +37076,15 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
 -- indexes are partial and the interaction is subtle.
  ('agentic','agents','extracts_source','absence','an extractor with no source configured yet'),
  ('agentic','agents','extracts_doctype','absence','an extractor with no doctype configured yet'),
- ('agentic','messages','session_id','absence','a summary not attached to a session')
+ ('agentic','messages','session_id','absence','a summary not attached to a session'),
+
+-- owner_scope (REM-962): NULL is a VALUE, not a gap. It is "one node for this
+-- scope" -- an org or a public candidate -- and the identity indexes read it
+-- NULLS NOT DISTINCT so that every such row competes for the one slot, while a
+-- private candidate carries its owner and takes a slot of its own.
+ ('aiq','soft_nodes','owner_scope','value','one candidate for its org or public scope; a private candidate carries its owner'),
+ ('aiq','lake_nodes','owner_scope','value','one reference for its org or public scope; a private one carries its owner'),
+ ('aiq','node_keys','owner_scope','value','the key of a node that is not private; a private node''s key carries its owner')
 on conflict (schema_name, table_name, column_name) do update
   set means = excluded.means, why = excluded.why;
 

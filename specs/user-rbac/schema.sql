@@ -1137,20 +1137,6 @@ returns text as $$
     end;
 $$ language sql stable parallel safe;
 
--- THE WIDER OF TWO SCOPES, for a row that more than one source writes. A
--- graph candidate is named by every memory that mentions it, and its name is
--- as readable as the widest of them (REM-962, world-model-ingestion/graph.sql
--- upsert_graph). A scope this ranking does not know keeps what the row had:
--- widening into a scope nobody ranked would be a decision made by omission.
-create or replace function rbac.wider_visibility(p_have text, p_new text)
-returns text as $$
-    select case
-        when p_have = 'public' or p_new = 'public' then 'public'
-        when p_have = 'org' or p_new = 'org' then 'org'
-        else p_have
-    end;
-$$ language sql immutable parallel safe;
-
 -- AND THE SAME RULE AT A LAYER NOTHING CAN ROUTE AROUND.
 --
 -- The write policy holds it for callers arriving through RLS. Every SECURITY

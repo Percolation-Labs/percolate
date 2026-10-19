@@ -118,8 +118,26 @@ comment on column aiq.nodes.entity_type is
 -- at NULLS NOT DISTINCT with no note has to work out for themselves whether it
 -- is load-bearing. It is not. Anything that makes org_id nullable again makes
 -- it load-bearing again.
+--
+-- AND owner_scope MADE IT LOAD-BEARING AGAIN (REM-962). A thing named in a
+-- PRIVATE memory is its owner's node, so two owners naming "Leeds" on one tier
+-- hold two nodes with one canonical key -- one shared node meant the second
+-- owner's facts landed on a node only the first could read, and Leo lost five
+-- of his eight. owner_scope is the node's owner when the node is private and
+-- NULL otherwise, so org and public scopes keep one node per key, and for them
+-- NULLS NOT DISTINCT is the whole constraint once more. Copied from the node by
+-- every writer, as org_id is, so the index needs no join.
+alter table aiq.node_keys add column if not exists owner_scope uuid;
+do $$
+begin
+    if exists (select 1 from pg_indexes
+                where schemaname = 'aiq' and indexname = 'idx_node_keys_canonical'
+                  and indexdef not like '%owner_scope%') then
+        drop index aiq.idx_node_keys_canonical;
+    end if;
+end $$;
 create unique index if not exists idx_node_keys_canonical
-    on aiq.node_keys (org_id, key, entity_type) nulls not distinct
+    on aiq.node_keys (org_id, key, entity_type, owner_scope) nulls not distinct
     where kind = 'canonical';
 create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
 -- AND THE SAME KEY FOLDED, because the exact tier asks for it folded and this
@@ -925,12 +943,14 @@ begin
         --    existing key row silently corrupts that scoping after a tenancy
         --    change.
         format($q$
-            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
+            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+            select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s),
+                   case when nd.visibility = 'private' then nd.owner_id end
             from %4$s n
             join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
             where %5$s
-            on conflict (node_id, key, kind) do update set org_id = excluded.org_id
+            on conflict (node_id, key, kind) do update
+                set org_id = excluded.org_id, owner_scope = excluded.owner_scope
         $q$, r.entity_type, r.key_expr, r.org_expr, p_rows, r.include_where),
 
         -- 4. Superseded canonical keys. Runs AFTER the insert, so a key_expr
@@ -1302,10 +1322,12 @@ begin
     -- entity_type and org_id are COPIED from the node for the same reason the
     -- projection copies them: the canonical-key unique index reads them
     -- without a join, and a hand-supplied value could disagree with the node.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select v_node_id, n.entity_type, v_norm, p_kind, n.org_id
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select v_node_id, n.entity_type, v_norm, p_kind, n.org_id,
+           case when n.visibility = 'private' then n.owner_id end
     from aiq.nodes n where n.id = v_node_id
-    on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
+    on conflict (node_id, key, kind) do update
+        set org_id = excluded.org_id, owner_scope = excluded.owner_scope;
 
     return v_node_id;
 end;
@@ -1537,8 +1559,9 @@ begin
     -- The survivor answers to the merged node's name. `alias`, never
     -- `canonical`: the canonical slot is unique per (org, key, entity_type) and
     -- the survivor already holds its own.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select p_canonical, n.entity_type, k.key, 'alias', n.org_id
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select p_canonical, n.entity_type, k.key, 'alias', n.org_id,
+           case when n.visibility = 'private' then n.owner_id end
       from aiq.node_keys k, aiq.nodes n
      where k.node_id = p_merged and k.kind = 'canonical' and n.id = p_canonical
     on conflict (node_id, key, kind) do nothing;
@@ -1587,10 +1610,11 @@ begin
     -- ...and the merged node takes it back as canonical, which is the operation
     -- D11 calls mechanical. It is mechanical because the row it belongs to was
     -- never deleted.
-    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-    select r.merged_id, m->>'entity_type', m->>'key', m->>'kind',
-           (select org_id from aiq.nodes where id = r.merged_id)
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+    select r.merged_id, m->>'entity_type', m->>'key', m->>'kind', nd.org_id,
+           case when nd.visibility = 'private' then nd.owner_id end
       from jsonb_array_elements(r.evidence->'moved_keys') m
+      join aiq.nodes nd on nd.id = r.merged_id
     on conflict (node_id, key, kind) do nothing;
 
     -- The row is never deleted: an undone merge is part of the record, and a

@@ -736,8 +736,10 @@ begin
       -- cache. `resolved_node_id` is on the allow-list because it is the one
       -- such pointer the design does want; who may read the row is not one at
       -- all, and it sits beside org_id for the same reason org_id does.
+      -- owner_scope likewise: owner_id restated as identity for a private
+      -- candidate (REM-962), a person and never a node.
       and c.column_name not in ('id','claimed_kind','key','label','attrs','org_id',
-                                'owner_id','visibility',
+                                'owner_id','visibility','owner_scope',
                                 'first_seen_at','last_seen_at','resolved_node_id',
                                 'dataset','row_key');
     if v_bad is not null then
