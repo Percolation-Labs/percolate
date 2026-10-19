@@ -125,9 +125,13 @@ set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000105602"}';
 set local role authenticated;
 do $$
 begin
-    if jsonb_array_length(agentic.session_messages(current_setting('t.session')::uuid)) <> 0 then
+    -- Refused by name, not handed an empty list (REM-1021).
+    begin
+        perform agentic.session_messages(current_setting('t.session')::uuid);
         raise exception '4 Leo was handed Maya''s conversation';
-    end if;
+    exception when insufficient_privilege then
+        if sqlerrm not like '%is not one the run''s owner can read%' then raise; end if;
+    end;
     begin
         perform agentic.land_message_facts(current_setting('t.lisbon')::uuid,
             '{"nodes":[{"k":"person","n":"Maya Okafor"},{"k":"place","n":"Madrid"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}');
