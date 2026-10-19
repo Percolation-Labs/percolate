@@ -1,6 +1,6 @@
 -- A remembered fact bears on a question (REM-996, specs/claims/schema.sql §10a3). A memory edge ("Priya prefers
 -- DuckDB") and a question ("Should the harbour analytics move off Postgres?") are joined by claims.bears_on: a link
--- someone proposed, which a person confirms or rejects, and never a stance. A link is readable only with both of
+-- someone proposed, which a person confirms or disputes, and never a stance. A link is readable only with both of
 -- its ends, so a private fact's link is invisible to anyone who cannot read the fact. claims.facts_to_link offers
 -- each unlinked fact its nearest questions in one space, shaped as the decider's request, and claims.edge_readable,
 -- the definers' copy of aiq.edges' read policy, agrees with that policy for every caller tested here.
@@ -139,15 +139,15 @@ begin
         'the private link is not even a row to Leo';
 end $$;
 
--- 4. A rejection is a later row, and a rejected link drops out of both reads.
+-- 4. A dispute is a later row, and a disputed link drops out of both reads.
 :as_maya
 do $$
 begin
-    perform claims.review_bears_on((select v from ids where k = 'priv'), (select v from ids where k = 'q'), 'rejected');
+    perform claims.review_bears_on((select v from ids where k = 'priv'), (select v from ids where k = 'q'), 'disputed');
     assert (select count(*) from claims.questions_of_fact((select v from ids where k = 'priv'))) = 0,
-        'a rejected link is not read';
+        'a disputed link is not read';
     assert (select count(*) from claims.bears_on where edge_id = (select v from ids where k = 'priv')) = 2,
-        'and the proposal it rejected is still there';
+        'and the proposal it disputed is still there';
 end $$;
 reset role;
 

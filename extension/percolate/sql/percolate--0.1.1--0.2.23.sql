@@ -34928,7 +34928,7 @@ revoke all on function claims.install_question_embed_workflow(text, text) from p
 --       with nothing joining them. claims.bears_on is that join.
 --
 -- A LINK, NEVER A VERDICT. A row says a fact bears on a question, who proposed it and with what probability, and,
--- later, whether a person confirmed or rejected it. It carries no stance: what the fact says about the question is
+-- later, whether a person confirmed or disputed it. It carries no stance: what the fact says about the question is
 -- read from the fact, by whoever reads it, and a stored stance would be a content verdict the graph made for them.
 -- Proposals come from a decider (Jev) through claims.install_fact_question_workflow; a person confirms. Later rows
 -- supersede earlier ones for the same pair, and none is rewritten.
@@ -34972,12 +34972,12 @@ create table if not exists claims.bears_on (
     id          bigint generated always as identity primary key,
     edge_id     uuid not null references aiq.edges(id) on delete cascade,
     question_id uuid not null references claims.questions(id),
-    status      text not null check (status in ('proposed', 'confirmed', 'rejected')),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
     p           real check (p between 0 and 1),
     tx          bigint not null references claims.tx(id)
 );
 comment on table claims.bears_on is
-    'That a remembered fact bears on a question: proposed by a decider or a reader, confirmed or rejected by a person. Never a stance.';
+    'That a remembered fact bears on a question: proposed by a decider or a reader, confirmed or disputed by a person. Never a stance.';
 create index if not exists bears_on_edge on claims.bears_on (edge_id, question_id, id desc);
 create index if not exists bears_on_question on claims.bears_on (question_id, edge_id, id desc);
 -- Rows are never rewritten, and a later row supersedes. Deletes are not refused: the only delete is the cascade
@@ -35046,7 +35046,7 @@ begin
 end;
 $$;
 
--- A person's verdict on a link: confirmed or rejected, as a later row. Human only: whether a fact bears on a question
+-- A person's verdict on a link: confirmed or disputed, as a later row (the claims graph's own status words). Human only: whether a fact bears on a question
 -- is a judgement, and an agent's judgement is what `proposed` already records.
 create or replace function claims.review_bears_on(p_edge uuid, p_question uuid, p_status text,
                                                   p_reason text default null) returns bigint
@@ -35057,10 +35057,10 @@ declare
     v_id   bigint;
 begin
     if rbac.current_actor() <> 'person' then
-        raise insufficient_privilege using message = 'Only a person confirms or rejects a link', hint = 'human_only';
+        raise insufficient_privilege using message = 'Only a person confirms or disputes a link', hint = 'human_only';
     end if;
-    if p_status is null or p_status not in ('confirmed', 'rejected') then
-        raise check_violation using message = 'A review is confirmed or rejected';
+    if p_status is null or p_status not in ('confirmed', 'disputed') then
+        raise check_violation using message = 'A review is confirmed or disputed';
     end if;
     if not claims.edge_readable(p_edge) or not claims.question_readable(p_question) then
         raise no_data_found using message = 'Link not found';
@@ -35098,7 +35098,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
            count(*) filter (where s.stance = 'depends' and s.op = 'assert')::int
       from link l join claims.questions q on q.id = l.question_id
       left join answer s on s.question_id = l.question_id
-     where l.status <> 'rejected'
+     where l.status <> 'disputed'
      group by l.question_id, q.search_text, l.status, l.p, l.at
      order by (l.status = 'confirmed') desc, l.p desc nulls last;
 $$;
@@ -35115,7 +35115,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
          order by b.edge_id, t.at desc, b.id desc)
     select l.edge_id, f.content, f.relation, l.status, l.p, l.at, f.valid_from, f.valid_to
       from link l join claims.fact_texts f on f.id = l.edge_id
-     where l.status <> 'rejected'
+     where l.status <> 'disputed'
      order by (l.status = 'confirmed') desc, l.p desc nulls last;
 $$;
 
