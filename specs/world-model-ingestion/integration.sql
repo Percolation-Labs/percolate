@@ -64,7 +64,17 @@ select aiq.register_entity_table(
           else coalesce(n.uri, n.external_id, n.id::text) end',   -- canonical key
     'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
-    $$n.status = 'ready'$$
+    $$n.status = 'ready'$$,
+    -- The resource's own scope (REM-962). The default reads the org alone, so
+    -- a private memory with no org projected a `public` node: Leo could not
+    -- read Maya's resource and could LOOKUP its title. And inside an org, a
+    -- member's private document was every member's node.
+    -- Read through to_jsonb, as the projection reads owner_id, because the
+    -- column arrives with add_scope_columns() further down and that call writes
+    -- to the table first: the trigger this regenerates fires on that write,
+    -- with the column not there yet. Until it is, the old rule.
+    p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$
 );
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
@@ -117,6 +127,19 @@ on conflict (src_type, relation, dst_type) do update
 select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
+
+-- Re-projected where a document node's scope differs from its resource's,
+-- which the registration change above leaves behind on an existing database:
+-- its regenerated trigger projects the next write, not the rows already there.
+-- On that drift, not on every replay (REM-962). After add_scope_columns,
+-- because the projection reads the column it adds.
+do $$
+begin
+    if exists (select 1 from aiq.nodes nd join content.resources n on n.id = nd.entity_id
+                where nd.entity_type = 'document' and nd.visibility is distinct from n.visibility) then
+        perform aiq.rebuild_entity_type('document');
+    end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- A ROW NOBODY CAN EVER READ IS REFUSED HERE, because writing it has now been

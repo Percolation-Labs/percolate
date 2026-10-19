@@ -30,6 +30,22 @@ insert into demo_t_org (name) values ('Northgate Freight');
 -- test that the remedy works, not a setup detail.
 select aiq.register_graph_vocabulary();
 
+-- The documents the extractions below name as their source. upsert_graph
+-- reads a fact's scope from the resource it was read out of and refuses one
+-- that names no resource (REM-962), so a source is a row rather than a uuid.
+-- Written as an operator writes reference content: shared tier, public, and
+-- `pending` so none of them projects a document node into the counts below.
+insert into content.channels (name, kind, org_id, visibility)
+    values ('t-graph-index', 'manual', rbac.shared_org_id(), 'public') on conflict do nothing;
+insert into content.resources (id, channel_id, external_id, status, org_id, visibility)
+select v.id::uuid, c.id, 't-graph-index-' || v.id, 'pending', rbac.shared_org_id(), 'public'
+  from content.channels c,
+       (values ('33330000-0000-0000-0000-000000000001'), ('33330000-0000-0000-0000-000000000002'),
+               ('33330000-0000-0000-0000-0000000000b1'), ('33330000-0000-0000-0000-0000000000b2'),
+               ('11111111-1111-1111-1111-111111111111'), ('22222222-2222-2222-2222-222222222222'),
+               ('33333333-3333-3333-3333-333333333333')) v(id)
+ where c.name = 't-graph-index';
+
 -- ---------------------------------------------------------------------
 -- 1. A REGISTERED KIND THAT RESOLVES LANDS ON THE REAL TYPED VERTEX (G2, (a)).
 -- ---------------------------------------------------------------------

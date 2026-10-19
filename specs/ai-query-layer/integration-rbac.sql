@@ -118,10 +118,14 @@ create policy node_keys_via_node on aiq.node_keys for select
 -- Its own org_id stays for authoring/provenance, not for read gating -- same
 -- reasoning as node_keys above, and it additionally prevents an edge from
 -- revealing that an invisible node exists.
-drop policy if exists edges_via_endpoints on aiq.edges;
-create policy edges_via_endpoints on aiq.edges for select
-  using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
-     and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
+--
+-- THE POLICY ITSELF IS WRITTEN IN world-model-ingestion/graph.sql §10a, which
+-- adds the second half: an edge is also read through the memories it was
+-- extracted from (REM-962). That gate reads content.resources, which does not
+-- exist yet when this file is assembled, and one policy written in two files is
+-- two policies that drift. Until §10a runs during an install, aiq.edges has RLS
+-- on and no read policy, so it returns nothing to a caller -- closed, and only
+-- for the length of the install.
 -- An edge's retraction history is visible exactly when the edge is, by the
 -- same inheritance. It carries no org of its own to gate on, and the schema's
 -- blanket `grant select on all tables in schema aiq` reaches it, so without

@@ -10312,6 +10312,20 @@ returns text as $$
     end;
 $$ language sql stable parallel safe;
 
+-- THE WIDER OF TWO SCOPES, for a row that more than one source writes. A
+-- graph candidate is named by every memory that mentions it, and its name is
+-- as readable as the widest of them (REM-962, world-model-ingestion/graph.sql
+-- upsert_graph). A scope this ranking does not know keeps what the row had:
+-- widening into a scope nobody ranked would be a decision made by omission.
+create or replace function rbac.wider_visibility(p_have text, p_new text)
+returns text as $$
+    select case
+        when p_have = 'public' or p_new = 'public' then 'public'
+        when p_have = 'org' or p_new = 'org' then 'org'
+        else p_have
+    end;
+$$ language sql immutable parallel safe;
+
 -- AND THE SAME RULE AT A LAYER NOTHING CAN ROUTE AROUND.
 --
 -- The write policy holds it for callers arriving through RLS. Every SECURITY
@@ -19383,10 +19397,14 @@ create policy node_keys_via_node on aiq.node_keys for select
 -- Its own org_id stays for authoring/provenance, not for read gating -- same
 -- reasoning as node_keys above, and it additionally prevents an edge from
 -- revealing that an invisible node exists.
-drop policy if exists edges_via_endpoints on aiq.edges;
-create policy edges_via_endpoints on aiq.edges for select
-  using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
-     and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
+--
+-- THE POLICY ITSELF IS WRITTEN IN world-model-ingestion/graph.sql §10a, which
+-- adds the second half: an edge is also read through the memories it was
+-- extracted from (REM-962). That gate reads content.resources, which does not
+-- exist yet when this file is assembled, and one policy written in two files is
+-- two policies that drift. Until §10a runs during an install, aiq.edges has RLS
+-- on and no read policy, so it returns nothing to a caller -- closed, and only
+-- for the length of the install.
 -- An edge's retraction history is visible exactly when the edge is, by the
 -- same inheritance. It carries no org of its own to gate on, and the schema's
 -- blanket `grant select on all tables in schema aiq` reaches it, so without
@@ -23118,7 +23136,17 @@ select aiq.register_entity_table(
           else coalesce(n.uri, n.external_id, n.id::text) end',   -- canonical key
     'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
-    $$n.status = 'ready'$$
+    $$n.status = 'ready'$$,
+    -- The resource's own scope (REM-962). The default reads the org alone, so
+    -- a private memory with no org projected a `public` node: Leo could not
+    -- read Maya's resource and could LOOKUP its title. And inside an org, a
+    -- member's private document was every member's node.
+    -- Read through to_jsonb, as the projection reads owner_id, because the
+    -- column arrives with add_scope_columns() further down and that call writes
+    -- to the table first: the trigger this regenerates fires on that write,
+    -- with the column not there yet. Until it is, the old rule.
+    p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$
 );
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
@@ -23171,6 +23199,19 @@ on conflict (src_type, relation, dst_type) do update
 select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
+
+-- Re-projected where a document node's scope differs from its resource's,
+-- which the registration change above leaves behind on an existing database:
+-- its regenerated trigger projects the next write, not the rows already there.
+-- On that drift, not on every replay (REM-962). After add_scope_columns,
+-- because the projection reads the column it adds.
+do $$
+begin
+    if exists (select 1 from aiq.nodes nd join content.resources n on n.id = nd.entity_id
+                where nd.entity_type = 'document' and nd.visibility is distinct from n.visibility) then
+        perform aiq.rebuild_entity_type('document');
+    end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- A ROW NOBODY CAN EVER READ IS REFUSED HERE, because writing it has now been
@@ -27193,14 +27234,29 @@ select aiq.register_entity_table(
     p_key_expr      => 'n.claimed_kind || ''/'' || n.key',
     p_summary_expr  => 'coalesce(n.label, n.key)',
     p_org_expr      => 'n.org_id',
-    p_include_where => 'n.resolved_node_id is null');
+    p_include_where => 'n.resolved_node_id is null',
+    -- The candidate's own scope, which upsert_graph takes from the memory it
+    -- was read out of (REM-962). The default reads the org alone, and on the
+    -- shared tier that is `public` for a private memory's names.
+    -- Read through to_jsonb, as the projection reads owner_id, because the
+    -- column arrives with add_scope_columns() further down and that call writes
+    -- to the table first: the trigger this regenerates fires on that write,
+    -- with the column not there yet. Until it is, the old rule.
+    p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$);
 
 select aiq.register_entity_table(
     p_entity_type   => 'lake',
     p_source_table  => 'aiq.lake_nodes',
     p_key_expr      => 'n.dataset || ''/'' || n.row_key',
     p_summary_expr  => 'coalesce(n.label, n.row_key)',
-    p_org_expr      => 'n.org_id');
+    p_org_expr      => 'n.org_id',
+    -- Read through to_jsonb, as the projection reads owner_id, because the
+    -- column arrives with add_scope_columns() further down and that call writes
+    -- to the table first: the trigger this regenerates fires on that write,
+    -- with the column not there yet. Until it is, the old rule.
+    p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$);
 -- No include_where on lake: a reference has no promotion path, because the row
 -- it points at is already the real thing. There is nothing to resolve it INTO,
 -- which is exactly what distinguishes a reference from a candidate.
@@ -27408,6 +27464,14 @@ declare
     v_retracted bigint;
     v_novel_kinds text[] := '{}';  -- claimed kinds no catalogue knows, for the receipt
     v_lock record;              -- the canonical lock order, see the loop below
+    -- THE SCOPE A NEW CANDIDATE IS WRITTEN AT, taken from the resource the
+    -- facts were read out of whenever the context names one (REM-962). See
+    -- the block after Validate.
+    v_vis     text;
+    v_owner   uuid;
+    v_res_org uuid;
+    v_got_vis text; v_got_owner uuid;
+    v_held    int := 0;         -- candidates another owner's private memory holds
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -27422,6 +27486,54 @@ begin
             coalesce(p_context->>'agent','?');
     end if;
     v_n := jsonb_array_length(v_nodes);
+
+    -- ---- A FACT IS NO MORE VISIBLE THAN THE MEMORY IT CAME FROM (REM-962).
+    --
+    -- The scope of what this writes used to come from the CONTEXT, and the
+    -- context is whatever the worker remembered to pass. A context with no
+    -- org_id is the shared tier, and on the shared tier a worker -- which has
+    -- no request identity, so rbac.default_visibility() reads it as an
+    -- operator -- wrote `public`. Measured on 0.2.23: Maya registers "Maya is
+    -- allergic to peanuts" with no org, the resource is private and Leo reads
+    -- none of it, and the worker's upsert_graph naming only that resource_id
+    -- gave Leo `Maya O. -allergic_to-> peanuts` from aiq.edges. Inside an org
+    -- the same shape gave every member a fact from one member's PRIVATE
+    -- resource, because naming an org meant `org`.
+    --
+    -- So when the context names a resource, the RESOURCE says: its org (a
+    -- context that disagrees is refused rather than believed), its visibility
+    -- and its owner become the new candidate's. Without one, nothing changes:
+    -- an extraction with no source is reference data or a run's own output,
+    -- and keeps rbac.default_visibility()'s rule. Read here, as the definer,
+    -- because a worker may not read a private resource and must still scope
+    -- what it extracted from one.
+    --
+    -- This scopes the NODES. The FACTS are gated at read time by the edge
+    -- policy (§10a), through every source an edge carries -- which is what an
+    -- edge merged from two memories needs, and what scoping at write time
+    -- cannot give it.
+    if nullif(p_context->>'resource_id', '') is not null then
+        if not pg_input_is_valid(p_context->>'resource_id', 'uuid') then
+            raise exception 'context resource_id % is not a uuid (agent: %)',
+                p_context->>'resource_id', coalesce(p_context->>'agent','?');
+        end if;
+        select r.org_id, r.visibility, r.owner_id into v_res_org, v_vis, v_owner
+          from content.resources r where r.id = (p_context->>'resource_id')::uuid;
+        if not found then
+            raise exception 'context resource_id % names no resource, so the scope of what it '
+                'yielded cannot be known (agent: %)',
+                p_context->>'resource_id', coalesce(p_context->>'agent','?');
+        end if;
+        if nullif(p_context->>'org_id', '') is not null
+           and rbac.org_or_shared(v_res_org) is distinct from v_org then
+            raise exception 'context org_id % is not the org of resource % (%)',
+                p_context->>'org_id', p_context->>'resource_id', rbac.org_or_shared(v_res_org)
+                using hint = 'pass the resource alone; its org is read from it';
+        end if;
+        v_org := rbac.org_or_shared(v_res_org);
+    else
+        v_vis := rbac.default_visibility(v_org);
+    end if;
 
     -- ---- LOCK IN A CANONICAL ORDER FIRST, or concurrent workers deadlock.
     --
@@ -27539,14 +27651,19 @@ begin
             -- scope when the extraction named one and `public` when this is
             -- shared reference data, which is the same rule everything else
             -- in the collection uses.
-            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility)
+            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
-                    rbac.default_visibility(v_org))
+                    v_vis, v_owner)
             on conflict (org_id, dataset, row_key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.lake_nodes.label, excluded.label),
-                    attrs = content.merge_policy(aiq.lake_nodes.attrs, excluded.attrs)
-            returning id into v_lake;
+                    attrs = content.merge_policy(aiq.lake_nodes.attrs, excluded.attrs),
+                    -- Widened, never narrowed: see the soft branch below.
+                    visibility = rbac.wider_visibility(aiq.lake_nodes.visibility, excluded.visibility)
+            returning id, visibility, owner_id into v_lake, v_got_vis, v_got_owner;
+            if v_vis = 'private' and v_got_vis = 'private' and v_got_owner is distinct from v_owner then
+                v_held := v_held + 1;
+            end if;
             -- The projection fired with the statement above, so the node
             -- exists NOW -- invariant 4, with no special case.
             select id into v_id from aiq.nodes
@@ -27609,14 +27726,31 @@ begin
                 v_novel_kinds := v_novel_kinds || v_kind;
             end if;
 
-            insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility)
+            -- A candidate's NAME is as visible as the widest memory that
+            -- named it: a public mention publishes a name a private one had
+            -- kept, because the public document published it first. Never
+            -- narrowed, because a name another reader already holds cannot be
+            -- taken back by a later private mention of it.
+            --
+            -- Two PRIVATE memories of different owners naming one thing on one
+            -- tier cannot both own the candidate, because its identity is
+            -- (org_id, claimed_kind, key) and carries no owner. It stays with
+            -- the first, the second owner's facts about it stay unreadable to
+            -- them as well as to everyone else, and the receipt counts it as
+            -- `nodes_held_by_another_owner`. Closed rather than open: the
+            -- alternative is publishing a name neither memory published.
+            insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
-                    rbac.default_visibility(v_org))
+                    v_vis, v_owner)
             on conflict (org_id, claimed_kind, key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.soft_nodes.label, excluded.label),
-                    attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs)
-            returning id into v_soft;
+                    attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs),
+                    visibility = rbac.wider_visibility(aiq.soft_nodes.visibility, excluded.visibility)
+            returning id, visibility, owner_id into v_soft, v_got_vis, v_got_owner;
+            if v_vis = 'private' and v_got_vis = 'private' and v_got_owner is distinct from v_owner then
+                v_held := v_held + 1;
+            end if;
             select id into v_id from aiq.nodes
              where entity_type = 'soft' and entity_id = v_soft;
             v_counts := jsonb_set(v_counts, '{soft}', to_jsonb((v_counts->>'soft')::int + 1));
@@ -27837,6 +27971,7 @@ begin
         -- Beside the dropped relations, because they are the same fact about
         -- an extractor seen from the two halves of the graph.
         'node_kinds_unregistered', to_jsonb(v_novel_kinds),
+        'nodes_held_by_another_owner', v_held,
         'node_ids', to_jsonb(v_ids));
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -28413,6 +28548,85 @@ select rbac.add_scope_columns('aiq.soft_nodes', 'public');
 select rbac.add_scope_policy ('aiq.soft_nodes');
 select rbac.add_scope_columns('aiq.lake_nodes', 'public');
 select rbac.add_scope_policy ('aiq.lake_nodes');
+
+-- RE-PROJECTED WHERE A NODE'S SCOPE DIFFERS FROM ITS ROW'S, which is what the
+-- registration change above leaves behind on an existing database (REM-962):
+-- the trigger it regenerates projects the next write, not the rows already
+-- there. Gated on that drift rather than run on every replay, because a
+-- rebuild is a pass over every candidate and a converged database has nothing
+-- for it to correct. After add_scope_columns, because the projection reads the
+-- column it adds. A candidate written before the fix keeps the scope it was
+-- written at, which for a no-org memory was `public`; its facts are gated
+-- through their source regardless (§10a).
+do $$
+begin
+    if exists (select 1 from aiq.nodes nd join aiq.soft_nodes n on n.id = nd.entity_id
+                where nd.entity_type = 'soft' and nd.visibility is distinct from n.visibility) then
+        perform aiq.rebuild_entity_type('soft');
+    end if;
+    if exists (select 1 from aiq.nodes nd join aiq.lake_nodes n on n.id = nd.entity_id
+                where nd.entity_type = 'lake' and nd.visibility is distinct from n.visibility) then
+        perform aiq.rebuild_entity_type('lake');
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 10a. A fact is read through the memory it came from (REM-962).
+--
+-- An edge used to be readable whenever both its endpoints were, and that is
+-- not enough once a candidate's NAME can be public while a fact about it is
+-- private: "peanuts" is a public word, and Maya's allergy to it is hers. So an
+-- edge is now also gated through its provenance. Every source that names a
+-- resource is a memory the fact was read out of, and the caller reads the fact
+-- when they may read ANY of them -- which is what an edge merged from two
+-- memories needs, and what Leo's own "lives in Leeds" needs when Maya said it
+-- first. A source with no resource (an authored edge, reference data, a run's
+-- own output) gates nothing, which leaves every edge written before this
+-- behaving as it did.
+--
+-- At read time and in the policy, rather than as a scope stamped on the row at
+-- write time, because the row is shared and its sources are not: a stamp would
+-- have to be the widest of them (publishing the private one) or the narrowest
+-- (hiding the public one from its own author). And because the resource's
+-- scope is the truth, a memory made private or deleted later takes its facts
+-- with it, with nothing to re-project.
+--
+-- content.resources is read AS THE CALLER, so its own policy is the whole
+-- decision; this function adds no rule of its own. SQL rather than plpgsql so
+-- the planner inlines it into the policy. A resource_id that is not a uuid
+-- matches nothing rather than raising, because an error inside a read policy
+-- fails every read of the table.
+--
+-- Defined here and not beside nodes' policy in ai-query-layer/integration-rbac.sql,
+-- because that file is assembled before the content plane exists; that file
+-- says so where the policy used to be.
+create or replace function aiq.edge_sources_readable(p_provenance jsonb)
+returns boolean as $$
+    -- CASE, not OR, because OR promises no order and both array functions
+    -- raise on a `sources` that is not an array.
+    select case
+        when jsonb_typeof(p_provenance->'sources') is distinct from 'array' then true
+        when jsonb_array_length(p_provenance->'sources') = 0 then true
+        else exists (
+            select 1
+              from jsonb_array_elements(p_provenance->'sources') s
+             where not (s ? 'resource_id')
+                or exists (select 1 from content.resources r
+                            where r.id = case when pg_input_is_valid(s->>'resource_id', 'uuid')
+                                              then (s->>'resource_id')::uuid end))
+    end;
+$$ language sql stable parallel safe;
+comment on function aiq.edge_sources_readable(jsonb) is
+    'True when the caller may read some memory an edge was read out of, or it names none.';
+-- Every role the policy reads edges for, and no other: a policy calls its
+-- functions as the caller.
+grant execute on function aiq.edge_sources_readable(jsonb) to authenticated, api_viewer;
+
+drop policy if exists edges_via_endpoints on aiq.edges;
+create policy edges_via_endpoints on aiq.edges for select
+  using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
+     and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id)
+     and aiq.edge_sources_readable(aiq.edges.provenance));
 
 -- ------------------------------------------------------------
 -- 11. The default vocabulary, installed rather than left to a first caller.
