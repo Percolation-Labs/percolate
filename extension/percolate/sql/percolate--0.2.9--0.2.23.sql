@@ -20495,6 +20495,52 @@ begin
     return p8_graph_snapshot_drop();
 end $$;
 
+-- A WRITE DROPS THE WRITING CONNECTION'S SNAPSHOT (REM-994). The snapshot is
+-- reused while the caller's identity and the tables' modification counters are
+-- unchanged, and those counters come from the stats collector: a backend's own
+-- writes reach them only once its pending stats are flushed, and never while its
+-- transaction is open. So a write followed by a read on the same connection was
+-- answered from before the write -- measured: an edge inserted and then asked
+-- for through aiq.related() came back absent until aiq.graph_snapshot(true) was
+-- called by hand, and dev/tests/query/16-memory-walk.sql made that call to get
+-- its as-of reads right.
+--
+-- A statement-level trigger on the three tables the counters watch gives the
+-- writer's backend its snapshot back. The next read rebuilds through SPI as the
+-- caller, inside the same transaction, so it sees the write. Other connections
+-- still rely on the counters, which is what the snapshot has always promised
+-- them (graph.rs §1, property 2: a stale read by construction, with `stale` as
+-- the hint).
+--
+-- SECURITY DEFINER, because the compiled drop is not granted to the roles that
+-- write the graph: `authenticated` and `worker` lack it until
+-- aiq.enable_graph_algorithms() grants it, and a trigger that raised for them
+-- would make their writes fail rather than their reads stale. Dropping only ever
+-- frees this backend's own memory and admission slot, so running it as the
+-- owner gives the writer nothing it could use. Without the parser installed
+-- there is no snapshot to drop, and the trigger does nothing.
+create or replace function aiq.graph_snapshot_invalidate()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, public as $$
+begin
+    if to_regprocedure('p8_graph_snapshot_drop()') is not null then
+        perform p8_graph_snapshot_drop();
+    end if;
+    return null;
+end $$;
+
+create or replace trigger graph_snapshot_invalidate
+    after insert or update or delete or truncate on aiq.nodes
+    for each statement execute function aiq.graph_snapshot_invalidate();
+create or replace trigger graph_snapshot_invalidate
+    after insert or update or delete or truncate on aiq.edges
+    for each statement execute function aiq.graph_snapshot_invalidate();
+-- rbac.org_members is the third table the counters watch: a membership change
+-- moves what this caller may see (graph.rs, counters()).
+create or replace trigger graph_snapshot_invalidate
+    after insert or update or delete or truncate on rbac.org_members
+    for each statement execute function aiq.graph_snapshot_invalidate();
+
 -- ------------------------------------------------------------
 -- 2. RELATED — personalised PageRank from one or more named seeds.
 --
