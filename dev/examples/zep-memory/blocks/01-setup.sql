@@ -7,8 +7,7 @@ select rbac.create_user_with_password('ana@example.com', 'a long passphrase for 
 insert into rbac.user_roles (user_id, role)
 select id, 'member' from rbac.users where email = 'ana@example.com' on conflict do nothing;
 
--- 2. The relations memory may use. The conversation reader takes its list from here when it is installed,
---    so this goes first (REM-1057).
+-- 2. The relations memory may use. From 0.2.25 the conversation reader reads them at each run (REM-1057).
 select aiq.register_graph_vocabulary($v$[
   {"relation": "lives_in",  "single_valued": true},
   {"relation": "works_at"},
