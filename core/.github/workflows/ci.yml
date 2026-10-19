@@ -336,6 +336,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_provider_failures.py
 
+      # An agent: step whose model provider refuses the key, or whose account
+      # has no credit, fails once with the provider's status, rather than as a
+      # 502 the worker retries five times (REM-987).
+      - name: A refused model key fails an agent step once
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_refused_model_key_fails_the_step_once.py
+
       # The Jev decision client sends typed questions to a pinned version, fails
       # once on a refused key, waits out a rate limit, and keeps the key unbound
       # until the operator binds it. The live cases skip without JEV_API_KEY.
@@ -405,6 +412,12 @@ jobs:
       - name: A refused tool call reaches the model and the stream as a failure
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_a_refused_tool_call_is_an_error.py
+
+      # A router was offered one catalogue cached for every caller, so an agent
+      # its caller had pushed (private, owned) was never on it (REM-971).
+      - name: A router is offered the agents its caller may read
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_router_offers_what_its_caller_may_read.py
 
       # brief.md §5.1: the agent gateway is the same deployed runtime. Only
       # `agent gateway` served MCP, no shipped deployment runs it, and the

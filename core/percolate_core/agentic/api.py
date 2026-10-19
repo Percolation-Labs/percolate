@@ -47,6 +47,7 @@ from .db import PgClient, PgRepository
 from .gateway import accept_run, caller_claims, user_id_of
 from .runtime import EventSink, channel, relay
 from .sequencer import AgentNotFound, TurnSequencer
+from .task_outcome import provider_failure
 from .settings import Settings
 from . import telemetry
 
@@ -541,6 +542,11 @@ async def _completion(
     # write the turn needed was reported as the model or a tool failing.
     if result.error is not None and (refused := refusal(result.error)) is not None:
         return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+    if result.error is not None and (failure := provider_failure(result.error)) is not None \
+            and failure.terminal:
+        agent = await repo.get_agent(body.model)
+        return _provider_refused(failure, result.error, agent.model if agent else None,
+                                 result.run.id, session.id)
     if status == "quota_exceeded":
         message = f"run {result.run.id} stopped: no quota remaining for this caller"
         return JSONResponse(
@@ -585,6 +591,44 @@ async def _completion(
             ],
         },
         headers={"X-P8-Session-Id": str(session.id)},
+    )
+
+
+# The variable each provider's key is read from, for the providers whose
+# pydantic-ai default is known here; any other names its provider instead.
+_KEY_VARIABLE = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+
+
+def _provider_refused(failure, exc: BaseException, model: str | None, run_id: Any,
+                      session_id: Any) -> JSONResponse:
+    """A turn the model provider refused for good, answered with the provider's status.
+
+    It was a 502 with "worth retrying" in the step error that the worker then
+    wrote, so an `agent:` step retried a refused key five times, about half a
+    minute a step, and told its reader the opposite of the cause (REM-987). The
+    provider's status and error code go back unchanged, and the worker's
+    `raise_for` reads them by the same rule (`core.provider_errors`): a refused
+    credential or an account with no credit fails the step once.
+    """
+    provider = (model or "").split(":", 1)[0]
+    message = (f"run {run_id}: the model provider answered HTTP {failure.status} "
+               f"for model {model or '(unknown)'}: {failure.why}")
+    if failure.reason == "auth":
+        variable = _KEY_VARIABLE.get(provider)
+        message += (f"; the key is read from {variable}" if variable
+                    else f"; check the key the {provider or 'model'} provider reads")
+    provided = getattr(exc, "body", None)
+    code = provided.get("code") if isinstance(provided, dict) else None
+    return JSONResponse(
+        {"detail": message,
+         "error": {"type": failure.reason, "code": code or failure.reason, "message": message}},
+        status_code=failure.status,
+        headers={"X-P8-Session-Id": str(session_id)},
     )
 
 
