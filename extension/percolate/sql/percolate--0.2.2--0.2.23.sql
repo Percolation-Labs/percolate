@@ -28061,6 +28061,9 @@ declare
     -- today about something said in January holds from January; without this
     -- every edge held from the moment of the write. Checked in the body.
     v_valid_from timestamptz;
+    -- What a second assertion from the same source looks like in an edge's
+    -- sources list, so a re-run appends nothing. Null: always append.
+    v_dedup jsonb;
     v_e       jsonb;
     v_node    jsonb;
     v_k       text; v_scheme text; v_kind text; v_name text; v_key text;
@@ -28139,6 +28142,12 @@ begin
     -- policy (§10a), through every source an edge carries -- which is what an
     -- edge merged from two memories needs, and what scoping at write time
     -- cannot give it.
+    if nullif(p_context->>'resource_id', '') is not null
+       and nullif(p_context->>'session_id', '') is not null then
+        raise exception 'a context names a resource or a session, not both (agent: %)',
+            coalesce(p_context->>'agent','?');
+    end if;
+
     if nullif(p_context->>'resource_id', '') is not null then
         if not pg_input_is_valid(p_context->>'resource_id', 'uuid') then
             raise exception 'context resource_id % is not a uuid (agent: %)',
@@ -28158,6 +28167,33 @@ begin
                 using hint = 'pass the resource alone; its org is read from it';
         end if;
         v_org := rbac.org_or_shared(v_res_org);
+        v_dedup := jsonb_build_object('resource_id', p_context->>'resource_id');
+    -- A CONVERSATION IS A MEMORY TOO (REM-969). What a session's messages
+    -- state is scoped by the SESSION, exactly as a resource scopes what was
+    -- read out of it: its org, visibility and owner. Without this a fact from
+    -- a private conversation had no source to gate it and went to whoever
+    -- could read both of its ends -- REM-962 again, by another door.
+    elsif nullif(p_context->>'session_id', '') is not null then
+        if not pg_input_is_valid(p_context->>'session_id', 'uuid') then
+            raise exception 'context session_id % is not a uuid (agent: %)',
+                p_context->>'session_id', coalesce(p_context->>'agent','?');
+        end if;
+        select se.org_id, se.visibility, se.owner_id into v_res_org, v_vis, v_owner
+          from agentic.sessions se where se.id = (p_context->>'session_id')::uuid;
+        if not found then
+            raise exception 'context session_id % names no session, so the scope of what it '
+                'yielded cannot be known (agent: %)',
+                p_context->>'session_id', coalesce(p_context->>'agent','?');
+        end if;
+        if nullif(p_context->>'org_id', '') is not null
+           and rbac.org_or_shared(v_res_org) is distinct from v_org then
+            raise exception 'context org_id % is not the org of session % (%)',
+                p_context->>'org_id', p_context->>'session_id', rbac.org_or_shared(v_res_org)
+                using hint = 'pass the session alone; its org is read from it';
+        end if;
+        v_org := rbac.org_or_shared(v_res_org);
+        v_dedup := jsonb_strip_nulls(jsonb_build_object('session_id', p_context->>'session_id',
+                                                        'message_ids', p_context->'message_ids'));
     else
         v_vis := rbac.default_visibility(v_org);
     end if;
@@ -28466,6 +28502,8 @@ begin
             'tier','machine',
             'sources', jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
                 'resource_id', p_context->>'resource_id',
+                'session_id',  p_context->>'session_id',
+                'message_ids', p_context->'message_ids',
                 'agent',       p_context->>'agent',
                 'run_id',      p_context->>'run_id',
                 'window',      p_context->'window',
@@ -28512,9 +28550,9 @@ begin
             set provenance = (aiq.edges.provenance - 'closed') || jsonb_build_object(
                     'sources',
                     coalesce(aiq.edges.provenance->'sources', '[]'::jsonb)
-                    || (case when coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
-                                  jsonb_build_array(jsonb_build_object(
-                                      'resource_id', p_context->>'resource_id'))
+                    || (case when v_dedup is not null
+                                  and coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
+                                      jsonb_build_array(v_dedup)
                              then '[]'::jsonb
                              else excluded.provenance->'sources' end)),
                 -- GREATEST, not least: weight is the BEST provenance tier that
@@ -29497,6 +29535,16 @@ end $$;
 -- Defined here and not beside nodes' policy in ai-query-layer/integration-rbac.sql,
 -- because that file is assembled before the content plane exists; that file
 -- says so where the policy used to be.
+-- Whether the caller may read a session, by the scope rule its own policy
+-- applies. DEFINER, because a caller holds no grant on agentic.sessions (they
+-- read sessions_api), and a policy runs its functions as the caller.
+create or replace function agentic.session_readable(p_session uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select coalesce((select rbac.may_read(se.owner_id, se.org_id, se.visibility)
+                       from agentic.sessions se where se.id = p_session), false);
+$$;
+grant execute on function agentic.session_readable(uuid) to authenticated, api_viewer;
+
 create or replace function aiq.edge_sources_readable(p_provenance jsonb)
 returns boolean as $$
     -- CASE, not OR, because OR promises no order and both array functions
@@ -29507,10 +29555,14 @@ returns boolean as $$
         else exists (
             select 1
               from jsonb_array_elements(p_provenance->'sources') s
-             where not (s ? 'resource_id')
+             where not (s ? 'resource_id' or s ? 'session_id')
                 or exists (select 1 from content.resources r
                             where r.id = case when pg_input_is_valid(s->>'resource_id', 'uuid')
-                                              then (s->>'resource_id')::uuid end))
+                                              then (s->>'resource_id')::uuid end)
+                -- A conversation gates what was said in it, by the session's
+                -- own rule (REM-969).
+                or agentic.session_readable(case when pg_input_is_valid(s->>'session_id', 'uuid')
+                                                 then (s->>'session_id')::uuid end))
     end;
 $$ language sql stable parallel safe;
 comment on function aiq.edge_sources_readable(jsonb) is
@@ -29859,7 +29911,8 @@ begin
     for v_child in
         select t.id, t.step_key, t.output->'result' as payload,
                (t.input->'item'->>'resource_id')::uuid as rid,
-               t.input->'item'->'window_ordinal' as win
+               t.input->'item'->'window_ordinal' as win,
+               t.input->'item' as item
         from workflow.tasks t
         where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
         order by t.created_at
@@ -29926,10 +29979,22 @@ begin
         -- tier, so every graph the upload pipeline produced was readable
         -- outside the org its document was uploaded into. Found backfilling
         -- private session transcripts on the dogfood stack, 2026-09-11.
-        v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
-            'resource_id', v_child.rid, 'run_id', v_run,
-            'org_id', (select r.org_id from content.resources r where r.id = v_child.rid),
-            'window', v_child.win, 'agent', 'structure_null'));
+        -- A WINDOW SAYS WHAT IT WAS READ FROM. A document's window names its
+        -- resource; a conversation's names its session, the message and when
+        -- it was said (agentic.session_windows, REM-969), so the fact holds
+        -- from the moment it was stated and cites the message that stated it.
+        if v_child.item ? 'session_id' then
+            v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
+                'session_id', v_child.item->>'session_id',
+                'message_ids', jsonb_build_array(v_child.item->>'message_id'),
+                'valid_from', v_child.item->>'at',
+                'run_id', v_run, 'agent', 'structure_null'));
+        else
+            v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
+                'resource_id', v_child.rid, 'run_id', v_run,
+                'org_id', (select r.org_id from content.resources r where r.id = v_child.rid),
+                'window', v_child.win, 'agent', 'structure_null'));
+        end if;
 
         v_acc := jsonb_build_object(
             'graphs',             (v_acc->>'graphs')::int + 1,
@@ -30243,6 +30308,77 @@ $$ language plpgsql;
 -- EXECUTE on every new function until it is taken away, so this line is what
 -- makes "owner-only" true rather than intended.
 revoke execute on function content.install_ingest_workflow(text, text, text, boolean, text, text) from public;
+
+-- ------------------------------------------------------------
+-- A conversation writes what it learned into the graph (REM-969).
+--
+-- A session's messages were rows in agentic.messages and nothing read them
+-- back into memory. reflect_session is the upload graph branch pointed at a
+-- conversation: one window per thing the user said, the same extractor row,
+-- the same landing. What changes is the source. Each fact cites the session
+-- and the message it came from and holds from when it was said, and it is
+-- scoped by the session, so a private conversation's facts are its owner's
+-- (aiq.upsert_graph, aiq.edge_sources_readable).
+--
+-- THE USER'S WORDS ONLY. activity-memory.md §3: "only the user's words are
+-- evidence about the user". The assistant's turns are context and are not
+-- windows, so an agent saying "you live in Leeds" never becomes the fact.
+--
+-- Started per session, by whoever may read it:
+--     select workflow.start_workflow('reflect_session', '{"session_id": "..."}');
+-- ------------------------------------------------------------
+create or replace function agentic.session_windows(p_session uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'session_id', m.session_id,
+               'message_id', m.id,
+               'at',         m.created_at,
+               'content',    m.content) order by m.seq), '[]'::jsonb)
+    from agentic.messages m
+    where m.session_id = p_session
+      and m.role = 'user'
+      and coalesce(btrim(m.content), '') <> ''
+      -- The session's read rule, as windows_to_index applies its resource's.
+      and (rbac.is_operator() or agentic.session_readable(p_session));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+revoke execute on function agentic.session_windows(uuid) from public;
+
+select workflow.register_step_function(
+    'session_windows', 'agentic.session_windows', array['uuid'], 30000,
+    'One window per message the user wrote in a session, with the message id and when it was said');
+
+create or replace function agentic.install_reflect_workflow(
+    p_graph_model text default null,
+    p_graph_agent text default 'structure_null',
+    p_name        text default 'reflect_session'
+) returns text as $$
+begin
+    insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+    values ('structure_extraction', 20, 20, 1)
+    on conflict (key) do nothing;
+
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: graph
+    matrix:
+      rows: {function: session_windows, args: ['{{run.session_id}}']}
+      max_fanout: 200
+      template:
+        queue: http
+        rate_key: structure_extraction
+        rest: %2$s
+
+  - id: land_graph
+    needs: [graph]
+    sql: {function: land_graph_windows, args: ['{{steps.graph.result.task_id}}']}
+$y$, p_name, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::text));
+
+    return p_name || ': each message the user wrote, graph-indexed with ' || p_graph_agent
+                  || ' (' || coalesce(p_graph_model, 'the agent''s own model') || ')';
+end;
+$$ language plpgsql;
+revoke execute on function agentic.install_reflect_workflow(text, text, text) from public;
 
 -- The channel POST /files defaults to when no X-P8-Channel header is sent.
 --

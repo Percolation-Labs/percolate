@@ -77,6 +77,8 @@ insert into t14_declared (fn, mechanism, why) values
  'writes only through upsert_summary, which refuses a session that is not the caller''s'),
 ('agentic.attach_skill(text,text,jsonb)', 'agentic.may_author',
  'refused without agents:update before the agent is looked up, so a non-author learns nothing about which agents exist'),
+('agentic.session_readable(uuid)', 'rbac.may_read',
+ 'answers whether the caller may read one session, by the session''s own owner, org and visibility; it returns a boolean and no row (REM-969)'),
 ('agentic.create_session(text)', 'owner',
  'creates a session owned by the caller; it takes no id, so there is nothing of anybody else''s to name'),
 ('agentic.detach_skill(text,text)', 'agentic.may_author',
