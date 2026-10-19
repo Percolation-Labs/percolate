@@ -2,14 +2,15 @@
 --
 -- The blocks of part three (Percolate writing ld-a56393c09254) that need no model, verbatim and in the article's
 -- order, each followed by the assertion that keeps the article true:
---   §1 one setup block knits Priya's sessions and makes the bindings later sections use (reconciling them is part
---      two's, for Zep users);
+--   §1 one setup block knits Priya's sessions; dream binds her by rule and queues P. Raman for a judge, and the
+--      reader's agent claims and decides it through the same calls the MCP tools make (claim_judgement,
+--      complete_judgement at tier agent), so every verdict carries decided_by and tier;
 --   §2 questions answered from notes, and a withdrawn answer kept as a row;
 --   §3 TEXT's warnings, and an iterated join that resolves and one that stops at its bound.
 -- The blocks that call a model (linking facts to questions with Jev, embedding notes, SEARCH and SEMANTIC in a
 -- workflow) run against a live stack in dev/examples/advanced-memory/run.sh, which runs every block in order.
 --
--- WHAT WOULD MAKE IT FAIL. Leave P. Raman unbound and §1 raises; let withdraw_answer delete and §2 raises; drop
+-- WHAT WOULD MAKE IT FAIL. Leave P. Raman undecided, or let dream bind it by rule, and §1 raises; let withdraw_answer delete and §2 raises; drop
 -- TEXT's count and §3 raises.
 --
 -- One transaction, rolled back.
@@ -65,18 +66,33 @@ select aiq.upsert_graph($g$
  '{"agent":"knit","run_id":"jun-02","valid_from":"2026-06-02T08:30:00Z"}') ->> 'edges_new' as jun_02;
 
 insert into team.people (name) values ('Priya Raman') on conflict do nothing;
-select aiq.dream() ->> 'promoted_exact' as bound_by_rule;
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'p. raman'),
-         (select node_id from aiq.lookup('Priya Raman')),
-         'harbour-lead', 'human', '{"why": "P. Raman is Priya"}') ->> 'moved' as bound_by_judge;
+select jsonb_pretty(aiq.dream() - 'since' - 'until') as dream;
+
+select kind, evidence ->> 'key' as name, status,
+       (select string_agg(c ->> 'key', ', ') from jsonb_array_elements(evidence -> 'candidates') c) as candidates
+  from aiq.judgements order by queued_at, name;
+select pg_temp.check((select status from aiq.judgements where evidence ->> 'key' = 'p. raman') = 'open',
+    '§1 dream should queue P. Raman for a judge, not bind it');
+
+-- The reader's agent: the calls the MCP tools claim_judgement and decide_judgement make, as the signed-in person.
+-- Claims are set before the role switch, as the tools' calls arrive: as authenticated.
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
+set local role authenticated;
+select aiq.claim_judgement(null, (select id from aiq.judgements where evidence ->> 'key' = 'p. raman')) ->> 'status' as claimed;
+select aiq.complete_judgement(j.id, jsonb_build_object('decision', 'bind', 'target', j.evidence -> 'candidates' -> 0 ->> 'node_id'),
+         'P. Raman prefers DuckDB in the March session, on the same team list and project as Priya Raman', 'agent') ->> 'status' as decided
+  from aiq.judgements j where j.evidence ->> 'key' = 'p. raman';
+reset role;
+select evidence ->> 'label' as name, status, decided_by, tier, reason
+  from aiq.judgements order by status desc, name;
 
 select relation, key from jsonb_to_recordset(aiq.query('GRAPH "Priya Raman" DEPTH 1') -> 'rows')
     as r(relation text, key text) order by relation, key;
+select pg_temp.check((select decided_by like 'agent:%' and tier = 'agent' from aiq.judgements where evidence ->> 'key' = 'p. raman'),
+    '§1 the verdict should read decided_by agent:<user> and tier agent');
 select pg_temp.check((select array_agg(key order by key) from pg_temp.priya()) = '{project/tide dashboard,tool/duckdb,tool/postgres}',
-    '§1 after setup Priya should prefer DuckDB and Postgres and work on Tide Dashboard');
-select pg_temp.check(exists (select 1 from aiq.soft_nodes where key = 'p. raman' and resolved_node_id is not null),
-    '§1 P. Raman should be bound to Priya, which the walk in §3 depends on');
+    '§1 after the agent decides, Priya should prefer DuckDB and Postgres and work on Tide Dashboard');
 
 -- §2
 select set_config('request.jwt.claims', json_build_object('sub',
