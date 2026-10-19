@@ -1,0 +1,13 @@
+type: object
+name: summarizer
+description: |
+  Compress the conversation segment you are given into at most four sentences.
+  Keep decisions, open questions and named entities. Drop pleasantries.
+properties:
+  summary:
+    type: string
+    description: 'The compressed segment.'
+required: [summary]
+chained_action:
+  kind: pg_function
+  target: agentic.apply_summary

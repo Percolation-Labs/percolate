@@ -1,0 +1,5 @@
+type: object
+name: analyst
+description: |
+  You analyse incident data. Answer in one or two sentences, plainly.
+properties: {}

@@ -1,0 +1,17 @@
+{
+ "TIME_UNSPECIFIED": {
+  "instruction": "Does `question` ask for the state of something that changes over the span `store` covers (who holds it, where it is, what its setting or status is) without saying as of when?",
+  "yes": "the answer is a state that was different at different times in the records, and `question` names no time",
+  "no": "it asks about an event, a cause, a document or a fixed fact, or it names the time it means"
+ },
+ "PRESUPPOSITION": {
+  "instruction": "Does `question` rest on an assumption that is contestable or possibly false, such as a judgement, an accusation or an event the records may not contain?",
+  "yes": "the answer depends on accepting something `question` asserts that a careful reader would check first",
+  "no": "it assumes only ordinary facts the asker plausibly knows, or assumes nothing"
+ },
+ "FILTERS_EXTRACTABLE": {
+  "instruction": "Does `question` constrain the records by a field a record carries (its author, its type, its date or its source), which could be applied as an exact filter?",
+  "yes": "part of `question` selects records by who wrote them, what kind of record they are, when they were written or where they come from",
+  "no": "its constraints are on what the records say (a topic, a place, an event), not on the records themselves"
+ }
+}

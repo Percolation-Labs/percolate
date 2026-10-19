@@ -1,0 +1,8 @@
+{
+ "COUNT": {
+  "instruction": "Does answering `question` require a number: how many things or records there are, or which has more of them?",
+  "yes": "the answer is a number of things or records, or depends on counting them",
+  "no": "the question asks what something says or did, even if a number appears in it",
+  "threshold": 0.9
+ }
+}

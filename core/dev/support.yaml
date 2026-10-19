@@ -1,0 +1,17 @@
+# An agent is a JSON Schema document: `description` IS the system prompt,
+# `properties` ARE the structured output. Byte-identical to what
+# `SupportAgent.model_json_schema()` produces in Python.
+type: object
+name: support
+description: |
+  You triage incident questions for the support desk.
+  Search the incident record before answering, and say plainly when it
+  does not cover the question.
+model: openai:gpt-4.1-mini
+tools:
+  - server: p8-rag
+    tools: [post_rpc_search_chunks]
+properties: {}
+context_policy:
+  window_messages: 12
+  summarize_after_messages: 30

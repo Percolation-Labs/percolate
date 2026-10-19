@@ -1,0 +1,34 @@
+You are a simple search assistant. You do not decide how to search: you pass each question to the store exactly as it was asked, and the store tells you if anything about the question needs handling differently.
+
+The store is reached by a shell command (put the settings on the same line as each command):
+  cd /Users/sirsh/code/pc-sx/evals/semantic_exceptions/traffic && ASK_URL=http://127.0.0.1:5712 ASK_TOKEN=$(cat <scratchpad>/sxtoken) ASK_SESSION=O1-qN python3 ask.py query '<p8ql>' --question "<the question>"
+
+For each question N below:
+1. Run exactly this first, with the question copied word for word in both places (replace any double quote inside the question with a single quote):
+   ASK_SESSION=O1-qN python3 ask.py query 'SEARCH "<the question>" FROM dracula LIMIT 10' --question "<the question>"
+2. If the reply ends with a block headed SEMANTIC EXCEPTIONS, do what it says, using at most 3 more queries for this question (same ASK_SESSION). If there is no such block, do not query again.
+3. Answer from what the store returned. Do not use your own knowledge of the novel.
+
+Questions:
+1. Find me who the second guest is, besides Arthur, invited to Quincey Morris's camp-fire dinner, plus the name of the wolf that the keeper locks in a cage, plus what the white figure carried at its breast as it advanced down the avenue of yews.
+2. I'd like to know which three places were ringed on the atlas map of England in the Count's library, and also what was newly installed on the summit of the East Cliff at Whitby, and what word the attendant swore Renfield called out loudly before the sound of falling.
+3. What is the name of the wolf that the keeper locks in a cage, what did the white figure carry at its breast as it advanced down the avenue of yews, and what did Seward find on Renfield's pillow on 20 July?
+4. Tell me what tool Van Helsing used to open the coffin's lead casing, and how many boxes form the consignment to be delivered to Carfax.
+5. I'd like to know what animal sprang from the schooner onto the sand upon impact, and also what machine was included in Mrs. Harker's luggage at the station.
+6. Which three places were ringed on the atlas map of England in the Count's library, and what is the name of the wolf that the keeper locks in a cage?
+7. Where on their bodies were the missing children found wounded? Also, what did the woman in the courtyard demand from the Count, and what strong-smelling plant does Lucy say she never liked before but finds delightful tonight?
+8. Which kind of moth does Van Helsing name when Renfield describes the large moths with skull markings? Also, what reason does Jonathan give for believing the Count was hurried when undressing him?
+9. I'd like to know the escaped wolf's name as spotted by Mr. Bilder, and also what reason Jonathan gives for believing the Count was hurried when undressing him.
+10. What household chore did Jonathan Harker see Count Dracula doing in his bedroom, what was newly installed on the summit of the East Cliff at Whitby, and where on their bodies were the missing children found wounded?
+11. Find me which three places were ringed on the atlas map of England in the Count's library, plus what the woman in the courtyard demanded from the Count.
+12. What date did the Count tell Jonathan to put on the first letter? Also, what is the name of the wolf that the keeper locks in a cage?
+13. Which logical errors does Renfield say lunatic asylum inmates tend toward, and what is the name of the wolf that the keeper locks in a cage?
+14. I'd like to know from which direction the wind was blowing more steadily as the party waited in the rocky shelter, and also the name of the wolf that the keeper locks in a cage, and who objects to taking Mina into the Count's death-trap.
+15. What was newly installed on the summit of the East Cliff at Whitby, what word did the attendant swear Renfield called out loudly before the sound of falling, and what did the white figure carry at its breast as it advanced down the avenue of yews?
+16. Find me where on their bodies the missing children were found wounded, plus what the white figure carried at its breast as it advanced down the avenue of yews.
+17. I'd like to know what animal sprang from the schooner onto the sand upon impact, what the woman in the courtyard demanded from the Count, and also what Van Helsing showed Lucy from the big parcel that arrived from abroad.
+18. I'd like to know what animal sprang from the schooner onto the sand upon impact, and also which firm sold the Piccadilly house and would not name the buyer, and the name of the wolf that the keeper locks in a cage.
+19. Where on their bodies were the missing children found wounded, what did the woman in the courtyard demand from the Count, and what did Van Helsing show Lucy from the big parcel that arrived from abroad?
+20. I'd like to know during what hours Renfield stays quiet over three nights according to Seward's diary, and also what name the straying Hampstead children give to the lady who lured them away.
+
+When finished, write your answers as a JSON object to <scratchpad>/thin/answers/O1.json keyed by question number ("1" to "20"), each a sentence ("not found" for parts the store did not return). Reply with one line: how many questions got SEMANTIC EXCEPTIONS, and how many you answered fully.

@@ -1,0 +1,243 @@
+{"id": "q-00519e5c82", "domain": "eng", "question": "Why did Dana revert the caching layer in checkout-svc?"}
+{"id": "q-9e99b9ede2", "domain": "dracula", "question": "Which of the Demeter's crew survived the voyage to Whitby?"}
+{"id": "q-d95148abe0", "domain": "eng", "question": "Will the payments-queue run out of disk again before Q4?"}
+{"id": "q-714599cdac", "domain": "eng", "question": "What release version shipped the fix for MOB-562?"}
+{"id": "q-06677825ab", "domain": "eng", "question": "Which design docs about the search indexer have been updated lately?"}
+{"id": "q-0da2f12636", "domain": "dracula", "question": "relationship between Mr Hawkins and Jonathan Harker"}
+{"id": "q-bfd6b242df", "domain": "dracula", "question": "It was Quincey Morris who shot the wolf at Lucy's window - is that what the record says?"}
+{"id": "q-d1db785d1e", "domain": "eng", "question": "Which on-call rotation setup was best for the team?"}
+{"id": "q-33906554e8", "domain": "eng", "question": "what did the on-call SRE write during the ledger-db failover"}
+{"id": "q-1bab86d5f9", "domain": "eng", "question": "Who owns the search-indexer service?"}
+{"id": "q-806b598689", "domain": "dracula", "question": "What is the name of the hotel Jonathan stays at in Bistritz? Also, how old is Lucy?"}
+{"id": "q-3191ddd36f", "domain": "dracula", "question": "The group realised the Count had left England by ship - which entry is the first one where that realisation is written down?"}
+{"id": "q-4ff6f0585d", "domain": "dracula", "question": "Where is the longest gap between two of Jonathan's journal entries?"}
+{"id": "q-586c53187f", "domain": "dracula", "question": "What did the professor from Amsterdam write to Seward about Lucy?"}
+{"id": "q-6825676d31", "domain": "dracula", "question": "What did Lucy write in the memorandum she left the night the wolf broke in?"}
+{"id": "q-7a84e5de16", "domain": "eng", "question": "Of the services flagged in the 2025 quality review tickets, which had the weakest test coverage?"}
+{"id": "q-e9ef659a9f", "domain": "dracula", "question": "What happened?"}
+{"id": "q-39c231dc76", "domain": "dracula", "question": "how to do the blood transfusion van helsing performed on lucy"}
+{"id": "q-184da6227a", "domain": "eng", "question": "Who was assigned ticket INFRA-3301?"}
+{"id": "q-c9dd8ba2c5", "domain": "eng", "question": "Walk me through failing ledger-db over to the secondary region"}
+{"id": "q-a7acd60310", "domain": "eng", "question": "What severity was INC-2133 given in its postmortem?"}
+{"id": "q-3b5cf9584c", "domain": "eng", "question": "the RFC proposing sharding for the orders database"}
+{"id": "q-e452a7de0a", "domain": "dracula", "question": "What did Van Helsing prescribe for Lucy, and which of the men gave blood for her transfusions?"}
+{"id": "q-d06355972e", "domain": "dracula", "question": "Who among the band of hunters never actually laid eyes on the Count?"}
+{"id": "q-8a8affbbf6", "domain": "eng", "question": "What did the SRE team's on-call notes say about Redis eviction in November 2025?"}
+{"id": "q-753e04277a", "domain": "dracula", "question": "The dog seen leaping from the Demeter was really the Count — right?"}
+{"id": "q-079ada4b52", "domain": "eng", "question": "Has anyone touched the rate limiter config since yesterday?"}
+{"id": "q-0eab0515df", "domain": "eng", "question": "when was the memory leak in notifier-worker first reported in a ticket"}
+{"id": "q-702a0210ac", "domain": "dracula", "question": "Is it true the Count can't cross running water by himself?"}
+{"id": "q-0b6b2cab9b", "domain": "eng", "question": "Status of the rewrite we talked about on Friday"}
+{"id": "q-51ba24d157", "domain": "eng", "question": "Postmortems authored by Elena Ruiz in 2024"}
+{"id": "q-a2575823d8", "domain": "dracula", "question": "Which of Lucy's donors gave her the smallest amount of blood?"}
+{"id": "q-757f168499", "domain": "dracula", "question": "Name each person who gave Lucy blood, without leaving anyone out."}
+{"id": "q-0ba387b16e", "domain": "dracula", "question": "a complete list of the creatures Renfield kept, in order"}
+{"id": "q-88139ee155", "domain": "eng", "question": "What's the process for requesting a production database snapshot?"}
+{"id": "q-292fd2add7", "domain": "eng", "question": "Priya mentioned a flaky integration test in standup this morning — is there a ticket for it?"}
+{"id": "q-c32bd89566", "domain": "dracula", "question": "After Seward's asylum burned down, where were the patients moved?"}
+{"id": "q-1d45e18653", "domain": "eng", "question": "Find whoever wrote the original rate-limiter design doc for ledger-api and list the tickets they closed after moving to the growth team."}
+{"id": "q-d3d0aa963b", "domain": "dracula", "question": "Where does Mina describe hypnosis sessions with Van Helsing? Quote the passages and cite the dates."}
+{"id": "q-170f95ce09", "domain": "eng", "question": "Incidents that affected the Frankfurt data centre"}
+{"id": "q-95ec8e4e1a", "domain": "dracula", "question": "How did Van Helsing come to be involved with Lucy's family?"}
+{"id": "q-c34fe4ba8f", "domain": "eng", "question": "best pizza place near the office"}
+{"id": "q-bd268bd62a", "domain": "dracula", "question": "What does Van Helsing say about the Count's brain being a child's brain?"}
+{"id": "q-944cf25938", "domain": "eng", "question": "how does a change to the shared proto library end up breaking the mobile build"}
+{"id": "q-c9e4d521ec", "domain": "eng", "question": "Which outages hit customers in Asia-Pacific?"}
+{"id": "q-3420c9c06a", "domain": "dracula", "question": "Explain the plot of Sheridan Le Fanu's Carmilla"}
+{"id": "q-b71f57d6e9", "domain": "dracula", "question": "When was the meeting at the asylum?"}
+{"id": "q-aa09c6f323", "domain": "eng", "question": "Most recent design doc touching the search ranking pipeline"}
+{"id": "q-14e58ed1e4", "domain": "dracula", "question": "Find the Demeter log and translate the key entries into modern English, keep it under 200 words"}
+{"id": "q-8212835242", "domain": "dracula", "question": "Text of the cutting from the Dailygraph about the storm at Whitby"}
+{"id": "q-42483ef5c3", "domain": "eng", "question": "Which marketing campaign brought in the most new customers this year?"}
+{"id": "q-be2e38cbb4", "domain": "eng", "question": "Tickets in the PLAT project that were closed without a linked commit"}
+{"id": "q-4fe9d521a5", "domain": "eng", "question": "Was switching from Postgres to DynamoDB for user-profiles the right call?"}
+{"id": "q-7a28e8cdb1", "domain": "eng", "question": "Postmortem for the 9 October 2024 auth-gateway outage"}
+{"id": "q-5758c329f3", "domain": "dracula", "question": "Where is \"Bloofer Lady\" used in the Westminster Gazette?"}
+{"id": "q-fc9297ff52", "domain": "dracula", "question": "Lucy died on 20 September, correct?"}
+{"id": "q-dad0fcd9fd", "domain": "dracula", "question": "What did he say to her after the wedding?"}
+{"id": "q-81072bdcc6", "domain": "dracula", "question": "Can you confirm that the Demeter sailed from Varna carrying fifty boxes of earth?"}
+{"id": "q-b7a74fb02d", "domain": "eng", "question": "Postmortem for INC-2047"}
+{"id": "q-0ea3b20e4b", "domain": "dracula", "question": "What did the ship's captain write in his final days at sea?"}
+{"id": "q-0d2363fd59", "domain": "eng", "question": "How many logins failed during the March auth-gateway outage, and did the remediation items from its postmortem ever ship?"}
+{"id": "q-a0bdf28b78", "domain": "dracula", "question": "In total, how many transfusions did Lucy receive and from how many donors?"}
+{"id": "q-0ce1da1cc4", "domain": "eng", "question": "On-call notes from Hannah Cole's shift on 3 February 2025"}
+{"id": "q-883d6dd80a", "domain": "eng", "question": "If each failed deploy cost us roughly 40 minutes, how much time did the broken CI pipeline cost in June?"}
+{"id": "q-2abdc135c4", "domain": "eng", "question": "What led the user-profiles team to move off MongoDB?"}
+{"id": "q-8bc0c936c1", "domain": "dracula", "question": "Why did Lucy's mother die?"}
+{"id": "q-0962c2a644", "domain": "eng", "question": "Commit that bumped the Go version in notify-worker to 1.22"}
+{"id": "q-70f639d93f", "domain": "dracula", "question": "Would Jonathan have been spared if he'd listened to the landlady at Bistritz and not gone on?"}
+{"id": "q-677576d55e", "domain": "eng", "question": "who reviewed the commit that introduced the kafka consumer lag bug and were they on call when it fired"}
+{"id": "q-47212935c0", "domain": "dracula", "question": "What caused the Demeter to run aground at Whitby?"}
+{"id": "q-873e7e4a90", "domain": "dracula", "question": "the letter"}
+{"id": "q-11f18392f7", "domain": "dracula", "question": "What did Lord Godalming do in the weeks after his fiancee died?"}
+{"id": "q-e25295808f", "domain": "dracula", "question": "what was mina's maiden name; what drug does seward record taking to sleep"}
+{"id": "q-31c46e01fe", "domain": "dracula", "question": "Where is Jonathan Harker?"}
+{"id": "q-798e86913a", "domain": "eng", "question": "What's the company's revenue for last fiscal year?"}
+{"id": "q-2a96fdc560", "domain": "dracula", "question": "How do you destroy a vampire, according to Van Helsing?"}
+{"id": "q-185d1e86f7", "domain": "dracula", "question": "telegrams sent yesterday by Van Helsing"}
+{"id": "q-e94e0e5e94", "domain": "dracula", "question": "Where did Jonathan and Mina get married?"}
+{"id": "q-e81ab044f7", "domain": "eng", "question": "What changes did the database whisperer make to ledger-db in 2025?"}
+{"id": "q-3d084ea1c6", "domain": "dracula", "question": "Which letters prove Lucy brought her troubles on herself by sleepwalking?"}
+{"id": "q-19ab7b6fbc", "domain": "eng", "question": "Who's the escalation contact for payments incidents?"}
+{"id": "q-45d62e8a66", "domain": "dracula", "question": "What did Jonathan find in the Count's library on his first evening?"}
+{"id": "q-3f82633245", "domain": "dracula", "question": "When did Mina first learn that Jonathan was in a hospital in Budapest?"}
+{"id": "q-558c5632e0", "domain": "eng", "question": "Any on-call shifts in 2025 where search-indexer and the CDN both paged on the same night?"}
+{"id": "q-7b864506f5", "domain": "dracula", "question": "How many newspaper cuttings are stored here?"}
+{"id": "q-8c2f36d342", "domain": "eng", "question": "Should we expect the same timeout errors once the new load balancer goes live?"}
+{"id": "q-095fe7a2e3", "domain": "eng", "question": "What was the longest outage we've ever had on checkout-api?"}
+{"id": "q-6025642069", "domain": "dracula", "question": "Events within a mile of Carfax"}
+{"id": "q-27a5703157", "domain": "eng", "question": "What did we believe the root cause of INC-2291 was before the postmortem corrected it?"}
+{"id": "q-c731fc68ef", "domain": "eng", "question": "I need to add a tenant to the multi-tenant config service tomorrow; what do I run, in what order?"}
+{"id": "q-a5c15232f6", "domain": "dracula", "question": "How did the Demeter's crew vanish during the voyage and what did the coastguard find aboard once she ran aground?"}
+{"id": "q-570043596e", "domain": "eng", "question": "errors"}
+{"id": "q-c21e246998", "domain": "dracula", "question": "Who owns the house at Carfax?"}
+{"id": "q-554e009e30", "domain": "eng", "question": "Postmortem for the expired TLS certificate on api.internal in March 2025"}
+{"id": "q-ed0c94c19f", "domain": "dracula", "question": "The ship's log has a line \"God help us\" or something close - I need the exact sentence it appears in"}
+{"id": "q-b861f2b2f7", "domain": "eng", "question": "Pull the on-call notes for the ledger service and draft a handover email for the next rotation."}
+{"id": "q-b7640210dc", "domain": "eng", "question": "Which commits did the release manager revert in 2025?"}
+{"id": "q-ee66ab27fb", "domain": "eng", "question": "Commit message for a3f9c21 in the checkout-api repo"}
+{"id": "q-af741c5b67", "domain": "eng", "question": "At what point did the team learn that the March outage was caused by the DNS change?"}
+{"id": "q-702a822063", "domain": "eng", "question": "Does the retry policy in the notifications design doc match what notify-worker's code actually does now?"}
+{"id": "q-e5c21a8e00", "domain": "eng", "question": "commit message where Dana Whitfield reverted the 4.12 login change"}
+{"id": "q-54e53319b7", "domain": "eng", "question": "Does notify-worker retry failed sends with exponential backoff?"}
+{"id": "q-54a0757015", "domain": "dracula", "question": "How did Van Helsing go about hypnotising Mina?"}
+{"id": "q-7945c74512", "domain": "eng", "question": "Recurring themes in our postmortems"}
+{"id": "q-c246ae5339", "domain": "dracula", "question": "Who is Mr Hawkins?"}
+{"id": "q-93d0724168", "domain": "eng", "question": "Which services have the main reliability problems?"}
+{"id": "q-5a8ba38df6", "domain": "eng", "question": "What hardware failures happened in the rack row nearest the cooling unit at the Dublin colo?"}
+{"id": "q-a2706ed43b", "domain": "eng", "question": "Find every log excerpt containing \"ECONNRESET upstream 10.4.2.17\""}
+{"id": "q-230b0d6717", "domain": "dracula", "question": "What happened in Whitby during August?"}
+{"id": "q-5ebf8c80c0", "domain": "dracula", "question": "In Jonathan's own diary, what does he say about the Count's lack of reflection?"}
+{"id": "q-d4f6e9dd7d", "domain": "dracula", "question": "how long was the Demeter at sea from Varna to Whitby"}
+{"id": "q-d150c38cf0", "domain": "dracula", "question": "Anything on the ship?"}
+{"id": "q-82282ad607", "domain": "eng", "question": "How many customers were affected when the EU region went down for six hours?"}
+{"id": "q-0f015f853f", "domain": "eng", "question": "PLAT-2071"}
+{"id": "q-1f74472188", "domain": "eng", "question": "Show me the incident commander's notes from INC-2133"}
+{"id": "q-23711e4846", "domain": "eng", "question": "The INC-1874 outage was caused by an expired TLS certificate, right?"}
+{"id": "q-519240b77b", "domain": "eng", "question": "Which postmortems had serious customer impact?"}
+{"id": "q-5ee6ab60f5", "domain": "dracula", "question": "I believe Renfield's room was next to Carfax and that's why he sensed the Count - check that for me"}
+{"id": "q-641fa30d70", "domain": "dracula", "question": "what did the coastguard report"}
+{"id": "q-f93ba8d48d", "domain": "dracula", "question": "I'm curious how the newspapers covered all the strange goings-on. Anything interesting?"}
+{"id": "q-c5e54ea98b", "domain": "dracula", "question": "Seward's account of opening Lucy's coffin and finding it empty"}
+{"id": "q-9b5cfd7288", "domain": "eng", "question": "Design doc for the notification preferences API, version 2"}
+{"id": "q-ca7f3fc343", "domain": "dracula", "question": "List every place the Count hid his boxes of earth."}
+{"id": "q-7b35c80222", "domain": "dracula", "question": "Mina's journal entries dated between 1 and 15 October"}
+{"id": "q-48cb983769", "domain": "dracula", "question": "What is the name of the ship the Count escapes England on?"}
+{"id": "q-665e04117b", "domain": "dracula", "question": "What did the coroner's inquest at Whitby conclude about the captain?"}
+{"id": "q-28fae1f6d4", "domain": "dracula", "question": "Anything Arthur Holmwood wrote, as opposed to things written about him, regarding his father's illness"}
+{"id": "q-b1bd2b56d9", "domain": "dracula", "question": "Why did Van Helsing refuse to give Lucy any blood transfusions?"}
+{"id": "q-e12d7450da", "domain": "dracula", "question": "Where was Jonathan Harker when Lucy started sleepwalking again, and what was Mina doing in Whitby at the time?"}
+{"id": "q-8c1cd12380", "domain": "dracula", "question": "Find the letter she wrote right after that."}
+{"id": "q-da0c5ce95d", "domain": "dracula", "question": "Was Jonathan Harker a qualified solicitor by the end?"}
+{"id": "q-7dd2962977", "domain": "eng", "question": "how many tickets will the infra team close next sprint"}
+{"id": "q-db974e9384", "domain": "dracula", "question": "Has anyone written to Arthur recently about Lucy's health?"}
+{"id": "q-7cb239e85f", "domain": "dracula", "question": "Seward's phonograph entry describing Renfield's theory of eating lives"}
+{"id": "q-593d7d0619", "domain": "eng", "question": "Isn't it true that the rewrite of the scheduler was a waste of time given how many bugs it introduced?"}
+{"id": "q-c51c37d3b5", "domain": "eng", "question": "Action items from the INC-1874 postmortem"}
+{"id": "q-22d1816093", "domain": "eng", "question": "What went wrong with Tomas's design for the event bus?"}
+{"id": "q-a234052f7b", "domain": "dracula", "question": "What did Quincey Morris say at his wedding to Lucy?"}
+{"id": "q-e76663d54d", "domain": "eng", "question": "Don't the incident records prove that Friday deploys are reckless?"}
+{"id": "q-4d4843ee18", "domain": "eng", "question": "was that ticket ever closed"}
+{"id": "q-b35c784246", "domain": "eng", "question": "What error message did search-indexer log during INC-1902?"}
+{"id": "q-be43fcdeef", "domain": "eng", "question": "Repro steps in bug ticket CHK-2210 about duplicate orders"}
+{"id": "q-040a95144a", "domain": "eng", "question": "List every incident that involved the CDN provider"}
+{"id": "q-6eb254e6ae", "domain": "eng", "question": "What did the INC-2291 postmortem list as the detection time?"}
+{"id": "q-cd270a6fb6", "domain": "eng", "question": "Were there network partitions between us-east-1 and us-west-2 in the postmortems?"}
+{"id": "q-2b5aaa4ba4", "domain": "dracula", "question": "How did Jonathan's attitude to his host shift between his first and his last days at the castle?"}
+{"id": "q-4b7497346d", "domain": "dracula", "question": "Did Lucy ever marry Arthur Holmwood?"}
+{"id": "q-594e5014fb", "domain": "eng", "question": "Give me the complete list of services still running on Python 2 as of the 2025 audit"}
+{"id": "q-0ed04542f5", "domain": "eng", "question": "Timeline section of the 12 June 2025 CDN outage postmortem"}
+{"id": "q-1b58ce3088", "domain": "eng", "question": "database stuff"}
+{"id": "q-bf16358d16", "domain": "dracula", "question": "what's in here about whitby"}
+{"id": "q-cac8d71dfe", "domain": "eng", "question": "Tell me about the service."}
+{"id": "q-123b625e0c", "domain": "dracula", "question": "What does Sister Agatha's letter to Mina say about Jonathan's condition?"}
+{"id": "q-398f06e556", "domain": "dracula", "question": "On what date was the death of the Demeter's captain first reported in the Whitby papers?"}
+{"id": "q-8cfeba9bc5", "domain": "eng", "question": "What's the max connection pool size configured for ledger-db?"}
+{"id": "q-9250ba7f4b", "domain": "dracula", "question": "Walk me through how they sealed Lucy's tomb so she couldn't get back in."}
+{"id": "q-c5940a57e0", "domain": "dracula", "question": "garlic vs the sacred wafer: which worked better against the vampire?"}
+{"id": "q-e293f193cb", "domain": "dracula", "question": "What is the name of the asylum's attendant who watches Renfield?"}
+{"id": "q-6253a384a4", "domain": "eng", "question": "Compare incident frequency on auth-gateway before and after the 2024 rewrite"}
+{"id": "q-2b76c866e1", "domain": "eng", "question": "How does the Kafka event bus proposal differ from the SQS one in the messaging design docs?"}
+{"id": "q-c7b86ebbcc", "domain": "eng", "question": "commit that added the circuit breaker to payments-core"}
+{"id": "q-7f9e2f6391", "domain": "dracula", "question": "Which of Van Helsing's letters contain the relevant details about the garlic flowers?"}
+{"id": "q-cf56e20837", "domain": "eng", "question": "Where's the runbook for the billing-sync job, and also who approved Priya's PTO over the release week?"}
+{"id": "q-6be7b88442", "domain": "dracula", "question": "did renfield die in the asylum"}
+{"id": "q-48d3bd3570", "domain": "dracula", "question": "What did Seward record about Renfield in the last few days?"}
+{"id": "q-0394f20625", "domain": "dracula", "question": "Lucy's letter to Mina describing Quincey Morris's proposal"}
+{"id": "q-93cb366387", "domain": "eng", "question": "Someone in standup said we've never had a Sev1 on the mobile API. Correct?"}
+{"id": "q-951d677a35", "domain": "dracula", "question": "What would have happened if Van Helsing had arrived a day earlier to treat Lucy?"}
+{"id": "q-8baf422236", "domain": "eng", "question": "The ticket where Priya Nair reported the memory leak in report-generator"}
+{"id": "q-707044bf6c", "domain": "eng", "question": "How do I apply for parental leave?"}
+{"id": "q-a70c196870", "domain": "eng", "question": "Whose schema migration approach led to fewer rollbacks, Dana Whitfield's or Raj Menon's?"}
+{"id": "q-e6e79aedf6", "domain": "eng", "question": "Which tickets tie the 2023 schema migration to the later billing discrepancies?"}
+{"id": "q-9a171db405", "domain": "dracula", "question": "What's the earliest dated document you hold?"}
+{"id": "q-92c97237b9", "domain": "eng", "question": "Did the migration he mentioned in standup go out?"}
+{"id": "q-1ff8229896", "domain": "eng", "question": "Design review comments from Amir Haddad on the rate-limiter v2 doc"}
+{"id": "q-a5c94d28b3", "domain": "dracula", "question": "Which entries were written while the group was in Varna or Galatz?"}
+{"id": "q-f9d88e106a", "domain": "eng", "question": "postmortems involving both the cache layer and a database failover"}
+{"id": "q-5ff3b50080", "domain": "dracula", "question": "Explore the theme of blood across the documents."}
+{"id": "q-6b58e96580", "domain": "eng", "question": "Which postmortems don't list any action items?"}
+{"id": "q-2256d19f2f", "domain": "dracula", "question": "How do Seward's and Van Helsing's explanations of Lucy's illness differ?"}
+{"id": "q-67a7d06183", "domain": "eng", "question": "Can you confirm that Rahul wrote the original design doc for the feature-flag service?"}
+{"id": "q-da485569c4", "domain": "eng", "question": "The threat model section in the SSO integration design doc"}
+{"id": "q-c7c9bdb452", "domain": "eng", "question": "anything interesting about caching strategies across our services"}
+{"id": "q-bcceaa62a3", "domain": "eng", "question": "What's the SLO for checkout-api?"}
+{"id": "q-ddc2e6cd4b", "domain": "eng", "question": "How many Sev1 incidents did we have in 2024?"}
+{"id": "q-b9e9d7a286", "domain": "dracula", "question": "Who is the most admirable character in the Whitby chapters?"}
+{"id": "q-9cbc1727ab", "domain": "eng", "question": "Lena Hart's design doc on the event-sourcing migration for cart-service"}
+{"id": "q-ae508ea4a5", "domain": "dracula", "question": "What turned Jonathan's hair white?"}
+{"id": "q-5e741f5d9e", "domain": "eng", "question": "Design doc for idempotency keys in ledger-api"}
+{"id": "q-178d6dde72", "domain": "dracula", "question": "what did lucy write to mina about her three proposals - answer in one sentence please"}
+{"id": "q-4772f68aa8", "domain": "eng", "question": "Did Wei's team close more tickets than Ola's team over the year?"}
+{"id": "q-f6e56586d7", "domain": "dracula", "question": "all telegrams in the collection"}
+{"id": "q-d4b0a57804", "domain": "eng", "question": "How many design docs went through infra guild review in 2025?"}
+{"id": "q-84364dbe44", "domain": "dracula", "question": "Who signed the telegram sent from Amsterdam — and by the way, what kind of dog jumped off the ship at Whitby?"}
+{"id": "q-7f099f3889", "domain": "eng", "question": "I'm after Sev-1 incident reports, anything from before the 2022 reorg, about queue backlogs."}
+{"id": "q-b61b8a85eb", "domain": "eng", "question": "which commit is a3f9e21c and what did it change"}
+{"id": "q-916cbd9f78", "domain": "eng", "question": "The nightly ETL jobs keep timing out on Mondays. Anything explaining that?"}
+{"id": "q-9f947b338c", "domain": "dracula", "question": "key turning points for Lucy"}
+{"id": "q-bf3e54f1b7", "domain": "dracula", "question": "the name of the firm that moved the boxes from Whitby to London"}
+{"id": "q-d92a0b880d", "domain": "eng", "question": "Is it true the August search outage was caused by a bad index migration?"}
+{"id": "q-8b14581abd", "domain": "dracula", "question": "is Renfield going to escape again"}
+{"id": "q-2267a255ad", "domain": "dracula", "question": "Seward mentions his age in one entry - how old would he have been when the Harkers' son was born?"}
+{"id": "q-bca5bb3dcd", "domain": "eng", "question": "incidents where the on-call notes don't name a root cause"}
+{"id": "q-369788370e", "domain": "dracula", "question": "Where did Jonathan first see the Count in Piccadilly after returning to England?"}
+{"id": "q-2a6f436e8d", "domain": "dracula", "question": "Which pass does the coach take into the Carpathians?"}
+{"id": "q-ae5805e974", "domain": "dracula", "question": "Looking into how women are portrayed in these papers, where should I start?"}
+{"id": "q-bc70f95987", "domain": "dracula", "question": "Which newspaper reports about the Hampstead children came out a couple of days back?"}
+{"id": "q-2619dc8434", "domain": "dracula", "question": "the letter from Samuel F. Billington, solicitor, about the consignment of boxes"}
+{"id": "q-973a0e3b55", "domain": "dracula", "question": "What crucifix did the old woman at the inn give Jonathan?"}
+{"id": "q-5011e91050", "domain": "dracula", "question": "Was Van Helsing right to keep the truth from the others for so long?"}
+{"id": "q-93f14d3602", "domain": "eng", "question": "ticket for upgrading the k8s ingress controller in staging"}
+{"id": "q-c0f61c7b00", "domain": "eng", "question": "what broke in the billing service last week"}
+{"id": "q-4b8cd5d9e0", "domain": "dracula", "question": "Find the passages that show how cowardly Arthur was at Lucy's tomb"}
+{"id": "q-4c41de4368", "domain": "eng", "question": "At current growth, when does the analytics cluster hit its storage limit?"}
+{"id": "q-9a5b6321e0", "domain": "eng", "question": "how many tickets are indexed for the identity team"}
+{"id": "q-5d986a1581", "domain": "dracula", "question": "How many days passed between Jonathan arriving at the castle and his escape?"}
+{"id": "q-dd6392b9a4", "domain": "eng", "question": "Description of ticket PLAT-4412"}
+{"id": "q-ca3fc9e376", "domain": "dracula", "question": "What does the Dailygraph cutting say about the storm?"}
+{"id": "q-6c657ce36c", "domain": "eng", "question": "Summarise the INC-3102 postmortem in three bullet points."}
+{"id": "q-02e68ffef9", "domain": "dracula", "question": "What links Renfield to the Count?"}
+{"id": "q-542879301b", "domain": "dracula", "question": "What did the undertaker notice when preparing the body?"}
+{"id": "q-39e13a7ccb", "domain": "dracula", "question": "How often does Seward record Renfield catching flies?"}
+{"id": "q-d7b21a2176", "domain": "dracula", "question": "Find the letter where Lucy describes her three proposals, then give me the date the Czarina Catherine sailed from London."}
+{"id": "q-b90072c477", "domain": "eng", "question": "Is the Kafka migration going to finish on schedule, based on what's in the design doc and tickets?"}
+{"id": "q-35fd169725", "domain": "dracula", "question": "What is Dracula likely to do next after leaving Carfax?"}
+{"id": "q-9acd07e5e8", "domain": "eng", "question": "on-call notes from three nights ago, the pager kept firing for ledger-api"}
+{"id": "q-c40fbccf2a", "domain": "dracula", "question": "Show me the newspaper cuttings, all of them, from first to last."}
+{"id": "q-4281f97d6f", "domain": "dracula", "question": "Jonathan's treatment of the three women in the castle - did he behave honourably?"}
+{"id": "q-426c0d0b00", "domain": "eng", "question": "Tell me about our history with database migrations"}
+{"id": "q-dff8763a6d", "domain": "dracula", "question": "What happened to the Texan at the very end?"}
+{"id": "q-cd7a96ee42", "domain": "eng", "question": "Trace the chain of dependencies from auth-service to the reporting dashboard."}
+{"id": "q-b8ef065f8b", "domain": "eng", "question": "All tickets ever filed against email-dispatcher"}
+{"id": "q-58cc89fd72", "domain": "eng", "question": "Tickets where the stack trace includes NullPointerException at InvoiceRenderer.java:212"}
+{"id": "q-bd710eaeff", "domain": "dracula", "question": "Which people have journals in this archive, and which only appear in letters?"}
+{"id": "q-47ceed1547", "domain": "eng", "question": "When did we last bump the Postgres major version on ledger-db?"}
+{"id": "q-4b44c46316", "domain": "eng", "question": "Pull up the postmortem for last November's DNS outage; I also need the RFC template the infra guild uses."}
+{"id": "q-7ae3681d41", "domain": "dracula", "question": "Should Lucy have accepted Quincey's proposal instead of Arthur's?"}
+{"id": "q-819c1dbd71", "domain": "eng", "question": "What were the most important incidents for the platform team?"}
+{"id": "q-85ba3a7303", "domain": "dracula", "question": "how long after Lucy's death did Arthur get told what she had become"}
+{"id": "q-83677a200d", "domain": "dracula", "question": "What cargo was the Demeter carrying?"}
+{"id": "q-437d4c9dd4", "domain": "dracula", "question": "last entry in the Demeter log"}
+{"id": "q-799b0c495e", "domain": "dracula", "question": "Had Mrs Westenra left the garlic flowers in place, could Lucy have lived?"}
+{"id": "q-1f68d57da4", "domain": "eng", "question": "What's been going on with the data platform over the last couple of years?"}

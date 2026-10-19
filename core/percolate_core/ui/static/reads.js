@@ -1,0 +1,187 @@
+/* Every read a screen makes, as data, because two things need to agree on it.
+ *
+ * A screen used to carry its own projection and Surface used to carry its own
+ * probe -- `limit=1`, no columns, no ordering. So Surface answered a question
+ * nobody asked ("does this view exist") while reporting it as the question
+ * that matters ("can this screen read it"), and the two were only ever equal
+ * by hand. They stopped being equal: Agents asked for `structured_output`,
+ * tool servers for `transport`, Keys for `name`, sessions for `created_at` and
+ * the auth stream for `event` -- five columns no view has ever had -- while
+ * Surface reported 31 of 31 objects reachable. A projection that nothing
+ * executes is a projection that nothing checks.
+ *
+ * So the projection, the ordering and any static filter live HERE, the screen
+ * reads through `read()`, and the audit executes the same string. An invalid
+ * column now fails the thing that exists to find invalid columns, and it fails
+ * for every caller at once rather than on the one screen somebody opened.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: the per-row filter (`id=eq.<uuid>`) and the
+ * bound a screen chooses (`limit=50`). Those are arguments rather than
+ * contracts -- an audit has no id to substitute, and running a screen's read
+ * unbounded is not an audit of it. They stay at the call site, as `extra`.
+ *
+ * THIS FILE IMPORTS NOTHING, deliberately. `read()` lives in api.js with the
+ * transport it uses, so this module is data a plain `node --input-type=module`
+ * can import and print -- which is what `dev/ui_reads.py` does to execute the
+ * screens' reads against a deployment with no browser in the loop. A contract
+ * table that only a browser can read is a contract table CI cannot check.
+ */
+
+/* `screen` is the name Surface prints, so it is the screen a failure breaks --
+   not the module the call happens to live in. */
+export const READS = {
+  workflowPlugins: {screen:"Workflow design",schema:"agentic",view:"plugins_api",
+    q:"select=name,description&order=name"},
+  apiSourceState: {screen:"Data Sources",schema:"content",view:"source_state",
+    q:"select=source_id,revision,watermark,pending_watermark,next_url,pages,inserted,updated,unchanged,total_records,last_page_at,last_completed_at"},
+  apiSourceRecords: {screen:"Data Sources",schema:"content",view:"source_records",
+    q:"select=external_id,watermark,data,raw,updated_at&order=updated_at.desc"},
+  sourceRuns: {screen:"Data Sources",schema:"workflow",view:"runs_api",
+    q:"select=id,status,created_at&order=created_at.desc"},
+  dataSources: {screen:"Data Sources",schema:"content",view:"channels",
+    q:"select=id,name,kind,config,enabled,owner_id,visibility,updated_at&order=name"},
+  sourceResources: {screen:"Data Sources",schema:"content",view:"resources",
+    q:"select=id,title,status,ingested_at&order=ingested_at.desc"},
+  embeddingModels: {screen:"Data Sources",schema:"aiq",view:"embedding_models",q:"select=name&order=name"},
+  /* -- content -------------------------------------------------------- */
+  resources: { screen: "Files", schema: "content", view: "resources",
+    q: "select=id,title,status,channel_id,file_id,ingested_at,metadata,visibility&file_id=not.is.null&order=ingested_at.desc" },
+  uploadChannels: { screen: "Files", schema: "content", view: "channels",
+    q: "select=id,name,org_id,config&enabled=eq.true&kind=eq.file_upload&order=name" },
+  resourceChunks: { screen: "Files", schema: "content", view: "resource_chunks",
+    q: "select=id,ordinal,content,token_count&order=ordinal" },
+  /* -- workflow ------------------------------------------------------- */
+  definitions: { screen: "Workflows", schema: "workflow", view: "definitions_api",
+    q: "select=id,name,version,step_count,step_kinds,queues,created_at,is_latest&order=name" },
+  runsByStatus: { screen: "Overview", schema: "workflow", view: "runs_by_status_api",
+    q: "select=status,n" },
+  tasksByStatus: { screen: "Queues", schema: "workflow", view: "tasks_by_status_api",
+    q: "select=queue,status,n&order=queue" },
+  recentRuns: { screen: "Overview", schema: "workflow", view: "runs_api",
+    q: "select=id,status,external_id,created_at,workflow_def_id,name&order=created_at.desc" },
+  runs: { screen: "Runs", schema: "workflow", view: "runs_api",
+    q: "select=id,status,compensation_state,external_id,created_at,completed_at,workflow_def_id,name"
+       + "&order=created_at.desc" },
+  /* No projection, and that is the contract: the Run panel prints the whole
+     row as JSON, so pinning columns here would hide the ones added later --
+     the failure this file exists to prevent, running the other way. */
+  run: { screen: "Run detail", schema: "workflow", view: "runs_api", q: "",
+    note: "the whole row, because the screen prints it" },
+  tasks: { screen: "Run detail", schema: "workflow", view: "tasks_api",
+    q: "select=id,step_key,kind,status,queue,attempts,max_attempts,error,output,created_at,completed_at"
+       + "&order=created_at" },
+  taskDeps: { screen: "Run detail", schema: "workflow", view: "task_dependencies_api",
+    q: "select=task_id,depends_on_task_id" },
+  taskEvents: { screen: "Overview · Run detail", schema: "workflow", view: "task_events_api",
+    q: "select=step_key,from_status,to_status,queue,detail,at&order=at.desc" },
+  eventStream: { screen: "Events", schema: "workflow", view: "task_events_api",
+    q: "select=id,run_id,step_key,kind,queue,from_status,to_status,detail,at&order=at.desc" },
+  schedules: { screen: "Schedules", schema: "workflow", view: "schedules_api",
+    q: "select=name,workflow_name,cron_expr,timezone,enabled,overlap_policy,last_fired_at,"
+       + "fire_count,skip_count,last_error&order=name" },
+  queueDepth: { screen: "Overview · Queues", schema: "workflow", view: "queues_api",
+    q: "select=queue,depth" },
+  /* The four pool reads are CONDITIONAL, and it is the only conditional
+     group here. `specs/workflow-engine/pools.sql` is on build-sql.py's
+     NOT_SHIPPED list on purpose -- pools.md §13 verifies the data model and
+     leaves the control loop a proposal, so shipping the schema would put
+     tables in the product with no manager on the other end. A deployment that
+     runs one applies pools.sql itself; every other deployment does not have
+     these relations and is not broken.
+
+     `absent` is what says so. The Queues screen already renders the refusal
+     with the file to apply (views.js, `gap(...)`), and dev/ui_reads.py treats
+     42P01 on these as expected rather than as a failed screen -- while still
+     failing on a wrong PROJECTION, which is the defect this table exists to
+     catch and which absence must not be allowed to hide. */
+  pools: { screen: "Queues", schema: "workflow", view: "v_pools",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    q: "select=name,image,enabled,queues,min_replicas,max_replicas,node_class,generation,"
+       + "observed_generation,reconcile_pending,phase&order=name" },
+  poolQueues: { screen: "Queues", schema: "workflow", view: "pool_queues",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    q: "select=queue,pool&order=queue" },
+  unservedQueues: { screen: "Queues", schema: "workflow", view: "v_unserved_queues",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    q: "select=queue,ready_tasks,running_tasks,oldest_task&order=queue" },
+  rateLimits: { screen: "Queues", schema: "workflow", view: "rate_limits_api",
+    q: "select=key,capacity,tokens&order=key" },
+  imagePolicy: { screen: "Queues", schema: "workflow", view: "pool_image_policy",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    q: "select=pattern,note&order=pattern" },
+
+  /* -- rbac ----------------------------------------------------------- */
+  /* `roles` and `org_roles` are columns now. The screen used to read three
+     views and join them in the browser; the numbers on it are checkable only
+     when they come from one read (REM-62). */
+  users: { screen: "Users", schema: "rbac", view: "users_api",
+    q: "select=id,email,status,created_at,roles,org_roles&order=email" },
+  roleNames: { screen: "Users", schema: "rbac", view: "roles", q: "select=name&order=name" },
+  roles: { screen: "Roles", schema: "rbac", view: "roles",
+    q: "select=name,grants_all,description&order=name" },
+  permissionKinds: { screen: "Roles", schema: "rbac", view: "permission_kinds",
+    q: "select=resource,action,checked_by&order=resource,action" },
+  rolePermissions: { screen: "Roles", schema: "rbac", view: "role_permissions",
+    q: "select=role,resource,action" },
+  /* `label`, not `name`: rbac.api_keys_api has always published `label`. */
+  apiKeys: { screen: "Keys", schema: "rbac", view: "api_keys_api",
+    q: "select=id,label,scopes,created_at,last_used_at,revoked_at&order=created_at.desc" },
+  /* `issued_at`, not `created_at`, and the ordering was wrong with it -- which
+     is why the ordering belongs in the contract the audit executes. */
+  refreshSessions: { screen: "Keys", schema: "rbac", view: "refresh_tokens_api",
+    q: "select=id,device_label,issued_at,expires_at,revoked_at&order=issued_at.desc" },
+  orgs: { screen: "Settings", schema: "rbac", view: "orgs_api",
+    q: "select=id,slug,name,member_count&order=slug" },
+  /* The status vocabulary itself, read once at boot so a state nobody wrote a
+     colour for is still chipped by what it means (ui.js setStatusVocabulary).
+     A contract rather than an inline fetch so the Surface audit executes it:
+     the screens' one weakest dependency is the one nothing was checking. */
+  lifecycleStates: { screen: "Settings", schema: "workflow", view: "lifecycle_states",
+    q: "select=state,is_terminal,is_success,note&order=state" },
+  visibilities: { screen: "Settings", schema: "rbac", view: "visibilities",
+    q: "select=scope,rank,requires_org,description&order=rank" },
+  /* `event_type` and `at`: the columns rbac.auth_events actually has. */
+  authEvents: { screen: "Events", schema: "rbac", view: "auth_events",
+    q: "select=id,user_id,event_type,detail,at&order=at.desc" },
+
+  /* -- agentic -------------------------------------------------------- */
+  agents: { screen: "Agents", schema: "agentic", view: "agents_api",
+    q: "select=name,model,tools,skills,structured_output_schema,system_prompt,plugin,visibility"
+       + "&order=name" },
+  agentNames: { screen: "Chat · Query · Help · Draft", schema: "agentic", view: "agents_api", q: "select=name&order=name" },
+  skills: { screen: "Agents", schema: "agentic", view: "skills_api",
+    q: "select=name,description&order=name" },
+  /* The body, fetched one skill at a time when the editor previews the
+     composed prompt. Separate from `skills` because the listing does not want
+     to carry every body, which is the reason `skills_api` publishes both. */
+  skillBodies: { screen: "Agents", schema: "agentic", view: "skills_api",
+    q: "select=name,content" },
+  toolServers: { screen: "Agents", schema: "agentic", view: "tool_servers_api",
+    q: "select=name,kind,cached_tools,synced_at&order=name" },
+  plugins: { screen: "Agents", schema: "agentic", view: "plugins_api", q: "select=name&order=name" },
+  chatSessions: { screen: "Chat", schema: "agentic", view: "sessions_api",
+    q: "select=id,title,created_at,message_count,run_count,last_message_at&order=created_at.desc" },
+  messages: { screen: "Chat", schema: "agentic", view: "messages_api",
+    q: "select=run_id,role,content,tool_calls,is_error,seq,created_at&order=seq" },
+  messageSeqs: { screen: "Chat", schema: "agentic", view: "messages_api", q: "select=seq" },
+  sessionRuns: { screen: "Chat", schema: "agentic", view: "runs_api",
+    q: "select=id,parent_run_id,agent_id,status,state,trigger_kind,depth,created_at&order=created_at.desc" },
+};
+
+/* Objects no screen READS, kept in the audit as what they are.
+ *
+ * Existence is the whole claim here, and separating them is the point: a table
+ * that is merely reachable cannot count towards "the screens work", which is
+ * exactly the arithmetic that let five broken projections pass. */
+export const PROBES = [
+  { schema: "workflow", view: "pools", absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    why: "written by the pool toggle (PATCH); never read as a list" },
+  /* Both were joined into Users and Settings in the browser until REM-62 put
+     the answers on `users_api` and `orgs_api`. They stay in the audit because
+     those columns are built out of them: if either becomes unreadable, the
+     columns go quietly empty rather than loudly absent. */
+  { schema: "rbac", view: "user_roles",
+    why: "aggregated into rbac.users_api.roles; no screen reads it directly" },
+  { schema: "rbac", view: "org_members",
+    why: "aggregated into rbac.users_api.org_roles and rbac.orgs_api.member_count" },
+];

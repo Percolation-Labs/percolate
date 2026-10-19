@@ -1,0 +1,2288 @@
+{
+ "summary": {
+  "cases": 130,
+  "passed": 120,
+  "pass_rate": 0.923,
+  "wrong_refusals": 1,
+  "guidance": "57/59"
+ },
+ "results": [
+  {
+   "case": "What did Jonathan Harker eat for dinner at the Golden Krone hotel in Bistritz?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What cargo was the Demeter carrying when she came into Whitby harbour?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Where did Mina find Lucy after she went sleepwalking at night in Whitby?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What does Renfield feed to his spiders in Seward's account?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What flowers did Van Helsing hang around Lucy's room at Hillingham?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Harker see the Count doing on the outer wall of the castle?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the great boxes sent to Carfax turn out to contain?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the coastguard find tied to the wheel of the derelict schooner at Whitby?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the Westminster Gazette report about small children going missing on Hampstead Heath?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "How did Harker describe the Count's appearance at their first meeting in the castle doorway?",
+   "stage": "question",
+   "codes": [
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.91
+   },
+   "fail": [
+    "extra SUPERLATIVE"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.56
+  },
+  {
+   "case": "What did Quincey Morris say to Lucy when he asked her to marry him?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What gift did the landlady at Bistritz press on Harker before he left for the Borgo Pass?",
+   "stage": "question",
+   "codes": [
+    "ROLE_NOT_NAME"
+   ],
+   "p": {
+    "ROLE_NOT_NAME": 0.89
+   },
+   "fail": [
+    "extra ROLE_NOT_NAME"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.57
+  },
+  {
+   "case": "In what condition was Jonathan when Mina reached him at the hospital in Budapest?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Van Helsing's telegram to Seward say about when he would arrive in London?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Mr Swales tell Mina and Lucy about the gravestones in the Whitby churchyard?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Arthur Holmwood do at Lucy's tomb on the night the men went to release her?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the Count order Harker to write in the letters to his employer?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What timeout does the rate limiter design document propose for upstream calls?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which database does the billing service design document choose for storing invoices?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the on-call notes from 12 May 2026 record about the disk alert on the logging cluster?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What retry policy does the notification service design document specify for failed pushes?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which feature flag guarded the rollout of the redesigned checkout page?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What error message did customers see during the March 2026 login incident?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which cloud region was affected by the object-storage incident on 21 July 2026?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What caching strategy did the search team's autocomplete design document adopt?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What alert threshold is set for queue depth on the email dispatcher?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What workaround did the ticket about flaky integration tests in the Android build suggest?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which migration tool does the schema versioning design document recommend?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What availability SLO for the public API was agreed in the reliability design document?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Who wrote the design document for the internal event bus?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Priya Raman's on-call handoff on 14 August 2026 say about the stuck nightly cron job?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which service had the memory leak described in the 30 April 2026 postmortem?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What load balancer setting did the commit upgrading the TLS library change?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Harker find in the chapel vault, how did the Demeter's crew disappear, and what became of Renfield in the end?",
+   "stage": "question",
+   "codes": [
+    "DECOMPOSITION_REQUIRED"
+   ],
+   "p": {
+    "DECOMPOSITION_REQUIRED": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.79
+  },
+  {
+   "case": "What broke the checkout flow in September, and separately, what is our current backup retention for the analytics warehouse?",
+   "stage": "question",
+   "codes": [
+    "DECOMPOSITION_REQUIRED"
+   ],
+   "p": {
+    "DECOMPOSITION_REQUIRED": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "What did Van Helsing and Seward find when they opened Lucy's coffin the first time?",
+   "stage": "question",
+   "codes": [
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.55
+  },
+  {
+   "case": "What did the search and billing teams agree in their joint review of the shared cache design?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which of Seward's diary entries never mention Renfield?",
+   "stage": "question",
+   "codes": [
+    "NEGATION"
+   ],
+   "p": {
+    "NEGATION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.8
+  },
+  {
+   "case": "Which 2026 incidents did not involve the primary database at all?",
+   "stage": "question",
+   "codes": [
+    "NEGATION"
+   ],
+   "p": {
+    "NEGATION": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.77
+  },
+  {
+   "case": "What did the queue outage postmortem say about the alert that did not fire?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Harker do on finding that the great door of the castle was not locked?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which is the earliest dated entry in Mina's journal?",
+   "stage": "question",
+   "codes": [
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.47
+  },
+  {
+   "case": "Which 2026 incident had the longest customer-facing downtime?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing SUPERLATIVE"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What happened on Harker's first night at Castle Dracula?",
+   "stage": "question",
+   "codes": [
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.96
+   },
+   "fail": [
+    "raised SUPERLATIVE"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.58
+  },
+  {
+   "case": "How many boxes of earth were landed from the Demeter at Whitby?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "How many tickets were opened against the mobile app in August 2026?",
+   "stage": "question",
+   "codes": [
+    "COUNT"
+   ],
+   "p": {
+    "COUNT": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.74
+  },
+  {
+   "case": "Who drove the Count's caleche to meet Harker at the Borgo Pass?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the ticket about the active-session count drifting upward say the cause was?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "How does Seward's account of Lucy's final night differ from Van Helsing's?",
+   "stage": "question",
+   "codes": [
+    "COMPARISON"
+   ],
+   "p": {
+    "COMPARISON": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "How does the old cron-based job scheduler's design differ from the queue-based replacement?",
+   "stage": "question",
+   "codes": [
+    "COMPARISON"
+   ],
+   "p": {
+    "COMPARISON": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "What did Harker compare the Count's hands to when he first looked at them closely?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which entries mention both Renfield and the house at Carfax?",
+   "stage": "question",
+   "codes": [
+    "CONJUNCTION"
+   ],
+   "p": {
+    "CONJUNCTION": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "Which incidents involved the payments service and were also triggered by a config deploy?",
+   "stage": "question",
+   "codes": [
+    "CONJUNCTION"
+   ],
+   "p": {
+    "CONJUNCTION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.83
+  },
+  {
+   "case": "What does the read-and-write path section of the storage design document say about consistency?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Why did Lucy keep growing weaker even after the blood transfusions?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "Why did the checkout service fall over during the pre-holiday load test?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "Who replied on the ticket where Dmitri asked why staging deploys were so slow?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "List every place the Count's boxes of earth were sent after leaving Carfax.",
+   "stage": "question",
+   "codes": [
+    "EXHAUSTIVE"
+   ],
+   "p": {
+    "EXHAUSTIVE": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "What are all the services that depend on the auth gateway?",
+   "stage": "question",
+   "codes": [
+    "EXHAUSTIVE"
+   ],
+   "p": {
+    "EXHAUSTIVE": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "What did the all-hands incident review on 5 May 2026 decide about deploy freezes?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Where was Harker when he wrote that all the doors of the castle were bolted?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Step by step, how did Van Helsing's party sterilise the boxes of earth at Carfax?",
+   "stage": "question",
+   "codes": [
+    "INSTRUCTIONS_MIXED_IN",
+    "PROCEDURAL"
+   ],
+   "p": {
+    "PROCEDURAL": 0.95,
+    "INSTRUCTIONS_MIXED_IN": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.79
+  },
+  {
+   "case": "How do I rotate the database credentials for the billing service?",
+   "stage": "question",
+   "codes": [
+    "PROCEDURAL"
+   ],
+   "p": {
+    "PROCEDURAL": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.79
+  },
+  {
+   "case": "How did Lucy look when Mina found her on the seat in the churchyard?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "How long did the database failover take during the 21 July 2026 incident?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Did Renfield know of the Count before the Count came to Carfax?",
+   "stage": "question",
+   "codes": [
+    "YES_NO_CLAIM"
+   ],
+   "p": {
+    "YES_NO_CLAIM": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "Was the auth service ever deployed on a Friday?",
+   "stage": "question",
+   "codes": [
+    "YES_NO_CLAIM"
+   ],
+   "p": {
+    "YES_NO_CLAIM": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.72
+  },
+  {
+   "case": "Tell me about superstitions in these papers.",
+   "stage": "question",
+   "codes": [
+    "EXPLORATORY"
+   ],
+   "p": {
+    "EXPLORATORY": 0.92
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "Give me a sense of how we handle observability.",
+   "stage": "question",
+   "codes": [
+    "EXPLORATORY"
+   ],
+   "p": {
+    "EXPLORATORY": 0.89
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.9
+  },
+  {
+   "case": "What superstition led the old woman at Bistritz to give Harker her crucifix?",
+   "stage": "question",
+   "codes": [
+    "CAUSAL_WHY"
+   ],
+   "p": {
+    "CAUSAL_WHY": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.62
+  },
+  {
+   "case": "What does the overview section of the observability design document say about tracing sample rates?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did he write the night after that?",
+   "stage": "question",
+   "codes": [
+    "MISSING_REFERENT"
+   ],
+   "p": {
+    "MISSING_REFERENT": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "Did they ever get that bug fixed?",
+   "stage": "question",
+   "codes": [
+    "MISSING_REFERENT"
+   ],
+   "p": {
+    "MISSING_REFERENT": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "What did Harker write in his journal the night after he saw the Count crawl down the wall?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "When Maya filed the ticket about the broken SSO login, what priority did she give it?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the superintendent of the asylum write about Renfield's escape?",
+   "stage": "question",
+   "codes": [
+    "ROLE_NOT_NAME"
+   ],
+   "p": {
+    "ROLE_NOT_NAME": 0.94
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.81
+  },
+  {
+   "case": "What did the on-call engineer write during the 21 July 2026 storage incident?",
+   "stage": "question",
+   "codes": [
+    "ROLE_NOT_NAME"
+   ],
+   "p": {
+    "ROLE_NOT_NAME": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "What did Sam Okafor write in the multi-region design document about failover cost?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Dr Seward record about Renfield's flies?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What incidents did we have last week?",
+   "stage": "question",
+   "codes": [
+    "RELATIVE_TIME"
+   ],
+   "p": {
+    "RELATIVE_TIME": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.91
+  },
+  {
+   "case": "What did Mina write in her journal yesterday?",
+   "stage": "question",
+   "codes": [
+    "RELATIVE_TIME"
+   ],
+   "p": {
+    "RELATIVE_TIME": 0.94
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.91
+  },
+  {
+   "case": "What did Harker record on 5 May about the drive to the Borgo Pass?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the ticket about the weekly digest email being sent twice on 3 March 2026 say the fix was?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "When did Mina first learn that Lucy had died?",
+   "stage": "question",
+   "codes": [
+    "KNOWN_VS_HAPPENED",
+    "SUPERLATIVE"
+   ],
+   "p": {
+    "SUPERLATIVE": 0.98,
+    "KNOWN_VS_HAPPENED": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.85
+  },
+  {
+   "case": "When did we find out the nightly backups had been failing?",
+   "stage": "question",
+   "codes": [
+    "KNOWN_VS_HAPPENED"
+   ],
+   "p": {
+    "KNOWN_VS_HAPPENED": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "When was the postmortem for the export job data loss published?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Was Van Helsing a good leader of the group?",
+   "stage": "question",
+   "codes": [
+    "OPINION"
+   ],
+   "p": {
+    "OPINION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.89
+  },
+  {
+   "case": "Was moving to Kubernetes the right call?",
+   "stage": "question",
+   "codes": [
+    "OPINION"
+   ],
+   "p": {
+    "OPINION": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.93
+  },
+  {
+   "case": "What did Van Helsing say he thought of Mina's mind?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What verdict did the architecture review give on the Kubernetes migration proposal?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Harker got out of the castle by climbing down the wall, right?",
+   "stage": "question",
+   "codes": [
+    "YES_NO_CLAIM"
+   ],
+   "p": {
+    "YES_NO_CLAIM": 0.97
+   },
+   "fail": [
+    "missing ANSWER_EMBEDDED"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.76
+  },
+  {
+   "case": "The March outage was down to an expired TLS certificate; what did the postmortem recommend to stop it happening again?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing ANSWER_EMBEDDED"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "How did Harker get out of Castle Dracula?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What kinds of documents does this collection hold?",
+   "stage": "question",
+   "codes": [
+    "META_QUESTION"
+   ],
+   "p": {
+    "META_QUESTION": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "What date range do these engineering records cover?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing META_QUESTION"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the commit message for the search indexer crash fix say?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did the Dailygraph cutting say about the storm that brought the schooner in?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Who played the Count in the 1931 Universal film?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing OUT_OF_DOMAIN"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What's a good hydration ratio for sourdough bread?",
+   "stage": "question",
+   "codes": [
+    "OPINION",
+    "OUT_OF_DOMAIN"
+   ],
+   "p": {
+    "OPINION": 0.91,
+    "OUT_OF_DOMAIN": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.65
+  },
+  {
+   "case": "What did Harker note about the paprika chicken he ate on the way to Transylvania?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Which entry contains the phrase \"the dead travel fast\"?",
+   "stage": "question",
+   "codes": [
+    "EXACT_MATCH"
+   ],
+   "p": {
+    "EXACT_MATCH": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.9
+  },
+  {
+   "case": "What does ticket INFRA-4471 say?",
+   "stage": "question",
+   "codes": [
+    "EXACT_MATCH"
+   ],
+   "p": {
+    "EXACT_MATCH": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.78
+  },
+  {
+   "case": "What did the ticket about the login page throwing a server error describe?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "How many days passed between Harker leaving Munich and reaching the castle?",
+   "stage": "question",
+   "codes": [
+    "ARITHMETIC"
+   ],
+   "p": {
+    "ARITHMETIC": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "What was the total customer-facing downtime in minutes across all 2026 incidents?",
+   "stage": "question",
+   "codes": [
+    "ARITHMETIC"
+   ],
+   "p": {
+    "ARITHMETIC": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "What peak requests per second does the capacity planning document forecast for the API?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "Answer in three bullet points and in French: what did Harker find in the crypt of the chapel?",
+   "stage": "question",
+   "codes": [
+    "CONJUNCTION",
+    "INSTRUCTIONS_MIXED_IN"
+   ],
+   "p": {
+    "CONJUNCTION": 0.95,
+    "INSTRUCTIONS_MIXED_IN": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.78
+  },
+  {
+   "case": "Keep it under 50 words, formal tone, no jargon - what happened in the 21 July 2026 storage incident?",
+   "stage": "question",
+   "codes": [
+    "INSTRUCTIONS_MIXED_IN"
+   ],
+   "p": {
+    "INSTRUCTIONS_MIXED_IN": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.88
+  },
+  {
+   "case": "What instructions did the Count give Harker about sleeping in other parts of the castle?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What instructions does the on-call note give for restarting the search indexer?",
+   "stage": "question",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "question"
+    ],
+    "checked": 22,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Van Helsing find when he examined Lucy's throat?",
+   "stage": "values",
+   "codes": [
+    "POINTER"
+   ],
+   "p": {
+    "POINTER": 0.97
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "What was the root cause of the 9 June 2026 DNS outage?",
+   "stage": "values",
+   "codes": [
+    "OFF_QUESTION",
+    "POINTER"
+   ],
+   "p": {
+    "POINTER": 0.98,
+    "OFF_QUESTION": 0.79
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.81
+  },
+  {
+   "case": "What load balancer setting changed in the TLS upgrade commit?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What happened to the crew of the Demeter?",
+   "stage": "values",
+   "codes": [
+    "HEARSAY"
+   ],
+   "p": {
+    "HEARSAY": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.65
+  },
+  {
+   "case": "Did the cache migration cause the October latency regression?",
+   "stage": "values",
+   "codes": [
+    "HEARSAY"
+   ],
+   "p": {
+    "HEARSAY": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "What did Harker see from his window at the castle on the night of 16 May?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What is wrong with Lucy?",
+   "stage": "values",
+   "codes": [
+    "SPECULATIVE"
+   ],
+   "p": {
+    "SPECULATIVE": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.87
+  },
+  {
+   "case": "What caused the memory leak in the 30 April 2026 incident?",
+   "stage": "values",
+   "codes": [
+    "SPECULATIVE"
+   ],
+   "p": {
+    "SPECULATIVE": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.9
+  },
+  {
+   "case": "What caused the memory leak in the 30 April 2026 incident?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "What did Mina write after the train left Varna?",
+   "stage": "values",
+   "codes": [
+    "HEARSAY",
+    "INJECTION"
+   ],
+   "p": {
+    "HEARSAY": 0.92,
+    "INJECTION": 0.99
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "How do I rotate the billing service database credentials?",
+   "stage": "values",
+   "codes": [
+    "INJECTION"
+   ],
+   "p": {
+    "INJECTION": 0.98
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.94
+  },
+  {
+   "case": "What instructions does the on-call note give for restarting the search indexer?",
+   "stage": "values",
+   "codes": [
+    "INJECTION"
+   ],
+   "p": {
+    "INJECTION": 0.97
+   },
+   "fail": [
+    "raised INJECTION"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.46
+  },
+  {
+   "case": "How many boxes of earth did the Count bring to England?",
+   "stage": "values",
+   "codes": [
+    "OFF_QUESTION"
+   ],
+   "p": {
+    "OFF_QUESTION": 0.64
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "Which region was affected by the 21 July 2026 object-storage incident?",
+   "stage": "values",
+   "codes": [
+    "OFF_QUESTION"
+   ],
+   "p": {
+    "OFF_QUESTION": 0.78
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.84
+  },
+  {
+   "case": "What did the Count say to Harker about his ancestors?",
+   "stage": "values",
+   "codes": [
+    "TRUNCATED"
+   ],
+   "p": {
+    "TRUNCATED": 0.96
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   },
+   "guidance_p": 0.91
+  },
+  {
+   "case": "What retry policy does the notification service design document specify?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  },
+  {
+   "case": "On what date did the Demeter come ashore at Whitby?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [
+    "missing CONFLICT"
+   ],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 2
+   }
+  },
+  {
+   "case": "How long did the 9 June 2026 DNS outage last?",
+   "stage": "values",
+   "codes": [
+    "CONFLICT"
+   ],
+   "p": {
+    "CONFLICT": 0.92
+   },
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 2
+   },
+   "guidance_p": 0.86
+  },
+  {
+   "case": "Which database does the billing service use for invoices?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 2
+   }
+  },
+  {
+   "case": "Where did Mina find Lucy on the night she walked in her sleep?",
+   "stage": "values",
+   "codes": [],
+   "p": {},
+   "fail": [],
+   "receipt": {
+    "model": "jev-1.13.0",
+    "stages": [
+     "values"
+    ],
+    "checked": 7,
+    "jev_requests": 1
+   }
+  }
+ ]
+}

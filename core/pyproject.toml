@@ -1,0 +1,133 @@
+[project]
+name = "percolate-core"
+version = "0.2.6"
+description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Percolate" }]
+keywords = ["postgres", "workflow", "agents", "rag", "pgvector"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Base install is the worker plus a driver, and nothing else. Someone writing
+# their own worker should not pull boto3 and pydantic-ai to do it.
+dependencies = [
+    "asyncpg>=0.30",
+    "httpx>=0.28",
+    "typer>=0.15",
+]
+
+[project.optional-dependencies]
+content = ["boto3>=1.35", "fastapi>=0.115", "uvicorn>=0.34"]
+# The ingest worker: it reads the bytes the Content Server wrote, so it needs
+# that extra too. semchunk is the chunker; the parsers are one light library
+# per format and nothing here downloads a model.
+ingest = [
+    "percolate-core[content]",
+    "pydantic>=2.9",
+    "semchunk>=3.0",
+    "pymupdf4llm>=0.0.17",
+    "python-docx>=1.1",
+]
+# Tabular is separate because a deployment that never uploads a CSV should not
+# carry pyarrow (~120MB) and duckdb (~45MB) to find that out.
+tabular = ["pyarrow>=17", "duckdb>=1.0"]
+# The lake worker (lake.md): DuckDB with Iceberg, spatial and vss, reading and
+# writing object storage. Floor 1.5 because that is what was measured -- Iceberg
+# writes, MERGE into Iceberg and GEOMETRY carrying its CRS through Parquet all
+# came from runs on 1.5.5. `content` for boto3, which deletes staged objects:
+# DuckDB can write to S3 and cannot delete from it.
+lake = ["percolate-core[content]", "pyarrow>=17", "duckdb>=1.5"]
+# The pool manager. `p8 pool render` needs none of this -- it is a pure function
+# of a row, and keeping it in the base install is what lets anyone review a
+# manifest without a cluster client. The extra is for the reconcile loop.
+manager = ["kubernetes-asyncio>=32.0"]
+# The browser surface. FastAPI hands over static files and owns no read
+# path -- the page talks to PostgREST directly, which is the property the whole
+# UI is built on, and the reason this extra is two packages rather than a stack.
+ui = ["fastapi>=0.115", "uvicorn>=0.34"]
+# `percolate sample load` reads authored YAML, and that is the whole of what it
+# needs beyond the base install. It used to be reachable only through [agent],
+# so the first thing anyone following the install guide was told to do -- load
+# the sample -- asked them to install pydantic-ai, fastapi, uvicorn and mcp to
+# parse four small documents.
+sample = ["pyyaml>=6.0"]
+agent = [
+    "pydantic>=2.9",
+    # FLOOR 2.38, NOT 0.4. The old bound spanned 0.4 to 2.42 -- two major eras
+    # of the same library -- which is not a constraint, it is a wish, and the
+    # lockfile was doing all the work. Anything resolving inside that range
+    # would have been "supported" by this file and unrunnable in fact.
+    #
+    # 2.38 is the floor because it is where `RunContext.context_window_used`
+    # lands, and `persistence.window_size` now reads it. The upper bound is the
+    # next major: this package calls `Agent(...)`, `agent.run(...)`,
+    # `StructuredDict` and `RunUsage`, all of which are 2.x surface.
+    "pydantic-ai-slim[openai]>=2.38,<3",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "mcp>=1.2",
+    "pyyaml>=6.0",
+    "rich>=13.9",
+]
+# OpenTelemetry, opt-in and off unless configured (see `agentic/telemetry.py`).
+#
+# Separate from [agent] on the same rule the providers below follow: a runtime
+# that exports nothing should not carry an exporter to find that out. The SDK
+# and the OTLP exporter are the whole of it -- pydantic-ai emits GenAI-semantic
+# spans through the OTel API on its own, so what this extra buys is somewhere
+# to send them.
+otel = [
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+]
+# Every provider pydantic-ai can drive, because `model` is a COLUMN and a
+# column should not be constrained by what somebody remembered to install.
+#
+# `agent` alone carries openai, which is the one an OpenAI-shaped gateway also
+# satisfies -- point OPENAI_BASE_URL at it and openrouter, cerebras, xai, zai,
+# vLLM and Ollama all work with no extra SDK. The providers below are the ones
+# that speak their own protocol and therefore need their own client. Measured,
+# they add ~140MB to the image (1.15GB -> 1.29GB), most of it botocore and
+# google-genai's protobuf -- which is why they are separable at all. The
+# published image takes them anyway (see `all`), because an image that cannot
+# run the model named in a row fails at request time rather than install time,
+# and 140MB is a poor trade against that.
+providers = [
+    "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=2.38,<3",
+]
+# The embedding model that runs in the worker (REM-628). Separate from ingest
+# because a deployment that embeds through a hosted provider, or not at all,
+# should not carry onnxruntime; in `all` because the image is one image and
+# this is what makes semantic search work with no key and no bill. fastembed is
+# ONNX Runtime and a tokenizer -- no torch, which is the whole reason this is
+# affordable: ~53MB of wheels and a 64MB quantised model, against ~2GB.
+embed = ["fastembed>=0.7"]
+all = ["percolate-core[content,agent,providers,ingest,tabular,lake,otel,embed]"]
+
+[project.scripts]
+percolate = "percolate_core.cli:app"
+
+[build-system]
+requires = ["hatchling<1.28"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["percolate_core"]
+# The UI's static files are package DATA, not code, and hatchling includes them
+# because they live inside the package directory. Stated here because "the
+# wheel carries the UI" is a claim worth being able to point at, and
+# `dev/check.sh` asserts it against a built wheel rather than against this
+# comment.
+artifacts = ["percolate_core/ui/static/*"]
+
+[project.urls]
+Homepage = "https://github.com/Percolation-Labs/percolate-core"
+Repository = "https://github.com/Percolation-Labs/percolate-core"
+Specs = "https://github.com/Percolation-Labs/p8-subsystems"

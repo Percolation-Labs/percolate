@@ -1,0 +1,8 @@
+{
+ "MISSING_REFERENT": {
+  "instruction": "Does `question` refer to something that only an earlier conversation could identify, such as a pronoun or 'that' with nothing in `question` for it to point to?",
+  "yes": "a reader given only `question` could not tell who or what is meant",
+  "no": "everything it refers to is named or described in `question` itself, even if introduced with 'the'",
+  "threshold": 0.7
+ }
+}

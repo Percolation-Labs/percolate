@@ -1,0 +1,142 @@
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "Which services did the payments team own in 2023, and which of those later had a Sev1 postmortem?"}
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "Find whoever wrote the original rate-limiter design doc for ledger-api and list the tickets they closed after moving to the growth team."}
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "How many logins failed during the March auth-gateway outage, and did the remediation items from its postmortem ever ship?"}
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "For each night the on-call got paged more than three times, what deploy went out just before?"}
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "who reviewed the commit that introduced the kafka consumer lag bug and were they on call when it fired"}
+{"domain": "eng", "target": "DECOMPOSITION_REQUIRED", "question": "Does the retry policy in the notifications design doc match what notify-worker's code actually does now?"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "Where's the runbook for the billing-sync job, and also who approved Priya's PTO over the release week?"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "What caused INC-2291? Separately, what is our naming convention for feature flags?"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "how do i rotate the vault token for search-indexer + when is the next architecture review"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "Did anyone ever fix the flaky checkout e2e test? Also what's the Slack channel for data platform?"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "Who owns the image-resizer service, and what's the standard latency SLO we set for internal APIs in general?"}
+{"domain": "eng", "target": "TWO_QUESTIONS", "question": "Pull up the postmortem for last November's DNS outage; I also need the RFC template the infra guild uses."}
+{"domain": "eng", "target": "NEGATION", "question": "Which postmortems don't list any action items?"}
+{"domain": "eng", "target": "NEGATION", "question": "Tickets in the PLAT project that were closed without a linked commit"}
+{"domain": "eng", "target": "NEGATION", "question": "Design docs for new services that never mention a rollback plan"}
+{"domain": "eng", "target": "NEGATION", "question": "incidents where the on-call notes don't name a root cause"}
+{"domain": "eng", "target": "NEGATION", "question": "Are there microservices nobody is recorded as owning?"}
+{"domain": "eng", "target": "NEGATION", "question": "Commits to payments-core in 2024 whose messages leave out a ticket id"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "What was the longest outage we've ever had on checkout-api?"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "first postmortem that mentions redis eviction"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "Which on-call engineer was paged the most during Q2 2025?"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "Most recent design doc touching the search ranking pipeline"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "Of the services flagged in the 2025 quality review tickets, which had the weakest test coverage?"}
+{"domain": "eng", "target": "SUPERLATIVE", "question": "When did we last bump the Postgres major version on ledger-db?"}
+{"domain": "eng", "target": "COUNT", "question": "How many Sev1 incidents did we have in 2024?"}
+{"domain": "eng", "target": "COUNT", "question": "number of tickets Marcus Okafor closed in Q3 2025"}
+{"domain": "eng", "target": "COUNT", "question": "How often did the inventory-sync job fail between January and June 2025?"}
+{"domain": "eng", "target": "COUNT", "question": "How many design docs went through infra guild review in 2025?"}
+{"domain": "eng", "target": "COUNT", "question": "Tally of postmortems that cite a bad config push as the trigger"}
+{"domain": "eng", "target": "COUNT", "question": "How many distinct engineers committed to the legacy-monolith repo after the decomposition project kicked off?"}
+{"domain": "eng", "target": "COMPARISON", "question": "How does the Kafka event bus proposal differ from the SQS one in the messaging design docs?"}
+{"domain": "eng", "target": "COMPARISON", "question": "Compare incident frequency on auth-gateway before and after the 2024 rewrite"}
+{"domain": "eng", "target": "COMPARISON", "question": "Whose schema migration approach led to fewer rollbacks, Dana Whitfield's or Raj Menon's?"}
+{"domain": "eng", "target": "COMPARISON", "question": "what's different between the SRE on-call handbook and the mobile team's one"}
+{"domain": "eng", "target": "COMPARISON", "question": "gRPC vs REST for internal calls: what did each side argue in the API standards thread?"}
+{"domain": "eng", "target": "COMPARISON", "question": "The January and June 2025 payment outage postmortems reached different conclusions, I think. Where do they diverge?"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "Sev1 incidents that happened on a weekend"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "Tickets assigned to the platform team that are also tagged security"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "Design docs authored by Lena Hart that the architecture board approved"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "postmortems involving both the cache layer and a database failover"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "Commits to billing-service touching the tax module that got reverted within a week"}
+{"domain": "eng", "target": "CONJUNCTION", "question": "Any on-call shifts in 2025 where search-indexer and the CDN both paged on the same night?"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "Would INC-1874 have been avoided if the canary had run for an hour instead of ten minutes?"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "If we'd kept orders in the monolith, would we still have hit the dual-write consistency bugs?"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "what would black friday 2024 have looked like with autoscaling enabled on cart-service"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "Had the dynamic-pricing flag defaulted to off, how many customers would the pricing bug have reached?"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "Would we have lost less data in the May 2025 backup incident with point-in-time recovery turned on?"}
+{"domain": "eng", "target": "COUNTERFACTUAL", "question": "Suppose Tomás Ruiz hadn't been on leave the week of the cert expiry; any sign in the notes it would've been caught?"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "Why did the payments queue back up on 14 March 2025?"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "What caused the memory leak in report-generator?"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "why was the graphql gateway project cancelled"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "Root cause of the login latency regression after release 4.12"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "What led the user-profiles team to move off MongoDB?"}
+{"domain": "eng", "target": "CAUSAL_WHY", "question": "The nightly ETL jobs keep timing out on Mondays. Anything explaining that?"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "List every incident that involved the CDN provider"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "All tickets ever filed against email-dispatcher"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "Give me the complete list of services still running on Python 2 as of the 2025 audit"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "every design doc amir haddad reviewed"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "Show me the 2025 postmortems, all of them, I don't want any missed"}
+{"domain": "eng", "target": "EXHAUSTIVE", "question": "I'm cleaning up flags before the Q4 release. Which feature flags were added in 2025? Need the full set."}
+{"domain": "eng", "target": "PROCEDURAL", "question": "How do I roll back a bad deploy of checkout-api?"}
+{"domain": "eng", "target": "PROCEDURAL", "question": "Steps to onboard a new service onto the observability stack"}
+{"domain": "eng", "target": "PROCEDURAL", "question": "What's the process for requesting a production database snapshot?"}
+{"domain": "eng", "target": "PROCEDURAL", "question": "rotating TLS certs on the edge load balancers how to"}
+{"domain": "eng", "target": "PROCEDURAL", "question": "Walk me through failing ledger-db over to the secondary region"}
+{"domain": "eng", "target": "PROCEDURAL", "question": "I need to add a tenant to the multi-tenant config service tomorrow; what do I run, in what order?"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "Is it true the August search outage was caused by a bad index migration?"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "Did Priya Nair write the original design for the rate limiter?"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "was the auth token TTL ever raised to 24 hours"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "Does notify-worker retry failed sends with exponential backoff?"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "Did the INC-2047 postmortem conclude that the load balancer health checks were misconfigured?"}
+{"domain": "eng", "target": "YES_NO_CLAIM", "question": "Someone in standup said we've never had a Sev1 on the mobile API. Correct?"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "Tell me about our history with database migrations"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "What's been going on with the data platform over the last couple of years?"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "Give me an overview of how we do on-call"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "anything interesting about caching strategies across our services"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "I just joined the payments team. What should I know about the stack's past?"}
+{"domain": "eng", "target": "EXPLORATORY", "question": "Recurring themes in our postmortems"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "Who fixed it after the deploy broke?"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "What did they decide in the meeting about the queue?"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "was that ticket ever closed"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "Find the postmortem for the outage"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "Did the migration he mentioned in standup go out?"}
+{"domain": "eng", "target": "MISSING_REFERENT", "question": "Status of the rewrite we talked about on Friday"}
+{"domain": "eng", "target": "ALIAS", "question": "What's the latest on the Beast?"}
+{"domain": "eng", "target": "ALIAS", "question": "Design docs written by the guy who built the original billing system"}
+{"domain": "eng", "target": "ALIAS", "question": "postmortems about the thanksgiving meltdown"}
+{"domain": "eng", "target": "ALIAS", "question": "Tickets on the service everyone calls the Shredder"}
+{"domain": "eng", "target": "ALIAS", "question": "What changes did the database whisperer make to ledger-db in 2025?"}
+{"domain": "eng", "target": "ALIAS", "question": "Who reviewed commits to that ancient Perl thing that generates invoices?"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "What did the VP of Engineering say about the deploy freeze in the Q3 2025 postmortems?"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "Tickets assigned to the payments tech lead"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "Design docs signed off by the head of security"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "what did the on-call SRE write during the ledger-db failover"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "Which commits did the release manager revert in 2025?"}
+{"domain": "eng", "target": "ROLE_NOT_NAME", "question": "Show me the incident commander's notes from INC-2133"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "Who owns the search-indexer service?"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "What's the SLO for checkout-api?"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "which database does user-profiles use"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "How many engineers are on the platform team?"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "What's the max connection pool size configured for ledger-db?"}
+{"domain": "eng", "target": "TIME_UNSPECIFIED", "question": "Who's the escalation contact for payments incidents?"}
+{"domain": "eng", "target": "NONE", "question": "Postmortem for INC-2047"}
+{"domain": "eng", "target": "NONE", "question": "Design doc for idempotency keys in ledger-api"}
+{"domain": "eng", "target": "NONE", "question": "Commit message for a3f9c21 in the checkout-api repo"}
+{"domain": "eng", "target": "NONE", "question": "Description of ticket PLAT-4412"}
+{"domain": "eng", "target": "NONE", "question": "On-call notes from Hannah Cole's shift on 3 February 2025"}
+{"domain": "eng", "target": "NONE", "question": "the RFC proposing sharding for the orders database"}
+{"domain": "eng", "target": "NONE", "question": "Timeline section of the 12 June 2025 CDN outage postmortem"}
+{"domain": "eng", "target": "NONE", "question": "Acceptance criteria on ticket PAY-1189"}
+{"domain": "eng", "target": "NONE", "question": "What error message did search-indexer log during INC-1902?"}
+{"domain": "eng", "target": "NONE", "question": "Ticket where Raj Menon proposed moving cron jobs to Temporal"}
+{"domain": "eng", "target": "NONE", "question": "Design doc for the notification preferences API, version 2"}
+{"domain": "eng", "target": "NONE", "question": "Which commit fixed the null pointer in invoice-renderer reported in BILL-772?"}
+{"domain": "eng", "target": "NONE", "question": "Postmortem for the 9 October 2024 auth-gateway outage"}
+{"domain": "eng", "target": "NONE", "question": "ticket for upgrading the k8s ingress controller in staging"}
+{"domain": "eng", "target": "NONE", "question": "Who was assigned ticket INFRA-3301?"}
+{"domain": "eng", "target": "NONE", "question": "The threat model section in the SSO integration design doc"}
+{"domain": "eng", "target": "NONE", "question": "What severity was INC-2133 given in its postmortem?"}
+{"domain": "eng", "target": "NONE", "question": "Lena Hart's design doc on the event-sourcing migration for cart-service"}
+{"domain": "eng", "target": "NONE", "question": "commit that added the circuit breaker to payments-core"}
+{"domain": "eng", "target": "NONE", "question": "Action items from the INC-1874 postmortem"}
+{"domain": "eng", "target": "NONE", "question": "What release version shipped the fix for MOB-562?"}
+{"domain": "eng", "target": "NONE", "question": "The capacity estimate in the 2024 design doc for the analytics ingestion pipeline"}
+{"domain": "eng", "target": "NONE", "question": "On-call handoff note mentioning the stuck Kafka partition on 22 April 2025"}
+{"domain": "eng", "target": "NONE", "question": "Ticket requesting a read replica for reporting-db"}
+{"domain": "eng", "target": "NONE", "question": "What did the INC-2291 postmortem list as the detection time?"}
+{"domain": "eng", "target": "NONE", "question": "Design review comments from Amir Haddad on the rate-limiter v2 doc"}
+{"domain": "eng", "target": "NONE", "question": "commit message where Dana Whitfield reverted the 4.12 login change"}
+{"domain": "eng", "target": "NONE", "question": "Which customer was named in support escalation ticket SUP-908?"}
+{"domain": "eng", "target": "NONE", "question": "The ADR choosing Terraform over Pulumi for infra provisioning"}
+{"domain": "eng", "target": "NONE", "question": "Repro steps in bug ticket CHK-2210 about duplicate orders"}
+{"domain": "eng", "target": "NONE", "question": "Postmortem for the expired TLS certificate on api.internal in March 2025"}
+{"domain": "eng", "target": "NONE", "question": "What budget did the 2025 observability migration design doc ask for?"}
+{"domain": "eng", "target": "NONE", "question": "ticket tracking the deprecation of the v1 webhooks endpoint"}
+{"domain": "eng", "target": "NONE", "question": "Marcus Okafor's on-call notes from the 18 August 2025 search outage"}
+{"domain": "eng", "target": "NONE", "question": "Commit that bumped the Go version in notify-worker to 1.22"}
+{"domain": "eng", "target": "NONE", "question": "What query was identified as slow in ticket DB-415?"}
+{"domain": "eng", "target": "NONE", "question": "Design doc for the multi-region failover plan for ledger-db"}
+{"domain": "eng", "target": "NONE", "question": "Customer impact section of the INC-2210 postmortem"}
+{"domain": "eng", "target": "NONE", "question": "The ticket where Priya Nair reported the memory leak in report-generator"}
+{"domain": "eng", "target": "NONE", "question": "What timeout value did commit 7be41d0 set for the cart-service HTTP client?"}

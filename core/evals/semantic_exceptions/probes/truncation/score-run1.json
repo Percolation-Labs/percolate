@@ -1,0 +1,1318 @@
+{
+ "summary": {
+  "shadow-truncated": {
+   "answers": 28,
+   "right": 22,
+   "accuracy": 0.786,
+   "queries_per_question": 1.75,
+   "queries_per_right_answer": 2.23,
+   "truncation_shown_share": 0.0
+  },
+  "shadow-control": {
+   "answers": 36,
+   "right": 15,
+   "accuracy": 0.417,
+   "queries_per_question": 0.5,
+   "queries_per_right_answer": 1.2,
+   "truncation_shown_share": 0.0
+  },
+  "on-truncated": {
+   "answers": 28,
+   "right": 23,
+   "accuracy": 0.821,
+   "queries_per_question": 1.54,
+   "queries_per_right_answer": 1.87,
+   "truncation_shown_share": 0.0
+  },
+  "on-control": {
+   "answers": 36,
+   "right": 15,
+   "accuracy": 0.417,
+   "queries_per_question": 0.78,
+   "queries_per_right_answer": 1.87,
+   "truncation_shown_share": 0.0
+  }
+ },
+ "rows": [
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O1",
+   "arm": "on",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O2",
+   "arm": "on",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 4,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O3",
+   "arm": "on",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 4,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "O4",
+   "arm": "on",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S1",
+   "arm": "shadow",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S2",
+   "arm": "shadow",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": true,
+   "queries": 4,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S3",
+   "arm": "shadow",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "1",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 3,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "2",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 2,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "3",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "4",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "5",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "6",
+   "group": "truncated",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "7",
+   "group": "control",
+   "kind": "count",
+   "right": true,
+   "queries": 1,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "8",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 4,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "9",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "10",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "11",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "12",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "13",
+   "group": "truncated",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "14",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "15",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  },
+  {
+   "agent": "S4",
+   "arm": "shadow",
+   "q": "16",
+   "group": "control",
+   "kind": "dates",
+   "right": false,
+   "queries": 0,
+   "truncation_shown": false
+  }
+ ]
+}
