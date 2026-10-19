@@ -461,11 +461,6 @@ select (agentic.upsert_tool_server($j${
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
 
--- A role that may use agents at all: a fresh install has only bootstrap_admin's admin
-insert into rbac.roles (name) values ('member') on conflict do nothing;
-insert into rbac.role_permissions (role, resource, action) values ('member', 'agents', 'invoke')
-on conflict do nothing;
-
 -- A second person, and a harbour office you both belong to
 select rbac.create_user_with_password('crew@example.com', 'a-long-crew-password-123') as crew_id \gset
 select rbac.grant_role(:'crew_id', 'member');
