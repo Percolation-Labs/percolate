@@ -123,6 +123,7 @@ TREE_GATES=(
   "The parser's upgrade scripts match its recorded SQL surface::$PY extension/percolate_parser/write-upgrades.py --check"
   "A released version number is not reused::./dev/check-version.sh"
   "No closed vocabulary disagrees with its own copies::$PY dev/vocab-audit.py --check"
+  "The semantic exceptions the database raises are core's, word for word::$PY dev/semantic-exceptions.py --check"
   "No assertion passes because its subject is missing::$PY dev/assertion-audit.py --check"
   "The superuser install step is written in one file::tree_one_superuser_step"
   "No gate lives only in CI::tree_no_gate_lives_only_in_ci"

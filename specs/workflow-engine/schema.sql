@@ -119,6 +119,7 @@ insert into workflow.lifecycle_states (state, is_terminal, is_success, note) val
     ('succeeded',        true,  true,  'finished, and did what it was asked'),
     ('failed',           true,  false, 'finished, and did not'),
     ('cancelled',        true,  false, 'stopped deliberately before finishing'),
+    ('skipped',          true,  true,  'did not run because its when was false, and counts as done for the steps after it'),
     ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
 on conflict (state) do update
     set is_terminal = excluded.is_terminal,
@@ -926,6 +927,13 @@ begin
         where t.status = 'ready'
           and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
 
+        -- A skip (REM-967) finishes no task through complete_task, which is
+        -- where a run asks whether it is done; so a run whose last step was
+        -- skipped asks here, after the steps after it have been released.
+        if new.status = 'skipped' then
+            perform workflow.check_run_completion(new.run_id);
+        end if;
+
     elsif workflow.is_terminal(new.status) then
         update workflow.tasks t2
         set status = 'cancelled'
@@ -1045,7 +1053,7 @@ begin
         select distinct d from unnest(coalesce(p_deps, '{}'::uuid[])) d where d is not null
     loop
         select status into v_status from workflow.tasks where id = v_dep for update;
-        if v_status is distinct from 'succeeded' then
+        if not coalesce(workflow.is_success(v_status), false) then
             v_n := v_n + 1;
         end if;
     end loop;
@@ -1142,14 +1150,16 @@ begin
     loop
         continue when (v_step->>'key') = any(v_comp);
         insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
-                                    wait_signal, input, rate_key, saga_group, compensation_task_key)
+                                    wait_signal, input, rate_key, saga_group, compensation_task_key,
+                                    when_sql)
         values (
             v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
             coalesce(v_step->>'kind', 'work'), 0, 'pending',
             case when coalesce(v_step->>'kind','work') = 'signal'
                  then coalesce(v_step->'input'->>'signal', v_step->>'signal', v_step->>'key') end,
             v_step->'input', v_step->>'rate_key',
-            v_step->>'saga_group', v_step->>'compensation_task_key')
+            v_step->>'saga_group', v_step->>'compensation_task_key',
+            v_step->>'when')
         returning id into v_new_id;
         v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
     end loop;
@@ -2215,7 +2225,7 @@ create or replace view workflow.v_queue_depth as
 
 create or replace view workflow.v_run_progress as
     select r.id as run_id, d.name as workflow_name, r.status as run_status,
-           count(*) filter (where t.status = 'succeeded') as done,
+           count(*) filter (where workflow.is_success(t.status)) as done,
            count(*) as total, r.created_at, r.updated_at
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
@@ -3071,9 +3081,14 @@ begin
     loop
         v_val    := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
         v_params := v_params || jsonb_build_object(v_ref, v_val);
+        -- A JSON null -- a skipped step's result (REM-967), or a null a step
+        -- returned -- binds as an untyped NULL, so it takes the type its place
+        -- in the statement needs: `{{x}} >= 2` over a skipped step is null,
+        -- not "operator does not exist: text >= numeric".
         v_slot   := case jsonb_typeof(v_val)
                         when 'number'  then '(($1->>' || quote_literal(v_ref) || ')::numeric)'
                         when 'boolean' then '(($1->>' || quote_literal(v_ref) || ')::boolean)'
+                        when 'null'    then 'NULL'
                         else                '($1->>' || quote_literal(v_ref) || ')'
                     end;
         v_pat := '\{\{\s*' || regexp_replace(v_ref, '([.$\\])', '\\\1', 'g') || '\s*\}\}';
@@ -4314,6 +4329,18 @@ begin
                  then '. {{items}} is a matrix TEMPLATE namespace: it binds when the '
                       'fan-out expands, so it means nothing on a step outside one.'
                  else '' end;
+    end if;
+
+    -- A skipped step (REM-967) ran nothing and wrote nothing, and its result is
+    -- null rather than an error: a statement binds NULL for it, and
+    -- a when: over it is null, which skips. That is what lets a condition be
+    -- written over a step that may itself have been skipped -- and what an
+    -- unrolled repeat asks of every attempt after the one that finished.
+    if v_val is null and v_head = 'steps' and exists (
+           select 1 from workflow.tasks t
+           where t.run_id = p_run_id and t.step_key = split_part(v_rest, '.', 1)
+             and t.status = 'skipped') then
+        return 'null'::jsonb;
     end if;
 
     if v_val is null then
@@ -6183,9 +6210,129 @@ create or replace function workflow.check_run_completion(p_run_id uuid) returns 
       and not exists (
           select 1 from workflow.tasks t
           where t.run_id = p_run_id
-            and t.status <> 'succeeded'
+            and not workflow.is_success(t.status)
             and not (t.status = 'failed' and t.tolerate_failure));
 $$ language sql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- CONDITIONAL STEPS: `when:` (REM-957, REM-967)
+-- ------------------------------------------------------------
+-- A step may carry a predicate over the run's input and earlier results. It
+-- is asked once, at the moment the step would become eligible -- every
+-- dependency done, the step about to be marked ready or waiting -- and a false
+-- or null answer marks it `skipped` instead. Skipped is terminal and a
+-- success (lifecycle_states), so the cascade releases the steps after it
+-- exactly as a success would, and a run of successes and skips is finished.
+--
+-- WHY HERE, AND NOT IN EACH DISPATCHER. A step reaches readiness through the
+-- cascade, through start_workflow's second pass (roots), and through the
+-- paths that add tasks later; it is then run by autorun, drain, a claim or a
+-- signal. Asking at the one transition every path shares means no kind can
+-- forget to ask, and a skipped step is never claimed, autorun or waited on,
+-- because by the time anything looks it is not ready.
+--
+-- The predicate is the author's SQL, so it goes through run_sql exactly as a
+-- `sql:` step's statement does: read-only, under sql_policy, as the run's
+-- owner (row policies apply), with each {{template}} a bound parameter. It
+-- is asked on pending -> ready (or waiting), and on the ready -> ready update
+-- start_workflow gives each root; never once a step has been claimed, so the
+-- retry path (running -> ready) does not ask again.
+--
+-- A predicate that cannot be evaluated fails the step, and the run, rather
+-- than the statement that released it: an error raised here would roll back
+-- the predecessor's own completion, so a bad `when:` would look like a
+-- failure of the step before it.
+alter table workflow.tasks add column if not exists when_sql text;
+
+create or replace function workflow.apply_when() returns trigger as $$
+declare
+    v_prev text := current_setting('workflow.current_run_id', true);
+    v_res  jsonb;
+    v_ok   jsonb;
+begin
+    if new.when_sql is null
+       or new.pending_deps <> 0
+       or new.status not in ('ready', 'waiting_external')
+       or old.status <> 'pending' and not (old.status = new.status and old.attempts = 0
+                                           and old.claimed_at is null) then
+        return new;
+    end if;
+
+    perform set_config('workflow.current_run_id', new.run_id::text, true);
+    begin
+        v_res := workflow.resolve_statement_params(
+                     'select (' || new.when_sql || ') as ok', new.run_id, null);
+        v_ok  := workflow.run_sql(v_res->>'sql', false, 30000, v_res->'params') -> 0 -> 'ok';
+    exception when others then
+        perform set_config('workflow.current_run_id', coalesce(v_prev, ''), true);
+        new.status := 'failed';
+        new.error  := jsonb_build_object('error', 'when: ' || sqlerrm, 'sqlstate', sqlstate);
+        update workflow.runs set status = 'failed'
+        where id = new.run_id and status = 'running';
+        return new;
+    end;
+    perform set_config('workflow.current_run_id', coalesce(v_prev, ''), true);
+
+    if v_ok is distinct from 'true'::jsonb then
+        new.status       := 'skipped';
+        new.completed_at := clock_timestamp();
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_apply_when
+    before update of status on workflow.tasks
+    for each row execute function workflow.apply_when();
+
+-- ------------------------------------------------------------
+-- REPEATS: `repeat:` (REM-968)
+-- ------------------------------------------------------------
+-- The compiler unrolls a repeat into attempts (`<step>_<n>`), each skipped by
+-- `when:` once the check held after the one before, and ends it with a step
+-- named for the repeat that calls this. It reports how many attempts ran,
+-- whether the check held, and the last attempt's results, so the steps after
+-- a repeat read {{steps.<id>.result.0.last.<step>}} without knowing which
+-- attempt that was.
+--
+-- p_satisfied is the check over the last attempt that ran: the compiler
+-- passes coalesce(check over attempt max, ..., check over attempt 1), and a
+-- skipped attempt's check is null (its results are), so the first answer
+-- that is not null belongs to the last attempt that ran.
+--
+-- It reads only the run whose step is calling it (workflow.current_run_id,
+-- which a caller cannot set: set_config is revoked from them), so it needs no
+-- access check of its own and leaks nothing about another run.
+create or replace function workflow.repeat_outcome(p_spec jsonb, p_satisfied boolean)
+returns table (attempts int, max_attempts int, satisfied boolean, last jsonb) as $$
+#variable_conflict use_column
+declare
+    v_run uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+    v_max int  := (p_spec->>'max')::int;
+    v_n   int;
+begin
+    if v_run is null then
+        raise exception 'repeat_outcome reports on the repeat a step belongs to, and is '
+                        'only called by the step the compiler writes at the end of one';
+    end if;
+
+    select coalesce(max(i), 0) into v_n
+    from generate_series(1, v_max) i
+    where exists (
+        select 1 from workflow.tasks t
+        join jsonb_array_elements_text(p_spec->'steps') s(step) on t.step_key = s.step || '_' || i
+        where t.run_id = v_run and t.status <> 'skipped');
+
+    return query
+    select v_n, v_max, coalesce(p_satisfied, false),
+           (select jsonb_object_agg(s.step, t.output->'result')
+            from jsonb_array_elements_text(p_spec->'steps') s(step)
+            left join workflow.tasks t on t.run_id = v_run and t.step_key = s.step || '_' || v_n);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.repeat_outcome(jsonb, boolean) to authenticated;
+
 
 -- ------------------------------------------------------------
 -- 21f. Agent steps with a declared output shape.
@@ -6602,6 +6749,8 @@ begin
             ('signal',       E'name: c\nsteps:\n  - id: s\n    signal: true'),
             ('timer',        E'name: c\nsteps:\n  - id: s\n    timer: 1'),
             ('sub_workflow', E'name: c\nsteps:\n  - id: s\n    workflow: other'),
+            ('when',         E'name: c\nsteps:\n  - id: s\n    work: true\n    when: \'true\''),
+            ('repeat',       E'name: c\nsteps:\n  - id: r\n    repeat:\n      max: 2\n      until: \'{{steps.s.result}} is not null\'\n      steps: [{id: s, work: true}]'),
 
             ('continue_on',  E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      continue_on: failed\n      min_success: 0.5\n      template: {work: true}'),
 
@@ -7425,7 +7574,7 @@ alter table workflow.runs  add  constraint runs_status_check
 alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
-                      'succeeded','failed','cancelled'));
+                      'succeeded','failed','cancelled','skipped'));
 
 -- AND THE IDEMPOTENCY KEY, for the same reason and with the same shape.
 --

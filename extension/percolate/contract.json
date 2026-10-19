@@ -118,6 +118,7 @@
         "quota_exceeded",
         "ready",
         "running",
+        "skipped",
         "succeeded",
         "waiting_external"
       ],
@@ -1240,6 +1241,7 @@
         "quota_exceeded",
         "ready",
         "running",
+        "skipped",
         "succeeded",
         "waiting_external"
       ],
@@ -1327,7 +1329,8 @@
         "waiting_external",
         "succeeded",
         "failed",
-        "cancelled"
+        "cancelled",
+        "skipped"
       ],
       "column": "status",
       "enforced_by": "check",
@@ -1344,6 +1347,7 @@
         "quota_exceeded",
         "ready",
         "running",
+        "skipped",
         "succeeded",
         "waiting_external"
       ],

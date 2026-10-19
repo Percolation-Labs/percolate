@@ -140,12 +140,12 @@ select pg_temp.check(aiq.query('SEMANTIC "anything" FROM chunks USING demo-quad-
 
 -- ---------------------------------------------------------------------
 -- 5. AS OF A DATE: an hour ago the graph still believed the bad run; now it
---    does not. Ranked reads go through the compiled snapshot, which a write in
---    the same backend does not refresh, so it is rebuilt first.
+--    does not. Ranked reads go through the compiled snapshot, and the writes
+--    above dropped this backend's copy (REM-994), so these reads see them with
+--    no refresh by hand.
 -- ---------------------------------------------------------------------
 select pg_temp.parser_current() as parser_ok \gset
 \if :parser_ok
-select aiq.graph_snapshot(true);
 select key from aiq.related(array['priya raman'], 10, 'prefers', 250, now() - interval '1 hour');
 select key from aiq.related(array['priya raman'], 10, 'prefers');
 select pg_temp.check((select array_agg(key order by key) from aiq.related(array['priya raman'], 10, 'prefers', 250, now() - interval '1 hour')

@@ -170,6 +170,10 @@ declare
     v_roles constant text[] := array['authenticated', 'web_anon', 'api_viewer'];
     v_dynamic constant text[] := array[
         'aiq.expand_embed_steps(jsonb)',
+        -- The judge it calls is a regproc from the operator's setting
+        -- percolate.link_judge, cast before format() so it names a function
+        -- that exists; the criterion goes in as %L (REM-997).
+        'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
@@ -190,6 +194,10 @@ declare
         -- LIMIT, and a caller asking for five would get however many of five
         -- survived and no sign that it had (specs/claims/graph.md §5 *Did you mean*).
         'claims.candidates(uuid,text,double precision,integer,vector,text)',
+        -- The same shape as candidates (REM-998): the space's name comes from aiq.embedding_space_name over a
+        -- registered model and goes through %I; the vector, limit, date and floor are bound parameters.
+        'claims.find_question(vector,double precision,integer,text,timestamp with time zone)',
+        'claims.questions_to_embed(text,integer)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant
