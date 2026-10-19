@@ -18,7 +18,13 @@
 --
 -- Every comparison is `is distinct from`, not `<>`: a missing row is NULL, and
 -- `if NULL <> 1` is false, so the first draft passed with the stance it checks
--- deleted.
+-- deleted. pg_temp.check refuses anything but true for the same reason.
+--
+-- THE ARTICLE'S BLOCKS ARE THE TOP-LEVEL STATEMENTS HERE, word for word, so a
+-- reader can paste them into psql in order (dev/article-blocks.py holds the two
+-- to each other). Ids and receipts pass between steps with \gset, never through
+-- plpgsql variables, and each step's assertion follows it as a separate
+-- `select pg_temp.check(...)` that is not part of the article.
 --
 -- Reads the committed samples (dev/init/04-graph-sample.sql for Priya Raman,
 -- 05-corpus-sample.sql for the chunks). One transaction, rolled back.
@@ -35,154 +41,120 @@ create or replace function pg_temp.parser_current() returns boolean language sql
        and coalesce(current_setting('percolate.parser_behind', true), 'absent') <> 'yes';
 $$;
 
--- ---------------------------------------------------------------------
--- 1. THE VOCABULARY IS CLOSED UNTIL YOU OPEN IT. An extractor's `works_on`
---    is dropped and named in the receipt; registered, the same write lands.
--- ---------------------------------------------------------------------
-do $$
-declare v jsonb;
+create or replace function pg_temp.check(p_ok boolean, p_what text) returns void language plpgsql as $$
 begin
-    v := aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"}],
-        "edges":[{"s":0,"t":1,"r":"works_on"}]}'::jsonb, '{"agent":"probe"}'::jsonb);
-    if (v->>'edges_new')::int is distinct from 0
-       or v->'edges_dropped_unknown_relation' is distinct from '["works_on"]'::jsonb then
-        raise exception 'an unregistered relation was not dropped and named: %', v;
+    if p_ok is not true then
+        raise exception 'memory walk: %', p_what;
     end if;
 end $$;
 
-do $$
-begin
-    perform aiq.register_graph_vocabulary('[
-        {"relation":"works_on","description":"a person works on a project"},
-        {"relation":"prefers","description":"a person prefers a tool"}]'::jsonb);
-end $$;
+-- ---------------------------------------------------------------------
+-- 1. THE VOCABULARY IS CLOSED UNTIL YOU OPEN IT. The first session's two
+--    relations are dropped and named in the receipt, and its nodes land.
+-- ---------------------------------------------------------------------
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1","resource_id":"session-1"}') as receipt \gset
+\echo :receipt
+select pg_temp.check(:'receipt'::jsonb->'node_residence' = '["pg","soft","soft"]'::jsonb,
+    'Priya Raman did not land on her typed row, or the new names did not land soft: ' || :'receipt');
+select pg_temp.check((:'receipt'::jsonb->>'edges_new')::int = 0
+    and (select array_agg(r order by r) from jsonb_array_elements_text(:'receipt'::jsonb->'edges_dropped_unknown_relation') r)
+        = '{prefers,works_on}', 'an unregistered relation was not dropped and named: ' || :'receipt');
+
+select aiq.register_graph_vocabulary('[{"relation":"works_on"},{"relation":"prefers"}]');
+
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"tool","n":"Postgres"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}', '{"agent":"knit","run_id":"r1","resource_id":"session-1"}') as receipt \gset
+\echo :receipt
+select pg_temp.check((:'receipt'::jsonb->>'edges_new')::int = 2, 'the registered relations did not land: ' || :'receipt');
 
 -- ---------------------------------------------------------------------
--- 2. KNIT: two sessions say the same thing, which is one edge with two
---    sources, each naming the run and the resource it came from. A third
---    session, from a bad extractor, says something wrong.
+-- 2. KNIT: a second session repeats one fact, which is one edge with two
+--    sources, and names an alias. A third, from a bad extractor, is wrong.
 -- ---------------------------------------------------------------------
-do $$
-declare v jsonb; src jsonb;
-begin
-    v := aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},
-                                     {"k":"tool","n":"Postgres"}],
-        "edges":[{"s":0,"t":1,"r":"works_on"},{"s":0,"t":2,"r":"prefers"}]}'::jsonb,
-        '{"agent":"knit","run_id":"r1","resource_id":"session-1"}'::jsonb);
-    if v->'node_residence' is distinct from '["pg","soft","soft"]'::jsonb then
-        raise exception 'Priya Raman did not land on her typed row, or the new names did not land soft: %', v;
-    end if;
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},{"k":"person","n":"P. Raman"},{"k":"tool","n":"DuckDB"}], "edges":[{"s":0,"t":1,"r":"works_on"},{"s":2,"t":3,"r":"prefers"}]}', '{"agent":"knit","run_id":"r2","resource_id":"session-2"}') as receipt \gset
+\echo :receipt
+select pg_temp.check((:'receipt'::jsonb->>'edges_merged')::int = 1 and (:'receipt'::jsonb->>'edges_new')::int = 1,
+    'the repeated fact did not merge into the existing edge: ' || :'receipt');
+select pg_temp.check((select array_agg(s->>'run_id' || '/' || (s->>'resource_id') order by s->>'run_id')
+                        from aiq.edges e join aiq.node_keys k on k.node_id = e.src_id and k.key = 'priya raman',
+                             jsonb_array_elements(e.provenance->'sources') s
+                       where e.relation = 'works_on') = '{r1/session-1,r2/session-2}',
+    'one fact from two sessions is not one edge with both sources');
 
-    v := aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"project","n":"Harbour Rewrite"},
-                                     {"k":"person","n":"P. Raman"},{"k":"tool","n":"DuckDB"}],
-        "edges":[{"s":0,"t":1,"r":"works_on"},{"s":2,"t":3,"r":"prefers"}]}'::jsonb,
-        '{"agent":"knit","run_id":"r2","resource_id":"session-2"}'::jsonb);
-    if (v->>'edges_merged')::int is distinct from 1 or (v->>'edges_new')::int is distinct from 1 then
-        raise exception 'the repeated fact did not merge into the existing edge: %', v;
-    end if;
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"tool","n":"MySQL"}], "edges":[{"s":0,"t":1,"r":"prefers"}]}', '{"agent":"knit-bad","run_id":"r3","resource_id":"session-3"}');
 
-    select e.provenance->'sources' into src
-      from aiq.edges e join aiq.node_keys k on k.node_id = e.src_id and k.key = 'priya raman'
-     where e.relation = 'works_on';
-    if jsonb_array_length(src) is distinct from 2
-       or (select array_agg(s->>'run_id' || '/' || (s->>'resource_id') order by s->>'run_id')
-             from jsonb_array_elements(src) s) is distinct from '{r1/session-1,r2/session-2}' then
-        raise exception 'one fact from two sessions is not one edge with both sources: %', src;
-    end if;
-
-    perform aiq.upsert_graph('{"nodes":[{"k":"person","n":"Priya Raman"},{"k":"tool","n":"MySQL"}],
-        "edges":[{"s":0,"t":1,"r":"prefers"}]}'::jsonb,
-        '{"agent":"knit-bad","run_id":"r3","resource_id":"session-3"}'::jsonb);
-end $$;
-
--- What was believed before the reconcile pass, dated a day back so the as-of
--- read in §5 has a past to read.
-update aiq.edges set valid_from = now() - interval '1 day'
- where provenance->'sources' @> '[{"agent":"knit"}]' or provenance->'sources' @> '[{"agent":"knit-bad"}]';
+-- This walk takes seconds, so the three sessions are dated a day back to give
+-- the as-of read in §5 a past to read.
+update aiq.edges set valid_from = now() - interval '1 day' where provenance->'sources' @> '[{"run_id":"r1"}]' or provenance->'sources' @> '[{"run_id":"r2"}]' or provenance->'sources' @> '[{"run_id":"r3"}]';
 
 -- ---------------------------------------------------------------------
 -- 3. RECONCILE: bind the alias to the person, and withdraw the bad run.
 --    The alias's edge moves to Priya and its name stays a key; the bad edge
 --    is retracted with its provenance intact, not deleted.
 -- ---------------------------------------------------------------------
-do $$
-declare v jsonb; v_priya uuid; n int;
-begin
-    select node_id into v_priya from aiq.node_keys where key = 'priya raman';
-    v := aiq.promote_soft_node(
-        (select id from aiq.soft_nodes where claimed_kind = 'person' and key = 'p. raman'),
-        v_priya, 'dream', 'llm', '{"why":"same surname, same project, same week"}'::jsonb);
-    if (v->>'moved')::int is distinct from 1 or v->'name'->>'kept' is distinct from 'true' then
-        raise exception 'the alias was not bound with its edge and its name: %', v;
-    end if;
+select id as alias from aiq.soft_nodes where claimed_kind = 'person' and key = 'p. raman' \gset
+select node_id as priya from aiq.node_keys where key = 'priya raman' \gset
+select aiq.promote_soft_node(:'alias', :'priya', 'dream', 'llm', '{"why":"same surname, same project, same week"}') as receipt \gset
+\echo :receipt
+select pg_temp.check((:'receipt'::jsonb->>'moved')::int = 1 and :'receipt'::jsonb->'name'->>'kept' = 'true',
+    'the alias was not bound with its edge and its name: ' || :'receipt');
 
-    v := aiq.retract_derived('knit-bad');
-    if (v->>'retracted')::int is distinct from 1 then
-        raise exception 'withdrawing one bad run did not retract its one edge: %', v;
-    end if;
-
-    select count(*) into n from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id
-     where e.src_id = v_priya and k.key = 'tool/mysql'
-       and e.valid_to is not null and e.provenance->'sources' @> '[{"run_id":"r3"}]';
-    if n is distinct from 1 then raise exception 'the bad edge is gone instead of retracted with its provenance'; end if;
-end $$;
+select aiq.retract_derived('knit-bad') as receipt \gset
+\echo :receipt
+select pg_temp.check((:'receipt'::jsonb->>'retracted')::int = 1,
+    'withdrawing one bad run did not retract its one edge: ' || :'receipt');
+select pg_temp.check((select count(*) from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id
+                       where e.src_id = :'priya' and k.key = 'tool/mysql'
+                         and e.valid_to is not null and e.provenance->'sources' @> '[{"run_id":"r3"}]') = 1,
+    'the bad edge is gone instead of retracted with its provenance');
 
 -- ---------------------------------------------------------------------
 -- 4. QUERY, in one dialect: the alias resolves to the person, the walk sees
 --    the moved edge and not the retracted one, and a soft node answers to its
---    kind-prefixed key only.
+--    kind-prefixed key only. Each read is the article's statement, then the
+--    same read asserted.
 -- ---------------------------------------------------------------------
-do $$
-declare v jsonb; keys text[];
-begin
-    v := aiq.query('FUZZY LOOKUP "raman"');
-    if v->'rows'->0->>'node_id' is distinct from (select node_id::text from aiq.node_keys where key = 'priya raman') then
-        raise exception 'the bound alias does not resolve to the person: %', v->'rows';
-    end if;
+select aiq.query('FUZZY LOOKUP "raman"');
+select pg_temp.check(aiq.query('FUZZY LOOKUP "raman"')->'rows'->0->>'node_id' = :'priya',
+    'the bound alias does not resolve to the person');
 
-    select array_agg(r->>'key' order by r->>'key') into keys
-      from jsonb_array_elements(aiq.query('GRAPH "Priya Raman" DEPTH 1')->'rows') r
-     where r->>'key' like 'tool/%' or r->>'key' like 'project/%';
-    if keys is distinct from '{project/harbour rewrite,tool/duckdb,tool/postgres}' then
-        raise exception 'the walk after reconcile is %, wanted the moved DuckDB edge and no MySQL', keys;
-    end if;
+select aiq.query('GRAPH "Priya Raman" DEPTH 1');
+select pg_temp.check((select array_agg(r->>'key' order by r->>'key')
+                        from jsonb_array_elements(aiq.query('GRAPH "Priya Raman" DEPTH 1')->'rows') r
+                       where r->>'key' like 'tool/%' or r->>'key' like 'project/%')
+                     = '{project/harbour rewrite,tool/duckdb,tool/postgres}',
+    'the walk after reconcile should see the moved DuckDB edge and no MySQL');
 
-    if jsonb_array_length(aiq.query('LOOKUP "Harbour Rewrite"')->'rows') is distinct from 0 then
-        raise exception 'a soft node now answers its bare name: correct the article''s gap and this assertion';
-    end if;
-    if aiq.query('LOOKUP "project/harbour rewrite"')->'rows'->0->>'key' is distinct from 'project/harbour rewrite' then
-        raise exception 'a soft node does not answer its kind-prefixed key';
-    end if;
+select aiq.query('LOOKUP "Harbour Rewrite"');
+select pg_temp.check(jsonb_array_length(aiq.query('LOOKUP "Harbour Rewrite"')->'rows') = 0,
+    'a soft node now answers its bare name: correct the article''s gap and this assertion');
+select aiq.query('LOOKUP "project/harbour rewrite"');
+select pg_temp.check(aiq.query('LOOKUP "project/harbour rewrite"')->'rows'->0->>'key' = 'project/harbour rewrite',
+    'a soft node does not answer its kind-prefixed key');
 
-    -- The same dialect reads the corpus: SEMANTIC over the sample's literal vectors.
-    if aiq.query('SEMANTIC "anything" FROM chunks USING demo-quad-a LIMIT 1', '[1,0,0,0]')->'rows'->0->>'chunk_id'
-       is distinct from '33330000-0000-0000-0000-000000000001' then
-        raise exception 'SEMANTIC through the dialect did not rank the sample''s nearest chunk first';
-    end if;
-end $$;
+-- The same dialect reads the corpus: SEMANTIC over the sample's literal vectors.
+select pg_temp.check(aiq.query('SEMANTIC "anything" FROM chunks USING demo-quad-a LIMIT 1', '[1,0,0,0]')->'rows'->0->>'chunk_id'
+                     = '33330000-0000-0000-0000-000000000001',
+    'SEMANTIC through the dialect did not rank the sample''s nearest chunk first');
 
 -- ---------------------------------------------------------------------
 -- 5. AS OF A DATE: an hour ago the graph still believed the bad run; now it
 --    does not. Ranked reads go through the compiled snapshot, which a write in
 --    the same backend does not refresh, so it is rebuilt first.
 -- ---------------------------------------------------------------------
-do $$
-declare past text[]; now_ text[];
-begin
-    if pg_temp.parser_current() then
-        perform aiq.graph_snapshot(true);
-        select array_agg(key order by key) into past
-          from aiq.related(array['priya raman'], 10, 'prefers', 250, now() - interval '1 hour') where key like 'tool/%';
-        select array_agg(key order by key) into now_
-          from aiq.related(array['priya raman'], 10, 'prefers') where key like 'tool/%';
-        if past is distinct from '{tool/duckdb,tool/mysql,tool/postgres}'
-           or now_ is distinct from '{tool/duckdb,tool/postgres}' then
-            raise exception 'as of an hour ago %, now % -- retraction must be history', past, now_;
-        end if;
-    else
-        raise notice 'DEFERRED: query/16 §5 as-of through related -- the compiled parser is behind the extension SQL';
-    end if;
-end $$;
+select pg_temp.parser_current() as parser_ok \gset
+\if :parser_ok
+select aiq.graph_snapshot(true);
+select key from aiq.related(array['priya raman'], 10, 'prefers', 250, now() - interval '1 hour');
+select key from aiq.related(array['priya raman'], 10, 'prefers');
+select pg_temp.check((select array_agg(key order by key) from aiq.related(array['priya raman'], 10, 'prefers', 250, now() - interval '1 hour')
+                       where key like 'tool/%') is not distinct from '{tool/duckdb,tool/mysql,tool/postgres}',
+    'as of an hour ago the bad run''s MySQL should still be believed');
+select pg_temp.check((select array_agg(key order by key) from aiq.related(array['priya raman'], 10, 'prefers')
+                       where key like 'tool/%') is not distinct from '{tool/duckdb,tool/postgres}',
+    'now the retracted MySQL should be gone: retraction must be history');
+\else
+\echo 'DEFERRED: query/16 §5 as-of through related -- the compiled parser is behind the extension SQL'
+\endif
 
 -- ---------------------------------------------------------------------
 -- 6. THE QUESTIONS GRAPH sits beside the memory graph, over research works:
