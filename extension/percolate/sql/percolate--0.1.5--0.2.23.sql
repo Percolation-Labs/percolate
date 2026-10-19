@@ -14719,6 +14719,14 @@ create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
 -- distinct canonical keys. Folding on write would collide them -- a change to
 -- what the table permits, not a change to how it is read.
 create index if not exists idx_node_keys_key_lower on aiq.node_keys (lower(key));
+-- A SOFT NODE BY ITS BARE NAME (REM-995). A soft node's only canonical key is
+-- `<kind>/<name>` -- 'project/harbour rewrite' -- so `LOOKUP "Harbour Rewrite"`
+-- found nothing, and a reader had to know a kind prefix they were never shown.
+-- aiq.lookup's soft step asks for the name after the first slash; this is the
+-- index it asks, so the step costs a probe and not a scan of every key.
+create index if not exists idx_node_keys_soft_name
+    on aiq.node_keys (lower(substr(key, strpos(key, '/') + 1)))
+    where kind = 'canonical' and entity_type = 'soft';
 -- FUZZY lives here and ONLY here: a trigram index on this thin key table,
 -- never on the data plane (graph-identity.md "Scale").
 create index if not exists idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
@@ -16225,7 +16233,21 @@ begin
     limit p_limit;
     if found then return; end if;
 
-    -- 3. fuzzy, opt-in, and ONLY over node_keys -- never the data plane.
+    -- 3. a soft node by its bare name (REM-995). Only after every typed tier
+    -- has missed, so a typed node of the same name still wins. The key that
+    -- comes back is the kind-prefixed one, 'project/harbour rewrite', which is
+    -- what says under which kind the name was found; match_kind 'soft' says it
+    -- was this step. Several kinds may hold one name, and each is a row.
+    return query
+    select distinct on (n.id)
+           n.id, n.entity_type, n.entity_id, k.key, 'soft'::text, 1.0::real
+    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+    where lower(substr(k.key, strpos(k.key, '/') + 1)) = v_norm
+      and k.kind = 'canonical' and k.entity_type = 'soft'
+    limit p_limit;
+    if found then return; end if;
+
+    -- 4. fuzzy, opt-in, and ONLY over node_keys -- never the data plane.
     --
     -- DISTINCT ON (n.id): a node with several matching keys (canonical
     -- 'acme', short 'acme', alias 'acme robotics') otherwise comes back once
