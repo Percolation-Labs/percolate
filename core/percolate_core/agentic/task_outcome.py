@@ -33,24 +33,45 @@ from __future__ import annotations
 def failure_is_terminal(exc: BaseException) -> bool:
     """True if another attempt at this turn would fail the same way."""
     from ..core.config import TerminalError
-    from ..core.provider_errors import classify
     from ..worker.loop import PERMANENT_DB_ERRORS
     from .sequencer import AgentNotFound
 
     if isinstance(exc, (TerminalError, AgentNotFound, PermissionError) + PERMANENT_DB_ERRORS):
         return True
     try:
-        from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
+        from pydantic_ai.exceptions import UsageLimitExceeded
     except ImportError:  # the agent extra is not installed; nothing below can occur
         return False
     if isinstance(exc, UsageLimitExceeded):
         return True
-    if isinstance(exc, ModelHTTPError):
-        body = exc.body
-        if not isinstance(body, (str, bytes)) and body is not None:
-            import json
+    failure = provider_failure(exc)
+    return bool(failure and failure.terminal)
 
-            body = json.dumps(body)
-        failure = classify(exc.status_code, body)
-        return bool(failure and failure.terminal)
-    return False
+
+def provider_failure(exc: BaseException):
+    """The model provider's error response, classified, or None if `exc` is not one.
+
+    One reading for both ways a turn is asked for: a scheduled run fails its
+    task with it above, and a synchronous `/chat` answers with the provider's
+    own status (`api._complete`), so the worker's `raise_for` applies the same
+    rule rather than reading every failure as a retryable 502 (REM-987).
+    """
+    from ..core.provider_errors import classify
+
+    try:
+        from pydantic_ai.exceptions import ModelHTTPError
+    except ImportError:  # the agent extra is not installed; nothing below can occur
+        return None
+    if not isinstance(exc, ModelHTTPError):
+        return None
+    body = exc.body
+    # The OpenAI SDK unwraps `{"error": {...}}` before pydantic-ai keeps the
+    # body, and classify reads the provider's envelope: without it a 429 from an
+    # account with no credit read as a rate limit, and was retried.
+    if isinstance(body, dict) and "error" not in body:
+        body = {"error": body}
+    if not isinstance(body, (str, bytes)) and body is not None:
+        import json
+
+        body = json.dumps(body)
+    return classify(exc.status_code, body)

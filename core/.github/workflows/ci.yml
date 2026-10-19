@@ -336,6 +336,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_provider_failures.py
 
+      # An agent: step whose model provider refuses the key, or whose account
+      # has no credit, fails once with the provider's status, rather than as a
+      # 502 the worker retries five times (REM-987).
+      - name: A refused model key fails an agent step once
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_refused_model_key_fails_the_step_once.py
+
       # The Jev decision client sends typed questions to a pinned version, fails
       # once on a refused key, waits out a rate limit, and keeps the key unbound
       # until the operator binds it. The live cases skip without JEV_API_KEY.
