@@ -163,7 +163,7 @@ $$ language sql;
 -- }
 --
 -- waiting() {
---   for i in $(seq 30); do
+--   for i in $(seq 90); do
 --     s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
 --     case $s in waiting_external|succeeded|failed|cancelled) break ;; esac
 --     sleep 2
@@ -258,11 +258,17 @@ create policy owner_reads on fleet.port_calls for select using (owner_id = (sele
 select (select count(*) from fleet.vessels) as vessels, (select count(*) from fleet.berths) as berths,
        (select count(*) from fleet.port_calls) as port_calls;
 -- /block
+-- live: fleet_schema
+-- curl -s $REST/rpc/query \
+--   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"p_query": "SCHEMA \"sql\" FROM port_calls"}'; echo
+-- /live
 -- live: fleet_curl
 -- curl -s $REST/rpc/sql_passthrough \
 --   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
 --   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
---   -d '{"p_statement": "select v.name, v.imo, b.port, b.code as berth, c.arrived_at, c.purpose from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id where c.departed_at is null order by c.arrived_at"}'
+--   -d '{"p_statement": "select v.name, v.imo, b.port, b.code as berth, c.arrived_at, c.purpose from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id where c.departed_at is null order by c.arrived_at"}'; echo
 -- /live
 
 select pg_temp.check((select count(*) from fleet.port_calls where departed_at is null) = 3,
@@ -274,7 +280,7 @@ select pg_temp.check((select count(*) from fleet.port_calls where departed_at is
 select (agentic.upsert_agent($j${
   "name": "harbourmaster",
   "model": "openai:gpt-4o-mini",
-  "system_prompt": "You answer questions about the fleet. Start with SCHEMA \"sql\" FROM vessels to see what exists, then query. Never guess a vessel name.",
+  "system_prompt": "You answer questions about the fleet, which is in fleet.vessels, fleet.berths and fleet.port_calls. A vessel is alongside while its port call has no departed_at. Query those tables in SQL; start with SCHEMA \"sql\" FROM port_calls if you need the columns. Never guess a vessel name.",
   "tools": [{"server": "harbour-query", "tools": ["query"]}]
 }$j$::jsonb)).name;
 
@@ -482,11 +488,11 @@ select set_config('request.jwt.claims', json_build_object('sub',
 -- /block
 select pg_temp.check(agentic.may_invoke('story'), '§4 signed back in, you may invoke every writer');
 select set_config('request.jwt.claims', '', false);
-
 -- live: sync
 -- curl -s -X POST $AGENT/tools/p8-agents/sync \
 --   -H "Authorization: Bearer $TOKEN"; echo
 -- /live
+
 
 select pg_temp.check((select tools from agentic.agents where name = 'router')
     = '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
@@ -853,7 +859,7 @@ name: insurance_claim
 steps:
   - id: fraud
     agent: fraud_scorer
-    input: '{{run.claim}}'
+    input: 'Score the fraud risk of this claim from 0 (none) to 1 (certain): {{run.claim}}'
     output_schema:
       type: object
       required: [score]
@@ -890,7 +896,7 @@ steps:
 $y$);
 -- /block
 -- live: bank
--- # Percolate: docker-compose.override.yml, beside docker-compose.yml
+-- cat > docker-compose.override.yml <<'EOF'
 -- services:
 --   worker:
 --     environment:
@@ -899,6 +905,7 @@ $y$);
 --       BANK_TOKEN: test-token
 --       # a credential goes only where this binds it; the first entry is the compose default
 --       P8_CREDENTIAL_ORIGINS: '{"LLM_API_KEY": ["https://api.openai.com"], "BANK_TOKEN": ["http://agent:8080"]}'
+-- EOF
 -- /live
 -- live: worker
 -- docker compose up -d worker
@@ -993,7 +1000,7 @@ select v.name, b.port,
 -- curl -s $REST/rpc/sql_passthrough \
 --   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
 --   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
---   -d '{"p_statement": "select v.name, b.port, count(distinct m.session_id) as conversations, count(distinct t.run_id) as runs from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id left join agentic.messages_api m on strpos(m.content, v.name) > 0 left join workflow.tasks_api t on strpos(t.output::text, v.name) > 0 where c.departed_at is null group by v.name, b.port order by v.name"}'
+--   -d '{"p_statement": "select v.name, b.port, count(distinct m.session_id) as conversations, count(distinct t.run_id) as runs from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id left join agentic.messages_api m on strpos(m.content, v.name) > 0 left join workflow.tasks_api t on strpos(t.output::text, v.name) > 0 where c.departed_at is null group by v.name, b.port order by v.name"}'; echo
 -- /live
 
 
