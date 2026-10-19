@@ -325,6 +325,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.expand_embed_steps','jsonb','integration-workflow.sql: an embed step names a model, never a url -- and the model is pinned into both halves'),
 ('ai-query-layer','function','aiq.query','text,vector','§9: one RPC for the whole dialect'),
 ('ai-query-layer','function','aiq.result_exceptions','jsonb,integer,integer,boolean','§8z: the result kinds only the store can raise, in core''s vocabulary (REM-948)'),
+('ai-query-layer','function','aiq.iterated_join','text,text,integer,integer,real,text,text[]','resolution.sql: a walk whose relation is a wildcard, each hop naming its link kind (REM-997)'),
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.extension_boundary','','§9b: every place the SQL half calls the compiled half, and whether it is there'),
 ('ai-query-layer','table','aiq.node_resolutions',null,
