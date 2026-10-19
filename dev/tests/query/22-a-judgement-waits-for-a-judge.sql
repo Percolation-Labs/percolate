@@ -14,7 +14,9 @@
 --      again is idempotent, a different one is refused;
 --   5. release gives an item back with nothing recorded; a lapsed lease
 --      cannot complete;
---   6. a second dream queues nothing new.
+--   6. a second dream queues nothing new;
+--   7. another soft node is a candidate -- an alias, or the same name as
+--      another kind -- and a bind to it goes through.
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -153,6 +155,36 @@ select pg_temp.check((select status in ('open','claimed') and verdict is null an
 -- 6. A second dream queues nothing new.
 select aiq.dream() as second \gset
 select pg_temp.check((:'second'::jsonb->>'queued_for_a_judge')::int = 0, '6. a second dream queued again: ' || :'second');
+
+-- 7. A soft name's twin is another soft name (jack, 20 Oct): an alias of the
+--    same kind, and the same name claimed as another kind, are candidates, and
+--    the bind to the alias goes through. Knit lands as the engine, with no
+--    member's claims set: the member's would make these nodes theirs alone.
+set local request.jwt.claims = '';
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Ana Costa Q22"},{"k":"company","n":"Tagus Q22"}],
+  "edges":[{"s":0,"t":1,"r":"affiliated_with"}]}', '{"agent":"knit","run_id":"q22-twins-1"}');
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"A. Costa Q22"},{"k":"organization","n":"Tagus Q22"}],
+  "edges":[{"s":0,"t":1,"r":"affiliated_with"}]}', '{"agent":"knit","run_id":"q22-twins-2"}');
+select aiq.dream() as third \gset
+select id as costa_j from aiq.judgements where evidence->>'key' = 'a. costa q22' and status = 'open' \gset
+select k.node_id as ana_soft from aiq.node_keys k where k.key = 'person/ana costa q22' and k.kind = 'canonical' \gset
+select pg_temp.check(exists (select 1 from aiq.judgements j, jsonb_array_elements(j.evidence->'candidates') c
+                              where j.id = :'costa_j' and c->>'node_id' = :'ana_soft' and c->>'candidate' = 'soft'),
+    '7. the alias A. Costa did not get the soft node Ana Costa as a candidate');
+select pg_temp.check(exists (select 1 from aiq.judgements j, jsonb_array_elements(j.evidence->'candidates') c
+                              where j.evidence->>'key' = 'tagus q22' and j.evidence->>'claimed_kind' = 'organization'
+                                and c->>'candidate' = 'soft, claimed as company'),
+    '7. Tagus as organization did not get Tagus as company as a candidate');
+select set_config('q22.costa', :'costa_j', true), set_config('q22.ana', :'ana_soft', true);
+set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}';
+set local role authenticated;
+select (aiq.claim_judgement(null, current_setting('q22.costa')::uuid)->>'status') = 'claimed' as claimed_costa \gset
+select aiq.complete_judgement(current_setting('q22.costa')::uuid,
+         jsonb_build_object('decision','bind','target', current_setting('q22.ana')),
+         'same initial and surname, same company, same sessions', 'agent') as bound \gset
+reset role;
+select pg_temp.check(:'claimed_costa'::boolean and jsonb_array_length(:'bound'::jsonb->'resolution_ids') = 1,
+    '7. the bind of A. Costa to the soft node Ana Costa did not go through: ' || :'bound');
 
 \echo 'query/22: dream queues what it cannot decide; an agent claims, binds, and the verdict is recorded'
 rollback;
