@@ -1,6 +1,6 @@
 # Journey materials
 
-The fixture half of `../../../scenarios/evals/`. What a journey eval's cast
+The fixture half of p8-subsystems' `scenarios/evals/` (internal). What a journey eval's cast
 acts **on** — file bodies, the chunks a parser would have produced, the graph an
 extractor would have proposed, the workflow definitions they author.
 
@@ -8,7 +8,7 @@ extractor would have proposed, the workflow definitions they author.
 runs.** Every one of those is something a user *does*, and the journey is an
 agent doing them. A fixture that pre-created them would have already performed
 the half of the journey most likely to be broken — which is not a hypothetical
-here. `../../../meta/postmortems/2026-09-04-user-rbac-review.md` records the signup
+here. p8-subsystems' `meta/postmortems/2026-09-04-user-rbac-review.md` (internal) records the signup
 path and the refresh-token theft branch both shipped, both declared in the spec,
 and neither ever executed; the first transaction to run them found the account
 signup creates cannot log in, and found a revocation that revoked nothing.
@@ -44,7 +44,7 @@ at the end of its own load, because a table granted to an application role and
 carrying no policy is precisely the defect `../rbac/05-read-surface.sql`
 enumerates for. The grant discipline means loading it elsewhere would not break
 that gate — but the journey *writes*, and the suite's fixtures assert counts.
-Use a database of your own. `../../../meta/postmortems/` records four sessions
+Use a database of your own. p8-subsystems' `meta/postmortems/` (internal) records four sessions
 sharing `p8reload` and the hour of verification it cost.
 
 ## What is in it
@@ -61,7 +61,7 @@ Two of those carry a design decision worth not flattening:
 
 **`probes` writes the expected winner down beside the vector.** A step whose
 expectation is formed after the answer is seen is a step that cannot fail — the
-class `../../../meta/postmortems/README.md` names as the largest recurring one here.
+class p8-subsystems' `meta/postmortems/README.md` (internal) names as the largest recurring one here.
 The vectors are near-unit along one axis each (1 scour, 2 bearings, 3 consent,
 4 cost), so which chunk wins is arithmetic a reader checks by eye rather than a
 property of whichever model happened to be installed.
