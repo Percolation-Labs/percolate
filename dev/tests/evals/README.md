@@ -151,7 +151,7 @@ useful part:
 
 | kind | which | what it was |
 |---|---|---|
-| **one defect, in the system** | `coll-11` | `content.register_fetched` wrote a resource with the column defaults `visibility = 'private'` and `owner_id = null`, a pair `resources_scoped` grants to nobody at all — so a poll landed a row, returned its id, and the puller's next select over its own `external_id` found nothing. `register_upload` had been given both columns when `visibility` arrived and this sibling had not: `meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md`, seventeenth instance. Fixed in `world-model-ingestion/schema.sql`. |
+| **one defect, in the system** | `coll-11` | `content.register_fetched` wrote a resource with the column defaults `visibility = 'private'` and `owner_id = null`, a pair `resources_scoped` grants to nobody at all — so a poll landed a row, returned its id, and the puller's next select over its own `external_id` found nothing. `register_upload` had been given both columns when `visibility` arrived and this sibling had not: p8-subsystems' `meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md` (internal), seventeenth instance. Fixed in `world-model-ingestion/schema.sql`. |
 | **one predicate in the fixture** | `coll-01 02 03 07 08 09` | `calder.registry_targets()` selected the shared tier as `org_id is null`, which `rbac.adopt_shared_org` turned into a uuid. A `rows:` function returning `[]` does not fail — a matrix of width zero *succeeds* — so six scenarios went red about child counts, floors and tallies, one layer downstream of one `where` clause. |
 | **a scenario the schema moved past** | `f2g-01 02 03 10`, `hitl-12`, `upload-04 07` | A document is keyed by its **uri**, never its title (a label is never an identity; two sections headed "run it" once stopped an ingest of 797). Authoring is read from the **claims**, not the role. `org_id` is NOT NULL with a default an explicit `null` defeats. Each corrected, each with the change and its date in a comment beside it. |
 | **an assertion that could not pass** | `coll-09`, `recov-09` | `{result,done}` named a key `calder.tally_children` has never returned, and `already done` named a status the vocabulary stopped spelling that way. Both now read their subject from the row instead of from a literal, so the next rename does not recreate them. |
@@ -220,6 +220,6 @@ Two failure modes specific to this file, both met while writing it:
   failure of the guarantee rather than of the query. Read through the `*_api`
   views, or say `role: app_owner` on that check and say why in `because`.
 
-`../../../scenarios/` is upstream of this directory: exploration and verdicts in
+p8-subsystems' `scenarios/` (internal) is upstream of this directory: exploration and verdicts in
 prose. This is where the ones worth re-running forever get pinned, executable.
-`meta/skills/dogfooding` is the method that generates them.
+p8-subsystems' `meta/skills/dogfooding` (internal) is the method that generates them.
