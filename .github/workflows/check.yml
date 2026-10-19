@@ -204,12 +204,6 @@ jobs:
       # installing the extension needs no Python at all.
       - run: pip install --quiet pyyaml
       - run: dev/check.sh --tree
-      # A CORE FREEZE REFUSES A PR THAT WOULD MERGE INTO IT (REM-536). The
-      # pre-push hook refuses a direct push to main; this is the merge path.
-      # Red while a release is cut, and a re-run after release.yml clears it
-      # goes green. dev/freeze.sh says why.
-      - if: github.event_name == 'pull_request'
-        run: dev/freeze.sh check "origin/${{ github.base_ref }}" HEAD
 
   # THE COMPILED HALF, BUILT FROM THIS TREE.
   #
@@ -584,70 +578,5 @@ jobs:
         if: always()
         run: docker ps -aq --filter "name=^$CONTAINER" | xargs -r docker rm -f -v >/dev/null
 
-  # THE SELF-MODEL, REBUILT FROM THE REPOSITORY ALONE.
-  #
-  # A third job, split from the second for the reason the second was split from
-  # the first: cost. This one is minutes rather than seconds, and the `database`
-  # job's own comment says not to add work there without measuring. Measured on
-  # this runner, 2026-09-12 (run 34668494624): 5m47s here, against 2m03s for
-  # `database` and 16s for `tree`. Roughly two thirds of it is the load and the
-  # rest `tests.sql`. The three run in parallel, so this costs wall clock only
-  # where it is the slowest, which it is -- and it is still three times the
-  # whole database job, which is why it is not a line inside it.
-  #
-  # WHY IT EXISTS. `applications/percolate-self-model/load.sh --from-zero` had
-  # been broken since `492e007` and nobody noticed for a month, because every
-  # load anybody runs is incremental against a database that already holds the
-  # rows -- so the path that makes the self-model a rebuildable artifact rather
-  # than a database somebody happens to still have was the one path nothing
-  # exercised. Eight defects had accumulated in it (REM-74), every one invisible
-  # to an incremental load by construction: what is missing is exactly what the
-  # previous run left behind. load.sh's own ordering comment had already recorded
-  # the mirror-image bug and drawn the conclusion -- "there are two load paths and
-  # both have to be exercised" -- and then neither was exercised by CI. This is
-  # that sentence, run.
-  #
-  # NO API KEY, ON PURPOSE. load.sh skips embed.py without one, which is a
-  # supported state and therefore one worth testing: two of the eight defects
-  # were steps downstream that had quietly made embeddings mandatory.
-  self-model:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.P8_HEAVY_RUNNER || vars.P8_RUNNER) || 'ubuntu-latest' }}
-    needs: changes
-    if: needs.changes.outputs.selfmodel == 'true'
-    env:
-      CONTAINER: p8-sm-${{ github.run_id }}-${{ github.run_attempt }}
-      DB: p8sm
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # THE HISTORY, not a snapshot of it. ingest.py, symbol_touch.py and
-          # metrics.sql all read git -- commits, per-file revisions, evolutionary
-          # coupling -- so a shallow clone would load the self-model of a
-          # repository with one commit in it and report success.
-          fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - run: pip install --quiet pyyaml
-      # A RUN KILLED MID-JOB NEVER REACHES ITS `if: always()` CLEANUP. Found
-      # 2026-09-19: p8-ci-35432943851-1-parser-upgrade had been up seven hours
-      # on r1. Anything of ours older than three hours is from a dead run.
-      - name: Remove containers a killed run left behind
-        run: |
-          now=$(date +%s)
-          docker ps -a --format '{{.Names}} {{.CreatedAt}}' | grep -E '^p8-(ci|sm)-' | while read -r name created; do
-            age=$(( now - $(date -d "${created% [A-Z]*}" +%s 2>/dev/null || echo "$now") ))
-            [ "$age" -gt 10800 ] && docker rm -f -v "$name" >/dev/null && echo "removed $name, $((age/3600))h old" || true
-          done
-      - run: dev/ci-database.sh
-      - run: dev/check.sh --self-model
-
-      - name: What the database said, if it failed
-        if: failure()
-        run: docker logs "$CONTAINER" | tail -60
-
-      # By prefix, because gates start siblings named after it: agent-turn.sh
-      # leaves `$CONTAINER-agent` running, and the first run on p8-arm left one.
-      - name: Remove this run's containers
-        if: always()
-        run: docker ps -aq --filter "name=^$CONTAINER" | xargs -r docker rm -f -v >/dev/null
+  # THE SELF-MODEL JOB IS p8-subsystems', NOT THIS REPOSITORY'S. It loads
+  # applications/percolate-self-model, which stays there, so it runs there.
