@@ -639,6 +639,9 @@ declare
     -- today about something said in January holds from January; without this
     -- every edge held from the moment of the write. Checked in the body.
     v_valid_from timestamptz;
+    -- What a second assertion from the same source looks like in an edge's
+    -- sources list, so a re-run appends nothing. Null: always append.
+    v_dedup jsonb;
     v_e       jsonb;
     v_node    jsonb;
     v_k       text; v_scheme text; v_kind text; v_name text; v_key text;
@@ -717,6 +720,12 @@ begin
     -- policy (§10a), through every source an edge carries -- which is what an
     -- edge merged from two memories needs, and what scoping at write time
     -- cannot give it.
+    if nullif(p_context->>'resource_id', '') is not null
+       and nullif(p_context->>'session_id', '') is not null then
+        raise exception 'a context names a resource or a session, not both (agent: %)',
+            coalesce(p_context->>'agent','?');
+    end if;
+
     if nullif(p_context->>'resource_id', '') is not null then
         if not pg_input_is_valid(p_context->>'resource_id', 'uuid') then
             raise exception 'context resource_id % is not a uuid (agent: %)',
@@ -736,6 +745,33 @@ begin
                 using hint = 'pass the resource alone; its org is read from it';
         end if;
         v_org := rbac.org_or_shared(v_res_org);
+        v_dedup := jsonb_build_object('resource_id', p_context->>'resource_id');
+    -- A CONVERSATION IS A MEMORY TOO (REM-969). What a session's messages
+    -- state is scoped by the SESSION, exactly as a resource scopes what was
+    -- read out of it: its org, visibility and owner. Without this a fact from
+    -- a private conversation had no source to gate it and went to whoever
+    -- could read both of its ends -- REM-962 again, by another door.
+    elsif nullif(p_context->>'session_id', '') is not null then
+        if not pg_input_is_valid(p_context->>'session_id', 'uuid') then
+            raise exception 'context session_id % is not a uuid (agent: %)',
+                p_context->>'session_id', coalesce(p_context->>'agent','?');
+        end if;
+        select se.org_id, se.visibility, se.owner_id into v_res_org, v_vis, v_owner
+          from agentic.sessions se where se.id = (p_context->>'session_id')::uuid;
+        if not found then
+            raise exception 'context session_id % names no session, so the scope of what it '
+                'yielded cannot be known (agent: %)',
+                p_context->>'session_id', coalesce(p_context->>'agent','?');
+        end if;
+        if nullif(p_context->>'org_id', '') is not null
+           and rbac.org_or_shared(v_res_org) is distinct from v_org then
+            raise exception 'context org_id % is not the org of session % (%)',
+                p_context->>'org_id', p_context->>'session_id', rbac.org_or_shared(v_res_org)
+                using hint = 'pass the session alone; its org is read from it';
+        end if;
+        v_org := rbac.org_or_shared(v_res_org);
+        v_dedup := jsonb_strip_nulls(jsonb_build_object('session_id', p_context->>'session_id',
+                                                        'message_ids', p_context->'message_ids'));
     else
         v_vis := rbac.default_visibility(v_org);
     end if;
@@ -1044,6 +1080,8 @@ begin
             'tier','machine',
             'sources', jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
                 'resource_id', p_context->>'resource_id',
+                'session_id',  p_context->>'session_id',
+                'message_ids', p_context->'message_ids',
                 'agent',       p_context->>'agent',
                 'run_id',      p_context->>'run_id',
                 'window',      p_context->'window',
@@ -1090,9 +1128,9 @@ begin
             set provenance = (aiq.edges.provenance - 'closed') || jsonb_build_object(
                     'sources',
                     coalesce(aiq.edges.provenance->'sources', '[]'::jsonb)
-                    || (case when coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
-                                  jsonb_build_array(jsonb_build_object(
-                                      'resource_id', p_context->>'resource_id'))
+                    || (case when v_dedup is not null
+                                  and coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
+                                      jsonb_build_array(v_dedup)
                              then '[]'::jsonb
                              else excluded.provenance->'sources' end)),
                 -- GREATEST, not least: weight is the BEST provenance tier that
@@ -1913,6 +1951,16 @@ end $$;
 -- Defined here and not beside nodes' policy in ai-query-layer/integration-rbac.sql,
 -- because that file is assembled before the content plane exists; that file
 -- says so where the policy used to be.
+-- Whether the caller may read a session, by the scope rule its own policy
+-- applies. DEFINER, because a caller holds no grant on agentic.sessions (they
+-- read sessions_api), and a policy runs its functions as the caller.
+create or replace function agentic.session_readable(p_session uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select coalesce((select rbac.may_read(se.owner_id, se.org_id, se.visibility)
+                       from agentic.sessions se where se.id = p_session), false);
+$$;
+grant execute on function agentic.session_readable(uuid) to authenticated, api_viewer;
+
 create or replace function aiq.edge_sources_readable(p_provenance jsonb)
 returns boolean as $$
     -- CASE, not OR, because OR promises no order and both array functions
@@ -1923,10 +1971,14 @@ returns boolean as $$
         else exists (
             select 1
               from jsonb_array_elements(p_provenance->'sources') s
-             where not (s ? 'resource_id')
+             where not (s ? 'resource_id' or s ? 'session_id')
                 or exists (select 1 from content.resources r
                             where r.id = case when pg_input_is_valid(s->>'resource_id', 'uuid')
-                                              then (s->>'resource_id')::uuid end))
+                                              then (s->>'resource_id')::uuid end)
+                -- A conversation gates what was said in it, by the session's
+                -- own rule (REM-969).
+                or agentic.session_readable(case when pg_input_is_valid(s->>'session_id', 'uuid')
+                                                 then (s->>'session_id')::uuid end))
     end;
 $$ language sql stable parallel safe;
 comment on function aiq.edge_sources_readable(jsonb) is
