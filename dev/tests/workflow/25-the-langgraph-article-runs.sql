@@ -22,21 +22,12 @@
 -- the worker: it claims each task, reads its context through get_task_context as the worker does, and answers
 -- by step name. The live run behind this file used the published compose stack with dev/faultsrv as the model.
 --
--- What does not run here, and was run live instead: `percolate agent push` (a CLI), the /chat turns of §1, §4 and
--- §7, which need the runtime, and the two HTTP calls below, as the article prints them. The live run reads each
--- from between its markers, drops the leading "-- ", and runs it with the compose stack's ports in place of 3000
--- and 8080.
---
--- live: start_workflow (§2)
--- curl -s http://localhost:3000/rpc/start_workflow \
---   -H 'Content-Profile: workflow' -H "Authorization: Bearer $TOKEN" \
---   -H 'Content-Type: application/json' \
---   -d '{"p_name": "joke", "p_input": {"topic": "harbours"}}'
--- /live
--- live: sync (§4)
--- curl -s -X POST http://localhost:8080/tools/p8-agents/sync \
---   -H "Authorization: Bearer $TOKEN"
--- /live
+-- What does not run here runs live: the article's shell and compose blocks, between `-- live: <name>` and
+-- `-- /live` where the article has them, each line behind "-- ". The live run takes each out, drops that prefix,
+-- and runs it as the reader would, in one shell whose variables and `start` carry from block to block. It changes
+-- only the stack's ports (5432, 3000 and 8080 are taken on the machine it ran on), the virtualenv's path, and the
+-- model: it brings its own project up with the 0.2.23 image instead of running `stack`, points the agents at
+-- dev/faultsrv, and scripts that stub through the agent rows, so every request is the reader's word for word.
 --
 -- One transaction, rolled back.
 
@@ -96,7 +87,54 @@ create function pg_temp.status(p_run uuid, p_step text) returns text as $$
 $$ language sql;
 
 
+-- Before you start -----------------------------------------------------------------------------------------------
+-- live: stack (not run: the live run brings up its own project)
+-- # Percolate: the stack, get-percolate's compose file
+-- mkdir langgraph-tour && cd langgraph-tour
+-- curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml \
+--   -o docker-compose.yml
+-- # Installed Percolate before? The project is always named percolate, so its old
+-- # database comes back: `docker compose down -v` here drops it first (REM-979).
+-- docker compose up -d --wait     # Postgres on 5432, REST on 3000, the agent runtime on 8080
+-- /live
+-- live: shell
+-- # Percolate: the shell. The CLI needs Python 3.11 or newer, and `start` needs jq.
+-- python3 -m venv ~/.percolate && . ~/.percolate/bin/activate
+-- pip install 'percolate-core[sample,agent]>=0.2.5'
+--
+-- export P8_DSN=postgres://p8:p8@localhost:5432/percolate
+-- export P8_ADMIN_DSN=$P8_DSN
+-- export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
+-- psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')"
+-- export P8_USER_ID=$(psql "$P8_DSN" -Atc "select id from rbac.users where email = 'me@example.com'")
+-- export TOKEN=$(percolate auth token --email me@example.com)
+--
+-- start() {   # start <workflow> '<input as JSON>' prints the run id
+--   curl -s http://localhost:3000/rpc/start_workflow \
+--     -H 'Content-Profile: workflow' -H "Authorization: Bearer $TOKEN" \
+--     -H 'Content-Type: application/json' \
+--     -d "{\"p_name\": \"$1\", \"p_input\": $2}" | jq -r .
+-- }
+-- /live
+
+
 -- §1 ------------------------------------------------------------------------------------------------------------
+-- live: harbourmaster.yaml
+-- # Percolate: harbourmaster.yaml
+-- type: object
+-- name: harbourmaster
+-- description: |-
+--   You answer questions about the fleet.
+--   Start with SCHEMA to see what exists, then query. Never guess a vessel name.
+-- model: anthropic:claude-sonnet-5
+-- tools:
+--   - server: harbour-query
+--     tools: [query]
+-- properties:
+--   verdict: {type: string}
+--   vessel:  {type: string}
+-- required: [verdict, vessel]
+-- /live
 -- block: tool-server
 select agentic.upsert_tool_server($j${
   "name": "harbour-query", "kind": "mcp", "url": "http://query-mcp:8090"
@@ -105,6 +143,17 @@ select agentic.upsert_tool_server($j${
 
 select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'harbour-query'),
     '§1 the tool server is a row');
+-- live: push
+-- percolate agent push harbourmaster.yaml
+-- /live
+-- live: chat
+-- curl -s -X POST http://localhost:8080/tools/harbour-query/sync -H "Authorization: Bearer $TOKEN"
+--
+-- curl -sN http://localhost:8080/chat -D headers.txt \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"model": "harbourmaster", "stream": true,
+--        "messages": [{"role": "user", "content": "Which vessels exist?"}]}'
+-- /live
 
 
 -- §2 ------------------------------------------------------------------------------------------------------------
@@ -137,6 +186,9 @@ steps:
     input: 'Add a surprising twist: {{steps.improve.result}}'
 $y$);
 -- /block
+-- live: start_joke
+-- start joke '{"topic": "harbours"}'
+-- /live
 
 do $$
 declare r uuid := pg_temp.start('joke', '{"topic": "harbours"}');
@@ -179,6 +231,9 @@ steps:
     input: '{{steps.story.result}} {{steps.joke.result}} {{steps.poem.result}}'
 $y$);
 -- /block
+-- live: start_compare
+-- start compare '{"topic": "tides"}'
+-- /live
 
 do $$
 declare r uuid := pg_temp.start('compare', '{"topic": "tides"}');
@@ -209,6 +264,11 @@ select agentic.upsert_agent($j${
              "tools": ["agent__story", "agent__joke", "agent__poem"]}]
 }$j$::jsonb);
 -- /block
+
+-- live: sync
+-- curl -s -X POST http://localhost:8080/tools/p8-agents/sync \
+--   -H "Authorization: Bearer $TOKEN"
+-- /live
 
 select pg_temp.check((select tools from agentic.agents where name = 'router')
     = '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
@@ -250,9 +310,12 @@ steps:
     sql: {function: land_extractions, args: ['{{steps.extract.result.task_id}}']}
 $y$);
 -- /block
+-- live: start_extract_reports
+-- start extract_reports '{}'
+-- /live
 
 do $$
-declare r uuid := pg_temp.start('extract_reports');
+declare r uuid := pg_temp.start('extract_reports', '{}');
 begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§5 one child per row');
     perform pg_temp.check((select output #>> '{result,landed}' from workflow.tasks
@@ -283,6 +346,9 @@ steps:
         input: 'Write the {{item.section}} section of a report on {{run.topic}}'
 $y$);
 -- /block
+-- live: start_write_report
+-- start write_report '{"topic": "port state control"}'
+-- /live
 
 do $$
 declare r uuid := pg_temp.start('write_report', '{"topic": "port state control"}');
@@ -305,6 +371,9 @@ steps:
      input: 'Research the class you chose'}
 $y$);
 -- /block
+-- live: start_triage_then_research
+-- start triage_then_research '{"report": "fire door held open"}'
+-- /live
 
 do $$
 declare
@@ -330,6 +399,14 @@ begin
     perform set_config('session.id', v_sid::text, false);
 end $$;
 
+-- live: session (after chat)
+-- SID=$(awk 'tolower($1) == "x-p8-session-id:" {print $2}' headers.txt | tr -d '\r')
+-- curl -sN http://localhost:8080/chat -H "X-P8-Session-Id: $SID" \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"model": "harbourmaster", "stream": true,
+--        "messages": [{"role": "user", "content": "And the second one?"}]}'
+-- /live
+
 
 -- §8 ------------------------------------------------------------------------------------------------------------
 -- block: release_vessel
@@ -346,9 +423,12 @@ steps:
     signal: true
 $y$);
 -- /block
+-- live: start_release_vessel
+-- start release_vessel '{}'
+-- /live
 
 do $$
-declare r uuid := pg_temp.start('release_vessel');
+declare r uuid := pg_temp.start('release_vessel', '{}');
 begin
     perform pg_temp.check(pg_temp.status(r, 'cooling_off') = 'ready'
         and (select run_after from workflow.tasks where run_id = r and step_key = 'cooling_off')
@@ -363,9 +443,13 @@ begin
     perform set_config('run.id', r::text, true);
 end $$;
 
-select current_setting('run.id') as run_id \gset
--- From psql the reader says who they are before signing, as the published first-workflow page does.
+-- The reader finds the run by its workflow's name, and says who they are before signing, as the published
+-- first-workflow page does.
 -- block: signal
+select r.id as run_id from workflow.runs r
+  join workflow.definitions d on d.id = r.workflow_def_id
+ where d.name = 'release_vessel' order by r.created_at desc limit 1 \gset
+
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false);
 
@@ -424,9 +508,12 @@ steps:
     sql: {statement: "delete from pilot_bookings where run_id = '{{run.$id}}'::uuid", write: true}
 $y$);
 -- /block
+-- live: start_booking
+-- start booking '{}'
+-- /live
 
 do $$
-declare r uuid := pg_temp.start('booking');
+declare r uuid := pg_temp.start('booking', '{}');
 begin
     perform pg_temp.check((select status = 'failed' and compensation_state = 'compensated'
                              from workflow.runs where id = r), '§9 failed, and compensated');
@@ -490,10 +577,27 @@ steps:
     sql: {statement: "update claims set approved = false where id = {{run.claim_id}}", write: true}
 $y$);
 -- /block
+-- live: bank
+-- # Percolate: docker-compose.override.yml, beside docker-compose.yml
+-- services:
+--   worker:
+--     environment:
+--       P8_TEMPLATE_ENV: BANK_API
+--       BANK_API: http://agent:8080/no-bank    # answers 404, so the payout is reversed
+--       BANK_TOKEN: test-token
+--       # a credential goes only where this binds it; the first entry is the compose default
+--       P8_CREDENTIAL_ORIGINS: '{"LLM_API_KEY": ["https://api.openai.com"], "BANK_TOKEN": ["http://agent:8080"]}'
+-- /live
+-- live: worker (the live run names its own project and files)
+-- docker compose up -d worker
+-- /live
+-- live: start_insurance_claim
+-- start insurance_claim '{"claim_id": 7, "policy_id": "POL-1", "documents": "survey.pdf, invoice.pdf", "claim": "Hull damage at berth 4."}'
+-- /live
 
 do $$
 declare r uuid := pg_temp.start('insurance_claim',
-    '{"claim_id": 7, "policy_id": "POL-1", "claim": "Hull damage at berth 4", "documents": "survey.pdf"}');
+    '{"claim_id": 7, "policy_id": "POL-1", "documents": "survey.pdf, invoice.pdf", "claim": "Hull damage at berth 4."}');
 begin
     perform pg_temp.check(pg_temp.status(r, 'coverage') = 'succeeded', '§11 the coverage query ran in-database');
     perform pg_temp.check(pg_temp.work(r) = 2, '§11 fraud and documents start together');
@@ -502,10 +606,17 @@ begin
     perform set_config('run.id', r::text, true);
 end $$;
 
+-- The reader's psql session is still signed from §8; this one was cleared since.
 select set_config('request.jwt.claims', json_build_object('sub',
-    (select id from rbac.users where email = 'me@example.com'), 'role', 'authenticated')::text, true);
-select workflow.signal_task(current_setting('run.id')::uuid, 'adjuster', '{"decision": "approved"}');
-select set_config('request.jwt.claims', '', true);
+         (select id from rbac.users where email = 'me@example.com'))::text, false);
+-- block: adjuster
+select r.id as run_id from workflow.runs r
+  join workflow.definitions d on d.id = r.workflow_def_id
+ where d.name = 'insurance_claim' order by r.created_at desc limit 1 \gset
+
+select workflow.signal_task(:'run_id', 'adjuster', '{"decision": "approved"}');
+-- /block
+select set_config('request.jwt.claims', '', false);
 
 do $$
 declare r uuid := current_setting('run.id')::uuid;
@@ -519,8 +630,10 @@ end $$;
 
 
 -- §10 -----------------------------------------------------------------------------------------------------------
-select current_setting('run.id') as run_id, current_setting('session.id') as session_id \gset
+-- :run_id is the claim's, from the adjuster block.
 -- block: trace
+select id as session_id from agentic.sessions order by created_at desc limit 1 \gset
+
 select step_key, kind, status, claimed_by as worker
 from workflow.tasks
 where run_id = :'run_id' order by step_key;
@@ -529,6 +642,7 @@ select seq, role, citations from agentic.messages
 where session_id = :'session_id' order by seq;
 -- /block
 
+select pg_temp.check(:'session_id' = current_setting('session.id'), '§10 the latest conversation is §7''s session_group');
 select pg_temp.check((select count(*) from workflow.tasks where run_id = current_setting('run.id')::uuid) = 8,
     '§10 every step of the claim, the reversal included, is a row');
 
