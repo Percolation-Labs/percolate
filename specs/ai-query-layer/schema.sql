@@ -1395,7 +1395,7 @@ create table if not exists aiq.node_resolutions (
     -- meta/spikes/2026-09-30-jev-decisions.
     tier         text not null
                      check (tier in ('registry','crosswalk','embedding','llm',
-                                     'decision_model','human')),
+                                     'decision_model','agent','human')),
     -- The matched key, the score, the agent run. `moved_keys` under this is
     -- written by aiq.resolve_nodes and read by aiq.unresolve_node: reversing a
     -- merge needs to know which key rows moved, and re-deriving them later is
@@ -1417,7 +1417,7 @@ comment on table aiq.node_resolutions is
 -- list arrives by replacing the constraint, not through the create above.
 alter table aiq.node_resolutions drop constraint if exists node_resolutions_tier_check;
 alter table aiq.node_resolutions add constraint node_resolutions_tier_check
-    check (tier in ('registry','crosswalk','embedding','llm','decision_model','human'));
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','agent','human'));
 
 create unique index if not exists idx_node_resolutions_live
     on aiq.node_resolutions (merged_id) where undone_at is null;
@@ -1456,7 +1456,7 @@ create table if not exists aiq.node_distinctions (
     b_id        uuid not null,
     tier        text not null
                     check (tier in ('registry','crosswalk','embedding','llm',
-                                    'decision_model','human')),
+                                    'decision_model','agent','human')),
     evidence    jsonb not null default '{}',
     decided_by  text not null check (length(btrim(decided_by)) > 0),
     undone_at   timestamptz,
@@ -1469,6 +1469,13 @@ create table if not exists aiq.node_distinctions (
 );
 comment on table aiq.node_distinctions is
     'A decision that two nodes are different things, with the evidence, who decided, and whether it was undone.';
+-- 'agent' (REM-1055): the person's own connected AI deciding through
+-- aiq.complete_judgement, a different kind of assertion from a configured
+-- model ('llm') and from the person ('human'). Replaced, not created, for
+-- node_resolutions' replay reason.
+alter table aiq.node_distinctions drop constraint if exists node_distinctions_tier_check;
+alter table aiq.node_distinctions add constraint node_distinctions_tier_check
+    check (tier in ('registry','crosswalk','embedding','llm','decision_model','agent','human'));
 create unique index if not exists idx_node_distinctions_live
     on aiq.node_distinctions (a_id, b_id) where undone_at is null;
 create index if not exists idx_node_distinctions_b
