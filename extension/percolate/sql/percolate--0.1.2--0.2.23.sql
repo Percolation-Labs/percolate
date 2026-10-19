@@ -2628,9 +2628,21 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- was the third path that marked a task `done` without it. A signalled task in
 -- a saga group sorted first under `order by completed_at desc` -- compensated
 -- before everything that ran after it -- because a NULL sorts first.
+-- REM-977: signal_task returns how many waiting steps it resolved. It returned
+-- void, so a signal sent before its step reached waiting_external (the timer
+-- still holding the run) changed nothing and looked exactly like one that
+-- worked: a fresh reader of the LangGraph article signalled early, saw no
+-- error, and the step then waited for a signal that had already come. 0 now
+-- says so, from psql and over REST. It does not raise, because answering twice
+-- (a double click, a retried webhook) must stay harmless: the second call
+-- resolves nothing and returns 0 rather than failing the caller. A return type
+-- cannot be changed in place, hence the drop.
+drop function if exists workflow.signal_task(uuid, text, jsonb);
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
-returns void as $$
-declare r record;
+returns integer as $$
+declare
+    r   record;
+    v_n integer := 0;
 begin
     -- The rows are selected, merged, and only then transitioned -- see the note
     -- on merge_step_context. Doing it in one UPDATE ... RETURNING loop reads
@@ -2652,11 +2664,13 @@ begin
         set status = 'succeeded', output = jsonb_build_object('result', p_payload),
             completed_at = clock_timestamp()
         where id = r.id;
+        v_n := v_n + 1;
     end loop;
     -- A signal can be a run's last step, and nothing else asks the question
     -- complete_task asks: so a run ending on a person's decision stayed
     -- `running` with every task succeeded (REM-957).
     perform workflow.check_run_completion(p_run_id);
+    return v_n;
 end;
 $$ language plpgsql;
 
@@ -14138,9 +14152,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- Returns how many waiting steps it resolved: 0 is a signal that reached
+-- nothing (sent early, sent twice, or under the wrong name). schema.sql's copy
+-- carries the note (REM-977).
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
-returns void as $$
-declare r record;
+returns integer as $$
+declare
+    r   record;
+    v_n integer := 0;
 begin
     -- Was equally open, and only *appeared* safe when tested because
     -- wait_signal was never populated (schema.sql's start_workflow bug, fixed
@@ -14179,11 +14198,13 @@ begin
         set status = 'succeeded', output = jsonb_build_object('result', p_payload),
             completed_at = clock_timestamp()
         where id = r.id;
+        v_n := v_n + 1;
     end loop;
     -- A signal can be a run's last step, and nothing else asks the question
     -- complete_task asks: so a run ending on a person's decision stayed
     -- `running` with every task succeeded (REM-957).
     perform workflow.check_run_completion(p_run_id);
+    return v_n;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
