@@ -1043,6 +1043,210 @@ grant execute on function claims.pose_question(text, text), claims.propose_answe
     to authenticated;
 
 -- ------------------------------------------------------------
+-- 10a2. Finding a question by meaning (REM-998). A person asks "does agent memory need valid time?" and the graph
+--       either names the question already holding that argument, with its stances as of a date, or says there is
+--       none close enough.
+--
+-- WHAT WAS MISSING WAS IN THE ENGINE, NOT ONLY THE SURFACE. A question had no searchable text and no vector: it was
+-- in no lexical or semantic source, so the only way to find one was the words of its key, which is what the
+-- application's search does. Reproduced on 19 October: the top hit for the question above was one about clinical
+-- methods being "valid" in another hospital, matched on one shared word. Claims were already a corpus
+-- (research.claims, §12 below); the questions they answer were not.
+--
+-- So a question gets one text, its phrasing or else its frame's subject and outcome, and that text is registered
+-- as the semantic corpus `questions`, like chunks and claims. Its vectors live in the model's space,
+-- keyed by the question's id, and claims.questions_to_embed lists the ones a space still lacks -- the rows an
+-- `embed:` matrix fans out over (claims.install_question_embed_workflow). Readability is the question's own policy
+-- (claims.question_readable): a question nobody you can read answers is not found, by meaning or by words.
+--
+-- DISTANCE RANKS AND NEVER DECIDES, the rule claims.candidates already states. find_question returns the nearest
+-- questions with their distance and whether each falls inside the caller's floor; "none close enough" is an answer
+-- the caller reads off `within`, and the nearest question is still shown so the caller can see what it missed.
+-- The floor has no default, for the reason candidates gives.
+-- ------------------------------------------------------------
+alter table claims.questions add column if not exists search_text text
+    generated always as (coalesce(phrasing, subject || ': ' || outcome)) stored;
+comment on column claims.questions.search_text is
+    'The words a question is found by: its phrasing, or its frame''s subject and outcome. Derived, never written.';
+
+do $$
+begin
+    if to_regclass('aiq.semantic_sources') is not null then
+        insert into aiq.semantic_sources (name, source_table, content_col)
+        values ('questions', 'claims.questions', 'search_text')
+        on conflict (name) do update
+           set source_table = excluded.source_table,
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
+    end if;
+end $$;
+-- Not a lexical source as well: aiq.register_lexical_source adds a generated tsvector over the content column, and
+-- a generated column cannot read another one. Finding a question by its words is what failed above.
+
+-- The questions the caller may read that a model's space has no vector for, shaped as an `embed:` matrix's rows:
+-- chunk_id is what aiq.land_embeddings keys the space by. Invoker, so a run sees what its owner may read and an
+-- operator's run sees all of it.
+create or replace function claims.questions_to_embed(p_model text, p_limit int default 500)
+returns table (chunk_id uuid, text text)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    v_tbl text;
+begin
+    if not exists (select 1 from aiq.embedding_models where name = p_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', p_model);
+    end if;
+    v_tbl := aiq.embedding_space_name(p_model);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        return query select q.id, q.search_text from claims.questions q
+                      order by q.id limit least(greatest(p_limit, 1), 5000);
+        return;
+    end if;
+    return query execute format(
+        'select q.id, q.search_text from claims.questions q
+          where not exists (select 1 from aiq.%I e where e.chunk_id = q.id)
+          order by q.id limit $1', v_tbl)
+        using least(greatest(p_limit, 1), 5000);
+end;
+$$;
+
+-- The questions nearest a text's vector, each with its stances as of p_at: how many of the claims answering it say
+-- yes, no or depends, from how many works. The vector arrives alongside, as it does for aiq.query; embedding is an
+-- external model call and this schema makes none.
+create or replace function claims.find_question(p_embedding vector, p_max_distance float8, p_limit int default 5,
+                                                p_model text default null, p_at timestamptz default now())
+returns table (question uuid, phrasing text, distance float8, within boolean,
+               yes int, no int, depends int, works int)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    m     aiq.embedding_models;
+    v_tbl text;
+begin
+    if p_max_distance is null then
+        raise check_violation using
+            message = 'find_question needs a distance floor: whether a question is close enough is the caller''s call',
+            hint = 'the number is meaningful only against the model that produced the vectors';
+    end if;
+    if p_embedding is null then
+        raise check_violation using message = 'find_question needs the text''s vector: embed it with the model and pass it';
+    end if;
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+    end if;
+    if m.name is null then
+        raise no_data_found using message = format('embedding model %s is not registered', coalesce(p_model, '(the default)'));
+    end if;
+    if vector_dims(p_embedding) <> m.dim then
+        raise data_exception using message = format('the vector has %s dimensions and model %s expects %s',
+                                                    vector_dims(p_embedding), m.name, m.dim);
+    end if;
+    v_tbl := aiq.embedding_space_name(m.name);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise no_data_found using message = format('embedding model %s is registered but its space does not exist', m.name);
+    end if;
+    return query execute format($q$
+        with near as (
+            select q.id, q.search_text, (e.embedding <=> $1)::float8 as d
+              from aiq.%I e join claims.questions q on q.id = e.chunk_id
+             order by e.embedding <=> $1 limit $2),
+        latest as (
+            select distinct on (a.claim_id, a.question_id) a.question_id, a.stance, a.op, a.evidence
+              from claims.answered a join claims.tx t on t.id = a.tx
+             where a.question_id in (select id from near) and t.at <= $3
+             order by a.claim_id, a.question_id, t.at desc, a.id desc)
+        select n.id, n.search_text, n.d, n.d <= $4,
+               count(*) filter (where l.stance = 'yes' and l.op = 'assert')::int,
+               count(*) filter (where l.stance = 'no' and l.op = 'assert')::int,
+               count(*) filter (where l.stance = 'depends' and l.op = 'assert')::int,
+               count(distinct v.work_id) filter (where l.op = 'assert' and l.stance <> 'unknown')::int
+          from near n
+          left join latest l on l.question_id = n.id
+          left join research.revisions v on v.id = l.evidence
+         group by n.id, n.search_text, n.d
+         order by n.d, n.id$q$, v_tbl)
+        using p_embedding, least(greatest(coalesce(p_limit, 5), 1), 50), p_at, p_max_distance;
+end;
+$$;
+
+-- What changed a question's answer between two dates: each claim whose latest stance at p_from differs from its
+-- latest at p_to -- added, withdrawn or changed -- with when the later one was made and by what kind of actor (a
+-- transaction's reason is not granted to readers, claims.tx). Invoker: an answer from a revision the caller cannot
+-- read is not part of the change they see.
+create or replace function claims.stance_changes(p_question uuid, p_from timestamptz, p_to timestamptz default now())
+returns table (claim uuid, revision_id uuid, claim_key text, stance_then text, stance_now text, change text,
+               changed_at timestamptz, actor_kind text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with at_from as (
+        select distinct on (a.claim_id) a.claim_id, a.stance, a.op
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id = p_question and t.at <= p_from
+         order by a.claim_id, t.at desc, a.id desc),
+    at_to as (
+        select distinct on (a.claim_id) a.claim_id, a.stance, a.op, a.evidence, a.claim_key, t.at, t.actor_kind
+          from claims.answered a join claims.tx t on t.id = a.tx
+         where a.question_id = p_question and t.at <= p_to
+         order by a.claim_id, t.at desc, a.id desc),
+    paired as (
+        select coalesce(n.claim_id, f.claim_id) as claim, n.evidence, n.claim_key,
+               case when f.op = 'assert' and f.stance <> 'unknown' then f.stance end as s_then,
+               case when n.op = 'assert' and n.stance <> 'unknown' then n.stance end as s_now,
+               n.at, n.actor_kind
+          from at_to n full join at_from f on f.claim_id = n.claim_id)
+    select p.claim, p.evidence, p.claim_key, p.s_then, p.s_now,
+           case when p.s_then is null then 'added' when p.s_now is null then 'withdrawn' else 'changed' end,
+           p.at, p.actor_kind
+      from paired p
+     where p.s_then is distinct from p.s_now
+     order by p.at, p.claim;
+$$;
+
+-- The workflow that keeps a model's space current: one `embed:` child per question the space lacks, landed by
+-- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
+--
+-- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
+-- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
+-- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
+-- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+create or replace function claims.install_question_embed_workflow(p_model text default null,
+                                                                  p_name text default 'embed_questions')
+returns text
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    v_model text := p_model;
+begin
+    if v_model is null then
+        select name into v_model from aiq.embedding_models where is_default;
+    end if;
+    if v_model is null or not exists (select 1 from aiq.embedding_models where name = v_model) then
+        raise no_data_found using message = format('embedding model %s is not registered', coalesce(v_model, '(the default)'));
+    end if;
+    perform workflow.define_yaml(format($y$
+name: %1$s
+steps:
+  - id: embed
+    matrix:
+      rows: "select chunk_id, text from claims.questions_to_embed('%2$s')"
+      max_fanout: 500
+      template:
+        embed:
+          text: '{{item.text}}'
+          model: %2$s
+  - id: land
+    needs: [embed]
+    sql: {function: land_embeddings, args: ['{{steps.embed.result.task_id}}']}
+$y$, p_name, v_model));
+    return format('%s: embeds the questions a %s space lacks', p_name, v_model);
+end;
+$$;
+
+grant execute on function claims.questions_to_embed(text, int),
+                          claims.find_question(vector, float8, int, text, timestamptz),
+                          claims.stance_changes(uuid, timestamptz, timestamptz)
+    to authenticated;
+revoke all on function claims.install_question_embed_workflow(text, text) from public;
+
+-- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
 --      by claims.study_key -- the application's REM-430 key, moved here -- so two packages that read one study
 --      cite one origin however they word it. An occurrence cites an origin through a source's origin text, its

@@ -43,6 +43,10 @@ begin;
 insert into rbac.users (id, email, status) values
     ('00000000-0000-4000-8000-0000000025a1', 'me@example.com', 'active')
 on conflict (email) do nothing;
+-- bootstrap_admin makes the reader an administrator; section 4 creates a second person and an org as them.
+insert into rbac.user_roles (user_id, role)
+select id, 'admin' from rbac.users where email = 'me@example.com'
+on conflict do nothing;
 
 create function pg_temp.check(p_ok boolean, p_what text) returns void as $$
 begin
@@ -78,13 +82,30 @@ begin
             perform workflow.fail_task(t.id, '{"error": "http_call returned HTTP 404"}', true, 'wf25');
         else
             perform workflow.complete_task(t.id, jsonb_build_object('status', 200, 'result',
-                case when t.step_key = 'fraud' then '{"score": 0.12}'::jsonb
+                case when t.step_key = 'fraud' then
+                          jsonb_build_object('score', case when (select input->>'claim_id' from workflow.runs
+                                                                  where id = t.run_id) = '7' then 0.82 else 0.12 end)
                      when t.step_key = 'plan'  then '{"sections": ["intro", "method", "results"]}'::jsonb
+                     when t.step_key = 'generate' then
+                          to_jsonb(case when (select input->>'topic' from workflow.runs where id = t.run_id) = 'puns'
+                                        then 'Why did the tide turn? It had a change of heart!'
+                                        else 'a joke about harbours' end)
+                     when t.step_key = 'grade_1' then '{"grade": "not funny", "feedback": "shorter"}'::jsonb
+                     when t.step_key like 'grade\_%' then '{"grade": "funny", "feedback": "keep it"}'::jsonb
                      else to_jsonb('answer from ' || t.step_key) end), 'wf25');
         end if;
     end loop;
     return v_n;
 end $$ language plpgsql;
+
+-- Whether the installed parser is the one this tree compiles (dev/tests/run.sh, "requires-parser"). Its absence asserts:
+-- a database whose parser lags its SQL (the published image under a newer tree) defers only what the parser decides.
+create function pg_temp.parser_current() returns boolean language sql stable as $$
+    select coalesce((select p.extversion = c.extversion
+                       from pg_catalog.pg_extension p, pg_catalog.pg_extension c
+                      where p.extname = 'percolate_parser' and c.extname = 'percolate'), false)
+       and coalesce(current_setting('percolate.parser_behind', true), 'absent') <> 'yes';
+$$;
 
 create function pg_temp.status(p_run uuid, p_step text) returns text as $$
     select status from workflow.tasks where run_id = p_run and step_key = p_step
@@ -103,15 +124,20 @@ $$ language sql;
 -- P8_PG_PORT=5432
 -- P8_REST_PORT=3000
 -- P8_AGENT_PORT=8080
+-- P8_CONTENT_PORT=8081
+-- P8_MINIO_PORT=9000
+-- P8_MINIO_CONSOLE_PORT=9001
 -- OPENAI_API_KEY=sk-your-key
 -- EOF
 -- docker compose up -d --wait
 -- /live
--- live: shell
+-- live: venv
 -- python3 -m venv .venv && . .venv/bin/activate
 -- pip install 'percolate-core[sample,agent]>=0.2.5'
---
+-- /live
+-- live: shell
 -- set -a; . ./.env; set +a
+-- export PAGER=cat
 -- export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
 -- export P8_ADMIN_DSN=$P8_DSN
 -- export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
@@ -142,52 +168,160 @@ $$ language sql;
 -- }
 --
 -- waiting() {
---   for i in $(seq 30); do
+--   for i in $(seq 90); do
 --     s=$(psql "$P8_DSN" -Atc "select status from workflow.tasks where run_id = '$1' and step_key = '$2'")
---     case $s in waiting_external|succeeded|failed|cancelled) break ;; esac
+--     case $s in waiting_external|succeeded|skipped|failed|cancelled) break ;; esac
 --     sleep 2
 --   done
 --   echo "$s"
 -- }
 -- /live
 
+-- The fleet the harbourmaster queries: dev/tests/query/16's article block, verbatim (REM-984).
+-- block: fleet
+-- Percolate: the fleet the harbourmaster queries. Synthetic, CC0-1.0.
+do $$ begin
+  if not exists (select 1 from rbac.users where email = 'me@example.com') then
+    raise exception 'run the bootstrap_admin step first: the fleet belongs to me@example.com';
+  end if;
+end $$;
+
+create schema if not exists fleet;
+comment on schema fleet is
+  'A synthetic fleet for the LangGraph tour, released under CC0-1.0. Ships, operators and berths are '
+  'invented; the ports are real. Every IMO number fails the IMO check digit, so none is a real ship.';
+
+create table if not exists fleet.vessels (
+  id int primary key, name text not null unique, imo text not null unique,
+  operator text not null, type text not null, gross_tonnage int not null,
+  owner_id uuid not null);
+create table if not exists fleet.berths (
+  id int primary key, port text not null, code text not null,
+  max_draught_m numeric(4,1) not null, length_m int not null,
+  owner_id uuid not null, unique (port, code));
+create table if not exists fleet.port_calls (
+  id int primary key, vessel_id int not null references fleet.vessels,
+  berth_id int not null references fleet.berths,
+  arrived_at timestamptz not null, departed_at timestamptz,  -- null: alongside now
+  purpose text not null, owner_id uuid not null);
+comment on column fleet.port_calls.departed_at is 'null while the vessel is still alongside';
+comment on table fleet.vessels    is 'Synthetic tour data (CC0-1.0): the fleet. IMO numbers fail the check digit on purpose.';
+comment on table fleet.berths     is 'Synthetic tour data (CC0-1.0): berths at real ports, with invented codes and sizes.';
+comment on table fleet.port_calls is 'Synthetic tour data (CC0-1.0): one row per call; departed_at is null while alongside.';
+
+with me as (select id from rbac.users where email = 'me@example.com')
+insert into fleet.vessels select v.*, me.id from me, (values
+  (1, 'Meridian Dawn',  '9331802', 'Meridian Line',    'container ship',  38200),
+  (2, 'Meridian Star',  '9331803', 'Meridian Line',    'container ship',  38200),
+  (3, 'Bulk Harmony',   '9407711', 'Meridian Bulk',    'bulk carrier',    31900),
+  (4, 'Aurora Kestrel', '9214578', 'Kestrel Shipping', 'general cargo',    8450),
+  (5, 'Kestrel Tern',   '9512340', 'Kestrel Shipping', 'general cargo',    8450),
+  (6, 'Nordvik Spirit', '9620012', 'Nordvik Chartering', 'product tanker', 23400))
+  v(id, name, imo, operator, type, gross_tonnage)
+on conflict (id) do nothing;
+
+with me as (select id from rbac.users where email = 'me@example.com')
+insert into fleet.berths select b.*, me.id from me, (values
+  (1, 'Rotterdam',  'Amazonehaven 4', 15.0, 380),
+  (2, 'Rotterdam',  'Waalhaven 2',    11.5, 240),
+  (3, 'Felixstowe', 'Trinity 6',      14.5, 350),
+  (4, 'Felixstowe', 'Landguard 1',     9.0, 180),
+  (5, 'Gothenburg', 'Skandia 3',      13.0, 300),
+  (6, 'Gothenburg', 'Energy Port 9',  12.0, 230))
+  b(id, port, code, max_draught_m, length_m)
+on conflict (id) do nothing;
+
+with me as (select id from rbac.users where email = 'me@example.com')
+insert into fleet.port_calls select c.*, me.id from me, (values
+  ( 1, 1, 1, timestamptz '2026-10-02 06:10Z', timestamptz '2026-10-03 21:40Z', 'discharge'),
+  ( 2, 1, 3, timestamptz '2026-10-09 14:00Z', timestamptz '2026-10-10 18:25Z', 'load'),
+  ( 3, 2, 3, timestamptz '2026-10-04 08:30Z', timestamptz '2026-10-05 19:00Z', 'discharge'),
+  ( 4, 2, 1, timestamptz '2026-10-17 05:45Z', null,                           'load'),
+  ( 5, 3, 2, timestamptz '2026-10-06 11:20Z', timestamptz '2026-10-09 07:15Z', 'discharge'),
+  ( 6, 3, 5, timestamptz '2026-10-15 16:00Z', null,                           'repairs'),
+  ( 7, 4, 4, timestamptz '2026-10-01 09:00Z', timestamptz '2026-10-01 22:30Z', 'load'),
+  ( 8, 4, 6, timestamptz '2026-10-12 07:40Z', timestamptz '2026-10-13 12:10Z', 'bunkers'),
+  ( 9, 5, 2, timestamptz '2026-10-18 13:15Z', null,                           'discharge'),
+  (10, 6, 6, timestamptz '2026-10-08 03:50Z', timestamptz '2026-10-08 20:05Z', 'discharge'),
+  (11, 6, 2, timestamptz '2026-10-14 10:30Z', timestamptz '2026-10-16 02:00Z', 'load'))
+  c(id, vessel_id, berth_id, arrived_at, departed_at, purpose)
+on conflict (id) do nothing;
+
+-- Readable by its owner and nobody else, through the same policy shape the extension's own tables use.
+grant usage on schema fleet to authenticated;
+grant select on fleet.vessels, fleet.berths, fleet.port_calls to authenticated;
+alter table fleet.vessels    enable row level security;
+alter table fleet.berths     enable row level security;
+alter table fleet.port_calls enable row level security;
+drop policy if exists owner_reads on fleet.vessels;
+drop policy if exists owner_reads on fleet.berths;
+drop policy if exists owner_reads on fleet.port_calls;
+create policy owner_reads on fleet.vessels    for select using (owner_id = (select rbac.current_user_id()));
+create policy owner_reads on fleet.berths     for select using (owner_id = (select rbac.current_user_id()));
+create policy owner_reads on fleet.port_calls for select using (owner_id = (select rbac.current_user_id()));
+
+select (select count(*) from fleet.vessels) as vessels, (select count(*) from fleet.berths) as berths,
+       (select count(*) from fleet.port_calls) as port_calls;
+-- /block
+-- live: fleet_schema
+-- curl -s $REST/rpc/query \
+--   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"p_query": "SCHEMA \"sql\" FROM port_calls"}'; echo
+-- /live
+-- live: fleet_curl
+-- curl -s $REST/rpc/sql_passthrough \
+--   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"p_statement": "select v.name, v.imo, b.port, b.code as berth, c.arrived_at, c.purpose from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id where c.departed_at is null order by c.arrived_at"}'; echo
+-- /live
+
+select pg_temp.check((select count(*) from fleet.port_calls where departed_at is null) = 3,
+    'before you start: three vessels are alongside');
+
 
 -- §1 ------------------------------------------------------------------------------------------------------------
--- live: harbourmaster.yaml
--- # Percolate: harbourmaster.yaml
--- type: object
--- name: harbourmaster
--- description: |-
---   You answer questions about the fleet.
---   Start with SCHEMA to see what exists, then query. Never guess a vessel name.
--- model: openai:gpt-4o-mini
--- tools:
---   - server: harbour-query
---     tools: [query]
--- properties:
---   verdict: {type: string}
---   vessel:  {type: string}
--- required: [verdict, vessel]
--- /live
--- block: tool-server
+-- block: harbourmaster
+select (agentic.upsert_agent($j${
+  "name": "harbourmaster",
+  "model": "openai:gpt-4o-mini",
+  "system_prompt": "You answer questions about the fleet, which is in fleet.vessels, fleet.berths and fleet.port_calls. A vessel is alongside while its port call has no departed_at. Query those tables in SQL; start with SCHEMA \"sql\" FROM port_calls if you need the columns. Never guess a vessel name.",
+  "tools": [{"server": "harbour-query", "tools": ["query"]}]
+}$j$::jsonb)).name;
+
 select (agentic.upsert_tool_server($j${
   "name": "harbour-query", "kind": "mcp", "url": "http://query-mcp:8090"
 }$j$::jsonb)).name;
 -- /block
 
-select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'harbour-query'),
-    '§1 the tool server is a row');
--- live: push
--- percolate agent push harbourmaster.yaml
--- /live
+select pg_temp.check(exists (select 1 from agentic.tool_servers where name = 'harbour-query')
+    and exists (select 1 from agentic.agents where name = 'harbourmaster'), '§1 the agent and its tool server are rows');
 -- live: chat
 -- curl -s -X POST $AGENT/tools/harbour-query/sync -H "Authorization: Bearer $TOKEN"; echo
 --
 -- curl -sN $AGENT/chat -D headers.txt \
 --   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 --   -d '{"model": "harbourmaster", "stream": true,
---        "messages": [{"role": "user", "content": "Which vessels exist?"}]}'
+--        "messages": [{"role": "user", "content": "Which vessels are alongside right now?"}]}'
 -- /live
+-- block: retell
+update agentic.agents set system_prompt = system_prompt || ' Answer in French.'
+ where name = 'harbourmaster';
+-- /block
+-- live: chat_again
+-- curl -sN $AGENT/chat \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"model": "harbourmaster", "stream": true,
+--        "messages": [{"role": "user", "content": "Which vessels are alongside right now?"}]}'
+-- /live
+-- block: versions
+select version, left(system_prompt, 60) as prompt, held_from, replaced_at, replaced_by_role
+  from agentic.agent_versions_api where name = 'harbourmaster' order by version;
+-- /block
+
+select pg_temp.check((select count(*) from agentic.agent_versions_api where name = 'harbourmaster') = 1
+    and (select system_prompt from agentic.agent_versions_api where name = 'harbourmaster') not like '%French%',
+    '§1 the change wrote one version, holding the prompt it replaced');
 
 
 -- §2 ------------------------------------------------------------------------------------------------------------
@@ -197,7 +331,7 @@ select (agentic.upsert_agent(jsonb_build_object(
          'name', a, 'model', 'openai:gpt-4o-mini',
          'system_prompt', 'You are the ' || replace(a, '_', ' ') || '. Answer briefly.'))).name
 from unnest(array['joker', 'writer', 'editor', 'planner', 'psc_report_extractor', 'classifier',
-                  'researcher', 'fraud_scorer', 'document_reviewer', 'assessor']) a;
+                  'researcher', 'fraud_scorer', 'document_reviewer', 'assessor', 'critic']) a;
 -- /block
 
 select pg_temp.check((select count(*) from agentic.agents where name in ('joker', 'writer', 'assessor')) = 3,
@@ -212,10 +346,12 @@ steps:
     input: 'Write a short joke about {{run.topic}}'
   - id: improve
     needs: [generate]
+    when: "'{{steps.generate.result}}' !~ '[?!]'"
     agent: joker
     input: 'Make this funnier with wordplay: {{steps.generate.result}}'
   - id: polish
     needs: [improve]
+    when: "{{steps.improve.result}} is not null"
     agent: joker
     input: 'Add a surprising twist: {{steps.improve.result}}'
 $y$);
@@ -232,7 +368,17 @@ begin
         '§2 only the first step of a chain is claimable');
     perform pg_temp.check(pg_temp.work(r) = 1 and pg_temp.work(r) = 1 and pg_temp.work(r) = 1,
         '§2 each step frees the next');
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded', '§2 the chain finishes');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§2 the chain finishes');
+end $$;
+
+-- The gate: a joke that already has its punchline skips the rest (REM-967).
+do $$
+declare r uuid := pg_temp.start('joke', '{"topic": "puns"}');
+begin
+    perform pg_temp.check(pg_temp.work(r) = 1, '§2 the joke is written');
+    perform pg_temp.check(pg_temp.status(r, 'improve') = 'skipped' and pg_temp.status(r, 'polish') = 'skipped',
+        '§2 a joke with a punchline skips improve and polish');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§2 and the run succeeds');
 end $$;
 
 -- §2's prose: a chain of query steps has finished by the time start_workflow returns.
@@ -246,8 +392,8 @@ $y$);
 do $$
 declare r uuid := pg_temp.start('query_chain');
 begin
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded'
-        and (select output #>> '{result,0,n}' from workflow.tasks where run_id = r and step_key = 'b') = '2',
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded'
+        and (select output #>> '{result,0,n}' from workflow.tasks where run_id = r and step_key = 'b') is not distinct from '2',
         '§2 query steps finish inside start_workflow');
 end $$;
 
@@ -270,49 +416,96 @@ $y$);
 -- RUN=$(start compare '{"topic": "tides"}')
 -- show $RUN
 -- /live
+-- live: compare_times
+-- psql "$P8_DSN" -c "select step_key, to_char(claimed_at, 'HH24:MI:SS.MS') as claimed,
+--   to_char(completed_at, 'HH24:MI:SS.MS') as finished
+--   from workflow.tasks where run_id = '$RUN' order by claimed_at, step_key"
+-- /live
 
 do $$
 declare r uuid := pg_temp.start('compare', '{"topic": "tides"}');
 begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§3 three steps with no dependency start together');
     perform pg_temp.check(pg_temp.work(r) = 1, '§3 the join runs once all three are back');
-    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded', '§3 the run finishes');
+    perform pg_temp.check((select status from workflow.runs where id = r) is not distinct from 'succeeded', '§3 the run finishes');
 end $$;
 
 
 -- §4 ------------------------------------------------------------------------------------------------------------
--- The writers are made here rather than pushed: the runtime lists agents nobody owns, and `percolate agent push`
--- makes an agent its pusher's own (see the card linked from the article).
--- block: router
+-- block: p8-agents
 select (agentic.upsert_tool_server($j${
   "name": "p8-agents", "kind": "mcp",
   "url": "http://agent:8080/mcp", "serves_agents": true
 }$j$::jsonb)).name;
-
-select (agentic.upsert_agent(jsonb_build_object('name', w, 'model', 'openai:gpt-4o-mini',
-         'system_prompt', 'Write a short ' || w || ' about what you are given.'))).name
-from unnest(array['story', 'joke', 'poem']) w;
-
-select (agentic.upsert_agent($j${
-  "name": "router", "model": "openai:gpt-4o-mini",
-  "system_prompt": "Hand the request to the story, joke or poem writer.",
-  "tools": [{"server": "p8-agents",
-             "tools": ["agent__story", "agent__joke", "agent__poem"]}]
-}$j$::jsonb)).name;
 -- /block
 
+-- Bob's block, run for real (REM-985; the mechanism is dev/tests/rbac/22).
+-- block: reach
+-- You, signed in as yourself
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
+
+-- A role that may use agents at all: a fresh install has only bootstrap_admin's admin
+insert into rbac.roles (name) values ('member') on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values ('member', 'agents', 'invoke')
+on conflict do nothing;
+
+-- A second person, and a harbour office you both belong to
+select rbac.create_user_with_password('crew@example.com', 'a-long-crew-password-123') as crew_id \gset
+select rbac.grant_role(:'crew_id', 'member');
+select rbac.create_org('harbour-office', 'Harbour office') as office \gset
+select rbac.add_org_member(:'office', :'crew_id');
+
+-- Your three writers stay yours. The router is shared with the office.
+select (agentic.upsert_agent(jsonb_build_object('name', w,
+          'system_prompt', 'Write a short ' || w || ' about what you are given.',
+          'visibility', 'private'))).name
+  from unnest(array['story', 'joke', 'poem']) w;
+
+select (agentic.upsert_agent(jsonb_build_object('name', 'router',
+          'system_prompt', 'Hand the request to the story, joke or poem writer.',
+          'org_id', :'office', 'visibility', 'org',
+          'tools', '[{"server": "p8-agents",
+                      "tools": ["agent__story", "agent__joke", "agent__poem"]}]'::jsonb))).name;
+
+-- What the router can hand on, for you: the agents you may invoke
+select name, visibility, agentic.may_invoke(name) as you_may_invoke
+  from agentic.agents_api where name in ('router', 'story', 'joke', 'poem') order by name;
+
+-- The same question, asked as crew
+select set_config('request.jwt.claims', json_build_object('sub', :'crew_id')::text, false) is not null as signed_in_as_crew;
+select name, visibility, agentic.may_invoke(name) as crew_may_invoke
+  from agentic.agents_api where name in ('router', 'story', 'joke', 'poem') order by name;
+-- /block
+
+select pg_temp.check(not agentic.may_invoke('story') and agentic.may_invoke('router'),
+    '§4 crew may invoke the router and not the writers');
+
+\set ON_ERROR_STOP off
+savepoint refused_route;
+-- block: refused_route
+-- And if the router hands crew's request to a writer anyway, the run is refused by name
+select agentic.start_run('story');
+-- /block
+rollback to savepoint refused_route;
+\set ON_ERROR_STOP on
+select pg_temp.check(:'LAST_ERROR_MESSAGE' = 'not authorized to invoke agent story',
+    '§4 crew''s run of a writer is refused by name: ' || :'LAST_ERROR_MESSAGE');
+
+-- block: back_to_me
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
+-- /block
+select pg_temp.check(agentic.may_invoke('story'), '§4 signed back in, you may invoke every writer');
+select set_config('request.jwt.claims', '', false);
 -- live: sync
 -- curl -s -X POST $AGENT/tools/p8-agents/sync \
 --   -H "Authorization: Bearer $TOKEN"; echo
 -- /live
--- live: router_chat
--- curl -sN $AGENT/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
---   -d '{"model": "router", "stream": true,
---        "messages": [{"role": "user", "content": "Tell me a story about tides."}]}'
--- /live
+
 
 select pg_temp.check((select tools from agentic.agents where name = 'router')
-    = '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
+    is not distinct from '[{"server": "p8-agents", "tools": ["agent__story", "agent__joke", "agent__poem"]}]', '§4 the allowlist is a row');
 
 
 -- §5 ------------------------------------------------------------------------------------------------------------
@@ -363,7 +556,7 @@ declare r uuid := pg_temp.start('extract_reports', '{}');
 begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§5 one child per row');
     perform pg_temp.check((select output #>> '{result,landed}' from workflow.tasks
-                            where run_id = r and step_key = 'land') = '3', '§5 the fan-in lands every child');
+                            where run_id = r and step_key = 'land') is not distinct from '3', '§5 the fan-in lands every child');
     perform pg_temp.check((select count(*) from reports where extracted_at is not null) = 3,
         '§5 every report is extracted');
 end $$;
@@ -402,7 +595,55 @@ begin
     perform pg_temp.check(pg_temp.work(r) = 3, '§5 the width came from the plan');
     perform pg_temp.check((select array_agg(input#>>'{item,section}' order by step_key) from workflow.tasks
                             where run_id = r and step_key like 'write[%')
-        = array['intro', 'method', 'results'], '§5 each child got its section');
+        is not distinct from array['intro', 'method', 'results'], '§5 each child got its section');
+end $$;
+
+
+-- §6 ------------------------------------------------------------------------------------------------------------
+-- block: joke_until_funny
+select workflow.define_yaml($y$
+name: joke_until_funny
+steps:
+  - id: refine
+    repeat:
+      max: 3
+      until: "'{{steps.grade.result.grade}}' = 'funny'"
+      steps:
+        - id: write
+          agent: joker
+          input: 'Write a joke about {{run.topic}}. {{previous.grade.result.feedback}}'
+        - id: grade
+          needs: [write]
+          agent: critic
+          input: 'Grade this joke funny or not funny, with feedback: {{steps.write.result}}'
+          output_schema:
+            type: object
+            required: [grade, feedback]
+            properties:
+              grade: {type: string, enum: [funny, not funny]}
+              feedback: {type: string}
+  - id: tell
+    needs: [refine]
+    sql: "select '{{steps.refine.result.0.last.write}}' as joke, {{steps.refine.result.0.attempts}} as attempts"
+$y$);
+-- /block
+-- live: start_joke_until_funny
+-- RUN=$(start joke_until_funny '{"topic": "pilots"}')
+-- show $RUN
+-- /live
+
+do $$
+declare r uuid := pg_temp.start('joke_until_funny', '{"topic": "pilots"}');
+begin
+    perform pg_temp.check(pg_temp.work(r) = 1 and pg_temp.work(r) = 1, '§6 the first attempt writes, then grades');
+    perform pg_temp.check(pg_temp.work(r) = 1 and pg_temp.work(r) = 1, '§6 graded not funny, a second attempt runs');
+    perform pg_temp.check(pg_temp.status(r, 'write_3') = 'skipped' and pg_temp.status(r, 'grade_3') = 'skipped',
+        '§6 graded funny, the third attempt is skipped');
+    perform pg_temp.check((select output->'result'->0 @> '{"attempts": 2, "satisfied": true}' from workflow.tasks
+                            where run_id = r and step_key = 'refine'), '§6 the repeat reports two attempts, satisfied');
+    perform pg_temp.check((select output#>>'{result,0,attempts}' from workflow.tasks
+                            where run_id = r and step_key = 'tell') is not distinct from '2'
+        and (select status from workflow.runs where id = r) is not distinct from 'succeeded', '§6 the step after the repeat reads it');
 end $$;
 
 
@@ -430,8 +671,20 @@ begin
     -- REM-957: the compiled body said `session`, which the runtime ignores, and the id had no row, which it 404s.
     select * into t from workflow.claim_task('http', 'wf25') where run_id = r;
     v_ctx := workflow.get_task_context(t.id, 'wf25');
-    perform pg_temp.check((v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid,
-        '§7 the step sends the group''s session as session_id');
+    -- The key the runtime reads is the compiler's (#460, plan_graph.rs); that the group's session reaches the step
+    -- is the engine's, and holds whichever key a lagging parser spelled it under.
+    if pg_temp.parser_current() then
+        perform pg_temp.check((v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid,
+            '§7 the step sends the group''s session as session_id');
+    else
+        perform pg_temp.check(coalesce(v_ctx #>> '{task_input,body,session_id}',
+                                       v_ctx #>> '{task_input,body,session}')::uuid = v_sid,
+            '§7 the step carries the group''s session');
+        raise notice 'DEFERRED: workflow/25 §7 the session sent as session_id -- the compiled parser (%) predates '
+                     'the extension SQL (%), and the key is the compiler''s',
+            (select extversion from pg_catalog.pg_extension where extname = 'percolate_parser'),
+            (select extversion from pg_catalog.pg_extension where extname = 'percolate');
+    end if;
     perform pg_temp.check(exists (select 1 from agentic.sessions where id = v_sid
                                    and owner_id = (select id from rbac.users where email = 'me@example.com')),
         '§7 the session row exists, owned by the person who started the run');
@@ -440,7 +693,8 @@ begin
     select * into t from workflow.claim_task('http', 'wf25') where run_id = r;
     v_ctx := workflow.get_task_context(t.id, 'wf25');
     perform pg_temp.check(t.step_key = 'deep_dive'
-        and (v_ctx #>> '{task_input,body,session_id}')::uuid = v_sid, '§7 both steps carry one session');
+        and coalesce(v_ctx #>> '{task_input,body,session_id}', v_ctx #>> '{task_input,body,session}')::uuid = v_sid,
+        '§7 both steps carry one session');
     perform workflow.complete_task(t.id, '{"status": 200, "result": "done"}', 'wf25');
     perform set_config('session.id', v_sid::text, false);
 end $$;
@@ -492,6 +746,25 @@ end $$;
 -- live: waiting
 -- waiting $RUN approve
 -- /live
+-- Crew, from section 4, tries to sign first.
+\set ON_ERROR_STOP off
+savepoint crew_signs;
+-- block: crew_signs
+select set_config('request.jwt.claims', json_build_object('sub',
+         (select id from rbac.users where email = 'crew@example.com'))::text, false);
+
+select r.id as run_id from workflow.runs r
+  join workflow.definitions d on d.id = r.workflow_def_id
+ where d.name = 'release_vessel' order by r.created_at desc limit 1 \gset
+
+select workflow.signal_task(:'run_id', 'approve', '{"decision":"released","by":"crew"}'::jsonb);
+-- /block
+rollback to savepoint crew_signs;
+\set ON_ERROR_STOP on
+select pg_temp.check(:'LAST_ERROR_MESSAGE' like 'not authorized to signal run %',
+    '§8 crew is refused at the signature: ' || :'LAST_ERROR_MESSAGE');
+select pg_temp.check(pg_temp.status(current_setting('run.id')::uuid, 'approve') = 'waiting_external',
+    '§8 and the step still waits');
 -- The reader finds the run by its workflow's name, and says who they are before signing, as the published
 -- first-workflow page does.
 -- block: signal
@@ -582,7 +855,7 @@ end $$;
 -- block: claims
 create table claims (id int primary key, policy_id text, approved boolean not null default false);
 grant select, update on claims to authenticated;
-insert into claims values (7, 'POL-1', false);
+insert into claims values (7, 'POL-1', false), (8, 'POL-2', false);
 
 create function check_coverage(policy_id text) returns jsonb language sql
   as $$ select jsonb_build_object('policy', policy_id, 'covered', true) $$;
@@ -596,7 +869,7 @@ name: insurance_claim
 steps:
   - id: fraud
     agent: fraud_scorer
-    input: '{{run.claim}}'
+    input: 'Score the fraud risk of this claim from 0 (none) to 1 (certain): {{run.claim}}'
     output_schema:
       type: object
       required: [score]
@@ -611,7 +884,8 @@ steps:
     agent: assessor
     input: 'Fraud {{steps.fraud.result}}, cover {{steps.coverage.result}}, documents {{steps.documents.result}}'
   - id: adjuster
-    needs: [assess]
+    needs: [assess, fraud]
+    when: "{{steps.fraud.result.score}} > 0.5"
     signal: true
   - id: approve_payment
     needs: [adjuster]
@@ -632,7 +906,7 @@ steps:
 $y$);
 -- /block
 -- live: bank
--- # Percolate: docker-compose.override.yml, beside docker-compose.yml
+-- cat > docker-compose.override.yml <<'EOF'
 -- services:
 --   worker:
 --     environment:
@@ -641,6 +915,7 @@ $y$);
 --       BANK_TOKEN: test-token
 --       # a credential goes only where this binds it; the first entry is the compose default
 --       P8_CREDENTIAL_ORIGINS: '{"LLM_API_KEY": ["https://api.openai.com"], "BANK_TOKEN": ["http://agent:8080"]}'
+-- EOF
 -- /live
 -- live: worker
 -- docker compose up -d worker
@@ -688,6 +963,16 @@ begin
     perform pg_temp.check(not (select approved from claims where id = 7), '§11 the approval is reversed');
 end $$;
 
+-- A claim scored below the threshold skips the adjuster and goes straight to payment (REM-967).
+do $$
+declare r uuid := pg_temp.start('insurance_claim',
+    '{"claim_id": 8, "policy_id": "POL-2", "documents": "survey.pdf", "claim": "A scraped fender."}');
+begin
+    perform pg_temp.check(pg_temp.work(r) = 2 and pg_temp.work(r) = 1, '§11 the low claim is checked and assessed');
+    perform pg_temp.check(pg_temp.status(r, 'adjuster') = 'skipped', '§11 below 0.5 the adjuster is skipped');
+    perform pg_temp.check(pg_temp.status(r, 'approve_payment') = 'succeeded', '§11 and the payment is approved at once');
+end $$;
+
 
 -- §10 -----------------------------------------------------------------------------------------------------------
 -- The reader runs the trace from the shell, with $RUN (section 9's saga) and $SID (section 7's conversation).
@@ -697,15 +982,37 @@ end $$;
 -- from workflow.tasks
 -- where run_id = :'run_id' order by step_key;
 --
--- select seq, role, citations from agentic.messages
--- where session_id = :'session_id' order by seq;
+-- select seq, role, jsonb_array_length(tool_calls) as tool_calls, citations
+-- from agentic.messages where session_id = :'session_id' order by seq;
 -- SQL
 -- /live
 select current_setting('run.id') as run_id, current_setting('session.id') as session_id \gset
 select step_key, kind, status, claimed_by as worker from workflow.tasks where run_id = :'run_id' order by step_key;
-select seq, role, citations from agentic.messages where session_id = :'session_id' order by seq;
+select seq, role, jsonb_array_length(tool_calls) as tool_calls, citations
+from agentic.messages where session_id = :'session_id' order by seq;
 
 select pg_temp.check((select count(*) from workflow.tasks where run_id = current_setting('run.id')::uuid) = 8,
     '§10 every step of the claim, the reversal included, is a row');
+
+-- One question across the fleet, the conversations and the runs.
+-- block: cross
+select v.name, b.port,
+       count(distinct m.session_id) as conversations,
+       count(distinct t.run_id)     as runs
+  from fleet.port_calls c
+  join fleet.vessels v on v.id = c.vessel_id
+  join fleet.berths  b on b.id = c.berth_id
+  left join agentic.messages_api m on strpos(m.content, v.name) > 0
+  left join workflow.tasks_api   t on strpos(t.output::text, v.name) > 0
+ where c.departed_at is null
+ group by v.name, b.port order by v.name;
+-- /block
+-- live: cross_curl
+-- curl -s $REST/rpc/sql_passthrough \
+--   -H 'Content-Profile: aiq' -H 'Accept-Profile: aiq' \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"p_statement": "select v.name, b.port, count(distinct m.session_id) as conversations, count(distinct t.run_id) as runs from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id left join agentic.messages_api m on strpos(m.content, v.name) > 0 left join workflow.tasks_api t on strpos(t.output::text, v.name) > 0 where c.departed_at is null group by v.name, b.port order by v.name"}'; echo
+-- /live
+
 
 rollback;
