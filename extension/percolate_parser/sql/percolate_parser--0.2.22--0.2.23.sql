@@ -147,6 +147,11 @@ STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'p8_graph_snapshot_drop_wrapper';
 
+CREATE OR REPLACE FUNCTION "p8_graph_snapshot_invalidate"() RETURNS jsonb
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'p8_graph_snapshot_invalidate_wrapper';
+
 CREATE OR REPLACE FUNCTION "p8_graph_trust"(
  "seeds" uuid[],
  "floor" double precision DEFAULT 0.01,
