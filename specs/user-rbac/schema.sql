@@ -2149,6 +2149,27 @@ begin
     select p_role, resource, action from rbac.permission_kinds
     on conflict do nothing;
 
+    -- AND A ROLE FOR EVERY OTHER ACCOUNT (REM-993). Without it the second
+    -- person on a fresh install -- the LangGraph tour's crew, any deployment's
+    -- first ordinary user -- could not be given a role: `grant_role(:u,
+    -- 'member')` failed on the foreign key, because only dev/init's seed made
+    -- `member`, and the suite always runs on the seed. Here and not at CREATE
+    -- EXTENSION: a restore runs CREATE EXTENSION and then loads the dump, so a
+    -- role seeded there collides with the dumped one and aborts the load
+    -- (dev/restore-is-possible.sh), and every upgrade replays the schema. This
+    -- function runs once, by hand, on a real install. The pairs go only with a
+    -- role this call made, so an operator's own `member` is left as it is.
+    with created as (
+        insert into rbac.roles (name, description)
+        values ('member', 'an ordinary account: may use agents and upload content')
+        on conflict (name) do nothing
+        returning name)
+    insert into rbac.role_permissions (role, resource, action)
+    select c.name, k.resource, k.action
+      from created c
+     cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
+    on conflict do nothing;
+
     insert into rbac.user_roles (user_id, role) values (v_uid, p_role);
 
     insert into rbac.auth_events (user_id, event_type, detail)
