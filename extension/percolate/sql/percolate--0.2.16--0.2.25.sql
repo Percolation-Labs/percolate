@@ -28101,8 +28101,19 @@ create or replace function aiq.graph_schema() returns jsonb as $$
             'required', jsonb_build_array('k','n'),
             'additionalProperties', false,
             'properties', jsonb_build_object(
+              -- THE KINDS ARE LISTED, AND NO PREFIX IS SUGGESTED (REM-1066). The
+              -- description used to read "kind; optionally pg:/lake:/soft:
+              -- prefixed" and the prompt said "use a k from the kinds listed"
+              -- with none listed, so gpt-4o answered `pg:/port` about one run
+              -- in seven -- the description's own punctuation -- and the lander
+              -- kept `/port`, which matched no table. A residence scheme is for
+              -- a typed extractor with its own schema; this one names kinds.
               'k', jsonb_build_object('type','string',
-                   'description','kind; optionally pg:/lake:/soft: prefixed'),
+                   'description', 'kind: a lowercase singular noun'
+                     || coalesce(' -- one of ' || (select string_agg(entity_type, ', ' order by entity_type)
+                                                   from aiq.entity_registry
+                                                  where entity_type not in ('soft', 'lake'))
+                                 || ' when it fits, otherwise your own', '')),
               'n', jsonb_build_object('type','string',
                    'description','the name as the document wrote it'),
               'a', jsonb_build_object('type','object')))),
@@ -28465,16 +28476,22 @@ begin
         -- infrastructure. The scheme is for a TYPED extractor that knows what
         -- it is mapping onto.
         v_scheme := null;
+        -- A slash around the kind is punctuation, not part of it: a model that
+        -- writes `pg:/port` or `/port` means `port` (REM-1066). Kept, it made
+        -- the key `/port/felixstowe`, which no table and no reader could match.
         if strpos(v_k, ':') > 0 then
             v_scheme := split_part(v_k, ':', 1);
-            v_kind   := split_part(v_k, ':', 2);
+            v_kind   := btrim(split_part(v_k, ':', 2), '/ ');
             if v_scheme not in ('pg','lake','soft') then
                 raise exception
                     'node ordinal % has residence scheme ''%'', which is not one of '
                     'pg/lake/soft. A kind containing '':'' is read as a scheme.', i, v_scheme;
             end if;
         else
-            v_kind := v_k;
+            v_kind := btrim(v_k, '/ ');
+        end if;
+        if v_kind = '' then
+            raise exception 'node ordinal % has no kind once its punctuation is removed: %', i, v_node->>'k';
         end if;
         v_key := lower(trim(v_name));
         v_id  := null;
