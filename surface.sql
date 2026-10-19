@@ -794,6 +794,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','table','claims.origins',null,'specs/claims/graph.md §3: a study keyed by study_key, readable when a readable citation names it (REM-477)'),
 ('claims','table','claims.cites',null,'specs/claims/graph.md §3: which origins an occurrence cites, readable with its revision (REM-477)'),
 ('claims','table','claims.origin_links',null,'specs/claims/graph.md §3: two origins one source names, readable with its revision (REM-477)'),
+('claims','function','claims.claim_readable','uuid','specs/claims/graph.md §9: a claim is readable when a readable occurrence expresses it; the claims policy asks it so the planner cannot hash expresses (REM-1006)'),
 ('claims','function','claims.origin_readable','uuid','specs/claims/graph.md §3: an origin is readable when a readable citation names it; the origins policy asks it so the planner cannot hash cites (REM-1003)'),
 ('claims','function','claims.tx_named_by_readable','bigint','specs/claims/graph.md §9: a transaction a readable row names; the tx policy asks it so the planner cannot hash the graph (REM-1003)'),
 ('claims','function','claims.readable_links_of','uuid[],uuid[]','specs/claims/graph.md §3: the readable links incident to some origins, fetched by origin before the readability test (REM-1003)'),
