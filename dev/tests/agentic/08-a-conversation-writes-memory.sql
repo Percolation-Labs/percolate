@@ -10,7 +10,8 @@
 --
 -- WHAT WOULD MAKE IT FAIL. Let edge_sources_readable ignore session_id and §6
 -- raises: Leo still reads a fact from a conversation Maya stopped sharing.
--- Window the assistant's turns and §2 raises. (§4's private conversation is
+-- Window the assistant's turns and §2 raises. Drop the speaker from the window
+-- and §3 raises: the extractor reads "I" with no one to attach it to. (§4's private conversation is
 -- protected twice: its facts land on Maya's own nodes, which Leo cannot read
 -- either end of, so the gate alone does not decide §4.)
 
@@ -64,14 +65,33 @@ begin
 end $$;
 
 -- 3. Reflect: start the run, and answer each extraction as a model would.
-select workflow.start_workflow('reflect_session', json_build_object('session_id', :'session')::jsonb) as reflect_run \gset
+select workflow.start_workflow('reflect_session', json_build_object('session_id', :'session', 'speaker', 'Maya Okafor')::jsonb) as reflect_run \gset
+-- The extractor is told who is speaking: a first-person message has no
+-- subject of its own. A window with no speaker says "The person".
+do $$
+begin
+    if not exists (select 1 from workflow.tasks t
+                    where t.input->'item'->>'content' = 'Maya Okafor wrote: We moved to Lisbon for Harbour Health.') then
+        raise exception 'the extraction was not told who was speaking: %',
+            (select t.input->'item'->>'content' from workflow.tasks t
+              where t.input->'item'->>'content' like '%We moved%' limit 1);
+    end if;
+end $$;
+select agentic.session_windows(:'session')->0->>'content' as unnamed \gset
+select set_config('rem969.unnamed', :'unnamed', true) \g /dev/null
+do $$
+begin
+    if current_setting('rem969.unnamed') is distinct from 'The person wrote: We moved to Lisbon for Harbour Health.' then
+        raise exception 'a window with no speaker reads %', current_setting('rem969.unnamed');
+    end if;
+end $$;
 do $$
 declare t workflow.tasks; n int := 0;
 begin
     for t in select * from workflow.claim_tasks('http', 'rem969-model', 10) loop
         n := n + 1;
         perform workflow.complete_task(t.id, jsonb_build_object('result',
-            case when t.input->'item'->>'content' like 'We moved%'
+            case when t.input->'item'->>'content' like '%We moved%'
                  then '{"nodes":[{"k":"person","n":"Maya Okafor"},{"k":"place","n":"Lisbon"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}'
                  else '{"nodes":[{"k":"person","n":"Maya Okafor"},{"k":"food","n":"peanuts"}],"edges":[{"s":0,"t":1,"r":"allergic_to"}]}'
             end), 'rem969-model');
@@ -141,7 +161,7 @@ declare t workflow.tasks;
 begin
     for t in select * from workflow.claim_tasks('http', 'rem969-model', 10) loop
         perform workflow.complete_task(t.id, jsonb_build_object('result',
-            case when t.input->'item'->>'content' like 'We moved%'
+            case when t.input->'item'->>'content' like '%We moved%'
                  then '{"nodes":[{"k":"person","n":"Maya Okafor"},{"k":"place","n":"Lisbon"}],"edges":[{"s":0,"t":1,"r":"lives_in"}]}'
                  else '{"nodes":[{"k":"person","n":"Maya Okafor"},{"k":"food","n":"peanuts"}],"edges":[{"s":0,"t":1,"r":"allergic_to"}]}'
             end), 'rem969-model');
