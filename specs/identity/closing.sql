@@ -194,6 +194,10 @@ declare
         -- LIMIT, and a caller asking for five would get however many of five
         -- survived and no sign that it had (specs/claims/graph.md §5 *Did you mean*).
         'claims.candidates(uuid,text,double precision,integer,vector,text)',
+        -- The same shape as candidates (REM-998): the space's name comes from aiq.embedding_space_name over a
+        -- registered model and goes through %I; the vector, limit, date and floor are bound parameters.
+        'claims.find_question(vector,double precision,integer,text,timestamp with time zone)',
+        'claims.questions_to_embed(text,integer)',
         'percolate.enums()',
         'workflow.define_yaml(text)',
         -- Owned by api_viewer, so api_viewer holds execute on it and no grant
