@@ -1,4 +1,4 @@
--- Coalescing (specs/build-knit-dream/coalescing.md §5, graph.md §7): a question minted from a phrasing joins claims
+-- Coalescing (specs/claims/graph.md §7): a question minted from a phrasing joins claims
 -- in different works that share no frame. One phrasing is one question however it is spaced or cased, and anything
 -- that is not one polar sentence is refused. An agent's stance lands proposed and the writer's own lands confirmed.
 -- A stance needs a readable revision, a real occurrence and yes, no or depends. claims.question_web shows a question
