@@ -2413,8 +2413,9 @@ begin
                 'Use TEXT ''%'' for the lexical half alone.', p->>'arg';
         end if;
         select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
+        -- BY AGENT / BY RUN, when written, is the plan's scope (REM-965).
         from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
-                        (p->>'limit')::int) h;
+                        (p->>'limit')::int, 60, nullif(p->'scope', 'null'::jsonb)) h;
         v_exceptions := aiq.result_exceptions(v_out);
 
     when 'SCHEMA' then
@@ -3738,9 +3739,41 @@ begin
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
 
+-- ONE AGENT'S OR ONE RUN'S MEMORIES (REM-965). Mem0's filters={"agent_id": ...}
+-- became SQL over aiq.search with a post-filter, and a post-filter starves the
+-- limit: when other agents' memories outrank this agent's, both halves'
+-- candidate lists fill up with the wrong ones. So the scope goes in where each
+-- half joins the source table, as a narrower relation in its place: the source's
+-- rows whose memory's metadata contains the scope, read as the caller like the
+-- table itself. The limit then counts only rows inside the scope. A source
+-- whose rows name no resource has no memory to scope by, and is refused.
+create or replace function aiq.scoped_source(p_source_table text, p_scope jsonb)
+returns text as $$
+begin
+    if p_scope is null then
+        return p_source_table;
+    end if;
+    if jsonb_typeof(p_scope) is distinct from 'object'
+       or exists (select 1 from jsonb_object_keys(p_scope) k where k not in ('agent', 'run'))
+       or exists (select 1 from jsonb_each(p_scope) e where jsonb_typeof(e.value) <> 'string') then
+        raise exception 'a search scope names an agent and or a run, each a string, not %', p_scope;
+    end if;
+    if not exists (select 1 from pg_attribute where attrelid = p_source_table::regclass
+                      and attname = 'resource_id' and not attisdropped) then
+        raise exception 'BY AGENT and BY RUN narrow a source whose rows belong to a memory, and % has no resource_id',
+                        p_source_table
+            using hint = 'search FROM chunks, the memories'' own corpus';
+    end if;
+    return format('(select c.* from %s c join content.resources r on r.id = c.resource_id '
+                  'where r.metadata @> %L::jsonb)', p_source_table, p_scope::text);
+end;
+$$ language plpgsql stable;
+
 drop function if exists aiq.semantic_in(vector, text, int);
+drop function if exists aiq.semantic_in(text, vector, text, int);
 create or replace function aiq.semantic_in(
-    p_source text, p_query vector, p_model text default null, p_limit int default 10
+    p_source text, p_query vector, p_model text default null, p_limit int default 10,
+    p_scope jsonb default null
 ) returns table(chunk_id uuid, distance float8, model text) as $$
 declare
     m aiq.embedding_models;
@@ -3850,7 +3883,7 @@ begin
         'select e.chunk_id, (e.embedding <=> $1)::float8, %L
          from aiq.%I e
          join %s c on c.id = e.chunk_id
-         order by e.embedding <=> $1 limit $2', m.name, v_tbl, src.source_table)
+         order by e.embedding <=> $1 limit $2', m.name, v_tbl, aiq.scoped_source(src.source_table, p_scope))
         using p_query, p_limit;
 
     -- Restored rather than left set, because SET LOCAL lasts to the end of the
@@ -3970,8 +4003,9 @@ $$ language plpgsql;
 
 -- TEXT mode. Deliberately returns the same (id, score) shape as
 -- aiq.semantic_in() so the two can be fused without reshaping either.
+drop function if exists aiq.lexical(text, text, int);
 create or replace function aiq.lexical(
-    p_source text, p_query text, p_limit int default 10
+    p_source text, p_query text, p_limit int default 10, p_scope jsonb default null
 ) returns table(chunk_id uuid, content text, score real) as $$
 declare s aiq.lexical_sources;
 begin
@@ -3986,7 +4020,7 @@ begin
         'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
          from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
          order by ts_rank(c.search_tsv, plainto_tsquery(%L, $1)) desc limit $2',
-        s.content_col, s.regconfig, s.source_table, s.regconfig, s.regconfig)
+        s.content_col, s.regconfig, aiq.scoped_source(s.source_table, p_scope), s.regconfig, s.regconfig)
         using p_query, p_limit;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -4029,10 +4063,11 @@ $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 -- data in them to scope.
 -- ------------------------------------------------------------
 
+drop function if exists aiq.search(text, text, vector, text, int, int);
 create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
-    p_limit int default 10, p_k int default 60
+    p_limit int default 10, p_k int default 60, p_scope jsonb default null
 ) returns table(chunk_id uuid, content text, rrf_score real,
                 lexical_rank int, semantic_rank int) as $$
 declare
@@ -4046,14 +4081,14 @@ begin
     return query execute format($q$
     with lex as (
         select l.chunk_id, row_number() over (order by l.score desc)::int as rnk
-        from aiq.lexical($1, $2, $4 * 4) l
+        from aiq.lexical($1, $2, $4 * 4, $7) l
     ),
     sem as (
         -- The SAME source name feeds both halves, so `SEARCH "..." FROM x`
         -- means one corpus and not two. It must therefore be registered in
         -- both registries; the semantic branch says so by name if it is not.
         select s.chunk_id, row_number() over (order by s.distance asc)::int as rnk
-        from aiq.semantic_in($1, $3, $6, $4 * 4) s
+        from aiq.semantic_in($1, $3, $6, $4 * 4, $7) s
     )
     -- Content is fetched by id AFTER the fusion, not carried through the
     -- lexical branch: a chunk matched only semantically has no row in `lex`,
@@ -4072,7 +4107,7 @@ begin
     order by f.rrf desc
     limit $4
     $q$, src.content_col, src.source_table)
-    using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model;
+    using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model, p_scope;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 

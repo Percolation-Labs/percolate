@@ -254,14 +254,16 @@ grant execute on function aiq.graph_walk(uuid, int, text, int, timestamptz) to a
 -- fails for exactly the roles it is granted to.
 grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
     to authenticated, api_viewer;
-grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
+grant execute on function aiq.semantic_in(text, vector, text, int, jsonb) to authenticated;
 -- semantic_in's one setting, set as the owner because its caller holds no
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
-grant execute on function aiq.lexical(text, text, int) to authenticated;
+grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+-- Both halves build their scoped relation through it as the caller (REM-965).
+grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
 grant execute on function aiq.result_exceptions(jsonb, int, int, boolean) to authenticated;
-grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
+grant execute on function aiq.search(text, text, vector, text, int, int, jsonb) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
 -- Diagnostic, and granted for the same reason the error messages name the fix:
 -- the caller who hits "function p8_graph_ppr does not exist" is the one who
