@@ -29,10 +29,11 @@
 #     prose cries wolf, and this is the largest instance of it in the
 #     repository". A number nobody could act on, guarded by a chore.
 #
-#   * `extension/percolate/check-references.py` as a SEPARATE gate. It still
-#     runs -- it is section 5 of `dev/references.sh` now -- but it is no longer
-#     a second thing to remember. Two gates one word apart, asking different
-#     questions, cost 68167c1 a round trip.
+#   * `extension/percolate/check-references.py` as a SEPARATE gate. It runs
+#     as section 3 of `dev/references.sh` -- which was left in the private tree
+#     at the cut, so from then until REM-1080 this sentence said it ran and
+#     nothing ran it. Two gates one word apart, asking different questions,
+#     cost 68167c1 a round trip.
 #
 # VERIFYING IT ON THE PLATFORM CI USES, which is not the one you are on. "CI
 # runs what you run" is true of the COMMANDS and says nothing about the
@@ -122,6 +123,7 @@ TREE_GATES=(
   "The generated SQL matches the specs it came from::$PY extension/percolate/build-sql.py --check"
   "The parser's upgrade scripts match its recorded SQL surface::$PY extension/percolate_parser/write-upgrades.py --check"
   "A released version number is not reused::./dev/check-version.sh"
+  "Every version and path named for the extension resolves::./dev/references.sh"
   "No closed vocabulary disagrees with its own copies::$PY dev/vocab-audit.py --check"
   "The semantic exceptions the database raises are core's, word for word::$PY dev/semantic-exceptions.py --check"
   "No assertion passes because its subject is missing::$PY dev/assertion-audit.py --check"
