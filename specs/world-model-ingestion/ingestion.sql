@@ -282,7 +282,7 @@ grant execute on function aiq.quote_occurs(text, text) to authenticated, worker;
 -- A model's answer, as jsonb. The one thing a JSON parser accepts and jsonb
 -- does not is the NUL escape: `\u0000` is valid JSON and jsonb refuses it
 -- ("unsupported Unicode escape sequence"), because a Postgres text value
--- cannot hold a NUL. Models do emit it -- scenarios/tour's extractor wrote one
+-- cannot hold a NUL. Models do emit it -- our end-to-end tour's extractor wrote one
 -- into a quote from a GitHub issue -- and in a fan-in that casts each child's
 -- answer, one such window used to fail the landing of the whole document.
 -- Stripping it changes no meaning a Postgres row could have held.

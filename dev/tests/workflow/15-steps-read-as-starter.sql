@@ -3,7 +3,7 @@
 -- workflow-engine/schema.sql, "WHOSE REACH A STATEMENT HAS", and
 -- integration-rbac.sql, execute_for. Before this, a step's statement and every
 -- p8ql mode ran as the engine owner, past RLS, whoever started the run: the
--- tour (scenarios/tour, act 8) had a member of one org start `ask_uploads` and
+-- end-to-end tour (act 8) had a member of one org start `ask_uploads` and
 -- read another org's runbook through its SEARCH step.
 --
 -- What this asserts, at every door an author's read goes through -- a `sql:`

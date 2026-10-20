@@ -259,8 +259,8 @@ end $$;
 --
 -- expanded into `select 'x' || current_user || ''::text` and EXECUTED,
 -- returning `xapp_owner`. Arbitrary SQL out of ordinary row data, running as
--- the engine owner. Found by walking scenarios/evals/J2; the run log is
--- runs/2026-09-04-J2.md.
+-- the engine owner. Found by walking journey J2
+-- on 4 September.
 --
 -- THE PAYLOAD IS THE ASSERTION. A test that fanned out over well-behaved rows
 -- passes on the broken engine and on the fixed one -- the whole defect is

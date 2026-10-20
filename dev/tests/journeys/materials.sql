@@ -5,7 +5,7 @@
 --
 -- WHAT IS AND IS NOT IN HERE, because the split is the whole design.
 --
--- A journey eval (`scenarios/evals/`) is performed by an agent acting AS a
+-- A journey eval (kept internally) is performed by an agent acting AS a
 -- user: creating the orgs, signing the people up, uploading the files, asking
 -- the questions. So this file contains NO orgs, NO users, NO memberships, NO
 -- agents and NO runs. Every one of those is a thing a user does, and a fixture
@@ -227,7 +227,7 @@ insert into journey.chunks (doc_slug, ordinal, start_offset, end_offset, content
 -- on -- and `dev/init/05-corpus-sample.sql` uses exact unit vectors too. They
 -- collided perfectly: on the first performance of J1 all four probes were won
 -- at distance 0.0000 by dev-sample chunks belonging to nobody in the journey,
--- and Act 4 was void. See runs/2026-09-04-J1.md §3.7.
+-- and Act 4 was void (4 September).
 --
 -- The part worth not repeating is HOW IT WAS VERIFIED, not what the numbers
 -- were. The header claimed all four probes rank their expect_top_doc first and

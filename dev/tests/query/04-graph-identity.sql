@@ -269,7 +269,7 @@ end $$;
 -- A table with no `id uuid` is refused at registration. It used to register,
 -- and then every insert into it failed inside the generated projection trigger
 -- with `column n.id does not exist` -- the table unusable, the registry row
--- describing it as fine (found by scenarios/tour).
+-- describing it as fine (found by our end-to-end tour).
 do $$
 declare v_msg text;
 begin

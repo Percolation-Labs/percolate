@@ -215,7 +215,7 @@ changed in it. That is the remaining gap, and provenance on the artifact — a
 sidecar beside the `.so`, or an image label — is what would close it, because
 `public.percolate_build` records it in a database that `dev/reload.sh` drops.
 
-`scenarios/` is upstream of this directory. Exploration happens there; what
+Internal scenarios are upstream of this directory. Exploration happens there; what
 turns out to be worth re-running forever gets pinned here.
 
 `../examples/` is beside it and is neither. It is ten worked scenarios over one
@@ -346,7 +346,7 @@ prose verdicts are kept privately.
 ## `journeys/`, which is a fixture and not a suite
 
 `journeys/` holds no tests. It is the material half of
-p8-subsystems' `scenarios/evals/` (internal) — file bodies, chunks with literal vectors, graph
+our internal journey evaluations — file bodies, chunks with literal vectors, graph
 payloads and unparsed workflow YAML — for journeys an agent performs **as the
 user**, by hand, against a database of its own. `run.sh` never sees it: the
 surface list above is explicit, so nothing there is globbed.

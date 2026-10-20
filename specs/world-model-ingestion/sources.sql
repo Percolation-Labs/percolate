@@ -37,7 +37,7 @@ begin
             -- PT409, NOT 40001. PostgREST runs every request in a transaction that
             -- retries on serialization_failure, so a deterministic 40001 is an
             -- infinite loop: the browser waits forever and the database takes
-            -- about five thousand rollbacks a second (measured, scenarios/tour).
+            -- about five thousand rollbacks a second (measured, in our end-to-end tour).
             -- PT409 is PostgREST's own convention for "answer with HTTP 409".
             raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='PT409';
         end if;

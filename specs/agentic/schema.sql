@@ -2240,7 +2240,7 @@ begin
     -- declares nothing, and everything the correct key installed last time is
     -- removed to match.
     --
-    -- Measured on 0.1.5 before this existed, walking scenarios/evals/J2 Act 8:
+    -- Measured on 0.1.5 before this existed, walking journey J2, act 8:
     --
     --   {"name":"p","skils":[...],"agnets":[...]}
     --     -> {"agents": [], "skills": [], "removed": [], "tool_servers": []}

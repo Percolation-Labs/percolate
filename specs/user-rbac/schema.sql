@@ -692,8 +692,8 @@ on conflict (scope) do update
         requires_org = excluded.requires_org,
         description = excluded.description;
 
--- ORGS AND MEMBERSHIP -- the model specs/README.md defers and
--- scenarios/round-4.md names as the open one.
+-- ORGS AND MEMBERSHIP -- the model specs/README.md defers and an
+-- internal review round named as the open one.
 --
 -- Until now `aiq.current_org_ids()` read an `orgs` array off the JWT and
 -- nothing in Postgres said which orgs existed or who belonged to one. That is
@@ -2554,7 +2554,7 @@ create policy org_members_own_orgs on rbac.org_members for select
 -- answerable by a member. The scoping was right all along; nobody could reach
 -- it.
 --
--- Found by walking scenarios/evals/J1-mill-lane.md Act 1, and NOT findable by
+-- Found by walking journey J1 (Mill Lane), act 1, and NOT findable by
 -- either test that covers this ground: dev/tests/rbac/05 enumerates tables a
 -- client role can READ and asks whether each has a policy, so a table nobody
 -- can read never enters its loop; dev/tests/rbac/10 walks `checked_by` and

@@ -233,7 +233,7 @@ begin
     -- register_graph_vocabulary() with no payload -- the REFRESH form, which
     -- widens the cross product of relations already in the vocabulary and adds
     -- none -- so every relation a package declared was an authored triple its
-    -- own derivations could never land: scenarios/tour's knit wrote 0 of its
+    -- own derivations could never land: our end-to-end tour's knit wrote 0 of its
     -- edges, each named in the receipt as an unknown relation. The inverse
     -- label travels with it, so a model reaching for `affected_by` is flipped
     -- onto `affects` rather than dropped.

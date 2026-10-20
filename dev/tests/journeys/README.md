@@ -1,6 +1,6 @@
 # Journey materials
 
-The fixture half of p8-subsystems' `scenarios/evals/` (internal). What a journey eval's cast
+The fixture half of our internal journey evaluations. What a journey eval's cast
 acts **on** — file bodies, the chunks a parser would have produced, the graph an
 extractor would have proposed, the workflow definitions they author.
 

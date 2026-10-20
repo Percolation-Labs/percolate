@@ -56,7 +56,7 @@ begin
     -- EVERY MODE RUNS AS THE PERSON WHO STARTED THE RUN. Called from a step,
     -- this function's invoker is the engine owner, which bypasses RLS -- so a
     -- SEARCH or a TEXT read every tenant's chunks, and `ask_uploads` answered a
-    -- member of one org from another org's runbook (scenarios/tour, act 8).
+    -- member of one org from another org's runbook (our end-to-end tour, act 8).
     -- Now, inside a person's run, the query re-enters through
     -- workflow.execute_for as that person, and runs there under RLS; inside
     -- execute_for the invoker is no longer the engine owner, so it does not

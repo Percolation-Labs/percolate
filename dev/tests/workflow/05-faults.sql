@@ -821,7 +821,7 @@ end $$;
 -- the validation was the rule for CALLING THAT FUNCTION, and step_functions is
 -- the table that decides what a workflow may cause to run, so a plain insert
 -- put an unrunnable row into it and said INSERT 0 1. Found by walking
--- scenarios/evals/J2 -- reading the table before the documentation produced two
+-- journey J2 -- reading the table before the documentation produced two
 -- broken registry rows inside a minute, by accident, on the first try.
 --
 -- Asserted BEHAVIOURALLY rather than by reading source: the property is "this

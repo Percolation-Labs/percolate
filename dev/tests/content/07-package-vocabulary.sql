@@ -3,7 +3,7 @@
 -- apply_package put a manifest's `relations` into aiq.relation_types and then
 -- refreshed the vocabulary without them, so aiq.upsert_graph -- the path every
 -- knit and dream stage writes through -- dropped each one as an unknown
--- relation and said so only in its receipt. Found by scenarios/tour, whose
+-- relation and said so only in its receipt. Found by our end-to-end tour, whose
 -- package install test asked the vocabulary rather than the catalogue.
 \set ON_ERROR_STOP on
 begin;
