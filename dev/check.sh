@@ -526,6 +526,7 @@ db_gates() {
     "A database at every released version can reach this one::./dev/upgrade-from-every-release.sh"
     "An installed parser moves to this version in place, as a fresh install would have it::./dev/parser-upgrade.sh"
     "Concurrent identical writes to one research work make one revision::./dev/research-concurrent-writes.sh"
+    "A new person's concurrent first provisions all succeed::./dev/provision-race.sh"
     "A replayed upgrade converges on a fresh install::./dev/upgrade-converges.sh"
     # THE NEXT RELEASE'S FIRST HOP, which no gate above can take: they all start
     # from a tag below default_version, so the body is never replayed onto the

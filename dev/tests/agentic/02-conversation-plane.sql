@@ -35,7 +35,12 @@ insert into rbac.user_roles (user_id, role)
 values ('c1a11111-0000-0000-0000-00000000c001', 'conv_probe_author')
 on conflict do nothing;
 
-select agentic.upsert_agent($j${"name": "conv_probe", "system_prompt": "a probe"}$j$::jsonb);
+-- Written as that author, and public, because §5 edits it as them: an author
+-- changes only the agents they own (REM-1067), and an operator-written agent
+-- is nobody's.
+set local request.jwt.claims = '{"sub":"c1a11111-0000-0000-0000-00000000c001"}';
+select agentic.upsert_agent($j${"name": "conv_probe", "system_prompt": "a probe", "visibility": "public"}$j$::jsonb);
+reset request.jwt.claims;
 
 -- ---------------------------------------------------------------------
 -- 1. A SESSION, A RUN, AND THE SPAN TREE DELEGATION CARRIES.
