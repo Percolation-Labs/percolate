@@ -2,7 +2,7 @@
 # Every block of "Advanced Percolate memory and semantic iteration", in order, from an empty directory, on part one's
 # stack (the LangGraph tour), against a real model and a real decider:
 #
-#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.25 \
+#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.26 \
 #         dev/examples/advanced-memory/run.sh [workdir]
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
@@ -12,7 +12,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.25}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.26}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}" "${JEV_API_KEY:?set JEV_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY; JK=$JEV_API_KEY
