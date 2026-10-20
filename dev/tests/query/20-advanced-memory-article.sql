@@ -73,6 +73,8 @@ select kind, evidence ->> 'key' as name, status,
   from aiq.judgements order by queued_at, name;
 select pg_temp.check((select status from aiq.judgements where evidence ->> 'key' = 'p. raman') = 'open',
     '§1 dream should queue P. Raman for a judge, not bind it');
+select pg_temp.check((select array_agg(evidence ->> 'key') from aiq.judgements) = '{p. raman}',
+    '§1 the queue should hold only P. Raman: a name with no candidate is not queued (0.2.26)');
 
 -- The reader's agent: the calls the MCP tools claim_judgement and decide_judgement make, as the signed-in person.
 -- Claims are set before the role switch, as the tools' calls arrive: as authenticated.
