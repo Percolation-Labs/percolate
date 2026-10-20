@@ -1,5 +1,5 @@
 mcp() {
-  curl -s http://localhost:$P8_QUERY_MCP_PORT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  curl -s http://localhost:${P8_QUERY_MCP_PORT:?add P8_QUERY_MCP_PORT to .env and source it again} -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d "$(jq -cn --arg n "$1" --argjson a "$2" '{jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: $n, arguments: $a}}')" \
   | jq -c '.result.structuredContent'
 }
