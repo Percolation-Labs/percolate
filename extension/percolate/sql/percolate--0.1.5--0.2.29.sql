@@ -12387,7 +12387,7 @@ end $$;
 -- in the research platform's file because that is where they were first needed.
 -- They are rbac tables: every other subsystem reads them, and a reviewer of
 -- this subsystem never saw them. `dev/owns-its-schema.py` refuses the next one;
--- specs/packages/rows-not-schema.md §7 step 2 is this move.
+-- A package's data is rows, not schema; this is that move.
 --
 -- Nothing changed but the file. The rows that are the research platform's own
 -- vocabulary -- its permission kinds, and the one kind it may delegate -- stay
@@ -23634,7 +23634,7 @@ $$ language plpgsql stable;
 --     chunk is -- live in the worker (percolate-core's `ingest` package), not
 --     in a table. They are code with libraries behind them, they change with
 --     those libraries, and a table of them would be a second place to be
---     wrong. `specs/world-model-ingestion/ingestion.md` is their contract.
+--     wrong. Their own documentation is their contract.
 --   * The OVERRIDES live here, because they are the deployment's and the
 --     uploader's, not the library's. A channel says how its own content
 --     should be handled; one upload may say something different again. Both
@@ -24029,7 +24029,7 @@ $$ language sql stable;
 -- A snapshot is a content table: it references content.resources and
 -- content.files and nothing in research. It was declared in the research
 -- platform's file because pinned evidence is what first needed it.
--- specs/packages/rows-not-schema.md §7 step 2; dev/owns-its-schema.py refuses
+-- A package's data is rows, not schema; dev/owns-its-schema.py refuses
 -- the next one. Nothing changed but the file.
 -- ============================================================
 
@@ -24889,7 +24889,7 @@ revoke execute on function workflow.register_artifact(uuid, text, text, text, bi
 -- percolate.types `content.query_event`; this file stores it, and checks only
 -- what storing needs.
 --
--- ROWS, NOT SCHEMA (specs/packages/rows-not-schema.md): a query event is a
+-- ROWS, NOT SCHEMA: a query event is a
 -- content.resources row on a shipped channel, `stored` because there is nothing
 -- to chunk, with the event as its metadata. `stored` and not `pending`, which
 -- is what register_fetched would leave and check_drift would report forever,
@@ -31492,8 +31492,8 @@ begin
     if v_model is null then
         raise exception
             'no embedding model is registered and none was named, so there is '
-            'nothing for this pipeline to embed with. Register one first: '
-            'specs/ai-query-layer/USAGE.md.';
+            'nothing for this pipeline to embed with. Register one first: a row in '
+            'aiq.embedding_models, marked is_default or named here.';
     end if;
 
     insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
@@ -39883,8 +39883,8 @@ comment on function percolate.contract() is
 --
 -- So every backup taken of every database this collection has ever produced
 -- contained the schema and nothing else, and a restore would have come up
--- empty and working. `specs/trace-field/brief.md` says supervision state
--- "survives a `pg_dump`"; it did not.
+-- empty and working. Supervision state was meant to
+-- survive a `pg_dump`; it did not.
 --
 -- LISTED, NOT DERIVED, AND THE ATTEMPT TO DERIVE IT IS WHY. The obvious rule --
 -- a table the install script never INSERTs into holds deployment data -- was

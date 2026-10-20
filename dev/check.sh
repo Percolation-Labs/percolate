@@ -124,7 +124,7 @@ TREE_GATES=(
   "The parser's upgrade scripts match its recorded SQL surface::$PY extension/percolate_parser/write-upgrades.py --check"
   "A released version number is not reused::./dev/check-version.sh"
   "Every version and path named for the extension resolves::./dev/references.sh"
-  "No line this branch adds cites a repository a reader cannot open::$PY dev/no-private-citations.py --check"
+  "No line in the tree cites a repository a reader cannot open::$PY dev/no-private-citations.py --check"
   "The schema is the size it says it is::$PY dev/the-schema-has-a-budget.py"
   "A spec file shapes only the schema its directory owns::$PY dev/owns-its-schema.py"
   "No file this branch adds is one a script writes::$PY dev/generated-output.py --check"

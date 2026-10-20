@@ -3,7 +3,7 @@
 -- "Percolate for LangGraph Users" (Percolate writing ld-83cdc18c9991) was drafted from the 0.2.22 docs and never
 -- run. Run on 0.2.23 it failed in four places: the saga and the worked example did not compile (`compensate_with`
 -- named steps that did not exist), the waiting fragment needed a step it did not show, and `session_group` never
--- shared a conversation with the real runtime. specs/design/core-product.md §1 says an article is a test, so this
+-- shared a conversation with the real runtime. An article is a test, so this
 -- file is the canonical copy of every workflow and SQL block in it. The article quotes these blocks; when one
 -- changes here, it changes there.
 --

@@ -1,6 +1,6 @@
 -- ONE WALK THROUGH THE GRAPH MEMORY -- write, reconcile, query, as of a date,
 -- and the questions graph beside it. The blocks of "Advanced Percolate memory
--- and semantic iteration" (specs/design/core-product.md §2.3) are these
+-- and semantic iteration" are these
 -- statements, so the article goes red when this file does (§1: an article is
 -- a test).
 --

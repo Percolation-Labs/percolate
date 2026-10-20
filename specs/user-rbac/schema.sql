@@ -2779,7 +2779,7 @@ end $$;
 -- in the research platform's file because that is where they were first needed.
 -- They are rbac tables: every other subsystem reads them, and a reviewer of
 -- this subsystem never saw them. `dev/owns-its-schema.py` refuses the next one;
--- specs/packages/rows-not-schema.md §7 step 2 is this move.
+-- A package's data is rows, not schema; this is that move.
 --
 -- Nothing changed but the file. The rows that are the research platform's own
 -- vocabulary -- its permission kinds, and the one kind it may delegate -- stay

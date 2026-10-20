@@ -807,7 +807,7 @@ revoke execute on function workflow.register_artifact(uuid, text, text, text, bi
 -- percolate.types `content.query_event`; this file stores it, and checks only
 -- what storing needs.
 --
--- ROWS, NOT SCHEMA (specs/packages/rows-not-schema.md): a query event is a
+-- ROWS, NOT SCHEMA: a query event is a
 -- content.resources row on a shipped channel, `stored` because there is nothing
 -- to chunk, with the event as its metadata. `stored` and not `pending`, which
 -- is what register_fetched would leave and check_drift would report forever,

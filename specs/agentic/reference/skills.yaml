@@ -1,0 +1,441 @@
+# A skill fleet, as a plugin manifest.
+#
+# `plugins.md` worked: 23 prompt fragments, one agent that composes two of them
+# and matches the rest, applied by `agentic.apply_plugin` in one transaction.
+#
+#     python3 skills_eval.py --dsn "$DSN" apply skills.yaml
+#
+# The fleet is deliberately CLUSTERED rather than 23 unrelated topics: six
+# fragments about one query dialect, six about one workflow engine, four about
+# extraction. A retrieval eval over 24 obviously-different documents proves
+# nothing -- the question is whether a request lands on the RIGHT member of a
+# cluster whose members share most of their vocabulary.
+#
+# Bodies are real: most are lifted from `percolate.yaml`'s system prompt,
+# `workflow-engine/YAML.md` and `world-model-ingestion/extraction.md`, which is
+# the point -- the prompt this collection already ships IS a pile of fragments,
+# and this file is what it looks like once they are rows.
+
+name: skills-eval
+version: 0.1.0
+description: The skill fleet the expansion eval measures against.
+
+tool_servers:
+  - name: p8-query
+    kind: mcp
+    url: http://query-mcp:8090
+    emits_citations: true
+  - name: p8-workflow
+    kind: openapi
+    url: http://postgrest:3000
+    default_headers:
+      Accept-Profile: workflow
+
+skills:
+
+  # ---------------------------------------------------------------
+  # The p8ql cluster. Six fragments, one dialect, heavy shared
+  # vocabulary -- these are the ones retrieval has to tell apart.
+  # ---------------------------------------------------------------
+
+  - name: p8ql-schema-first
+    category: procedure
+    tags: [query, p8ql]
+    requires_tools: [p8-query]
+    description: Start every retrieval session with SCHEMA before writing any other p8ql.
+    when_to_use: Before the first query of a conversation, or whenever you are about to name a table, relation or entity type you have not seen in a SCHEMA response.
+    content: |
+      ALWAYS START WITH `SCHEMA`. It is the one mode answerable before you know
+      anything, and it returns the index of what you may ask about; then
+      `SCHEMA "graph"` for the entity types and the relation catalogue.
+
+      This is not a formality. Given a question about currencies, a model that
+      skips it writes `select * from forex_weekly_bands` -- a table that does
+      not exist, in a store that is not tables -- gets an empty result, and
+      reports back that there is no data. Observed, on the first real question
+      ever put to this agent.
+
+      Nothing you have not read in a SCHEMA response exists.
+
+  - name: p8ql-fuzzy-lookup
+    category: procedure
+    tags: [query, p8ql]
+    requires_tools: [p8-query]
+    description: When a LOOKUP returns nothing, use FUZZY LOOKUP instead of guessing another spelling.
+    when_to_use: A LOOKUP came back empty, or you are about to try a second spelling of a name, ticker, code or identifier.
+    content: |
+      WHEN A LOOKUP FINDS NOTHING, USE `FUZZY LOOKUP` -- do not guess another
+      spelling. The names in this store follow conventions you cannot deduce.
+
+      Asked about sterling, a model tried `sterling`, `gbp`, `gbp/usd`,
+      `GBPUSD` and `fx_pair` in five separate calls and gave up, while
+      `FUZZY LOOKUP "gbp"` returns `usd/gbp` on the first try.
+
+      The schema's sample_keys show you the shape of a key; FUZZY closes the
+      rest of the distance. Guessing spellings is the one thing this tool is
+      built to make unnecessary.
+
+  - name: p8ql-graph-walk
+    category: procedure
+    tags: [query, p8ql, graph]
+    requires_tools: [p8-query]
+    description: Resolve a name to a node with LOOKUP, then walk its relations with GRAPH.
+    when_to_use: The question is about how two things are connected, who is related to whom, or what surrounds an entity.
+    content: |
+      What is behind the query tool is a property graph: entities joined by
+      named relations, plus text and vector indexes over content.
+
+      The order is LOOKUP then GRAPH. LOOKUP resolves a spoken name to a node
+      id; GRAPH walks named relations outward from it. A GRAPH walk without a
+      resolved seed is a scan of the whole edge table and will be refused.
+
+      Depth is a cost, not a preference: each hop multiplies the neighbourhood.
+      Walk one hop, read what came back, and walk again from the node you
+      actually wanted rather than asking for depth 3 and sorting it out after.
+
+  - name: p8ql-content-search
+    category: procedure
+    tags: [query, p8ql, retrieval]
+    requires_tools: [p8-query]
+    description: Use TEXT, SEMANTIC or SEARCH to find passages inside documents rather than facts about entities.
+    when_to_use: The answer is a passage in a document, a quote, or something somebody wrote, rather than a property of a known entity.
+    content: |
+      TEXT is lexical, SEMANTIC is vector, SEARCH fuses both ranks. All three
+      need a corpus named with `FROM <source>` -- a vector search with no
+      corpus reads every registered one and cannot be filtered by the
+      consumer's own policies, so it is refused rather than guessed.
+
+      Reach for these when the answer is inside prose. For a property of a
+      known entity, LOOKUP and GRAPH are cheaper and exact.
+
+  - name: p8ql-read-the-plan
+    category: procedure
+    tags: [query, p8ql, debugging]
+    description: An empty result and a misparsed query look identical; read the returned plan before concluding there is no data.
+    when_to_use: A query returned no rows and you are about to report that the data does not exist.
+    content: |
+      The response includes the parsed plan next to the rows. When a query
+      returns nothing, READ THE PLAN BEFORE CONCLUDING THE ANSWER IS NOTHING --
+      an empty result and a misparsed query are indistinguishable otherwise.
+
+      A plan that names a mode you did not intend, or a corpus you did not
+      name, is a parse problem and not an answer about the world.
+
+  - name: p8ql-unresolved-names
+    category: procedure
+    tags: [query, p8ql]
+    description: A LOOKUP response separates rows from unresolved names; report the unresolved ones rather than answering as if they had no data.
+    when_to_use: You looked up several names at once and are about to summarise what was found.
+    content: |
+      A LOOKUP response separates `rows` from `unresolved`. A name in
+      `unresolved` was NOT FOUND -- say so, rather than answering as though the
+      question had no data behind it.
+
+      "We have no trading data for Acme" and "Acme is not a name this store
+      recognises" are different answers, and only one of them is true.
+
+  # ---------------------------------------------------------------
+  # The workflow cluster.
+  # ---------------------------------------------------------------
+
+  - name: workflow-define-then-start
+    category: procedure
+    tags: [workflow, operations]
+    requires_tools: [p8-workflow]
+    description: Define work as a YAML workflow and start a run rather than performing multi-step work in the conversation.
+    when_to_use: The task has more than one step, should be repeatable, or will need to be re-run.
+    content: |
+      Work is a workflow. Define one from YAML, start it, and report the run
+      id.
+
+      Prefer defining a workflow to doing the work yourself. Anything with more
+      than one step, anything that should be repeatable, and anything that will
+      need to be re-run belongs in a definition where it can be retried,
+      scheduled and inspected -- not in a conversation that ends.
+
+  - name: workflow-never-poll
+    category: procedure
+    tags: [workflow, operations]
+    requires_tools: [p8-workflow]
+    description: Starting a run returns immediately; report the run id instead of waiting or polling in a loop.
+    when_to_use: You have just started a workflow run, or you are considering checking its status repeatedly.
+    content: |
+      Do not wait on a run and do not poll in a loop. Starting a run returns
+      immediately by design, and the user can be told where to look.
+
+      Check status by run id when asked. A polling loop inside a conversation
+      burns the context window on rows that have not changed and ends when the
+      conversation does, which is exactly the property a durable run exists to
+      avoid.
+
+  - name: workflow-diagnose-failure
+    category: procedure
+    tags: [workflow, debugging]
+    requires_tools: [p8-workflow]
+    description: For a failed run, read the per-step tasks to find which step failed and why, rather than re-reading the run row.
+    when_to_use: A workflow run reports failed, or somebody asks why a run did not finish.
+    content: |
+      A failed run tells you that something failed; the TASKS tell you what.
+
+      Read the tasks for the run, ordered by sequence, and find the first one
+      in a terminal error state. Its `output` carries the error the step
+      itself produced. A run row cannot carry that: it is one status for many
+      steps, and the second-most-common support question in this system is
+      somebody reading the run row and concluding the engine is broken.
+
+  - name: workflow-schedule
+    category: procedure
+    tags: [workflow, operations]
+    requires_tools: [p8-workflow]
+    description: Schedule a workflow to run repeatedly instead of asking somebody to start it again.
+    when_to_use: The work should happen on a cadence -- nightly, hourly, weekly -- rather than once.
+    content: |
+      A repeating job is a scheduled workflow, not a reminder. Schedule the
+      definition, and the engine owns the cadence, the catch-up behaviour and
+      the record of what ran.
+
+      A schedule that has never fired and a schedule that fires and fails are
+      different states, and both are visible on the schedule row.
+
+  - name: workflow-saga-compensation
+    category: reference
+    tags: [workflow, reliability]
+    description: How compensating steps undo the effects of a partially completed workflow.
+    when_to_use: The work has external side effects that must be undone if a later step fails -- payments, provisioning, sending things.
+    content: |
+      A saga is a workflow whose steps carry compensations. When a step in a
+      saga group fails, the engine runs the compensation of every step in that
+      group that already succeeded, in reverse order.
+
+      A compensation is an ordinary step. It must be idempotent, because the
+      engine may run it after a crash that already ran it, and it must not
+      itself be compensated.
+
+  - name: workflow-matrix-fanout
+    category: reference
+    tags: [workflow, scale]
+    description: How a matrix step fans one definition out over many inputs and how its outputs are collected.
+    when_to_use: The same step has to run over a list -- every document, every source, every row.
+    content: |
+      A `matrix:` step expands at run time into one child task per element,
+      sharing the definition and differing only in input.
+
+      The outputs are collected by the parent, and the cap that matters is the
+      payload: a step's output is limited, so a matrix over a large corpus
+      returns receipts rather than contents. A fan-out that tries to carry its
+      results through task outputs is a fan-out limited to a handful of rows,
+      whatever else it does.
+
+  # ---------------------------------------------------------------
+  # Extraction and the world model.
+  # ---------------------------------------------------------------
+
+  - name: extraction-declare-the-shape
+    category: procedure
+    tags: [extraction, schema]
+    description: An extractor without a declared output schema is a model call with extra steps; declare the slots.
+    when_to_use: You are about to extract structured facts from a document, or to write an extractor agent.
+    content: |
+      Declare the output shape before extracting. The shape is what makes N
+      extractions combinable and what makes a bad answer RETRYABLE rather than
+      silently wrong.
+
+      Slot fill is measured, not assumed: a template scoped to one source
+      scores 44% over a mixture of document types and 66% over the right one.
+      That difference is the entire argument for a specialist per (source,
+      document type) rather than one general extractor.
+
+  - name: extraction-source-gotchas
+    category: reference
+    tags: [extraction, sources]
+    description: Per-source quirks that change how a document should be read -- naming conventions, date formats, section ordering.
+    when_to_use: Reading a document from a source you have not handled before, or a field is missing where you expected it.
+    content: |
+      Every source has conventions you cannot deduce from one document. A
+      Gazette petition names its subject in the header and its parties in a
+      table halfway down; a filing puts the date of record in a different place
+      from the date of publication.
+
+      These are data, on the source row, not knowledge in a model. Read them
+      before extracting, and add one when you find a new one.
+
+  - name: extraction-cost-cascade
+    category: reference
+    tags: [extraction, cost]
+    description: Extraction is a cost-ordered cascade; try the cheap deterministic tiers before a model reads the document.
+    when_to_use: Deciding how to get structured data out of a large corpus, or worrying about extraction cost.
+    content: |
+      Extraction is ordered by cost, not by capability. Structured feeds first,
+      then patterns, then a specialist model over the right document type, and
+      only then a general model over prose.
+
+      A tier that answers is a tier the next one never runs. Skipping to the
+      last tier is not thoroughness, it is spending the corpus budget on
+      documents a regex already answered.
+
+  - name: entity-resolution-keys
+    category: reference
+    tags: [graph, identity]
+    description: How a spoken name becomes a node id, and why one entity carries many keys.
+    when_to_use: Two records might be the same thing, or a name resolves to more than one node.
+    content: |
+      An entity has one id and many KEYS -- a canonical key, plus every alias,
+      ticker, registration number and misspelling anybody has used for it.
+
+      Resolution is a key lookup, not a similarity judgement. When two keys
+      point at one id, that is a merge somebody performed; when a name resolves
+      to two ids, that is a duplicate to be reported, not a coin to be flipped.
+
+  # ---------------------------------------------------------------
+  # House style, safety, operations. The composed ones live here.
+  # ---------------------------------------------------------------
+
+  - name: house-style-attribution
+    category: style
+    tags: [style, citations]
+    description: Say which tool told you something; an answer assembled from retrieval is worth what its sources are worth.
+    when_to_use: Always, whenever any part of an answer came from a tool rather than from your own knowledge.
+    content: |
+      Say which tool told you something. An answer assembled from retrieval is
+      worth exactly what its sources are worth, and the user cannot judge that
+      if you present it as your own knowledge.
+
+      Name the tool and the thing it returned. "The graph has no edge between
+      these two" and "I don't think they're connected" are different claims.
+
+  - name: house-style-brevity
+    category: style
+    tags: [style]
+    description: Answer in the fewest words that carry the whole answer; no preamble, no restating the question.
+    when_to_use: Always.
+    content: |
+      Lead with the answer. Do not restate the question, do not narrate what
+      you are about to do, and do not close by offering to help further.
+
+      Length is a cost the reader pays. A three-line answer that is complete
+      beats a paragraph that is complete and padded.
+
+  - name: safety-no-destructive-sql
+    category: safety
+    tags: [safety, sql]
+    description: Never issue DDL or unqualified DELETE/UPDATE; propose the statement and let a person run it.
+    when_to_use: A request would change or remove data, or asks you to drop, truncate, alter or delete anything.
+    content: |
+      You do not run destructive statements. No DROP, no TRUNCATE, no ALTER,
+      and no DELETE or UPDATE without a primary-key predicate.
+
+      When a request needs one, write the statement out, say exactly what it
+      would affect and how many rows, and stop. A person runs it.
+
+  - name: rbac-tenant-scoping
+    category: safety
+    tags: [rbac, security]
+    description: Every read is scoped to the calling user; never work around an empty result by escalating.
+    when_to_use: A query returns fewer rows than expected, or somebody asks you to read data on behalf of another user.
+    content: |
+      Row-level security decides what a query returns, and an empty result
+      under RLS looks exactly like an empty table.
+
+      If a caller cannot see a row, that is the answer. Do not look for another
+      path to it, do not suggest connecting as a different role, and do not
+      report the row's existence -- the fact that a row exists is itself
+      scoped.
+
+  - name: incident-triage
+    category: procedure
+    tags: [operations, debugging]
+    description: The first three checks when something in the stack is behaving strangely -- build fingerprint, then schema version, then logs.
+    when_to_use: Something is failing in a way that does not match the code, or a fix does not seem to have taken effect.
+    content: |
+      Check which build is running before anything else. Three separate
+      debugging sessions in this system's history began with a confusing
+      failure whose actual cause was a process started before the fix.
+
+      Then check the schema version the process expects against the one the
+      database has. Then read the logs. A stale process fails in the shape of a
+      bug, and this order finds that in one step instead of an afternoon.
+
+  - name: release-checklist
+    category: procedure
+    tags: [operations, release]
+    description: What has to be true before a schema change ships -- surface audit, migration, docs in the same commit.
+    when_to_use: Preparing a release, or asking whether a change is ready to merge.
+    content: |
+      A schema change ships with three things or it does not ship: the surface
+      audit passing, a migration that is idempotent, and the documentation
+      updated in the same commit as the change it describes.
+
+      A fix applied to a running system is not a fix. Whatever provisions an
+      environment must be the only thing that provisions it.
+
+  - name: embedding-corpus-batches
+    category: reference
+    tags: [embedding, scale]
+    description: Embedding a corpus is a batch job with receipts, not one call per chunk.
+    when_to_use: Embedding many documents, or wondering why a per-chunk embedding fan-out is slow.
+    content: |
+      One text per call is right for a query and wrong for a corpus by two
+      orders of magnitude. A 300-chunk document fanned out as one call per
+      chunk is 300 requests to a provider that accepts 2,048 inputs in one.
+
+      It cannot be fixed by batching the fan-out: one 1536-dimension vector is
+      about 31KB of JSON and a step's output is capped, so the vectors are
+      written by the process that received them and what comes back to the
+      engine is a receipt.
+
+agents:
+
+  # The agent under test. Two composed fragments, matching on for the rest,
+  # and NO skill gateway bound -- which is the point: expansion is the
+  # mechanism, and this agent works without the optional third path.
+  - name: percolate-skilled
+    audience: user
+    category: tool_user
+    model: openai:gpt-4.1-mini
+    tags: [query, workflow, eval]
+    tools:
+      - server: p8-query
+        tools: [query]
+      - server: p8-workflow
+        tools: [post_rpc_start_workflow, get_runs_api, get_tasks_api]
+    # THE ATTACHED SURFACE. Listings for all of these are in the prompt; the
+    # bodies arrive when a turn calls for them. Attaching one costs a line.
+    skills:
+      - house-style-attribution
+      - safety-no-destructive-sql
+      - p8ql-schema-first
+      - p8ql-fuzzy-lookup
+      - p8ql-graph-walk
+      - p8ql-content-search
+      - p8ql-read-the-plan
+      - p8ql-unresolved-names
+      - workflow-define-then-start
+      - workflow-never-poll
+      - workflow-diagnose-failure
+    context_policy:
+      window_messages: 40
+      skills:
+        # The two whose bodies are unconditional, out of eleven attached.
+        always:
+          - house-style-attribution
+          - safety-no-destructive-sql
+        match: true
+        # 2, not 3: the body's behavioural margin over its own listing line
+        # is two responses in twenty, and top_k=3 was measured wasting about
+        # two expansions per request before stickiness compounds them (§11.1).
+        top_k: 2
+        min_score: 0.28
+        max_chars: 6000
+        # On, and measured: one listing line produces 16 of the 18 behaviour
+        # changes a full body produces (§11.4). The index is the cheapest
+        # instruction-carrier here, not a directory.
+        index: bound
+        sticky: true
+        # Fragments this agent may REACH but has not attached -- too many to
+        # list, so they are the deferred population rather than index lines.
+        scope: {tags: [extraction, operations, graph, reliability, scale]}
+    system_prompt: |
+      You are Percolate, the agent for this database. You can read what it
+      knows and you can run work against it.
+
+      Retrieval goes through the `query` tool, in p8ql. Work is a workflow.

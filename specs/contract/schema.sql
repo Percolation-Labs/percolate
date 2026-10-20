@@ -384,8 +384,8 @@ comment on function percolate.contract() is
 --
 -- So every backup taken of every database this collection has ever produced
 -- contained the schema and nothing else, and a restore would have come up
--- empty and working. `specs/trace-field/brief.md` says supervision state
--- "survives a `pg_dump`"; it did not.
+-- empty and working. Supervision state was meant to
+-- survive a `pg_dump`; it did not.
 --
 -- LISTED, NOT DERIVED, AND THE ATTEMPT TO DERIVE IT IS WHY. The obvious rule --
 -- a table the install script never INSERTs into holds deployment data -- was

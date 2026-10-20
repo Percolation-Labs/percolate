@@ -585,7 +585,7 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 7. THE THREE PROPERTIES THE AUTOSCALER AND THE PUBLIC DOCS RELY ON.
 --
--- REM-9 / specs/trace-field/brief.md §2, §3.2. These are not new mechanisms:
+-- REM-9. These are not new mechanisms:
 -- §2 reads all three as structural, which is precisely the risk -- everything
 -- downstream appears to succeed whether or not they hold, so a field that runs
 -- and changes nothing looks from outside like one that works. Two of the three
@@ -718,8 +718,8 @@ begin
         raise exception
             'queue_depth counted a backing-off task (%). It excludes them on purpose -- '
             'a pod held through a doubling backoff is paid for and idle. If this is '
-            'meant to change, the reason beside queue_depth in schema.sql and '
-            'specs/trace-field/brief.md §2 both have to change with it.',
+            'meant to change, the reason beside queue_depth in schema.sql has '
+            'to change with it.',
             v_depth_backoff;
     end if;
 
