@@ -26554,6 +26554,32 @@ begin
                   hint = 'needs agents:update';
     end if;
 
+    -- AN AUTHOR CHANGES ONLY THE AGENTS THEY OWN (REM-1067). agents:update
+    -- used to be deployment-wide, and this function ends in `on conflict
+    -- (name) do update` as its owner: any holder could rewrite another
+    -- person's prompt, tools and model by naming their agent, take it by
+    -- passing owner_id, or publish it by passing visibility. The memory
+    -- tutorials grant agents:update to ordinary people, so that was every
+    -- reader's agent. Now agents:update lets a person create names and edit
+    -- what is theirs; editing an agent somebody else owns (or nobody does: the
+    -- seeded ones) needs an operator or an account administrator
+    -- (users:admin). Attach and detach write through here, so they inherit it.
+    if not (rbac.is_operator()
+            or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        if p_spec ? 'owner_id'
+           and (p_spec->>'owner_id')::uuid is distinct from rbac.current_user_id() then
+            raise exception 'agent %: only an administrator may give an agent to someone else',
+                p_spec->>'name' using errcode = 'insufficient_privilege';
+        end if;
+        if exists (select 1 from agentic.agents a
+                    where a.name = p_spec->>'name'
+                      and a.owner_id is distinct from rbac.current_user_id()) then
+            raise exception 'agent % belongs to someone else, so you may not change it',
+                p_spec->>'name' using errcode = 'insufficient_privilege',
+                hint = 'author it under another name';
+        end if;
+    end if;
+
     -- THE TOOL BINDING IS SHAPE-CHECKED HERE, because the near-miss spellings
     -- WIDEN it rather than failing.
     --

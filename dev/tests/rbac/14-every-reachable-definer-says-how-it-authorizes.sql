@@ -98,7 +98,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('agentic.start_run(text,uuid,uuid,uuid,text,text,text,uuid)', 'agentic.may_invoke',
  'refuses an agent the caller may not invoke, and a session or parent run that is not theirs'),
 ('agentic.upsert_agent(jsonb)', 'agentic.may_author',
- 'refused without agents:update. An author may edit any agent by name: the permission is deployment-wide by design'),
+ 'refused without agents:update; edits only the caller''s own agent and never gives one away, unless operator or users:admin (REM-1067)'),
 ('agentic.upsert_skill(jsonb)', 'agentic.may_author',
  'refused without skills:update'),
 ('agentic.upsert_summary(uuid,text)', 'owner',
