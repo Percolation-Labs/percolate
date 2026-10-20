@@ -85,7 +85,7 @@ require_named_container() {
 # predicate live together, which is the whole argument for this file.
 #
 # AND THE SECOND HARM, WHICH IS WORSE THAN A DATABASE IN THE WRONG PLACE: a
-# GATE reading the wrong one. Measured by p8-subsystems-ae on 2026-09-12 --
+# GATE reading the wrong one. Measured on 2026-09-12 --
 # `dev/tests/query/11-graph-algorithms.sql` and `15-edge-currency.sql` fail
 # against the shared `p8dev` and pass against a database built fresh from
 # `origin/main` (11 defers on parser 0.1.5, 15 passes). A day of six sessions
@@ -101,8 +101,8 @@ require_named_container() {
 # AND THE HOOK READS IT TOO, IN THE ONE TREE ANYBODY PUSHES FROM. `#88` changed
 # `dev/githooks/pre-push` to `exec "$HERE/check.sh" --tree` -- no database at
 # all -- and that is what `origin/main` carries. But `core.hooksPath` is a path
-# into the WORKING TREE, and the shared checkout at
-# `/Users/sirsh/code/p8-subsystems` is 121 commits behind with `8aa1a85` absent
+# into the WORKING TREE, and a shared checkout
+# was 121 commits behind with `8aa1a85` absent
 # from its history, so its working copy still says `--reload`. Measured:
 #
 #     tail -1 dev/githooks/pre-push          -> exec "$HERE/check.sh" --reload

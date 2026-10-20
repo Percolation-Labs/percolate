@@ -1731,7 +1731,7 @@ grant execute on function claims.edge_readable(uuid) to authenticated;
 
 -- One key per study, whatever wording names it: its DOI when the text carries one, else its web address without
 -- scheme, www, query or trailing slash, else its words folded to lower case. Byte for byte the application's
--- study_key (percolate-application api/percolate_application/related.py), which is what makes an origin minted
+-- study_key, which is what makes an origin minted
 -- here the study the application already groups by.
 create or replace function claims.study_key(p_text text) returns text
 language sql immutable parallel safe set search_path = pg_catalog as $$

@@ -130,7 +130,7 @@ class Bump(unittest.TestCase):
 
     def test_a_tree_without_the_kind_manifest_still_bumps(self):
         # Percolation-Labs/percolate carries no k8s/: the kind stack stays in
-        # p8-subsystems. Every other reference still moves.
+        # the private deployment repository. Every other reference still moves.
         sh("git", "rm", "-q", "k8s/kind/manifests/postgres.yaml", cwd=self.root)
         sh("git", "commit", "-qm", "no kind manifest", cwd=self.root)
         done = self.bump()

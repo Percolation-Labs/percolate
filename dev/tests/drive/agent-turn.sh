@@ -182,7 +182,7 @@ have_dsn=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$AGENT
 # turn failed with 500 and NOT at the known set_config ordering", which reads
 # like a regression in whatever branch is being tested.
 #
-# Found by `p8-subsystems-ae`, who lost a red and a wrong diagnosis to it.
+# Found by a session that lost a red and a wrong diagnosis to it.
 # Comparing the recorded NetworkMode against the database container's CURRENT id
 # is exact: a rebuilt database has a new id, and that is the whole of the case.
 want_ns="container:$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null || echo none)"

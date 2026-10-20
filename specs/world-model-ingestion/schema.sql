@@ -497,7 +497,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- and chunked, and only then is there text. An application that already HAS the
 -- text -- a published article, a package frame, a claim -- has none of those
 -- problems and should not have to invent a file to get a vector. Before this,
--- percolate-application had no way to reach the index at all: it calls the
+-- the application had no way to reach the index at all: it calls the
 -- Content Server for evidence and images only, so production held 14 resources
 -- and zero chunks, and registering an embedding model there would have embedded
 -- nothing.

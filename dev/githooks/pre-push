@@ -2,7 +2,7 @@
 # The tree gates before every push: no Docker, no database, seconds. Armed with
 #     git config core.hooksPath dev/githooks
 # The database gates are `CONTAINER=... DB=... dev/check.sh`, which CI runs on
-# every pull request. `--tree` and not `--reload` since #88 in p8-subsystems: a
+# every pull request. `--tree` and not `--reload` since #88 in the private tree: a
 # hook that rebuilds a database rebuilds whichever one the shell names.
 #
 # Git exports GIT_DIR to a hook, and every git call the gates make would read it.

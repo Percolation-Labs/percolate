@@ -23271,7 +23271,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- and chunked, and only then is there text. An application that already HAS the
 -- text -- a published article, a package frame, a claim -- has none of those
 -- problems and should not have to invent a file to get a vector. Before this,
--- percolate-application had no way to reach the index at all: it calls the
+-- the application had no way to reach the index at all: it calls the
 -- Content Server for evidence and images only, so production held 14 resources
 -- and zero chunks, and registering an embedding model there would have embedded
 -- nothing.
@@ -34097,7 +34097,7 @@ begin
 end;
 $$;
 
--- AN IMAGE A WRITER PUTS IN AN ARTICLE (REM-309, percolate-application artifacts-and-thumbnails.md §4). The same
+-- AN IMAGE A WRITER PUTS IN AN ARTICLE (REM-309). The same
 -- gap register_evidence closed, for bytes the person sends rather than a page the Content Server fetched: no
 -- person holds resources:create (REM-193), so an uploaded picture could never be stored. research:insert, the
 -- evidence_bytes budget and the research_evidence channel, for the same reasons given there. The Content Server
@@ -35157,7 +35157,7 @@ select rbac.add_scope_policy('research.works');
 -- A restrictive policy intersects with the generated tenancy policy above.
 -- ONCE PER QUERY, NOT PER ROW (REM-528). Both calls depend only on the caller's transaction-scoped claims, so as
 -- subselects Postgres evaluates each once, as an InitPlan. Written bare they ran on every row a query touched, and
--- an anonymous Edition read paid for them on every private work too (percolate-application review/load/2026-09-18).
+-- an anonymous Edition read paid for them on every private work too (the application's load review, 18 September).
 drop policy if exists works_access on research.works;
 create policy works_access on research.works as restrictive for select
     using ((select rbac.current_user_id()) is null or (select rbac.may('research', 'select')));
@@ -37420,7 +37420,7 @@ grant execute on function claims.edge_readable(uuid) to authenticated;
 
 -- One key per study, whatever wording names it: its DOI when the text carries one, else its web address without
 -- scheme, www, query or trailing slash, else its words folded to lower case. Byte for byte the application's
--- study_key (percolate-application api/percolate_application/related.py), which is what makes an origin minted
+-- study_key, which is what makes an origin minted
 -- here the study the application already groups by.
 create or replace function claims.study_key(p_text text) returns text
 language sql immutable parallel safe set search_path = pg_catalog as $$

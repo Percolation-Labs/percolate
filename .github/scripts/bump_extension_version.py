@@ -203,7 +203,7 @@ def main() -> None:
     # which is what keeps the writer and the checker from drifting apart.
     #
     # ONLY WHERE IT EXISTS. Percolation-Labs/percolate holds the extension and
-    # not the kind stack, which stays in p8-subsystems and follows the published
+    # not the kind stack, which stays in the private deployment repository and follows the published
     # image, so there is no manifest here to move. A manifest that is present
     # but no longer matches still refuses, as before.
     mounts = None
