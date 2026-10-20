@@ -88,3 +88,4 @@ $(printf '%s\n' "$CHANGED" | sed 's/^/    /' | head -15)
 $(git log --oneline "$TAG..HEAD" 2>/dev/null | sed 's/^/    /' | head -15)
 MSG
 exit 1
+# Fork-PR test for REM-1081: not for merge.
