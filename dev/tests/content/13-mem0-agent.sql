@@ -75,10 +75,13 @@ select aiq.upsert_graph(
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'maya-home-2026-06'),
                     'valid_from', '2026-06-01T10:00:00Z')) ->> 'edges_new' as june;
 -- /block
+-- CI's database holds the demo fixtures, so every count below is of Maya's own facts, by her node's id.
+select distinct e.src_id as maya_node from aiq.edges e, jsonb_array_elements(e.provenance -> 'sources') src
+ where src ->> 'resource_id' = (select id::text from content.resources where external_id = 'maya-home-2026-01') \gset
 select pg_temp.check((select string_agg(d.summary || ' ' || p.valid_from::date || ' ' || coalesce(p.valid_to::date::text, 'now'), ', '
                                         order by p.valid_from)
                         from aiq.edge_periods p join aiq.nodes d on d.id = p.dst_id
-                       where p.relation = 'lives_in') = 'Leeds 2026-01-05 2026-06-01, Lisbon 2026-06-01 now',
+                       where p.relation = 'lives_in' and p.src_id = :'maya_node') = 'Leeds 2026-01-05 2026-06-01, Lisbon 2026-06-01 now',
     '§1: Leeds held from January until June, when Lisbon began');
 :as_maya
 select pg_temp.check(pg_temp.maya_graph($q$GRAPH "Maya Okafor" AS OF '2026-03-01'$q$) = 'lives_in place/leeds',
@@ -102,9 +105,12 @@ alter table travel.bookings enable row level security;
 drop policy if exists owner_reads on travel.bookings;
 create policy owner_reads on travel.bookings for select using (owner_id = (select rbac.current_user_id()));
 -- /block
+create temp table maya_node as select :'maya_node'::uuid as id;
+grant select on maya_node to authenticated;
 create function pg_temp.leaving_from() returns text language sql as $$
     select string_agg(b.destination || ' ' || d.summary, ', ' order by b.departs) from travel.bookings b
       join aiq.edge_periods p on p.relation = 'lives_in' and aiq.edge_is_current(p.valid_from, p.valid_to, b.departs)
+                             and p.src_id = (select id from pg_temp.maya_node)
       join aiq.nodes d on d.id = p.dst_id
 $$;
 :as_maya
@@ -150,7 +156,7 @@ select k.key as object, e.valid_from::date as held_from, jsonb_array_length(e.pr
  where e.relation = 'works_at'
  order by e.valid_from;
 -- /block
-select pg_temp.check((select count(*) from aiq.edges where relation = 'works_at') = 2,
+select pg_temp.check((select count(*) from aiq.edges where src_id = :'maya_node' and relation = 'works_at') = 2,
     '§4: two kinds of Harbour Health are two nodes, so two works_at facts');
 select pg_temp.check((select r - 'since' - 'until' = '{"superseded": 0, "promoted_exact": 0, "promotion_refused": 0,
                               "soft_left_for_a_judge": 7, "queued_for_a_judge": 2}'::jsonb from aiq.dream() r),
@@ -181,14 +187,16 @@ select pg_temp.check((select count(*) filter (where r.tier = 'agent' and r.decid
     '§4: the binding is recorded as Maya''s agent''s');
 select pg_temp.check((select string_agg(k.key || ' ' || e.valid_from::date || ' ' || jsonb_array_length(e.provenance -> 'sources'), ', ')
                         from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
-                       where e.relation = 'works_at' and aiq.edge_is_current(e.valid_from, e.valid_to, now()))
+                       where e.src_id = :'maya_node' and e.relation = 'works_at'
+                         and aiq.edge_is_current(e.valid_from, e.valid_to, now()))
                      = 'company/harbour health 2026-06-01 2',
     '§4: one works_at fact, from June, with both memories behind it');
 
 -- §5 Leo reads none of it.
 :as_leo
 select pg_temp.check(pg_temp.maya_graph() is null, '§5: Leo reads nothing of Maya''s graph');
-select pg_temp.check((select count(*) from aiq.edges) = 0, '§5: Leo reads no edge of Maya''s');
+select pg_temp.check((select count(*) from aiq.edges where src_id = :'maya_node') = 0,
+    '§5: Leo reads no edge of Maya''s');
 :as_operator
 
 rollback;
