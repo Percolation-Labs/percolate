@@ -328,6 +328,11 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- as yourself through it. A deployment that wants chat available to
     -- operators and not to every account expresses that here and nowhere else.
     ('agents',             'invoke', 'agentic.may_invoke'),
+    -- Authoring is two authorities (REM-1067, Sirsh 20 Oct): agents:update
+    -- creates names and edits the caller's own agents; agents:update_any edits
+    -- an agent somebody else owns, or nobody does, and gives one away. An
+    -- administrator's grants_all role holds both.
+    ('agents',             'update_any', 'agentic.upsert_agent'),
     -- Same argument on the content side. `content.assert_org_write` already
     -- asks whether the caller may act inside the org; nothing asked whether
     -- they may put bytes in it at all, so any member of any org could upload.

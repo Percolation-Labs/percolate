@@ -11,7 +11,8 @@
 --      prompt edit, a visibility change, owner_id to himself, and attach_skill;
 --   3. Leo cannot create an agent owned by Maya, and Maya cannot give hers away;
 --   4. a seeded agent with no owner is nobody's to edit but an administrator's;
---   5. an account administrator (users:admin) edits Maya's agent.
+--   5. a holder of agents:update_any edits Maya's agent and the seeded one, and
+--      an administrator's grants_all role holds agents:update_any.
 --
 -- One transaction, rolled back.
 
@@ -33,7 +34,7 @@ insert into rbac.roles (name) values ('rem1067_author'), ('rem1067_admin');
 insert into rbac.role_permissions (role, resource, action) values
     ('rem1067_author', 'agents', 'update'),
     ('rem1067_admin',  'agents', 'update'),
-    ('rem1067_admin',  'users',  'admin');
+    ('rem1067_admin',  'agents', 'update_any');
 insert into rbac.user_roles (user_id, role) values
     (:maya, 'rem1067_author'), (:leo, 'rem1067_author'), (:admin, 'rem1067_admin');
 -- A seeded agent: written by the operator, public, owned by nobody.
@@ -95,7 +96,7 @@ begin
     end if;
 end $$;
 
--- 5. An administrator.
+-- 5. agents:update_any.
 :as_admin
 select agentic.upsert_agent('{"name":"rem1067-maya","system_prompt":"reviewed by an admin"}') \g /dev/null
 select agentic.upsert_agent('{"name":"rem1067-seeded","system_prompt":"seeded, edited"}') \g /dev/null
@@ -103,10 +104,15 @@ reset role;
 do $$
 begin
     if (select system_prompt from agentic.agents where name = 'rem1067-maya') is distinct from 'reviewed by an admin' then
-        raise exception 'an account administrator could not edit Maya''s agent';
+        raise exception 'a holder of agents:update_any could not edit Maya''s agent';
+    end if;
+    if exists (select 1 from rbac.roles r where r.grants_all
+                and not exists (select 1 from rbac.role_permissions p where p.role = r.name
+                                 and p.resource = 'agents' and p.action = 'update_any')) then
+        raise exception 'an administrator''s grants_all role does not hold agents:update_any';
     end if;
 end $$;
 
 rollback;
 
-\echo rbac/24: an author changes only their own agents -- own edit, refused by name, no giving away, seeded agents, admin override
+\echo rbac/24: an author changes only their own agents -- own edit, refused by name, no giving away, seeded agents, agents:update_any
