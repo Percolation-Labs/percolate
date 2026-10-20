@@ -35228,7 +35228,13 @@ begin
     perform rbac.require_app_provisioner();
     insert into rbac.users (id, email, status)
     values (p_user, p_user::text || '@users.percolate.invalid', 'active')
-    on conflict (id) do nothing;
+    -- NO CONFLICT TARGET (REM-792). The email is made from the id and has its
+    -- own unique index, and `on conflict (id)` makes only the id an arbiter:
+    -- two first calls for one new person both passed the id check, and the
+    -- second met users_email_key as a unique violation. Measured on 0.2.22,
+    -- eight concurrent calls failed in 18 of 20 batches, and the app answered
+    -- 409. Either index clashing means this person is already here.
+    on conflict do nothing;
 end;
 $$;
 
@@ -35244,7 +35250,9 @@ begin
     insert into rbac.api_keys (id, user_id, label, key_hash, scopes)
     values (p_key, p_user, coalesce(nullif(p_label, ''), 'application credential'),
             'application:' || p_key::text, coalesce(p_scopes, '{}'))
-    on conflict (id) do nothing;
+    -- No target, as for the user above: key_hash is made from the id and is
+    -- unique too (REM-792).
+    on conflict do nothing;
 end;
 $$;
 
