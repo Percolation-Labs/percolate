@@ -29871,6 +29871,11 @@ declare
     v_superseded int := 0;
     v_promoted   int := 0;
     v_refused    int := 0;
+    v_why        jsonb := '{}'::jsonb;   -- refusals by kind (REM-1041)
+    v_triples    text[] := '{}';
+    v_msg        text;
+    v_state      text;
+    v_kind       text;
     v_left       int := 0;
     v_left_ids   uuid[] := '{}';
     v_queued     int := 0;
@@ -29927,6 +29932,18 @@ begin
                 v_promoted := v_promoted + 1;
             exception when others then
                 v_refused := v_refused + 1;
+                -- WHY, by kind, and never the message whole: a refusal can name
+                -- another owner's node by id (REM-1041). The catalogue refusal
+                -- names kinds and a relation only, so its triple is kept, because
+                -- it is the fix.
+                get stacked diagnostics v_msg = message_text, v_state = returned_sqlstate;
+                v_kind := case when v_msg like 'relation (%) is not in the catalogue%' then 'missing_triple'
+                               when v_msg like '% were decided distinct' then 'decided_distinct'
+                               else 'sqlstate_' || v_state end;
+                v_why := jsonb_set(v_why, array[v_kind], to_jsonb(coalesce((v_why->>v_kind)::int, 0) + 1));
+                if v_kind = 'missing_triple' then
+                    v_triples := v_triples || substring(v_msg from '^relation (\(.*\)) is not in the catalogue');
+                end if;
             end;
         else
             v_left := v_left + 1;
@@ -29944,6 +29961,16 @@ begin
         'promotion_refused', v_refused,
         'soft_left_for_a_judge', v_left,
         'queued_for_a_judge', v_queued);
+    -- Only when something was refused, so a clean run's receipt is unchanged.
+    if v_refused > 0 then
+        v_receipt := v_receipt || jsonb_build_object('refusals', v_why);
+        if cardinality(v_triples) > 0 then
+            v_receipt := v_receipt || jsonb_build_object(
+                'missing_triples', (select jsonb_agg(distinct t) from unnest(v_triples) t),
+                'hint', 'a kind registered after the vocabulary has no relations yet: '
+                        'select aiq.register_graph_vocabulary() widens the catalogue to it, then run dream again');
+        end if;
+    end if;
     insert into aiq.dream_runs (since, until, decided_by, receipt)
     values (v_since, v_until, p_decided_by, v_receipt);
     return v_receipt;
