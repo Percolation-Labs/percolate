@@ -8360,11 +8360,13 @@ begin
         -- it expected rather than against where the shape can occur, so a
         -- matrix fanning out an embed passed the lint, stored clean, and
         -- failed N times at dispatch.
+        -- An expanded step has a url, or `in_process` when its model runs in
+        -- the worker and there is nothing to call (REM-628).
         if (v_step->>'kind' = 'http_call'
-            and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url'))
+            and v_step->'input' ? 'embed' and not (v_step->'input' ?| array['url', 'in_process']))
         or (v_step->>'kind' = 'matrix'
             and v_step#>'{input,template,input}' ? 'embed'
-            and not (v_step#>'{input,template,input}' ? 'url')) then
+            and not (v_step#>'{input,template,input}' ?| array['url', 'in_process'])) then
             severity := 'error';
             detail := 'this embed step was never expanded -- it has no url. '
                       'workflow.define_yaml fills one in from aiq.embedding_models; '
@@ -20614,7 +20616,9 @@ select workflow.register_step_function(
 --   * The shipped worker needs no new handler. After expansion this is an
 --     http_call like any other, on the queue the author named, with retry,
 --     backoff, the reaper and tracing already applying. An `embed:` step is
---     not a new deployable and not a new execution path.
+--     not a new deployable and not a new execution path. A model that runs in
+--     the worker is the one branch: the task carries `in_process` instead of a
+--     url, and the same handler answers it locally (REM-628, core 0.2.8).
 --   * The model is resolved ONCE and pinned into BOTH halves -- written into
 --     the query as `USING <model>` if it was not already there, and refused if
 --     it was there and disagrees. The invariant the two-step form could not
@@ -20683,21 +20687,30 @@ begin
             m.name, m.provider;
     end if;
 
-    -- AN IN-PROCESS MODEL CANNOT BE AN http_call (REM-628). This function
-    -- compiles the marker into an HTTP task, and a provider that runs inside
-    -- the worker has no url to put in one. The corpus path
-    -- (aiq.embed_batch_call, op `embed`) embeds against it and is what an
-    -- upload uses; a query that wants its text embedded inside a workflow
-    -- needs a `work` step, which is not built. Refused here by name, because
-    -- the alternative is a task posting to the literal string
-    -- 'BAAI/bge-small-en-v1.5'.
+    -- AN IN-PROCESS MODEL IS EMBEDDED BY THE WORKER ITSELF (REM-628). There is
+    -- no url to call, so the task carries `in_process`, the model id the
+    -- runtime loads (the model row's endpoint) and the dimension its space was
+    -- built for, and the worker's http_call handler answers it from the local
+    -- model in the same {result: <vector>} shape. This was refused until core
+    -- 0.2.8, whose worker is the first to run it; an older worker fails the
+    -- task with "http_call task has no 'url'". It is what lets a deployment
+    -- whose only model is the bundled one embed questions and facts.
     if p.in_process then
-        raise exception
-            'step ''%'' embeds with model ''%'', which runs inside the worker '
-            '(provider ''%''). This step compiles to an HTTP call and there is '
-            'nothing to call. Supply the vector with the query, or embed the '
-            'corpus with the `embed` op, which uses the same model.',
-            p_step_key, m.name, m.provider;
+        if m.endpoint is null then
+            raise exception
+                'embedding model ''%'' runs inside the worker but names no model id, so '
+                'step ''%'' has nothing to load. Set aiq.embedding_models.endpoint to the '
+                'id the runtime loads, such as BAAI/bge-small-en-v1.5.',
+                m.name, p_step_key;
+        end if;
+        return jsonb_build_object(
+            'in_process', true,
+            'model_id',   m.endpoint,
+            'dim',        m.dim,
+            'timeout_ms', 30000,
+            -- Recognised by `in_process` where an HTTP task is recognised by
+            -- its url: expand_embed_steps leaves a step with either alone.
+            'embed',      jsonb_build_object('text', v_text, 'model', m.name));
     end if;
 
     -- Refused rather than defaulted: a guessed url is a step that 404s on
@@ -20765,7 +20778,7 @@ begin
     for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
 
         if v_step->>'kind' = 'http_call'
-           and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url') then
+           and v_step->'input' ? 'embed' and not (v_step->'input' ?| array['url', 'in_process']) then
             v_input  := aiq.embed_call(v_step->'input'->'embed', v_step->>'key');
             v_step   := jsonb_set(v_step, '{input}', v_input);
             v_models := v_models || jsonb_build_object(
@@ -20779,7 +20792,7 @@ begin
         -- and the model each child embedded with is recorded on the child.
         elsif v_step->>'kind' = 'matrix'
            and v_step#>'{input,template,input}' ? 'embed'
-           and not (v_step#>'{input,template,input}' ? 'url') then
+           and not (v_step#>'{input,template,input}' ?| array['url', 'in_process']) then
             v_step := jsonb_set(v_step, '{input,template,input}',
                 aiq.embed_call(v_step#>'{input,template,input,embed}',
                                (v_step->>'key') || ' (matrix template)'));
@@ -36388,10 +36401,9 @@ $$;
 -- The workflow that keeps a model's space current: one `embed:` child per question the space lacks, landed by
 -- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
 --
--- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
--- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
--- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
--- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+-- Either kind of model. An `embed:` step over an HTTP model is a request; over a model that runs inside the worker
+-- (fastembed, the default install's) it is a task the worker answers locally (REM-628), so a deployment with no
+-- provider key indexes its questions too. The local branch needs core 0.2.8's worker.
 create or replace function claims.install_question_embed_workflow(p_model text default null,
                                                                   p_name text default 'embed_questions')
 returns text

@@ -1212,10 +1212,9 @@ $$;
 -- The workflow that keeps a model's space current: one `embed:` child per question the space lacks, landed by
 -- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
 --
--- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
--- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
--- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
--- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+-- Either kind of model. An `embed:` step over an HTTP model is a request; over a model that runs inside the worker
+-- (fastembed, the default install's) it is a task the worker answers locally (REM-628), so a deployment with no
+-- provider key indexes its questions too. The local branch needs core 0.2.8's worker.
 create or replace function claims.install_question_embed_workflow(p_model text default null,
                                                                   p_name text default 'embed_questions')
 returns text

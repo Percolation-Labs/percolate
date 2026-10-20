@@ -7534,11 +7534,13 @@ begin
         -- it expected rather than against where the shape can occur, so a
         -- matrix fanning out an embed passed the lint, stored clean, and
         -- failed N times at dispatch.
+        -- An expanded step has a url, or `in_process` when its model runs in
+        -- the worker and there is nothing to call (REM-628).
         if (v_step->>'kind' = 'http_call'
-            and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url'))
+            and v_step->'input' ? 'embed' and not (v_step->'input' ?| array['url', 'in_process']))
         or (v_step->>'kind' = 'matrix'
             and v_step#>'{input,template,input}' ? 'embed'
-            and not (v_step#>'{input,template,input}' ? 'url')) then
+            and not (v_step#>'{input,template,input}' ?| array['url', 'in_process'])) then
             severity := 'error';
             detail := 'this embed step was never expanded -- it has no url. '
                       'workflow.define_yaml fills one in from aiq.embedding_models; '
