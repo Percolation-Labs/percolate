@@ -1297,7 +1297,7 @@ $$ language sql stable;
 -- the next one. Nothing changed but the file.
 -- ============================================================
 
--- EVIDENCE IS AN EXACT CAPTURE (REM-153, specs/tables/schema.md §4). A resource's file pointer moves -- a
+-- EVIDENCE IS AN EXACT CAPTURE (REM-153). A resource's file pointer moves -- a
 -- refetch, a workflow retry repointing an artifact -- so a citation that names only the resource would let a
 -- later fetch change what an old revision appears to rely on. A snapshot records the resource, the exact
 -- retained file and its hash, and who captured it, together, taken from the resource row as it stood.

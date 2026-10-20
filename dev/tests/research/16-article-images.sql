@@ -1,4 +1,4 @@
--- An article image (REM-309, specs/tables/schema.md §4): a writer with no upload permission stores a PNG as a
+-- An article image (REM-309): a writer with no upload permission stores a PNG as a
 -- private resource on the evidence budget; only PNG, JPEG and WebP up to 2 MB are kept; once a listed revision pins
 -- it as an image, a stranger and a signed-out reader resolve its bytes through that revision, while the resource
 -- itself stays unreadable to them; and nothing else resolves this way -- a table's pinned evidence page, or a

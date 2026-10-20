@@ -1,7 +1,7 @@
 -- The research platform with no application in the loop: access decisions,
 -- plans and usage, research revisions, engagement and the trust read, each
 -- exercised as `authenticated` with the claims a trusted boundary would mint.
--- specs/research-platform/architecture.md §2-§6.
+-- Core owns them, so any application gets them without installing another.
 --
 -- One transaction, rolled back. Claims are set before each role switch,
 -- because `authenticated` cannot set them itself.
