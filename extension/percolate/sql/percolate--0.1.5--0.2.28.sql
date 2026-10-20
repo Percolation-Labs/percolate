@@ -1798,6 +1798,48 @@ returns uuid as $$
     select id from workflow.runs where external_id = p_external_id;
 $$ language sql stable;
 
+-- A RUN KEY THE INPUT DOES NOT SUPPLY, SAID WHEN THE RUN STARTS (REM-1016).
+--
+-- A {{run.<key>}} the caller left out failed the step that read it, at
+-- dispatch, with "template 'run.speaker' resolved to nothing" -- four times in
+-- the postmortems, each found by a run that failed partway. The definition
+-- cannot know: a workflow document declares no inputs, so the first moment
+-- the gap is knowable is here, with the input in hand.
+--
+-- A WARNING, NOT A REFUSAL, because leaving a key out can be deliberate: a
+-- step gated by `when:` (or a compensation, which runs only on rollback) may
+-- read a key that only the branch that runs it needs. A skipped step is never
+-- dispatched, so its templates are never resolved. Each gap names its step
+-- and whether that step is conditional, so the reader sees which branch is at
+-- risk.
+--
+-- ONLY STEPS THE WORKER DISPATCHES. A `sql:` step and a `when:` predicate bind
+-- each template as a parameter, and a missing key binds as NULL -- which is
+-- how `when: "{{run.wanted}}"` skips a step on purpose -- so neither fails
+-- and neither is listed. The worker's resolver (worker/templates.py) is the
+-- one that raises.
+--
+-- ON THE RUN ROW as well as a WARNING, because most callers start a run over
+-- REST and never see a notice. $-prefixed engine fields are excluded by the
+-- character class: they come from the engine, not the input.
+alter table workflow.runs add column if not exists unsupplied_input jsonb;
+
+create or replace function workflow.unsupplied_input(p_spec jsonb, p_input jsonb)
+returns jsonb as $$
+begin
+    -- plpgsql so the body may name compensation_keys(), defined further down.
+    return (
+    select jsonb_agg(jsonb_build_object('key', 'run.' || k, 'step', step, 'conditional', cond)
+                     order by step, k)
+    from (select distinct s->>'key' as step, m[1] as k,
+                 s ? 'when' or s->>'key' = any(workflow.compensation_keys(p_spec)) as cond
+          from jsonb_array_elements(p_spec->'steps') s,
+               regexp_matches((s->'input')::text, '\{\{\s*run\.([a-zA-Z0-9_.-]+)\s*\}\}', 'g') m
+          where coalesce(s->>'kind', 'work') <> 'sql'
+            and p_input #> string_to_array(m[1], '.') is null) gaps);
+end;
+$$ language plpgsql stable;
+
 -- p_trace_id: propagate an existing W3C trace_id from an already-traced
 -- caller (e.g. a FastAPI request already inside a trace) instead of always
 -- starting a disconnected new one -- specs/README.md's OTel ground rule.
@@ -1818,6 +1860,7 @@ declare
     v_dep_ids   uuid[];
     v_count     int;
     v_comp      text[];
+    v_gaps      jsonb;
 begin
     if p_external_id is not null then
         -- AMONG THE RUNS THIS CALLER MAY SEE, never every run with the key.
@@ -1855,6 +1898,18 @@ begin
     insert into workflow.runs (workflow_def_id, input, external_id, trace_id)
     values (v_def.id, p_input, p_external_id, coalesce(p_trace_id, encode(gen_random_bytes(16), 'hex')))
     returning id into v_run_id;
+
+    v_gaps := workflow.unsupplied_input(v_def.spec, p_input);
+    if v_gaps is not null then
+        update workflow.runs set unsupplied_input = v_gaps where id = v_run_id;
+        raise warning 'run % of % starts without %', v_run_id, p_name,
+            (select string_agg(format('%s (read by step %s%s)', g->>'key', g->>'step',
+                                      case when (g->>'conditional')::boolean
+                                           then ', if it runs' else '' end), '; ')
+             from jsonb_array_elements(v_gaps) g)
+            using hint = 'a {{run.<key>}} the input lacks fails the step that reads it with '
+                         '"resolved to nothing". workflow.runs.unsupplied_input lists them.';
+    end if;
 
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
@@ -13126,7 +13181,9 @@ create or replace view workflow.runs_api as
          d.name,
          -- appended, not slotted in (see above): whether a person, their agent or the
          -- platform started the run (REM-171). The credential it carried is not published.
-         r.started_actor
+         r.started_actor,
+         -- appended: the {{run.*}} keys the input did not supply (REM-1016)
+         r.unsupplied_input
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
