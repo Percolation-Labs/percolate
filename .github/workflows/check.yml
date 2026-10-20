@@ -160,7 +160,7 @@ jobs:
           # batch still spent 17 minutes on it ahead of the database gate, on
           # the runner every p8 release and schema PR needs. Releases have a
           # 10-minute SLA.
-          LOADER='^(applications/percolate-self-model/|extension/|specs/contract/|dev/ci-database\.sh$|dev/lib/)|^specs/.*\.sql$'
+          LOADER='^(extension/|specs/contract/|dev/ci-database\.sh$|dev/lib/)|^specs/.*\.sql$'
           if printf '%s\n' "$files" | grep -qE "$LOADER"; then
             echo "selfmodel=true" >> "$GITHUB_OUTPUT"
           else

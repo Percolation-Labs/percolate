@@ -97,7 +97,7 @@ end $$;
 comment on function percolate.check_package_schema(name) is
     'Refuse a package schema holding a PUBLIC-executable SECURITY DEFINER function, '
     'an org_id that is nullable or not defaulted to rbac.shared_org_id(), or an '
-    'org_id table without RLS and a policy. packages/apply.py runs it in the '
+    'org_id table without RLS and a policy. a package loader runs it in the '
     'transaction that applies storage; apply_package runs it on every schema an '
     'entity type names.';
 
@@ -261,7 +261,7 @@ begin
         if v_e->>'kind'='http_pull' and v_e->'config' ? 'api' then
             if rbac.current_user_id() is null then
                 raise exception 'An API source package needs an installation owner.'
-                using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
+                using hint = 'Apply it as the user who will own it, so rbac.current_user_id() names them. The source and its runs belong to this user.';
             end if;
             -- The same refusal and the same complete block content.save_api_source
             -- stores, so a packaged source cannot mean something the UI's would
@@ -296,7 +296,7 @@ begin
         -- rbac.default_visibility() rather than a literal, because a package
         -- install has two shapes and they want different answers: an operator
         -- installing deployment configuration gets `public` with no owner, and
-        -- a signed-in installer (packages/apply.py --owner) gets `private`
+        -- a signed-in installer gets `private`
         -- against their own owner_id. Both are readable; a constant would be
         -- right for one of them. It is the same call the API branch's sibling
         -- and content.register_upload already make, so this is not a third
@@ -360,7 +360,7 @@ end $$;
 -- Operator-only. It is SECURITY DEFINER and installs agents, tool servers,
 -- sources and workflows, and it carried Postgres's PUBLIC default until
 -- 2026-09-11 -- dev/tests/rbac/04 listed six schemas and this one was not among
--- them. packages/apply.py calls it as app_owner, which owns it.
+-- them. A package loader calls it as app_owner, which owns it.
 revoke execute on function percolate.apply_package(jsonb) from public;
 
 comment on function percolate.apply_package(jsonb) is

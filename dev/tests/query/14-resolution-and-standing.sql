@@ -2,8 +2,8 @@
 -- an application and had, until this file, only that application's tests.
 --
 -- That is the gap worth naming. `aiq.resolve_mention` and the rest shipped in
--- core with their assertions living in `applications/percolate-self-model/
--- tests.sql`, which is a file core does not run and a directory core does not
+-- core with their assertions living in an internal
+-- application's tests, which core does not run and a directory core does not
 -- require. Delete the application and the extension keeps the code and loses
 -- every check on it.
 --

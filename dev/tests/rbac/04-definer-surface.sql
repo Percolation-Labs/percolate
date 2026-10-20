@@ -212,7 +212,7 @@ end $$;
 -- ---------------------------------------------------------------------
 -- AND WHAT IS CREATED AFTER THE INSTALL STARTS CLOSED.
 --
--- Section 1 checks what exists. A package applied later (packages/apply.py,
+-- Section 1 checks what exists. A package applied later (by a loader,
 -- as app_owner) creates functions nobody enumerated -- pgvector-watch shipped
 -- ten SECURITY DEFINER functions with the PUBLIC default, and a signed-in
 -- person could call pgw.lake_issues through aiq.sql_passthrough to read any

@@ -78,7 +78,7 @@ alter table content.channels alter column shipped set default
 -- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
 -- at each insert site)". That was a real decision and it put the guarantee one
 -- layer above where it can be refused. It held for as long as every insert
--- site remembered: the first NEW caller (applications/percolate-self-model)
+-- site remembered: the first NEW caller (an internal loader)
 -- used `on conflict do nothing`, which is the ordinary idiom and finds no
 -- conflict here, and created FIVE identical channels in one session before
 -- anything noticed.

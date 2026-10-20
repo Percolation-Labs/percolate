@@ -545,7 +545,7 @@ db_gates() {
 # THE SELF-MODEL, FROM ZERO -- behind a flag, and the flag is the honest answer
 # to where this belongs rather than a way of hiding it.
 #
-# `applications/percolate-self-model/load.sh --from-zero` had been broken since
+# An internal application's `load.sh --from-zero` had been broken since
 # `492e007` and nothing noticed for a month, because every load anybody runs is
 # incremental against a database that already holds the rows. Eight defects sat
 # in it by the time somebody ran it: three relations written and registered

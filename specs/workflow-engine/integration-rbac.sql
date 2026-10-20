@@ -155,7 +155,7 @@ attempt failed.$c$;
 -- (c2) The rest of the read surface: the registry, the audit trail, the
 --      edges, the four aggregates, and rate limits minus the personal data.
 --
---      These arrived as `applications/percolate-ui/sql/ui-views.sql`, applied
+--      These arrived as an internal UI's SQL file, applied
 --      to a live deployment by hand, and that was the defect rather than the
 --      views. `dev/owns-its-schema.py` states the rule: an application may
 --      FILL a core schema and may not SHAPE one, because needing a view on a

@@ -1281,7 +1281,7 @@ comment on function agentic.agent_call(text,text,text,text,text) is
 -- first one.
 --
 -- Until REM-70 every tool that read a document translated it itself, and each
--- knew one dialect. `packages/apply.py` knew a package's `output_schema` (a file
+-- knew one dialect. Our package loader knew a package's `output_schema` (a file
 -- in the package directory) and nothing of `description`/`properties`;
 -- percolate-core's `core/samples.py` and `percolate agent push` knew
 -- `description`/`properties` and nothing of `output_schema`. Three
@@ -1370,7 +1370,7 @@ begin
             ('output_schema',
              '`output_schema` is a package manifest''s reference to a FILE in the '
              'package; the loader that can see the package directory inlines it '
-             '(packages/apply.py) -- send the schema itself as `properties` or '
+             '-- send the schema itself as `properties` or '
              '`structured_output_schema`.'),
             ('prompt',
              'There is no `prompt` key (brief.md §6): the system prompt is the '
@@ -1422,8 +1422,8 @@ begin
         raise exception
             'agent %: `structured_output_schema` is the string %, which looks like '
             'a file reference. The database never sees a package directory, so the '
-            'loader resolves it and sends the schema (packages/apply.py does this '
-            'for a manifest''s `output_schema`, as it does for a skill''s body).',
+            'loader resolves it and sends the schema (as a package loader does '
+            'for a manifest''s `output_schema` and a skill''s body).',
             p_doc->>'name', p_doc->'structured_output_schema';
     end if;
     if p_doc ? 'type' and p_doc->>'type' <> 'object' then
