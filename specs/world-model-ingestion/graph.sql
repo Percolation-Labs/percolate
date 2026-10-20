@@ -1322,6 +1322,61 @@ end;
 $$;
 
 -- ------------------------------------------------------------
+-- A DELETED MEMORY TAKES THE FACTS IT ALONE SUPPORTED WITH IT (REM-964).
+--
+-- An owner deletes their resource; its chunks go by foreign key, their
+-- vectors by trg_forget_vectors, its document node by the projection. The
+-- graph was the one place it survived: every edge upsert_graph wrote names
+-- the memory in provenance.sources, and nothing read that list on a delete,
+-- so "Maya is vegetarian" stayed a current diet edge with the deleted
+-- memory's id and quote on it.
+--
+-- graph-index.md §7's refcount, applied to a source that no longer exists:
+-- the memory's entries leave every edge's sources, an edge somebody else
+-- still asserts stays on their word, and an edge nobody else asserts is
+-- DELETED rather than retracted. A retraction keeps its provenance, which
+-- here is the deleted memory's own words. Its retraction history goes with
+-- it by foreign key. An authored edge carries no sources and is untouched.
+--
+-- Statement-level with a transition table, so a bulk delete is one pass; and
+-- SECURITY DEFINER because the owner deleting the memory cannot write
+-- aiq.edges, and should not need to.
+-- ------------------------------------------------------------
+create or replace function aiq.forget_deleted_sources() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    with gone as (select id::text as rid from deleted_rows),
+    touched as (
+        select e.id,
+               (select jsonb_agg(s)
+                  from jsonb_array_elements(e.provenance->'sources') s
+                 where s->>'resource_id' is null
+                    or s->>'resource_id' not in (select rid from gone)) as rest
+          from aiq.edges e
+         where jsonb_typeof(e.provenance->'sources') = 'array'
+           and exists (select 1 from jsonb_array_elements(e.provenance->'sources') s
+                        where s->>'resource_id' in (select rid from gone))
+    ),
+    shared as (
+        update aiq.edges e
+           set provenance = e.provenance || jsonb_build_object('sources', t.rest)
+          from touched t
+         where e.id = t.id and t.rest is not null
+        returning e.id
+    )
+    delete from aiq.edges e
+     using touched t
+     where e.id = t.id and t.rest is null;
+    return null;
+end $$;
+revoke execute on function aiq.forget_deleted_sources() from public;
+
+create or replace trigger trg_forget_deleted_sources
+    after delete on content.resources
+    referencing old table as deleted_rows
+    for each statement execute function aiq.forget_deleted_sources();
+
+-- ------------------------------------------------------------
 -- 7. The two workflow entry points (graph-index.md §5).
 --
 -- The split is FORCED BY THE ENGINE, not chosen. A matrix step's result is

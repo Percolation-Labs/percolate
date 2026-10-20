@@ -1487,6 +1487,14 @@ begin
     execute format('drop policy if exists %I on %s', v_tbl || '_scoped_write', p_table);
     execute format('create policy %I on %s for insert with check (%s)',
                    v_tbl || '_scoped_write', p_table, rbac.scope_write_predicate());
+    -- THE OWNER DELETES THEIR OWN ROW, and nobody else (REM-964). A policy is
+    -- not a privilege: no role may delete until a table grants DELETE, so this
+    -- arm changes nothing on a table that has not decided to. One that has
+    -- (content.resources) gets owner-only deletes from the same home as its
+    -- reads, rather than a hand-written predicate beside them.
+    execute format('drop policy if exists %I on %s', v_tbl || '_scoped_delete', p_table);
+    execute format('create policy %I on %s for delete using (owner_id = (select rbac.current_user_id()))',
+                   v_tbl || '_scoped_delete', p_table);
 end;
 $$ language plpgsql;
 
