@@ -1,8 +1,7 @@
 -- 11. Five questions a walk cannot answer, and the tenancy that survives them.
 --
--- GRAPH walks. These rank, bound and search -- which is the line
--- specs/ai-query-layer/graph-algorithms.md draws for compiling something into
--- the extension rather than writing it as a query. They ship OFF, so the first
+-- GRAPH walks. These rank, bound and search -- which is our line for
+-- compiling something into the extension rather than writing it as a query. They ship OFF, so the first
 -- statement here is the grant, and it rolls back with everything else.
 --
 -- The fixture is nine edges on purpose: every answer below is small enough to

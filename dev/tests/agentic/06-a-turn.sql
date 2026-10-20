@@ -21,7 +21,7 @@
 -- of that is this repository's schema, and all of it happens before the first
 -- byte goes to a provider. The behaviour past that point is
 -- percolate-core's `percolate-core/dev/verify.py` and is deliberately not duplicated here
--- (specs/agentic/sequence.md: "two artifacts proving the same thing").
+-- (two artifacts proving the same thing is one too many).
 --
 -- THE THREE OUTCOMES, and the middle one is why this file is not a one-liner.
 -- `dev/tests/drive/agent-turn.sh` records the response and the runtime's log

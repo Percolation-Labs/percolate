@@ -85,7 +85,7 @@ survived because existing is not running.
 and grew there because the graph half of it was, until recently, the least
 exercised: `04-graph-identity.sql`, `05-graph-traversal.sql`
 and `06-graph-tenancy.sql` execute the eight criteria
-`specs/ai-query-layer/graph-identity.md` lists under "Verification" — a section
+the graph-identity design lists under "Verification" — a section
 that opens "A design is correct if all of these hold" and which nothing had ever
 run. Two of the eight passed unchanged. The rest failed, or passed for the wrong
 reason, and the corrections are recorded next to the criteria they belong to.
@@ -97,8 +97,7 @@ its own, because it tests the write path and a write path has to be exercised
 with writes.
 
 `10-graph-index.sql` is the newest and is the same argument one layer up: it
-tests the write path a *machine* takes into that graph
-(`specs/world-model-ingestion/graph-index.md`), where the characteristic
+tests the write path a *machine* takes into that graph, where the characteristic
 failure is not an error but a graph that landed and is wrong in a way nothing
 raises — an edge wired to the wrong endpoint because an ordinal moved, a
 machine-invented row in a human's table, a promotion that deleted the edges it
@@ -270,8 +269,7 @@ than committed, for the same reason those vectors are literals: a fixture you
 cannot regenerate is a fixture nobody can check, and a PDF in git is 40KB of
 bytes a reviewer has to take on trust.
 
-The defects that came out of running it are recorded in
-`../../specs/world-model-ingestion/ingestion.md` §7 — including a `rate_key`
+The defects that came out of running it include a `rate_key`
 that names a bucket with no row, which parks the task forever while the worker
 beside it reports an empty queue.
 
@@ -282,10 +280,9 @@ contract — the Content Server's and Agent Runtime's HTTP surfaces, plus a
 worker that handles the generic step kinds. In a real deployment the worker
 pool is typically owned by someone else entirely, so testing *our*
 implementation of that contract proves nothing about theirs. What this repo
-owes the boundary is a written contract, which lives in
-`../../specs/workflow-engine/spec.md` (the worker's database seam),
-`../../specs/agentic/brief.md` (the chat surface) and
-`../../specs/world-model-ingestion/brief.md` §3.5 (the Content Server).
+owes the boundary is a written contract for each: the worker's database seam,
+the chat surface and the Content Server, kept in design notes not yet
+published here.
 
 The database halves of those contracts *are* covered, both here and by
 `../../surface.sql` — which is the right split: we guarantee the functions a

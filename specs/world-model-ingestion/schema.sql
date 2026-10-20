@@ -897,7 +897,7 @@ $$ language plpgsql stable;
 --     chunk is -- live in the worker (percolate-core's `ingest` package), not
 --     in a table. They are code with libraries behind them, they change with
 --     those libraries, and a table of them would be a second place to be
---     wrong. `specs/world-model-ingestion/ingestion.md` is their contract.
+--     wrong. Their own documentation is their contract.
 --   * The OVERRIDES live here, because they are the deployment's and the
 --     uploader's, not the library's. A channel says how its own content
 --     should be handled; one upload may say something different again. Both
@@ -1292,7 +1292,7 @@ $$ language sql stable;
 -- A snapshot is a content table: it references content.resources and
 -- content.files and nothing in research. It was declared in the research
 -- platform's file because pinned evidence is what first needed it.
--- specs/packages/rows-not-schema.md §7 step 2; dev/owns-its-schema.py refuses
+-- A package's data is rows, not schema; dev/owns-its-schema.py refuses
 -- the next one. Nothing changed but the file.
 -- ============================================================
 

@@ -1,0 +1,233 @@
+# The Percolate agent, and the two tool servers it binds.
+#
+# This document is the whole of a use case. Registering a server is a name, a
+# kind and a url; binding an agent to it is a list of tool names. Everything
+# else -- what each tool is called, what arguments it takes, what it is for --
+# is discovered from the server itself and cached on the row, because a tool
+# description written here would be a second copy of something the upstream
+# already publishes, and it would be wrong the first time the upstream changed.
+#
+#   python3 binder.py apply percolate.yaml
+#
+# No runtime code is deployed by any of this. `brief.md` §5.2: adding an agent
+# or a tool provider is zero lines of Python, and this file is the evidence.
+
+tool_servers:
+
+  # ----------------------------------------------------------------
+  # Retrieval. One tool, one string argument, and a description the
+  # database generates -- see reference/query_mcp.py for why the p8ql
+  # dialect is worth an MCP server rather than being bound as the
+  # `post_rpc_query` operation it also is.
+  # ----------------------------------------------------------------
+  - name: p8-query
+    kind: mcp
+    url: http://query-mcp:8090
+    # This is the server whose results are citable (§5.3). The runtime reads
+    # this flag, not the tool's name, to decide which responses become the
+    # `citations` on the answer they informed.
+    emits_citations: true
+
+  # ----------------------------------------------------------------
+  # Everything else the agent can do, which is the REST surface this
+  # collection already ships. No service was written for this: PostgREST
+  # publishes an OpenAPI document, and the adapter turns it into tools.
+  # ----------------------------------------------------------------
+  - name: p8-workflow
+    kind: openapi
+    url: http://postgrest:3000
+    # The identity DISCOVERY runs as, never a literal secret -- an indirection
+    # the binder resolves from the environment. It is not optional here and
+    # the sample was first written without it: PostgREST publishes a different
+    # OpenAPI document per role, so an anonymous fetch returned 61 operations
+    # instead of 85 and quietly dropped start_workflow, runs_api and tasks_api
+    # -- three of the five tools the agent below is bound to. The registration
+    # succeeded, the row looked right, and the agent had lost most of its job.
+    # Calls do NOT use this identity; they carry the end user's.
+    credential_ref: env:P8_TOKEN
+    # Not decoration, and the reason the column exists. One PostgREST serves
+    # five schemas from this one url and chooses between them by header:
+    # without these two, the document fetched is `content`'s, discovery
+    # succeeds, and every workflow tool the agent below names is missing.
+    default_headers:
+      Accept-Profile: workflow
+      Content-Profile: workflow
+
+# ----------------------------------------------------------------
+# The prose this agent follows, as rows rather than as paragraphs of its own
+# prompt (`../plugins.md`). Every one of these came OUT of the system_prompt
+# below, which is the argument for the table made concrete: each is true of any
+# agent bound to the same servers, so carrying it inside one agent's prompt was
+# always a copy waiting to be made a second time.
+#
+# Three are COMPOSED -- named on the agent, concatenated into the prompt at
+# every invocation, so the behaviour is what it was when they were paragraphs.
+# Two are MATCHED: the situational ones, expanded when the turn calls for them
+# and advertised by their listing line when it does not. That second part is a
+# real change rather than a refactor, and it is the one the eval covers -- a
+# listing line alone carried 16 of the 18 behaviour changes a full body did
+# (`../plugins.md` §11.4), so the floor is well above nothing.
+# ----------------------------------------------------------------
+skills:
+
+  - name: p8ql-schema-first
+    category: procedure
+    tags: [query, p8ql]
+    requires_tools: [p8-query]
+    description: Start with SCHEMA before writing any other p8ql; nothing you have not read in a SCHEMA response exists.
+    when_to_use: Before the first query of a conversation, or whenever you are about to name a table, relation or entity type you have not seen in a SCHEMA response.
+    content: |
+      ALWAYS START WITH `SCHEMA`. It is the one mode answerable before you know
+      anything, and it returns the index of what you may ask about; then
+      `SCHEMA "graph"` for the entity types and the relation catalogue. This is
+      not a formality. Given a question about currencies, a model that skips it
+      writes `select * from forex_weekly_bands` -- a table that does not exist,
+      in a store that is not tables -- gets an empty result, and reports back
+      that there is no data. Observed, on the first real question ever put to
+      this agent.
+
+      READ IT IN THREE STEPS, NOT ONE. SCHEMA answers at three depths and each
+      one names the next:
+
+        SCHEMA                      which facets exist
+        SCHEMA "graph"              the vocabulary: entity types with SAMPLE
+                                    KEYS, and every relation with what it means
+        SCHEMA "graph" FROM <name>  the detail for one entity type or relation
+
+      Read the facet, then narrow -- do not ask for the detail of everything
+      before you know which name you want. Each response carries `narrow_with`
+      saying exactly how. The whole schema is about 44KB across four facets, so
+      reading all of it costs real context on every conversation; the first two
+      steps are 10KB and are usually enough to write the query.
+
+      What is behind the tool is a property graph: entities joined by named
+      relations, plus text and vector indexes over content. Nothing you have
+      not read in a SCHEMA response exists. Use LOOKUP to resolve a name to a
+      node, GRAPH to walk relations from it, TEXT/SEMANTIC/SEARCH for content.
+      Reach for plain SQL last, and only over relations SCHEMA "sql" listed.
+
+      `FROM` MEANS DIFFERENT THINGS IN DIFFERENT MODES, which is the one trap
+      here. TEXT/SEMANTIC/SEARCH take a registered SOURCE name -- `FROM chunks`.
+      `SCHEMA "sql"` takes a RELATION name -- `FROM resource_chunks`. Asking
+      `SCHEMA "sql" FROM chunks` matches nothing and returns relation_count 0
+      with no error, which reads exactly like "there is nothing there".
+
+  - name: house-style-attribution
+    category: style
+    tags: [style, citations]
+    description: Say which tool told you something; an answer assembled from retrieval is worth what its sources are worth.
+    when_to_use: Always, whenever any part of an answer came from a tool rather than from your own knowledge.
+    content: |
+      Say which tool told you something. An answer assembled from retrieval is
+      worth exactly what its sources are worth, and the user cannot judge that
+      if you present it as your own knowledge.
+
+  - name: workflow-define-then-start
+    category: procedure
+    tags: [workflow, operations]
+    requires_tools: [p8-workflow]
+    description: Define work as a YAML workflow and start a run rather than doing multi-step work in the conversation; never poll a run.
+    when_to_use: The task has more than one step, should be repeatable, or will need to be re-run -- or you have just started a run and are wondering whether to wait on it.
+    content: |
+      Work is a workflow. Define one from YAML, start it, and report the run
+      id; do not wait on it and do not poll in a loop -- starting a run returns
+      immediately by design, and the user can be told where to look. Check
+      status by that run id, and read the per-step tasks when a run has failed
+      and the question is which step.
+
+      Prefer defining a workflow to doing the work yourself. Anything with more
+      than one step, anything that should be repeatable, and anything that will
+      need to be re-run belongs in a definition where it can be retried,
+      scheduled and inspected -- not in a conversation that ends.
+
+  - name: p8ql-fuzzy-lookup
+    category: procedure
+    tags: [query, p8ql]
+    requires_tools: [p8-query]
+    description: When a LOOKUP returns nothing, use FUZZY LOOKUP instead of guessing another spelling.
+    when_to_use: A LOOKUP came back empty, or you are about to try a second spelling of a name, ticker, code or identifier.
+    content: |
+      WHEN A LOOKUP FINDS NOTHING, USE `FUZZY LOOKUP` -- do not guess another
+      spelling. The names in this store follow conventions you cannot deduce:
+      asked about sterling, a model tried `sterling`, `gbp`, `gbp/usd`,
+      `GBPUSD` and `fx_pair` in five separate calls and gave up, while
+      `FUZZY LOOKUP "gbp"` returns `usd/gbp` on the first try. The schema's
+      sample_keys show you the shape of a key; FUZZY closes the rest of the
+      distance. Guessing spellings is the one thing this tool is built to make
+      unnecessary.
+
+      A LOOKUP response separates `rows` from `unresolved`. A name in
+      `unresolved` was not found -- say so, rather than answering as though the
+      question had no data behind it.
+
+  - name: p8ql-read-the-plan
+    category: procedure
+    tags: [query, p8ql, debugging]
+    requires_tools: [p8-query]
+    description: An empty result and a misparsed query look identical; read the returned plan before concluding there is no data.
+    when_to_use: A query returned no rows and you are about to report that the data does not exist.
+    content: |
+      The response includes the parsed plan next to the rows: when a query
+      returns nothing, read the plan before concluding the answer is nothing --
+      an empty result and a misparsed query look identical otherwise.
+
+agents:
+
+  - name: percolate
+    # `user`, so a person may pick it -- the column that keeps this agent
+    # visible in a table sized for thousands of machine extractors (§5.7).
+    audience: user
+    category: tool_user
+    tags: [query, workflow, operations]
+    model: anthropic:claude-sonnet-5
+
+    # Authored here as `system_prompt`. Authored as a pydantic model (§6) this
+    # same text is the class docstring, which `model_json_schema()` emits as
+    # `description` -- the same document, one serialization along.
+    system_prompt: |
+      You are Percolate, the agent for this database. You can read what it
+      knows and you can run work against it.
+
+      Retrieval goes through the `query` tool, in p8ql.
+
+    # THE ATTACHED SURFACE -- the same idea as `tools:` below, one column over.
+    # `tools` says which tools this agent may call without carrying their
+    # implementations; this says which fragments it may use without carrying
+    # their bodies. All five are advertised by a listing line every turn; a
+    # body arrives when the turn calls for it.
+    skills:
+      - p8ql-schema-first
+      - house-style-attribution
+      - workflow-define-then-start
+      - p8ql-fuzzy-lookup
+      - p8ql-read-the-plan
+
+    context_policy:
+      skills:
+        # The three whose bodies are unconditional, because they were
+        # paragraphs of the prompt above and this is a refactor rather than a
+        # behaviour change. The other two are the situational ones.
+        always:
+          - p8ql-schema-first
+          - house-style-attribution
+          - workflow-define-then-start
+        match: true
+        top_k: 2
+        min_score: 0.28
+        max_chars: 6000
+        index: bound
+        sticky: true
+
+    tools:
+      # The allowlist is the agent's entire capability surface. A tool the
+      # server exposes and this list omits does not exist for this agent.
+      - server: p8-query
+        tools: [query]
+
+      - server: p8-workflow
+        tools:
+          - post_rpc_define_yaml        # author a workflow
+          - post_rpc_start_workflow     # run one
+          - post_rpc_schedule_workflow  # run one repeatedly
+          - get_runs_api                # is it done?
+          - get_tasks_api               # which step, and why did it fail?

@@ -1,0 +1,130 @@
+# The labelled set the expansion eval scores against.
+#
+# `expect` is the fragment(s) a correct expansion would put in front of the
+# model for this request. `expect: []` is a NEGATIVE -- a request that should
+# match nothing above the threshold, which is the half of a retrieval eval that
+# usually goes unmeasured and is where a low threshold does its damage.
+#
+# Written as requests a person would actually type, not as descriptions of the
+# fragments. A request that paraphrases the skill's own description measures
+# nothing except that cosine similarity works.
+
+cases:
+
+  # ---- the p8ql cluster: six fragments sharing most of their vocabulary ----
+
+  - ask: I looked up "sterling" and got nothing back. What now?
+    expect: [p8ql-fuzzy-lookup]
+
+  - ask: LOOKUP "acme holdings" returns an empty result. Should I try ACME Holdings Ltd?
+    expect: [p8ql-fuzzy-lookup]
+
+  - ask: What can I actually ask this database about?
+    expect: [p8ql-schema-first]
+
+  - ask: I'm about to write my first query against this thing. Where do I start?
+    expect: [p8ql-schema-first]
+
+  - ask: Which companies is Acme connected to, and how?
+    expect: [p8ql-graph-walk]
+
+  - ask: Find me the passage where the filing describes the merger terms.
+    expect: [p8ql-content-search]
+
+  - ask: My query came back with zero rows. I'll tell the user there's no data.
+    expect: [p8ql-read-the-plan]
+
+  - ask: I looked up four tickers and two came back. How should I write that up?
+    expect: [p8ql-unresolved-names]
+
+  - ask: Is there any data on forex weekly bands? select * from forex_weekly_bands returned nothing.
+    expect: [p8ql-schema-first, p8ql-read-the-plan]
+
+  # ---- the workflow cluster ----
+
+  - ask: I need to re-run this same import every night.
+    expect: [workflow-schedule]
+
+  - ask: Can you go ahead and ingest all 400 of those documents for me?
+    expect: [workflow-define-then-start]
+
+  - ask: I started the run. Should I keep checking until it's done?
+    expect: [workflow-never-poll]
+
+  - ask: Run 8f2c failed. Why?
+    expect: [workflow-diagnose-failure]
+
+  - ask: If the third step fails after we've already charged the card, what undoes it?
+    expect: [workflow-saga-compensation]
+
+  - ask: I want the same cleanup step to run once for every source we have.
+    expect: [workflow-matrix-fanout]
+
+  # ---- extraction and identity ----
+
+  - ask: Pull the parties and dates out of these 200 petitions.
+    expect: [extraction-declare-the-shape]
+
+  - ask: The date field is empty for everything from this publisher. Is the extractor broken?
+    expect: [extraction-source-gotchas]
+
+  - ask: Running a model over the whole archive is going to cost a fortune. Options?
+    expect: [extraction-cost-cascade]
+
+  - ask: We have "Acme Ltd" and "ACME LIMITED" as separate records. Same company?
+    expect: [entity-resolution-keys]
+
+  # ---- style, safety, operations ----
+
+  - ask: Just delete the rows where status is null, there's only a few.
+    expect: [safety-no-destructive-sql]
+
+  - ask: Drop the staging table, we don't need it.
+    expect: [safety-no-destructive-sql]
+
+  - ask: This query returns 3 rows for me and 40 for my colleague. Which is right?
+    expect: [rbac-tenant-scoping]
+
+  - ask: The fix is definitely deployed but the error hasn't changed.
+    expect: [incident-triage]
+
+  - ask: Is this schema change ready to merge?
+    expect: [release-checklist]
+
+  - ask: Embedding the corpus is taking hours. It's one call per chunk.
+    expect: [embedding-corpus-batches]
+
+  # ---- multi-label: a request that legitimately needs two fragments ----
+
+  - ask: Walk me from the Acme node out to its suppliers and tell me where each fact came from.
+    expect: [p8ql-graph-walk, house-style-attribution]
+
+  - ask: Find every mention of the acquisition in the filings and cite them.
+    expect: [p8ql-content-search, house-style-attribution]
+
+  # ---- negatives: nothing in the fleet should clear the threshold ----
+
+  - ask: What's the weather in Dublin tomorrow?
+    expect: []
+
+  - ask: Write me a haiku about elephants.
+    expect: []
+
+  - ask: Thanks, that's all for now.
+    expect: []
+
+  - ask: Who won the 1998 world cup?
+    expect: []
+
+# The multi-turn conversation the sticky-expansion measurement replays. Each
+# turn is matched in order against the same run, so the accumulation is the
+# thing being measured. The subject deliberately MOVES -- query, then workflow,
+# then back -- because a conversation that stays on one subject cannot show the
+# difference between sticky and per-turn expansion.
+conversation:
+  - What can I ask this database about?
+  - LOOKUP "sterling" gives me nothing.
+  - OK. Now I need that same lookup run over every pair, nightly.
+  - The run failed. Which step?
+  - Back to the first thing -- how do I phrase the name search again?
+  - And make sure you tell me which tool each answer came from.

@@ -490,8 +490,8 @@ begin
     if v_model is null then
         raise exception
             'no embedding model is registered and none was named, so there is '
-            'nothing for this pipeline to embed with. Register one first: '
-            'specs/ai-query-layer/USAGE.md.';
+            'nothing for this pipeline to embed with. Register one first: a row in '
+            'aiq.embedding_models, marked is_default or named here.';
     end if;
 
     insert into workflow.rate_limits (key, capacity, tokens, refill_rate)

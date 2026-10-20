@@ -3,8 +3,7 @@
 -- Each block is one call from Mem0's quickstart -- add, search, get_all, get,
 -- update, history, delete -- then its user/agent/run scopes and its entity
 -- graph, then the two things Mem0 does not do: say why a memory changed, and
--- return nothing to a reader without permission. `specs/design/core-product.md`
--- §2.2 is the brief. The article that walks these blocks is the Percolate
+-- return nothing to a reader without permission. The article that walks these blocks is the Percolate
 -- writing piece "Percolate for Mem0 folks"; a block changed here is a block
 -- changed there.
 --

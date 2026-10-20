@@ -54,8 +54,8 @@ version: 1
 fixture: fixtures.sql
 
 # -----------------------------------------------------------------------------
-# The vocabulary. Every entry is a class from
-# `specs/workflow-engine/failure-modes.md` or from `dev/tests/README.md`'s
+# The vocabulary. Every entry is a class from the workflow engine's
+# failure-modes design or from `dev/tests/README.md`'s
 # per-surface characteristic failure -- not invented here. A scenario citing
 # none is refused by the loader: a check that cannot say what it protects is a
 # check nobody can weigh.
