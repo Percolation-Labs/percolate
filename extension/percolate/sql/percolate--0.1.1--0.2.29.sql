@@ -36530,7 +36530,7 @@ create table if not exists claims.questions (
 comment on table claims.questions is
     'The question two claims must share before they can be compared, minted from a frame''s subject and outcome, or from a phrasing alone (graph.md §7).';
 create index if not exists questions_refines on claims.questions (refines) where refines is not null;
--- A question minted from a phrasing (specs/build-knit-dream/coalescing.md): a polar question in plain words, with no
+-- A question minted from a phrasing (graph.md §7): a polar question in plain words, with no
 -- frame yet. A database installed before carries subject and outcome as required columns, so they are relaxed here
 -- and the rule moves to a check: a question has a frame (subject and outcome) or a phrasing, and a phrased question
 -- is keyed by its normalised words.
@@ -36685,7 +36685,7 @@ grant select on claims.frames, claims.questions, claims.answered to authenticate
 revoke all on function claims.question_for(text, text, jsonb, bigint), claims.project_frames(uuid) from public;
 
 -- ------------------------------------------------------------
--- 10a. Coalescing (specs/build-knit-dream/coalescing.md §5). A question minted from a phrasing, a stance an agent
+-- 10a. Coalescing (graph.md §7). A question minted from a phrasing, a stance an agent
 --      proposes and the writer confirms, its withdrawal, and the web of questions that more than one work answers.
 --      Coalescing never merges claims: it joins them through the questions they answer.
 -- ------------------------------------------------------------
