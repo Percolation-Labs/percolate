@@ -49,7 +49,7 @@ insert into content.channels (name, kind, config, visibility)
 values ('memory', 'manual', '{"description": "memories written directly, with no pipeline"}', 'public')
 on conflict do nothing;
 select aiq.register_graph_vocabulary($v$[
-  {"relation": "lives_in",  "single_valued": true},
+  {"relation": "based_in",  "single_valued": true},
   {"relation": "works_at"},
   {"relation": "ships_via", "single_valued": true},
   {"relation": "prefers"}
@@ -74,7 +74,7 @@ select content.register_text('memory', 'ana-chat-2026-10',
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Ana Costa"}, {"k":"company","n":"Tagus Ceramics"},
             {"k":"place","n":"Lisbon"}, {"k":"port","n":"Rotterdam"}],
-  "edges": [{"s":0,"t":1,"r":"works_at"}, {"s":0,"t":2,"r":"lives_in"}, {"s":0,"t":3,"r":"ships_via"}]}$g$,
+  "edges": [{"s":0,"t":1,"r":"works_at"}, {"s":0,"t":2,"r":"based_in"}, {"s":0,"t":3,"r":"ships_via"}]}$g$,
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-support-2026-01'),
                     'valid_from', '2026-01-14T09:30:00Z')) ->> 'edges_new' as january;
 select aiq.upsert_graph($g$
@@ -92,13 +92,13 @@ select aiq.upsert_graph($g$
 -- What Ana's agent read from her message on the article's run, landed as land_message_facts lands it: from now.
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Ana Costa"}, {"k":"port","n":"Felixstowe"}, {"k":"place","n":"Porto"}],
-  "edges": [{"s":0,"t":1,"r":"ships_via"}, {"s":0,"t":2,"r":"lives_in"}]}$g$,
+  "edges": [{"s":0,"t":1,"r":"ships_via"}, {"s":0,"t":2,"r":"based_in"}]}$g$,
  jsonb_build_object('resource_id', (select id from content.resources where external_id = 'ana-chat-2026-10'),
                     'agent', 'agent:' || :ana)) ->> 'edges_new' as conversation;
 
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() =
-    'lives_in place/lisbon, lives_in place/porto, ships_via port/felixstowe, ships_via port/rotterdam, '
+    'based_in place/lisbon, based_in place/porto, ships_via port/felixstowe, ships_via port/rotterdam, '
     'works_at company/tagus ceramics',
     '§1: before reconciling, Ana''s graph holds both ports and both homes: ' || pg_temp.ana_graph());
 :as_leo
@@ -138,8 +138,8 @@ select pg_temp.check((select r - 'since' - 'until' = '{"superseded": 2, "promote
     '§3: dream ends Rotterdam and Lisbon, binds the two ports, and queues four of the eight names it leaves');
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() =
-    'lives_in place/porto, ships_via felixstowe, works_at company/tagus ceramics',
-    '§3: after dream, Ana ships via the Felixstowe row only, and lives in Porto: ' || pg_temp.ana_graph());
+    'based_in place/porto, ships_via felixstowe, works_at company/tagus ceramics',
+    '§3: after dream, Ana ships via the Felixstowe row only, and is based in Porto: ' || pg_temp.ana_graph());
 :as_operator
 
 -- §4 Ana's agent decides what dream queued, as Ana. Each pair is queued from both sides; binding one side settles
@@ -202,10 +202,10 @@ select pg_temp.check((select e.valid_to is not null and e.valid_from = '2026-01-
     '§5: the Rotterdam fact held from January and has ended, rather than being deleted');
 :as_ana
 select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q$) =
-    'lives_in place/lisbon, ships_via rotterdam, works_at company/tagus ceramics',
+    'based_in place/lisbon, ships_via rotterdam, works_at company/tagus ceramics',
     '§5: as of March she shipped via Rotterdam: ' || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q$), 'nothing'));
 select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$) =
-    'lives_in place/lisbon, prefers mode/rail, prefers mode/road, ships_via rotterdam, works_at company/tagus ceramics',
+    'based_in place/lisbon, prefers mode/rail, prefers mode/road, ships_via rotterdam, works_at company/tagus ceramics',
     '§5: as of May the withdrawn road preference still reads as held (REM-1013): '
     || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$), 'nothing'));
 select pg_temp.check((select string_agg(b.id || ' ' || p.name || ' ' || d.summary, ', ' order by b.departs)
