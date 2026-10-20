@@ -1,28 +1,17 @@
-NOTES=$(psql "$P8_DSN" -Atc "select string_agg(c.content, ' / ' order by r.external_id) from content.resource_chunks c
-          join content.resources r on r.id = c.resource_id where r.external_id like 'ana-%'")
-judge() {
-  jq -n --arg q "$1" --arg notes "$NOTES" '{model: "gpt-4o", temperature: 0,
-      messages: [{role: "user", content: ($q + " Decide from these notes alone, and give your reason in one sentence: " + $notes)}],
-      response_format: {type: "json_schema", json_schema: {name: "verdict", strict: true, schema: {type: "object",
-        additionalProperties: false, required: ["same", "why"],
-        properties: {same: {type: "boolean"}, why: {type: "string"}}}}}}' \
-  | curl -s https://api.openai.com/v1/chat/completions -H "Authorization: Bearer $OPENAI_API_KEY" \
-      -H 'Content-Type: application/json' -d @- | jq -r '.choices[0].message.content'
-}
-PERSON=$(judge 'Are "A. Costa" and "Ana Costa" the same person?')
-COMPANY=$(judge 'Is the organization "Tagus Ceramics" the same as the company "Tagus Ceramics"?')
-echo "$PERSON"; echo "$COMPANY"
-psql "$P8_DSN" -v person="$PERSON" -v company="$COMPANY" <<'SQL'
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'a. costa'),
-         (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id
-           where s.key = 'ana costa'),
-         'gpt-4o', 'llm', :'person'::jsonb) ->> 'moved' as moved
- where (:'person'::jsonb ->> 'same')::boolean;
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'tagus ceramics' and claimed_kind = 'organization'),
-         (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id
-           where s.key = 'tagus ceramics' and s.claimed_kind = 'company'),
-         'gpt-4o', 'llm', :'company'::jsonb) ->> 'merged' as merged
- where (:'company'::jsonb ->> 'same')::boolean;
-SQL
+open_item() { mcp list_judgements '{"status": "open"}' | jq -r --arg l "$1" --arg k "$2" '.result[] | select(.label == $l and .claimed_kind == $k) | .id'; }
+claim() { mcp claim_judgement "{\"id\": \"$1\"}" | jq -c '{label: .evidence.label, kind: .evidence.claimed_kind, candidates: [.evidence.candidates[] | {node_id, summary, candidate, sim}]}'; }
+look() { echo "GRAPH $1:"; mcp query "$(jq -cn --arg q "GRAPH \"$1\"" '{query: $q}')" | jq -c '[.rows[] | "\(.relation) \(.key)"]'; }
+decide() { mcp decide_judgement "$(jq -cn --arg id "$1" --argjson v "$2" --arg r "$3" '{id: $id, verdict: $v, reason: $r}')" \
+             | jq -c '{status, verdict: .verdict.decision, tier, decided_by}'; }
+
+J=$(open_item 'A. Costa' person); claim $J | tee claim.json; look 'A. Costa'; look 'Ana Costa'
+decide $J "{\"decision\": \"bind\", \"target\": $(jq '.candidates[0].node_id' claim.json)}" \
+  'Same surname and initial, a person both times; both work at Tagus Ceramics, and nothing either says conflicts.'
+J=$(open_item 'Ana Costa' person); claim $J
+decide $J '{"decision": "none"}' 'No candidate left: A. Costa, the one it had, is now this node.'
+
+J=$(open_item 'Tagus Ceramics' organization); claim $J | tee claim.json; look 'Ana Costa'
+decide $J "{\"decision\": \"bind\", \"target\": $(jq '.candidates[0].node_id' claim.json)}" \
+  'Same name, typed an organization by one reader and a company by another; Ana works at both, so they are one employer.'
+J=$(open_item 'Tagus Ceramics' company); claim $J
+decide $J '{"decision": "none"}' 'No candidate left: the organization, the one it had, is now this node.'

@@ -1,4 +1,3 @@
-ANA=$(percolate auth token --email ana@example.com)
 reg() { curl -s $REST/rpc/register_text -H 'Content-Profile: content' -H "Authorization: Bearer $ANA" \
           -H 'Content-Type: application/json' -d "$1" | jq -c '{status, resource_id}'; }
 reg '{"p_channel": "memory", "p_external_id": "ana-support-2026-01",
