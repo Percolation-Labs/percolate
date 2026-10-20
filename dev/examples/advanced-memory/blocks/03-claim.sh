@@ -5,4 +5,5 @@ mcp() {
 }
 J=$(mcp list_judgements '{}' | jq -r '.result[] | select(.candidates > 0) | .id')
 CLAIM=$(mcp claim_judgement "{\"id\": \"$J\"}")
-echo "$CLAIM" | jq '.evidence | {key, claimed_kind, candidates: [.candidates[] | {key, entity_type, candidate, sim}]}'
+echo "$CLAIM" | jq '.evidence | {key, claimed_kind, said: [.said[] | {relation, other, title, said}],
+  candidates: [.candidates[] | {key, entity_type, candidate, sim, said: [.said[] | {relation, other, title, said}]}]}'
