@@ -918,6 +918,10 @@ def released_versions() -> list[str]:
     tarball, a vendored copy) the answer is "none published", which produces no
     upgrade scripts and is the correct answer for that situation rather than a
     crash.
+
+    A git clone with no tags is not that situation. A shallow clone has none,
+    and treating it as "none published" writes no upgrade scripts, so the
+    reader's tree passes while CI's fails. That refuses, naming the fetch.
     """
     import subprocess
     try:
@@ -927,6 +931,11 @@ def released_versions() -> list[str]:
         return []
     if out.returncode != 0:
         return []
+    if not out.stdout.split():
+        raise SystemExit(
+            "this clone has no v* tags, so the released versions the upgrade scripts "
+            "start from are unknown (a shallow clone fetches none). Run:\n"
+            "  git fetch --tags --unshallow    # or: git fetch --tags")
     seen = []
     for line in out.stdout.split():
         v = line.lstrip("v")

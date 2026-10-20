@@ -75,6 +75,10 @@ def released_versions(current: str) -> list[str]:
         return []
     if out.returncode != 0:
         return []
+    if not out.stdout.split():
+        fail("this clone has no v* tags, so the released versions the upgrade scripts "
+             "start from are unknown (a shallow clone fetches none). Run:\n"
+             "  git fetch --tags --unshallow    # or: git fetch --tags")
     tags = {t.lstrip("v") for t in out.stdout.split()}
     return sorted((v for v in tags if re.fullmatch(r"\d+\.\d+\.\d+", v) and key(v) < key(current)), key=key)
 
