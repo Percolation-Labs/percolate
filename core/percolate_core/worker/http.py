@@ -129,7 +129,30 @@ def _wait_seconds(spec: dict) -> float:
     return value / 1000
 
 
+async def embed_in_process(spec: dict, ctx: dict) -> dict:
+    """An `embed:` step whose model runs in this process (REM-628).
+
+    aiq.embed_call compiles a marker for an in-process provider into this
+    shape instead of a request: no url, `in_process`, the model id the runtime
+    loads and the dimension its space was built for. The answer is the one an
+    HTTP embed gives after its jsonpath -- `{"result": <vector>}` -- so
+    aiq.land_embeddings reads either without knowing which ran. No request is
+    made, so nothing here touches egress or a credential.
+    """
+    spec = resolve_task(spec, ctx)
+    text = (spec.get("embed") or {}).get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise TerminalError("in-process embed task has no text to embed")
+    if not spec.get("model_id"):
+        raise TerminalError("in-process embed task names no model_id")
+    from ..ingest.local_embed import embed_local
+    (vector,) = await asyncio.to_thread(embed_local, spec["model_id"], [text], 1, spec.get("dim"))
+    return {"status": 200, "result": vector}
+
+
 async def http_call(spec: dict, ctx: dict) -> Any:
+    if spec.get("in_process") and not spec.get("url"):
+        return await embed_in_process(spec, ctx)
     # In a thread (REM-556): build_request resolves the host for the egress
     # check, and a slow DNS answer on the loop also stalls the heartbeat that
     # keeps this task's lease.

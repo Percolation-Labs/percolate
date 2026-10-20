@@ -167,22 +167,22 @@ begin
        and not (select array_agg(chunk_id) from claims.questions_to_embed('qbm-test-3d'))
            @> array[(select v from ids where k = 'qc')],
         'questions_to_embed lists the unembedded question and not the embedded one';
-    -- A model served over HTTP is embedded by an `embed:` matrix. One that runs inside the worker is refused by
-    -- the compiler, by name: that path embeds resources, and a question is not one (the limit §10a2 states).
+    -- A model served over HTTP is embedded by an `embed:` matrix of requests. One that runs inside the worker is
+    -- a matrix of tasks the worker answers locally (REM-628): no url, in_process, the model id and dimension.
     insert into aiq.embedding_models (name, dim, provider, endpoint, is_default, notes)
     values ('qbm-test-http', 3, 'openai', 'https://example.invalid/v1/embeddings', false, 'defined, never called');
     perform claims.install_question_embed_workflow('qbm-test-http', 'embed_questions_test');
     assert (select spec->'steps'->0->'input'->>'rows' from workflow.definitions where name = 'embed_questions_test')
            like '%claims.questions_to_embed(''qbm-test-http'')%',
         'the installed workflow fans out over questions_to_embed';
-    begin
-        perform claims.install_question_embed_workflow('qbm-test-3d', 'embed_questions_local');
-        raise exception 'an in-worker model was given an embed matrix';
-    exception when others then
-        if sqlerrm not like '%runs inside the worker%' then
-            raise exception 'refused for the wrong reason: %', sqlerrm;
-        end if;
-    end;
+    perform claims.install_question_embed_workflow('qbm-test-3d', 'embed_questions_local');
+    assert (select spec#>'{steps,0,input,template,input}' from workflow.definitions where name = 'embed_questions_local')
+           - 'embed' = '{"in_process": true, "model_id": "qbm-test-3d", "dim": 3, "timeout_ms": 30000}'::jsonb,
+        format('an in-worker model compiles to a local task, not a request: %s',
+               (select spec#>'{steps,0,input,template,input}' from workflow.definitions where name = 'embed_questions_local'));
+    assert (select spec#>>'{steps,0,input,template,input,embed,model}' from workflow.definitions
+             where name = 'embed_questions_local') = 'qbm-test-3d',
+        'the local task names the model whose space it lands in';
 end $$;
 
 rollback;
