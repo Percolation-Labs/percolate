@@ -79,6 +79,8 @@ insert into t14_declared (fn, mechanism, why) values
  'refused without agents:update before the agent is looked up, so a non-author learns nothing about which agents exist'),
 ('agentic.land_message_facts(uuid,jsonb)', 'agentic.session_readable',
  'refused unless the caller is signed in and may read the message''s session, and the message is the user''s; it lands only that message''s facts, as agent:<caller> (REM-1056)'),
+('agentic.message_said(uuid)', 'agentic.session_readable',
+ 'one user message''s text, only from a session the caller may read; NULL otherwise, the same for one that does not exist (REM-1055, what a judge quotes)'),
 ('agentic.session_messages(uuid)', 'agentic.session_windows',
  'reads through session_windows, which refuses by name a session the caller may not read (REM-1021); it passes no run, so no run''s input is read (REM-1056)'),
 ('agentic.session_readable(uuid)', 'rbac.may_read',

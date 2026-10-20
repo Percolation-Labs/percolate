@@ -29818,6 +29818,46 @@ create or replace trigger judgements_apply after update on aiq.judgements
     for each row when (new.status = 'decided' and old.status is distinct from 'decided')
     execute function aiq.judgements_apply();
 
+-- WHAT WAS SAID ABOUT A NODE, as the caller may read it (bob, 20 Oct). A judge
+-- given only names and a similarity score cannot quote its evidence, and both
+-- tutorials' reasons cited sentences the tools had never shown. So each fact
+-- touching the node comes with where it was said: the message (session and
+-- message id, and its text) or the resource (id, title, and the chunk that
+-- names it), cut to 300 characters. SECURITY INVOKER: aiq.edges, the messages
+-- and the chunks are read under the caller's own policies, so a fact from a
+-- memory they may not read is simply not here.
+create or replace function aiq.judgement_said(p_node uuid, p_limit int default 5)
+returns jsonb language sql stable set search_path = pg_catalog, public as $$
+    select coalesce(jsonb_agg(x), '[]'::jsonb) from (
+        select jsonb_strip_nulls(jsonb_build_object(
+                   'relation', e.relation,
+                   'direction', case when e.src_id = p_node then 'out' else 'in' end,
+                   'other', ok.key,
+                   'session_id', s->>'session_id',
+                   'message_id', s->'message_ids'->>0,
+                   'resource_id', s->>'resource_id',
+                   'title', r.title,
+                   'said', left(coalesce(m.content, ch.content), 300))) as x
+          from aiq.edges e
+          join aiq.node_keys ok
+            on ok.node_id = case when e.src_id = p_node then e.dst_id else e.src_id end
+           and ok.kind = 'canonical'
+          cross join lateral jsonb_array_elements(coalesce(e.provenance->'sources', '[]'::jsonb)) s
+          left join lateral (select agentic.message_said((s->'message_ids'->>0)::uuid) as content
+                              where pg_input_is_valid(s->'message_ids'->>0, 'uuid')) m on true
+          left join content.resources r
+            on pg_input_is_valid(s->>'resource_id', 'uuid') and r.id = (s->>'resource_id')::uuid
+          left join lateral (
+              select c.content from content.resource_chunks c, aiq.nodes me
+               where c.resource_id = r.id and me.id = p_node
+                 and c.content ilike '%' || coalesce(me.summary, '') || '%'
+               order by c.ordinal limit 1) ch on true
+         where p_node in (e.src_id, e.dst_id)
+           and aiq.edge_is_current(e.valid_from, e.valid_to, now())
+         order by e.created_at desc
+         limit greatest(least(coalesce(p_limit, 5), 20), 1)) t;
+$$;
+
 -- What the claimant may see of an item: the candidates it can see, and how to
 -- decide it in words an agent passes through.
 create or replace function aiq.judgement_for_judge(p_id uuid)
@@ -29825,8 +29865,11 @@ returns jsonb language plpgsql stable set search_path = pg_catalog, public as $$
 declare j aiq.judgements; v_ev jsonb; v_ids text;
 begin
     select * into j from aiq.judgements where id = p_id;
-    v_ev := j.evidence || jsonb_build_object('candidates', coalesce(
-        (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
+    v_ev := j.evidence || jsonb_build_object(
+        'said', aiq.judgement_said(j.subject_node_id),
+        'candidates', coalesce(
+        (select jsonb_agg(c || jsonb_build_object('said', aiq.judgement_said((c->>'node_id')::uuid, 3)))
+           from jsonb_array_elements(j.evidence->'candidates') c
           where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
     select string_agg(c->>'node_id' || ' (' || coalesce(c->>'key', c->>'summary')
                       || coalesce(', ' || (c->>'candidate'), '') || ')', ', ')
@@ -29836,7 +29879,8 @@ begin
         'evidence', v_ev,
         'how_to_decide', format(
             'Decide whether %L, named as a %s, is the same thing as one of the candidates. '
-            'Read what was said about it first, as yourself: aiq.query(''LOOKUP "%s"'') or GRAPH. '
+            'What was said about it and about each candidate is in evidence.said, with the message or resource each fact came from: quote it in your reason. '
+            'For more, read as yourself: aiq.query(''LOOKUP "%s"'') or GRAPH. '
             'Then decide it -- the decide_judgement tool over MCP, or aiq.complete_judgement(%L, verdict, reason) in SQL -- with verdict one of: '
             '{"decision":"bind","target":"<node_id>"} where target is one of %s; '
             '{"decision":"distinct"} if it is none of them (recorded against each, so it is not asked again); '
@@ -30256,11 +30300,13 @@ revoke execute on function aiq.judgements_apply()                          from 
 -- The four a judge calls, as themselves: SECURITY INVOKER, under the table's
 -- row policy and its guard trigger (see JUDGEMENTS).
 revoke execute on function aiq.judgement_for_judge(uuid)                   from public;
+revoke execute on function aiq.judgement_said(uuid, int)                   from public;
 revoke execute on function aiq.claim_judgement(text[], uuid, interval)     from public;
 revoke execute on function aiq.release_judgement(uuid)                     from public;
 revoke execute on function aiq.complete_judgement(uuid, jsonb, text, text) from public;
 revoke execute on function aiq.list_judgements(text, int)                  from public;
 grant execute on function aiq.judgement_for_judge(uuid)                   to authenticated;
+grant execute on function aiq.judgement_said(uuid, int)                   to authenticated;
 grant execute on function aiq.claim_judgement(text[], uuid, interval)     to authenticated;
 grant execute on function aiq.release_judgement(uuid)                     to authenticated;
 grant execute on function aiq.complete_judgement(uuid, jsonb, text, text) to authenticated;
@@ -31343,6 +31389,20 @@ returns jsonb as $$
 $$ language sql stable security definer set search_path = pg_catalog, public;
 revoke execute on function agentic.session_messages(uuid) from public;
 grant execute on function agentic.session_messages(uuid) to authenticated;
+
+-- One message's text, for a judge quoting where a fact came from
+-- (aiq.judgement_said). The caller holds no grant on agentic.messages, so it
+-- is read here, and only from a session the caller may read -- the gate
+-- land_message_facts already uses -- and only what the user wrote. Anything
+-- else is NULL, the same for a message that does not exist.
+create or replace function agentic.message_said(p_message_id uuid)
+returns text as $$
+    select m.content from agentic.messages m
+     where m.id = p_message_id and m.role = 'user'
+       and agentic.session_readable(m.session_id);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+revoke execute on function agentic.message_said(uuid) from public;
+grant execute on function agentic.message_said(uuid) to authenticated;
 
 -- One message's facts, landed as the caller's agent. The graph is the
 -- extractor's own shape ({"nodes":[{"k","n"}...], "edges":[{"s","t","r"}...]}),

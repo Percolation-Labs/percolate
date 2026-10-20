@@ -835,6 +835,20 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 revoke execute on function agentic.session_messages(uuid) from public;
 grant execute on function agentic.session_messages(uuid) to authenticated;
 
+-- One message's text, for a judge quoting where a fact came from
+-- (aiq.judgement_said). The caller holds no grant on agentic.messages, so it
+-- is read here, and only from a session the caller may read -- the gate
+-- land_message_facts already uses -- and only what the user wrote. Anything
+-- else is NULL, the same for a message that does not exist.
+create or replace function agentic.message_said(p_message_id uuid)
+returns text as $$
+    select m.content from agentic.messages m
+     where m.id = p_message_id and m.role = 'user'
+       and agentic.session_readable(m.session_id);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+revoke execute on function agentic.message_said(uuid) from public;
+grant execute on function agentic.message_said(uuid) to authenticated;
+
 -- One message's facts, landed as the caller's agent. The graph is the
 -- extractor's own shape ({"nodes":[{"k","n"}...], "edges":[{"s","t","r"}...]}),
 -- the one land_graph_fanout passes to upsert_graph.
