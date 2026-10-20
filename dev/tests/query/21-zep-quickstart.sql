@@ -163,11 +163,11 @@ end $$;
 select pg_temp.check((select count(*) from aiq.judgements where status = 'open') = 4,
     '§4: the four queued items wait for Ana''s agent');
 select pg_temp.decide('a. costa', 'person', true,
-    'The March email is signed A. Costa, Logistics, Tagus Ceramics; Ana Costa works at Tagus Ceramics. A. is Ana.');
-select pg_temp.decide('ana costa', 'person', false, 'Decided with its twin: A. Costa is now this node.');
+    'Same surname and initial, a person both times; both work at Tagus Ceramics, and nothing either says conflicts.');
+select pg_temp.decide('ana costa', 'person', false, 'No candidate left: A. Costa, the one it had, is now this node.');
 select pg_temp.decide('tagus ceramics', 'organization', true,
-    'One company, typed as a company in January and an organization in March.');
-select pg_temp.decide('tagus ceramics', 'company', false, 'Decided with its twin: the organization is now this node.');
+    'Same name, typed an organization by one reader and a company by another; Ana works at both, so they are one employer.');
+select pg_temp.decide('tagus ceramics', 'company', false, 'No candidate left: the organization, the one it had, is now this node.');
 :as_operator
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%' and pg_temp.ana_graph() like '%prefers mode/road%'
