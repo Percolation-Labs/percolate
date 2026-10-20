@@ -29518,11 +29518,18 @@ declare v_n int;
 begin
     with ins as (
         insert into aiq.judgements (kind, subject_node_id, evidence, queued_by, org_id)
-        select 'bind', sn.id, aiq.soft_bind_evidence(s.id), p_queued_by,
+        select 'bind', sn.id, ev.evidence, p_queued_by,
                coalesce(s.org_id, rbac.shared_org_id())
           from aiq.soft_nodes s
           join aiq.nodes sn on sn.entity_type = 'soft' and sn.entity_id = s.id
+          cross join lateral (select aiq.soft_bind_evidence(s.id) as evidence) ev
          where s.id = any(p_soft_ids) and s.resolved_node_id is null
+           -- ONLY A CASE WITH A CANDIDATE (bob, 20 Oct). A name nothing is
+           -- like can only be decided "none", so it sat open forever and
+           -- crowded the queue: four of five in the advanced article. It stays
+           -- counted in dream's soft_left_for_a_judge, and is queued on the
+           -- first run that finds it a candidate.
+           and jsonb_array_length(ev.evidence->'candidates') > 0
         on conflict (kind, subject_node_id) where status in ('open','claimed','to_human') do nothing
         returning 1)
     select count(*) into v_n from ins;
@@ -29537,6 +29544,12 @@ begin
     update aiq.judgements j set status = 'moot', claimed_by = null, lease_until = null
      where j.kind = 'bind' and j.status in ('open','claimed','to_human')
        and not exists (select 1 from aiq.nodes n where n.id = j.subject_node_id and n.entity_type = 'soft');
+    -- An open item left with no candidate -- queued by 0.2.25, which queued
+    -- every leftover name -- leaves the queue the same way; it comes back when
+    -- a candidate does.
+    update aiq.judgements j set status = 'moot'
+     where j.kind = 'bind' and j.status = 'open'
+       and jsonb_array_length(coalesce(j.evidence->'candidates', '[]'::jsonb)) = 0;
     return v_n;
 end;
 $$;
@@ -29678,12 +29691,12 @@ begin
         'how_to_decide', format(
             'Decide whether %L, named as a %s, is the same thing as one of the candidates. '
             'Read what was said about it first, as yourself: aiq.query(''LOOKUP "%s"'') or GRAPH. '
-            'Then call aiq.complete_judgement(%L, verdict, reason) with verdict one of: '
+            'Then decide it -- the decide_judgement tool over MCP, or aiq.complete_judgement(%L, verdict, reason) in SQL -- with verdict one of: '
             '{"decision":"bind","target":"<node_id>"} where target is one of %s; '
             '{"decision":"distinct"} if it is none of them (recorded against each, so it is not asked again); '
             '{"decision":"none"} to leave it unresolved and say why; '
             '{"decision":"human"} to pass it to a person. '
-            'Not sure: aiq.release_judgement(%L) gives it back with nothing recorded. Your claim ends at %s.',
+            'Not sure: release_judgement (aiq.release_judgement(%L)) gives it back with nothing recorded. Your claim ends at %s.',
             coalesce(v_ev->>'label', v_ev->>'key'), v_ev->>'claimed_kind', v_ev->>'key', j.id,
             coalesce(v_ids, 'none (no candidate: distinct does nothing, so use none or human)'),
             j.id, j.lease_until));
@@ -29801,6 +29814,14 @@ returns jsonb language sql stable set search_path = pg_catalog, public as $$
                                   'label', coalesce(j.evidence->>'label', j.evidence->>'key'),
                                   'claimed_kind', j.evidence->>'claimed_kind',
                                   'candidates', jsonb_array_length(coalesce(j.evidence->'candidates', '[]'::jsonb)),
+                                  -- The candidates themselves, as the caller may see
+                                  -- them, so a judge can choose before claiming (bob, 20 Oct).
+                                  'candidate_nodes', coalesce((
+                                      select jsonb_agg(jsonb_build_object('node_id', c->'node_id', 'key', c->'key',
+                                                                          'candidate', c->'candidate', 'summary', c->'summary'))
+                                        from jsonb_array_elements(j.evidence->'candidates') c
+                                       where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')),
+                                      '[]'::jsonb),
                                   'queued_at', j.queued_at, 'verdict', j.verdict, 'reason', j.reason,
                                   'decided_by', j.decided_by, 'tier', j.tier, 'decided_at', j.decided_at) as x
           from aiq.judgements j

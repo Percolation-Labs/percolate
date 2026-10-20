@@ -4,8 +4,9 @@
 -- then a person's job by hand. Now it is a row in aiq.judgements, and a
 -- connected agent claims it, decides, and the decision carries reason,
 -- decided_by and tier. The checks, as a signed-in member:
---   1. dream queues the alias, once, with its candidates; a rule-decided name
---      is not queued;
+--   1. dream queues the alias, once, with its candidates, and list_judgements
+--      shows them; a rule-decided name, and a name with no candidate, are not
+--      queued;
 --   2. claim returns it with how_to_decide; a second claimer gets nothing;
 --   3. a bind to something that is not a candidate is refused, and so is a
 --      verdict written straight onto the row by someone without the claim;
@@ -39,6 +40,11 @@ insert into demo.companies (id, name, org_id)
 select gen_random_uuid(), 'Acme Corporation Q22', s.org_id from aiq.soft_nodes s where s.key = 'acme corp q22';
 insert into demo.companies (id, name, org_id)
 select gen_random_uuid(), 'Borealis Q22', s.org_id from aiq.soft_nodes s where s.key = 'borealis q22';
+-- Zephyr gets a typed lookalike, so it has a candidate to be released over in 5.
+insert into demo.companies (id, name, org_id)
+select gen_random_uuid(), 'Zephyr Group Q22', s.org_id from aiq.soft_nodes s where s.key = 'zephyr holdings q22';
+-- A name nothing is like: counted as left for a judge, never queued.
+select aiq.upsert_graph('{"nodes":[{"k":"company","n":"Xylophonic Quahog Q22"}],"edges":[]}', '{"agent":"knit","run_id":"q22-lone"}');
 
 select aiq.dream() as first \gset
 select pg_temp.check((:'first'::jsonb->>'queued_for_a_judge')::int >= 1, '1. dream queued nothing: ' || :'first');
@@ -48,6 +54,10 @@ select pg_temp.check(exists (select 1 from aiq.judgements where kind = 'bind' an
     '1. the alias was not queued with a candidate');
 select pg_temp.check(not exists (select 1 from aiq.judgements where evidence->>'key' = 'borealis q22'),
     '1. a name dream bound by rule was queued for a judge');
+select pg_temp.check(not exists (select 1 from aiq.judgements where evidence->>'key' = 'xylophonic quahog q22'),
+    '1. a name with no candidate was queued: it can only ever be decided none');
+select pg_temp.check((aiq.list_judgements()->0->'candidate_nodes'->0->>'node_id') is not null,
+    '1. list_judgements does not show an open item''s candidates');
 select id as acme_j from aiq.judgements where evidence->>'key' = 'acme corp q22' \gset
 select id as zephyr_j from aiq.judgements where evidence->>'key' = 'zephyr holdings q22' \gset
 select n.id as acme_typed from aiq.nodes n join aiq.node_keys k on k.node_id = n.id
