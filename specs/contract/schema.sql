@@ -524,7 +524,7 @@ declare
         'research.run_results', 'research.run_evaluations', 'research.run_decisions',
         -- The claims graph (REM-473): claims, the transactions that minted them and every expresses link.
         'claims.execution_receipts', 'claims.execution_inputs', 'claims.execution_results',
-        'claims.answered', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
+        'claims.answered', 'claims.challenge_floors', 'claims.challenged', 'claims.cites', 'claims.claims', 'claims.consensus', 'claims.erasures', 'claims.expresses', 'claims.frames', 'claims.origin_links', 'claims.origins', 'claims.questions', 'claims.relations', 'claims.resolutions', 'claims.tx',
         -- Which remembered facts bear on which questions (REM-996): proposed links and who confirmed them.
         'claims.bears_on',
         'agentic.agent_versions',

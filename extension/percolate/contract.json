@@ -280,7 +280,8 @@
       "admits": [
         "bind",
         "merge",
-        "withdraw"
+        "withdraw",
+        "challenge"
       ],
       "column": "kind",
       "enforced_by": "check",
@@ -497,6 +498,15 @@
       "schema": "claims",
       "table": "bears_on",
       "vocabulary": null
+    },
+    {
+      "admits": null,
+      "column": "model",
+      "enforced_by": "reference",
+      "members": "deployment",
+      "schema": "claims",
+      "table": "challenge_floors",
+      "vocabulary": "aiq.embedding_models"
     },
     {
       "admits": [
