@@ -2,7 +2,7 @@
 # Every block of "Percolate for Zep users", in order, from an empty directory, on part one's stack (the LangGraph
 # tour), against a real model:
 #
-#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.25 dev/examples/zep-memory/run.sh [workdir]
+#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.26 dev/examples/zep-memory/run.sh [workdir]
 #
 # The SQL blocks that need no model are asserted by dev/tests/query/21-zep-quickstart.sql. This runs the rest too:
 # the assistant's turns, reflect_session with gpt-4o, and gpt-4o judging an alias. Each block's input and output
@@ -14,7 +14,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.25}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.26}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY
@@ -29,6 +29,7 @@ P8_AGENT_PORT=5793
 P8_CONTENT_PORT=5794
 P8_MINIO_PORT=5795
 P8_MINIO_CONSOLE_PORT=5796
+P8_QUERY_MCP_PORT=5797
 OPENAI_API_KEY=$OK
 ENV
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }

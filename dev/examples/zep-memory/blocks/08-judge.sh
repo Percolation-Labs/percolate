@@ -1,28 +1,17 @@
-NOTES=$(psql "$P8_DSN" -Atc "select string_agg(c.content, ' / ' order by r.external_id) from content.resource_chunks c
-          join content.resources r on r.id = c.resource_id where r.external_id like 'ana-%'")
-judge() {
-  jq -n --arg q "$1" --arg notes "$NOTES" '{model: "gpt-4o", temperature: 0,
-      messages: [{role: "user", content: ($q + " Decide from these notes alone, and give your reason in one sentence: " + $notes)}],
-      response_format: {type: "json_schema", json_schema: {name: "verdict", strict: true, schema: {type: "object",
-        additionalProperties: false, required: ["same", "why"],
-        properties: {same: {type: "boolean"}, why: {type: "string"}}}}}}' \
-  | curl -s https://api.openai.com/v1/chat/completions -H "Authorization: Bearer $OPENAI_API_KEY" \
-      -H 'Content-Type: application/json' -d @- | jq -r '.choices[0].message.content'
+open_item() { mcp list_judgements '{"status": "open"}' | jq -r --arg l "$1" --arg k "$2" '.result[] | select(.label == $l and .claimed_kind == $k) | .id'; }
+decide() { mcp decide_judgement "$(jq -cn --arg id "$1" --argjson v "$2" --arg r "$3" '{id: $id, verdict: $v, reason: $r}')" \
+             | jq -c '{status, verdict: .verdict.decision, tier, decided_by}'; }
+bind() {
+  J=$(open_item "$1" "$2")
+  T=$(mcp claim_judgement "{\"id\": \"$J\"}" | jq -r '.evidence.candidates[0].node_id')
+  decide "$J" "{\"decision\": \"bind\", \"target\": \"$T\"}" "$3"
 }
-PERSON=$(judge 'Are "A. Costa" and "Ana Costa" the same person?')
-COMPANY=$(judge 'Is the organization "Tagus Ceramics" the same as the company "Tagus Ceramics"?')
-echo "$PERSON"; echo "$COMPANY"
-psql "$P8_DSN" -v person="$PERSON" -v company="$COMPANY" <<'SQL'
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'a. costa'),
-         (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id
-           where s.key = 'ana costa'),
-         'gpt-4o', 'llm', :'person'::jsonb) ->> 'moved' as moved
- where (:'person'::jsonb ->> 'same')::boolean;
-select aiq.promote_soft_node(
-         (select id from aiq.soft_nodes where key = 'tagus ceramics' and claimed_kind = 'organization'),
-         (select n.id from aiq.nodes n join aiq.soft_nodes s on n.entity_type = 'soft' and n.entity_id = s.id
-           where s.key = 'tagus ceramics' and s.claimed_kind = 'company'),
-         'gpt-4o', 'llm', :'company'::jsonb) ->> 'merged' as merged
- where (:'company'::jsonb ->> 'same')::boolean;
-SQL
+twin() {
+  J=$(open_item "$1" "$2")
+  mcp claim_judgement "{\"id\": \"$J\"}" > /dev/null
+  decide "$J" '{"decision": "none"}' "$3"
+}
+bind 'A. Costa' person 'The March email is signed A. Costa, Logistics, Tagus Ceramics; Ana Costa works at Tagus Ceramics. A. is Ana.'
+twin 'Ana Costa' person 'Decided with its twin: A. Costa is now this node.'
+bind 'Tagus Ceramics' organization 'One company, typed as a company in January and an organization in March.'
+twin 'Tagus Ceramics' company 'Decided with its twin: the organization is now this node.'

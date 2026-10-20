@@ -8,7 +8,3 @@ curl -s $AGENT/chat -D ana-headers.txt -H "Authorization: Bearer $ANA" -H 'Conte
        "From this month our containers go through Felixstowe, and I am now based in our Porto office. Which port will my next booking use?"}]}' \
   | jq -r '.choices[0].message.content // .'
 SESSION=$(grep -i x-p8-session-id ana-headers.txt | tr -d '\r' | cut -d' ' -f2)
-RUN=$(curl -s $REST/rpc/start_workflow -H 'Content-Profile: workflow' \
-  -H "Authorization: Bearer $ANA" -H 'Content-Type: application/json' \
-  -d "{\"p_name\": \"reflect_session\", \"p_input\": {\"session_id\": \"$SESSION\", \"speaker\": \"Ana Costa\"}}" | jq -r .)
-show $RUN
