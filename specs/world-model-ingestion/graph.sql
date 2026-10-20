@@ -793,7 +793,14 @@ begin
                 using hint = 'pass the resource alone; its org is read from it';
         end if;
         v_org := rbac.org_or_shared(v_res_org);
-        v_dedup := jsonb_build_object('resource_id', p_context->>'resource_id');
+        -- A SOURCE IS A READING: the resource, the agent and the run (REM-1058).
+        -- Keyed by the resource alone, a second reader of one document matched
+        -- the first reader's entry and was dropped, so withdrawing the first
+        -- ended a fact the second still supported. A re-run by the same agent in
+        -- the same run still appends nothing.
+        v_dedup := jsonb_strip_nulls(jsonb_build_object('resource_id', p_context->>'resource_id',
+                                                        'agent', p_context->>'agent',
+                                                        'run_id', p_context->>'run_id'));
     -- A CONVERSATION IS A MEMORY TOO (REM-969). What a session's messages
     -- state is scoped by the SESSION, exactly as a resource scopes what was
     -- read out of it: its org, visibility and owner. Without this a fact from
@@ -819,6 +826,8 @@ begin
         end if;
         v_org := rbac.org_or_shared(v_res_org);
         v_dedup := jsonb_strip_nulls(jsonb_build_object('session_id', p_context->>'session_id',
+                                                        'agent', p_context->>'agent',
+                                                        'run_id', p_context->>'run_id',
                                                         'message_ids', p_context->'message_ids'));
     else
         v_vis := rbac.default_visibility(v_org);
