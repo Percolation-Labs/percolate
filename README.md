@@ -40,6 +40,21 @@ CONTAINER=p8-mine DB=p8mine dev/check.sh
 `python3 extension/percolate/build-sql.py`. Its upgrade scripts are written for every released version, read from
 the `v*` tags.
 
+## What is not in this repository
+
+Percolate was cut out of Percolation Labs' internal repository, and these stayed there on purpose:
+
+- the work board, the decision records, postmortems and the team's working notes;
+- research notes, experiments and the evaluation fixtures built from private data;
+- the hosted application at percolationlabs.ai, its deployment and production configuration;
+- the source of percolate-core, which `core/` mirrors read-only (see the table above);
+- for now, the prose design documents behind `specs/`: only their SQL moved at the cut, and whether the prose is
+  published is being decided.
+
+Some comments and tests here still point at those: a path into the internal repository, or a prose spec that is
+not in this tree. They are being replaced with the point itself; `dev/no-private-citations.py --check`, one of the tree gates,
+refuses a new one, and `--all` counts what is left.
+
 ## The earlier Percolate
 
 The Python project that used this name until October 2026 (`percolate-db` on PyPI) is now

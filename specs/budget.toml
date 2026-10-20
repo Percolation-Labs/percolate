@@ -1,0 +1,35 @@
+# HOW BIG THE EXTENSION IS, declared rather than observed.
+#
+# Every other gate in dev/check.sh asks whether a statement is well formed. None
+# of them asks how many statements there are, which is how this collection went
+# from 52 tables to 117 in fourteen days with a green board the whole way, and
+# how it dropped none: adding was free and nobody had to decide anything.
+#
+# So the totals live here, and `dev/the-schema-has-a-budget.py` refuses a tree
+# whose specs disagree with them. Adding a table means editing a number in this
+# file, in the same commit, where a reviewer sees it. Removing one means editing
+# it downward -- the check is two-sided on purpose, so the budget cannot hoard
+# headroom for a later addition nobody argued for.
+#
+# THIS IS NOT A LIMIT. Nothing here says 117 is the right number and no gate
+# will stop you raising it. It says the number moved because somebody moved it,
+# and the commit that moved it is the place they said why. A ceiling would get
+# raised on the way past; a declaration has to be walked through.
+#
+# Counted over the spec files in build-sql.py's ORDER -- what reaches a
+# database. A file held out of ORDER is a proposal and costs nothing until it
+# ships.
+#
+# WHAT EACH NUMBER HAS BEEN:
+#   tables     52 on 2026-09-06 (0.1.6) · 90 on 09-16 (0.2.10) · 117 on 09-20
+#   functions  228 on 2026-09-06 · 390 on 09-16 · 472 on 09-20
+#   20 Oct (REM-1080): moved here from the private tree, which declared 118 / 48
+#   / 465 for its frozen copy; this tree had grown to 124 / 49 / 520 uncounted.
+#
+# `public.percolate_build` is live and not counted: the image build creates it,
+# not specs/.
+
+[declared]
+tables    = 124
+views     = 49
+functions = 520
