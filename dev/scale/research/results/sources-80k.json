@@ -1,0 +1,134 @@
+{
+ "db": "s80000",
+ "claims": 960006,
+ "probes": {
+  "get_package head": {
+   "buffers": 132,
+   "ms": 1.344
+  },
+  "get_package draft-1": {
+   "buffers": 102,
+   "ms": 2.363
+  },
+  "list_packages (all readable)": {
+   "buffers": 1851950,
+   "ms": 18409.901
+  },
+  "list_packages first 20": {
+   "buffers": 1851950,
+   "ms": 38013.309
+  },
+  "list_packages owned": {
+   "buffers": 207,
+   "ms": 2.849
+  },
+  "list_listed first 20 (fix)": {
+   "buffers": 332,
+   "ms": 2.481
+  },
+  "search_claims common (fix)": {
+   "buffers": 44510,
+   "ms": 626.239
+  },
+  "search_claims rare (fix)": {
+   "buffers": 7,
+   "ms": 0.19
+  },
+  "trust": {
+   "buffers": 181,
+   "ms": 6.353
+  },
+  "trust_state": {
+   "buffers": 98,
+   "ms": 3.123
+  },
+  "readable": {
+   "buffers": 8,
+   "ms": 0.346
+  },
+  "revision_readable": {
+   "buffers": 12,
+   "ms": 0.73
+  },
+  "visible_head": {
+   "buffers": 26,
+   "ms": 0.476
+  },
+  "work_readable_in_full": {
+   "buffers": 8,
+   "ms": 0.502
+  },
+  "endorsements_affected_by": {
+   "buffers": 112,
+   "ms": 3.319
+  },
+  "revision_signals": {
+   "buffers": 22,
+   "ms": 0.813
+  },
+  "my_saves": {
+   "buffers": 58,
+   "ms": 1.403
+  },
+  "claims of a revision": {
+   "buffers": 76,
+   "ms": 1.478
+  },
+  "claims matching a word": {
+   "buffers": 421983,
+   "ms": 6515.057
+  },
+  "claims matching a rare word": {
+   "buffers": 20649779,
+   "ms": 167365.344
+  },
+  "search_sources common": {
+   "buffers": 43081,
+   "ms": 283.028
+  },
+  "search_sources no match": {
+   "buffers": 4,
+   "ms": 0.128
+  },
+  "a source's other citations": {
+   "buffers": 1214,
+   "ms": 25.696
+  },
+  "comments on a revision": {
+   "buffers": 3,
+   "ms": 0.027
+  },
+  "useful votes on a revision": {
+   "buffers": 3,
+   "ms": 0.031
+  },
+  "submit_package": {
+   "buffers": 974,
+   "ms": 7.29
+  },
+  "revise_package": {
+   "buffers": 1046,
+   "ms": 16.669
+  },
+  "set_useful (another's work)": {
+   "buffers": 92,
+   "ms": 2.718
+  },
+  "add_comment": {
+   "buffers": 58,
+   "ms": 1.677
+  },
+  "endorse": {
+   "buffers": 54,
+   "ms": 0.987
+  },
+  "set_saved": {
+   "buffers": 33,
+   "ms": 2.161
+  },
+  "erase_work (operator)": {
+   "buffers": 1399,
+   "ms": 6.647
+  }
+ }
+}

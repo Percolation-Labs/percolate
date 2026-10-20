@@ -1,0 +1,122 @@
+{
+ "db": "s1e4",
+ "claims": 96006,
+ "probes": {
+  "get_package head": {
+   "buffers": 103,
+   "ms": 1.502
+  },
+  "get_package draft-1": {
+   "buffers": 80,
+   "ms": 5.777
+  },
+  "list_packages (all readable)": {
+   "buffers": 157584,
+   "ms": 3637.995
+  },
+  "list_packages first 20": {
+   "buffers": 157584,
+   "ms": 3574.016
+  },
+  "list_packages owned": {
+   "buffers": 297,
+   "ms": 67.259
+  },
+  "trust": {
+   "buffers": 817,
+   "ms": 9.507
+  },
+  "trust_state": {
+   "buffers": 100,
+   "ms": 2.537
+  },
+  "readable": {
+   "buffers": 7,
+   "ms": 0.541
+  },
+  "revision_readable": {
+   "buffers": 10,
+   "ms": 0.63
+  },
+  "visible_head": {
+   "buffers": 22,
+   "ms": 2.186
+  },
+  "work_readable_in_full": {
+   "buffers": 7,
+   "ms": 0.565
+  },
+  "endorsements_affected_by": {
+   "buffers": 93,
+   "ms": 9.008
+  },
+  "revision_signals": {
+   "buffers": 648,
+   "ms": 10.659
+  },
+  "my_saves": {
+   "buffers": 47,
+   "ms": 1.582
+  },
+  "claims of a revision": {
+   "buffers": 64,
+   "ms": 1.032
+  },
+  "claims matching a word": {
+   "buffers": 194149,
+   "ms": 3661.165
+  },
+  "claims matching a rare word": {
+   "buffers": 1776692,
+   "ms": 40108.376
+  },
+  "aiq.lexical, a common term": {
+   "buffers": 1776693,
+   "ms": 41077.813
+  },
+  "aiq.lexical, a rare term": {
+   "buffers": 1776693,
+   "ms": 28693.743
+  },
+  "a source's other citations": {
+   "buffers": 2953,
+   "ms": 31.909
+  },
+  "comments on a revision": {
+   "buffers": 140,
+   "ms": 1.373
+  },
+  "useful votes on a revision": {
+   "buffers": 3,
+   "ms": 0.1
+  },
+  "submit_package": {
+   "buffers": 365,
+   "ms": 4.343
+  },
+  "revise_package": {
+   "buffers": 477,
+   "ms": 17.622
+  },
+  "set_useful (another's work)": {
+   "buffers": 79,
+   "ms": 2.746
+  },
+  "add_comment": {
+   "buffers": 51,
+   "ms": 1.262
+  },
+  "endorse": {
+   "buffers": 49,
+   "ms": 2.883
+  },
+  "set_saved": {
+   "buffers": 30,
+   "ms": 3.868
+  },
+  "erase_work (operator)": {
+   "buffers": 10117,
+   "ms": 35.825
+  }
+ }
+}
