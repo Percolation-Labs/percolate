@@ -3937,8 +3937,21 @@ create or replace function aiq.register_lexical_source(
     p_name text, p_source_table text,
     p_content_col text default 'content', p_regconfig text default 'english'
 ) returns void as $$
-declare v_short text := split_part(p_source_table, '.', 2);
+declare
+    v_short text := split_part(p_source_table, '.', 2);
+    v_type  text;
 begin
+    -- Every mode returns the row's id as chunk_id uuid, so an id of another type registered cleanly and failed at
+    -- query time as "Returned type integer does not match expected type uuid" (REM-1007). Refused here, by name.
+    select format_type(a.atttypid, a.atttypmod) into v_type
+      from pg_attribute a
+     where a.attrelid = p_source_table::regclass and a.attname = 'id' and a.attnum > 0 and not a.attisdropped;
+    if v_type is distinct from 'uuid' then
+        raise exception 'lexical source % needs a uuid id column: %.id is %', p_name, p_source_table,
+                        coalesce(v_type, 'missing')
+            using errcode = 'datatype_mismatch',
+                  hint = 'search returns each row''s id as chunk_id uuid';
+    end if;
     insert into aiq.lexical_sources (name, source_table, content_col, regconfig)
     values (p_name, p_source_table, p_content_col, p_regconfig)
     on conflict (name) do update set source_table = excluded.source_table,
