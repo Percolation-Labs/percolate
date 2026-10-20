@@ -23254,12 +23254,15 @@ begin
 
     select config->>'ingest_workflow' into v_workflow from content.channels where id = v_channel;
     if v_workflow is not null then
-        -- The external id makes the run idempotent per resource, as the upload
-        -- path does: saving twice before the first run finishes does not queue
-        -- the same document twice.
+        -- The external id makes the run idempotent per resource AND TEXT: saving
+        -- the same words twice before the first run finishes queues them once.
+        -- Keyed by the resource alone it was idempotent forever, so a later
+        -- save of changed text got the finished first run back and its new
+        -- chunks were never embedded (REM-1107; 135 chunks of 18 readings on
+        -- production on 20 Oct).
         v_run := workflow.start_workflow(
             v_workflow, jsonb_build_object('resource_id', v_res, 'org_id', p_org_id),
-            'text:' || v_res::text, p_trace_id);
+            'text:' || v_res::text || ':' || v_hash, p_trace_id);
     end if;
 
     return jsonb_build_object('resource_id', v_res, 'status',
