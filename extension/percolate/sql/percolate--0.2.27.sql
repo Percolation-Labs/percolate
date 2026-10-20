@@ -29665,6 +29665,30 @@ begin
     update aiq.judgements
        set result = jsonb_build_object('resolution_ids', to_jsonb(v_res), 'distinction_ids', to_jsonb(v_dist))
      where id = new.id;
+
+    -- THE TWIN SETTLES WITH IT (jack, 20 Oct). A pair of aliases is queued
+    -- from both sides -- "A. Costa, candidate Ana Costa" and "Ana Costa,
+    -- candidate A. Costa" -- and binding one evicts the node the other
+    -- proposed. So the bound node leaves every open item's candidates, and an
+    -- item left with none is moot, naming the judgement that settled it,
+    -- rather than open with nothing a judge could do but close it by hand.
+    if new.verdict->>'decision' = 'bind' then
+        update aiq.judgements j
+           set evidence = j.evidence || jsonb_build_object('candidates', coalesce(
+                   (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
+                     where c->>'node_id' <> new.subject_node_id::text), '[]'::jsonb))
+         where j.id <> new.id and j.status in ('open','to_human')
+           and j.evidence->'candidates' @> jsonb_build_array(jsonb_build_object('node_id', new.subject_node_id::text));
+        update aiq.judgements j
+           set status = 'moot',
+               evidence = j.evidence || jsonb_build_object('settled_by', jsonb_build_object(
+                   'judgement', new.id, 'bound', new.subject_node_id, 'onto', new.verdict->>'target'))
+         where j.id <> new.id and j.status = 'open'
+           and jsonb_array_length(coalesce(j.evidence->'candidates', '[]'::jsonb)) = 0
+           and j.evidence ? 'candidates'
+           and exists (select 1 from aiq.nodes n where n.id = j.subject_node_id)
+           and j.subject_node_id = (new.verdict->>'target')::uuid;
+    end if;
     return null;
 end;
 $$;

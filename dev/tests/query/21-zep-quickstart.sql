@@ -142,8 +142,8 @@ select pg_temp.check(pg_temp.ana_graph() =
     '§3: after dream, Ana ships via the Felixstowe row only, and lives in Porto: ' || pg_temp.ana_graph());
 :as_operator
 
--- §4 Ana's agent decides what dream queued, as Ana. Each pair is queued from both sides; after the bind, its
--- twin has no candidate left, and the agent closes it with none (automatic from the release after 0.2.26).
+-- §4 Ana's agent decides what dream queued, as Ana. Each pair is queued from both sides; binding one side settles
+-- its twin, which goes moot naming the judgement that bound it (from 0.2.27; on 0.2.26 the agent closed it with none).
 :as_ana
 create function pg_temp.decide(p_key text, p_kind text, p_bind boolean, p_reason text) returns text
 language plpgsql as $$
@@ -164,10 +164,13 @@ select pg_temp.check((select count(*) from aiq.judgements where status = 'open')
     '§4: the four queued items wait for Ana''s agent');
 select pg_temp.decide('a. costa', 'person', true,
     'Same surname and initial, a person both times; each is linked to a Tagus Ceramics, and nothing either says conflicts.');
-select pg_temp.decide('ana costa', 'person', false, 'No candidate left: A. Costa, the one it had, is now this node.');
 select pg_temp.decide('tagus ceramics', 'organization', true,
     'Same name, Tagus Ceramics; the only difference is the kind each was written as, and nothing either says conflicts.');
-select pg_temp.decide('tagus ceramics', 'company', false, 'No candidate left: the organization, the one it had, is now this node.');
+select pg_temp.check((select count(*) from aiq.judgements
+                       where status = 'moot' and evidence ? 'settled_by'
+                         and (evidence ->> 'key', evidence ->> 'claimed_kind')
+                             in (('ana costa', 'person'), ('tagus ceramics', 'company'))) = 2,
+    '§4: each twin settled with its pair: moot, naming the judgement that bound it');
 :as_operator
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%' and pg_temp.ana_graph() like '%prefers mode/road%'
