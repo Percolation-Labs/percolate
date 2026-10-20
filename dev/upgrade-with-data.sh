@@ -222,7 +222,7 @@ do \$\$ begin
   -- THE SUBJECT MUST EXIST BEFORE THE ASSERTION MEANS ANYTHING. Without this,
   -- a seed whose bootstrap_admin silently failed leaves zero grants_all roles,
   -- the cross join below is empty, and the check passes having examined
-  -- nothing -- which is exactly the class meta/postmortems/README.md calls
+  -- nothing -- which is exactly the class our postmortems call
   -- verified in a world where the defect could not appear. Caught by trying to
   -- make the assertion fail and watching it pass.
   if not exists (select 1 from rbac.roles where grants_all)

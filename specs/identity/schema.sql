@@ -34,8 +34,8 @@ alter default privileges revoke execute on functions from public;
 -- relation arm had it; upgrade-converges.sh had eight copies and none had
 -- `percolate`, so no percolate.* object or grant had ever been compared; the
 -- PUBLIC-EXECUTE invariant at the end of the install named five schemas and
--- missed the sixth (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md
--- §4, REM-45). A schema added next year would have been missing from all of
+-- missed the sixth (REM-45).
+-- A schema added next year would have been missing from all of
 -- them, and none of them would have said so.
 --
 -- Postgres already records the answer. CREATE EXTENSION and ALTER EXTENSION
@@ -115,8 +115,8 @@ grant execute on function percolate.extension_schemas() to public;
 -- workflow.runs and aiq.nodes -- and only rbac.users came back. The rows were
 -- in the file; they would not go back in. dev/backup-carries-the-data.sh
 -- proves the write half of that round trip and never proved the read half,
--- which is the class meta/postmortems/2026-09-11-fixed-at-the-copy-that-
--- failed.md keeps naming. dev/restore-is-possible.sh now does the round trip.
+-- which is the class our postmortems
+-- keep naming. dev/restore-is-possible.sh now does the round trip.
 create or replace function percolate.uuidv5(p_namespace uuid, p_name text)
 returns uuid language sql immutable strict parallel safe
 set search_path = pg_catalog, public as $$

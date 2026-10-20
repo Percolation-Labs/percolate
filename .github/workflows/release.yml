@@ -194,8 +194,7 @@ jobs:
       # write subject to the fewest checks. `references.sh` was added after
       # 0.1.6 published with `k8s/kind/manifests/postgres.yaml` still mounting
       # `percolate--0.1.5.sql`, so main went red one commit after the release
-      # went green; its postmortem
-      # (`meta/postmortems/2026-09-06-the-release-ran-fewer-gates-than-a-push.md`)
+      # went green; its postmortem (6 September)
       # named the remaining eight as a known hole and said what to do about a
       # second instance: "the fix is `check.sh --tree` wholesale rather than a
       # third individual step". This is that.
@@ -351,7 +350,7 @@ jobs:
       # OPEN THE NEXT VERSION, so main is never on a tagged number (REM-542). A change to extension/ under a
       # tagged version is refused by dev/check-version.sh, so until this step every first change after a release had
       # to bump, and two sessions bumping, or one tagging while another's change was in review, collided three times
-      # on 18-19 September (meta/postmortems/2026-09-19-a-night-the-checks-did-not-run.md §2). Now the release that
+      # on 18-19 September. Now the release that
       # spends a number opens the next one, a change never bumps, and the next run publishes what the tree carries.
       # From the latest main, because main moved while this built; a push that loses the race is retried from the
       # new main. A main already past this version (somebody opened it by hand) is left alone.

@@ -5,7 +5,7 @@
 --    percolate.uuidv5(id_namespace('session'), run_id) and
 --    `workflow.run_session` computed md5(run_id || ':' || group)::uuid for the
 --    same key. Two copies of one rule, and `fa59c8e` corrected one of them --
---    meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1 exactly.
+--    a fix made only at the copy that failed, exactly.
 --    They also were not the same function of their inputs: md5 aside, the
 --    empty group carried a trailing colon, so the strings differed too.
 --

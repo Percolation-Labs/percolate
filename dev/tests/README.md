@@ -144,8 +144,8 @@ same failure as a fixture living in somebody's psql session.
 
 ## What belongs here, and what does not
 
-These files are not a coverage exercise. Per
-p8-subsystems' `meta/skills/spec-driven-development` (internal) §4, the suite is roughly a tenth of the
+These files are not a coverage exercise. By our
+spec-driven practice, the suite is roughly a tenth of the
 failure modes worth naming — the ones that protect **intent** against silent
 erosion. Nearly every assertion in `rbac/02`, `query/02` and `workflow/01`
 corresponds to a bug this repo actually shipped and found by executing a
@@ -340,8 +340,8 @@ spans because it spells the key the writer does not read.
 A scenario there carries `status: pass` or an open verdict, and the runner
 reports loudly when a declared-open finding starts passing — a fix nobody
 recorded and a check that stopped checking look identical otherwise.
-p8-subsystems' `meta/skills/dogfooding` (internal) is the method that generates them; p8-subsystems' `scenarios/` (internal)
-is where the prose verdicts live.
+Dogfooding, an internal practice, is the method that generates them, and the
+prose verdicts are kept privately.
 
 ## `journeys/`, which is a fixture and not a suite
 
@@ -355,7 +355,7 @@ It is separate from `evals/` next door for one reason, and it is the reason that
 directory earns its own place. `evals/run.py` rolls every scenario back, which
 is right for every one of them and structurally cannot find anything that only goes
 wrong on the *fourth* thing a user does — the class two of the five postmortems
-are about and p8-subsystems' `meta/postmortems/README.md` (internal) still lists as the largest open
+are about and our postmortems still list as the largest open
 shape. A journey does not roll back. Re-running one means rebuilding the
 database, which is why there is no teardown script in there.
 

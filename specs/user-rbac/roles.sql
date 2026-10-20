@@ -184,7 +184,7 @@ end $$;
 --    is a SELECT. Measured on the tour stack: carol read 24 nodes as herself
 --    and 229 -- alice's count -- after writing alice's id into the setting.
 --    `workflow.current_run_id`, which the step functions trust, fell the same
---    way. (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §3.)
+--    way.
 --
 --    The fix is not a check in any of the ~50 functions that read the
 --    setting; it is that the roles a person can become cannot write it. Only

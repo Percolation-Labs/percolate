@@ -4,8 +4,8 @@
 -- never sees the call: each one has to ask its own question about the caller.
 -- Fourteen single-function authorization fixes landed in eleven days, each
 -- correct for its own function, each leaving a sibling that asked the org, or
--- the claims, or nothing (meta/postmortems/2026-09-11-fixed-at-the-copy-that-
--- failed.md §3, REM-46). rbac/04 holds who may EXECUTE. Nothing held what each
+-- the claims, or nothing (REM-46).
+-- rbac/04 holds who may EXECUTE. Nothing held what each
 -- function then ASKS, so every new definer was reviewed or it was not.
 --
 -- DECLARED, NOT INFERRED. The obvious gate reads each body and guesses whether

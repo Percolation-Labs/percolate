@@ -381,7 +381,7 @@ end $$;
 -- fails may_read: that is the only caller who tells the two predicates apart,
 -- and neither the org-B caller of §5 nor the owner of §1 is one.
 --
--- meta/postmortems/README.md calls the class "a check that cannot distinguish
+-- Our postmortems call the class "a check that cannot distinguish
 -- pass from fail". dev/assertion-audit.py catches one spelling of it (a scalar
 -- subquery going three-valued); a grep for a name that appears in a comment is
 -- another, and no tool catches that one -- only asking what the code DOES.

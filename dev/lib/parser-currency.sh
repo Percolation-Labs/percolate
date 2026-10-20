@@ -18,7 +18,7 @@
 #      the state dev/reload.sh is in every day of an unreleased version.
 #
 # WHAT (2) COST, because this guard exists on an incident and not a risk --
-# meta/postmortems/README.md's bar. dev/tests/query/11-graph-algorithms.sql's
+# our bar for a new check. dev/tests/query/11-graph-algorithms.sql's
 # own header records three sessions in one day reading `without as_of the
 # expired edge was still traversed` as a defect in the graph (0b7af9f), and it
 # happened a fourth time on 2026-09-12: the .so in p8-dev-db was dated

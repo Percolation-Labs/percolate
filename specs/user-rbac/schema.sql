@@ -990,7 +990,7 @@ $fn$ language sql immutable;
 -- and may_upload; "the login can become the table's owner" in
 -- assert_schedule_access; "no run executing" in a package. Four spellings of
 -- one fact is how one of them drifts
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §3, REM-44).
+-- (REM-44).
 --
 -- Two conditions, and both are now things a caller cannot fake:
 --   * no claims. Since user-rbac/roles.sql §6 only the roles that set identity

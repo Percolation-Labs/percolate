@@ -11,7 +11,7 @@
 -- agents and NO runs. Every one of those is a thing a user does, and a fixture
 -- that pre-creates them is a fixture that has already performed the half of the
 -- journey most likely to be broken -- which is the failure
--- `meta/postmortems/2026-09-04-user-rbac-review.md` records twice over: the signup
+-- our user-rbac review of 4 September records twice over: the signup
 -- path and the theft-detection branch were both DECLARED, shipped, and never
 -- once executed, and both were found by the first transaction that ran them.
 --
@@ -220,7 +220,7 @@ insert into journey.chunks (doc_slug, ordinal, start_offset, end_offset, content
 -- rather than pasting sixteen digits -- and so the EXPECTED WINNER is written
 -- down beside the vector instead of being decided after the result is seen.
 -- A step whose expectation is formed after the answer is a step that cannot
--- fail, which is the class meta/postmortems/README.md calls the largest here.
+-- fail, which is the class our postmortems call the largest here.
 --
 -- NOT ON THE AXES, AND THAT IS THE WHOLE POINT OF THESE PARTICULAR DIGITS.
 -- The first version of this table used exact unit vectors -- [1,0,0,0] and so

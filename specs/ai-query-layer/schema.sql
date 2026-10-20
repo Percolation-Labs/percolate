@@ -435,11 +435,11 @@ comment on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz) i
 
 -- SECURITY INVOKER, and it was not. The view ran as its owner, app_owner owns
 -- aiq.edges, and a table's owner bypasses its policies -- so `authenticated`
--- reading this view saw every org's edges. Recorded as a hazard in
--- meta/postmortems/2026-09-08-what-the-move-made-visible.md §2 and left,
+-- reading this view saw every org's edges. Recorded as a hazard on
+-- 8 September and left,
 -- because every edge then carried the shared org and no leak could be shown;
 -- the two-tenant sample shows it (15 edges through this view, 14 through the
--- table, as org A). meta/postmortems/2026-09-11-owner-privileged-views.md.
+-- table, as org A).
 create or replace view aiq.edges_current with (security_invoker = true) as
     select id, src_id, dst_id, relation, weight, valid_from, valid_to,
            provenance, org_id, created_at,
@@ -1406,7 +1406,7 @@ create table if not exists aiq.node_resolutions (
     -- decision_model: one option from a declared set in a forward pass, with no
     -- generation (Jev and its kind) -- neither an embedding score nor an LLM's
     -- answer. graph-identity.md said to add it with its first caller; that is
-    -- meta/spikes/2026-09-30-jev-decisions.
+    -- the Jev decisions spike of 30 September.
     tier         text not null
                      check (tier in ('registry','crosswalk','embedding','llm',
                                      'decision_model','agent','human')),
@@ -3886,8 +3886,8 @@ $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 --
 -- Chosen as the DEFAULT anyway because it is permissive-licensed, already in
 -- core Postgres, costs one GIN index and zero new dependencies. pg_search
--- (ParadeDB, real BM25) is the promote-on-evidence upgrade -- see
--- meta/postgres-manifest.md for its AGPLv3 posture, which is the one
+-- (ParadeDB, real BM25) is the promote-on-evidence upgrade. It is AGPLv3,
+-- which would make it the one
 -- non-permissive license in the collection and deserves a deliberate decision
 -- rather than a default.
 -- ============================================================
@@ -4773,7 +4773,7 @@ begin
             -- here and the row question has to be asked by name; it used to
             -- list every agent's name and model to any signed-in caller -- the
             -- probe 2e5995e removed from may_invoke, still open one function
-            -- over (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md).
+            -- over.
             -- A connection with no claims is an operator, as everywhere else.
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', a.name, 'model', a.model) order by a.name)

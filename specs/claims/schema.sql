@@ -71,7 +71,7 @@ create table if not exists claims.expresses (
 );
 comment on table claims.expresses is
     'That an occurrence in a revision expresses a claim, by which method, at what review status. Never updated; a change is a later row.';
--- The spike's index (meta/spikes/2026-09-18-claims-graph, "added after the first 1.1M run"): every read by revision
+-- The spike's index ("added after the first 1.1M run", claims-graph spike, 18 September): every read by revision
 -- and the projection's own "is this occurrence linked" check use it.
 create index if not exists expresses_occurrence on claims.expresses (revision_id, claim_key, part, id desc);
 create index if not exists expresses_claim on claims.expresses (claim_id);

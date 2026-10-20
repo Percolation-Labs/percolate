@@ -701,7 +701,7 @@ begin
     --
     -- register_upload got these two columns when the visibility column arrived
     -- and this sibling did not, which is the pattern
-    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md is about.
+    -- of a fix made only at the copy that failed.
     -- Found by dev/tests/evals coll-11 (REM-75), which had asserted since it
     -- was written that a polled record is readable by the poller.
     insert into content.resources (channel_id, external_id, uri, title, org_id,
@@ -776,8 +776,7 @@ begin
     -- answers "may this person act in that tenancy" -- and on the shared tier,
     -- or for a co-member's private upload, that is yes, so anyone who could
     -- name a resource could replace its chunks. content.resolve_file made the
-    -- same move in 75abb1d and this, its sibling, was left behind
-    -- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1).
+    -- same move in 75abb1d and this, its sibling, was left behind.
     -- may_write carries the claimless arm the worker relies on.
     select r.owner_id, r.org_id, r.visibility into v_owner, v_org, v_vis
       from content.resources r where r.id = p_resource_id;

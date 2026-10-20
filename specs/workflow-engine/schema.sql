@@ -2749,8 +2749,8 @@ comment on table workflow.step_functions is
 -- Found by walking scenarios/evals/J2 as a user: the officer read the table
 -- before the documentation and had two unrunnable rows in the registry inside a
 -- minute. The docs do say to use the function, so this was never a
--- documentation defect -- it is meta/challenge-the-process's PUSH-DOWN
--- principle unapplied, on the one table that decides what a workflow may cause
+-- documentation defect -- it is the push-down principle (a fact
+-- belongs at the lowest layer that can refuse it) unapplied, on the one table that decides what a workflow may cause
 -- to run. A foreign key beats a CHECK beats a trigger beats a validator
 -- somebody has to call, and a validator somebody has to call is what this was.
 --
@@ -2759,8 +2759,8 @@ comment on table workflow.step_functions is
 -- and a CHECK may not read tables. This is the strongest form available.
 --
 -- MOVED AND NOT COPIED. register_step_function below now just inserts. Two
--- copies of one rule, checked against each other, is the defect recorded in
--- meta/postmortems/2026-09-04-docs-examples-nobody-ran.md, where a seat defined
+-- copies of one rule, checked against each other, is the defect recorded
+-- on 4 September, where a seat defined
 -- as two format strings eighty lines apart diverged and a gate spent an hour
 -- reporting a defect that was not there.
 create or replace function workflow.step_function_is_runnable()
@@ -2953,8 +2953,8 @@ revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from
 -- not stop the second from running. It is SECURITY INVOKER and granted to
 -- `authenticated`.
 --
--- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
--- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
+-- That is the seventeenth instance of a fix made only at the copy
+-- that failed, so the fix is not a second copy of the wrapping:
 -- it is this function, which both callers now ask.
 --
 -- THE WRAPPING ALONE DID NOT HOLD, and both callers now open the wrapped
@@ -4355,8 +4355,7 @@ revoke execute on function workflow.assert_schedule_access(text, text) from publ
 --     pattern that works today is the one the worked pipelines actually want:
 --     children write to a domain table, and the successor is a `sql` step over
 --     that table. Promote a real aggregation namespace on the second consumer
---     that cannot be expressed that way, per
---     meta/skills/spec-driven-development §5.
+--     that cannot be expressed that way.
 --   * PARTIAL-FAILURE TOLERANCE (`continue_on: failed`, `min_success`). One
 --     failed child currently cascade-cancels the successors, which for an
 --     11,200-fetch matrix against a public API means one 404 kills the run.
@@ -6750,8 +6749,8 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- second and the comment inside run_meta already explained why -- md5 produces
 -- a value whose version nibble is 0, which is not a UUID and compares unequal
 -- to a correctly derived one computed anywhere else. `fa59c8e` moved run_meta
--- and left its sibling behind, which is the postmortem's own class
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1): a fix
+-- and left its sibling behind, which is a recurring class of ours:
+-- a fix
 -- applied to one of two copies of one rule.
 --
 -- THE TWO WERE ALSO NOT THE SAME FUNCTION OF THEIR INPUTS, which is why this
