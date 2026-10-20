@@ -108,7 +108,9 @@ create or replace view workflow.runs_api as
          d.name,
          -- appended, not slotted in (see above): whether a person, their agent or the
          -- platform started the run (REM-171). The credential it carried is not published.
-         r.started_actor
+         r.started_actor,
+         -- appended: the {{run.*}} keys the input did not supply (REM-1016)
+         r.unsupplied_input
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
