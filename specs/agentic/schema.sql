@@ -1542,21 +1542,22 @@ begin
     -- tutorials grant agents:update to ordinary people, so that was every
     -- reader's agent. Now agents:update lets a person create names and edit
     -- what is theirs; editing an agent somebody else owns (or nobody does: the
-    -- seeded ones) needs an operator or an account administrator
-    -- (users:admin). Attach and detach write through here, so they inherit it.
+    -- seeded ones) needs an operator or agents:update_any, which only an
+    -- administrator holds (Sirsh, 20 Oct). Attach and detach write through
+    -- here, so they inherit it.
     if not (rbac.is_operator()
-            or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+            or rbac.has_permission(rbac.current_user_id(), 'agents', 'update_any')) then
         if p_spec ? 'owner_id'
            and (p_spec->>'owner_id')::uuid is distinct from rbac.current_user_id() then
             raise exception 'agent %: only an administrator may give an agent to someone else',
-                p_spec->>'name' using errcode = 'insufficient_privilege';
+                p_spec->>'name' using errcode = 'insufficient_privilege', hint = 'needs agents:update_any';
         end if;
         if exists (select 1 from agentic.agents a
                     where a.name = p_spec->>'name'
                       and a.owner_id is distinct from rbac.current_user_id()) then
             raise exception 'agent % belongs to someone else, so you may not change it',
                 p_spec->>'name' using errcode = 'insufficient_privilege',
-                hint = 'author it under another name';
+                hint = 'author it under another name, or ask an administrator (agents:update_any)';
         end if;
     end if;
 
