@@ -47,6 +47,14 @@ insert into rbac.user_roles (user_id, role) select id, 'rp-q20' from rbac.users 
 delete from demo.people where lower(full_name) = 'priya raman';
 
 -- §1
+insert into content.channels (name, kind, visibility) values ('sessions', 'manual', 'public') on conflict do nothing;
+select content.register_text('sessions', 'session-2026-01-12', $j$[{"content":
+  "Priya Raman, harbour analytics lead: the Harbour Rewrite stays on Postgres for now."}]$j$, 'Session, 12 January') ->> 'resource_id' as jan_12;
+select content.register_text('sessions', 'session-2026-03-03', $j$[{"content":
+  "P. Raman: DuckDB read a year of the harbour logs in four seconds, so I would move the harbour analytics to it."}]$j$, 'Session, 3 March') ->> 'resource_id' as mar_03;
+select content.register_text('sessions', 'session-2026-06-02', $j$[{"content":
+  "Priya Raman has moved from the Harbour Rewrite to the Tide Dashboard."}]$j$, 'Session, 2 June') ->> 'resource_id' as jun_02;
+
 create schema if not exists team;
 create table if not exists team.people (id uuid primary key default gen_random_uuid(), name text not null unique);
 select aiq.register_entity_table('person', 'team.people', 'n.name', 'n.name', 'rbac.shared_org_id()');
@@ -55,15 +63,18 @@ select aiq.register_graph_vocabulary($v$[{"relation": "works_on", "single_valued
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Priya Raman"}, {"k":"project","n":"Harbour Rewrite"}, {"k":"tool","n":"Postgres"}],
   "edges": [{"s":0,"t":1,"r":"works_on"}, {"s":0,"t":2,"r":"prefers"}]}$g$,
- '{"agent":"knit","run_id":"jan-12","valid_from":"2026-01-12T10:00:00Z"}') ->> 'edges_new' as jan_12;
+ jsonb_build_object('agent', 'knit', 'run_id', 'jan-12', 'valid_from', '2026-01-12T10:00:00Z',
+   'resource_id', (select id from content.resources where external_id = 'session-2026-01-12'))) ->> 'edges_new' as jan_12;
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"P. Raman"}, {"k":"tool","n":"DuckDB"}],
   "edges": [{"s":0,"t":1,"r":"prefers"}]}$g$,
- '{"agent":"knit","run_id":"mar-03","valid_from":"2026-03-03T15:00:00Z"}') ->> 'edges_new' as mar_03;
+ jsonb_build_object('agent', 'knit', 'run_id', 'mar-03', 'valid_from', '2026-03-03T15:00:00Z',
+   'resource_id', (select id from content.resources where external_id = 'session-2026-03-03'))) ->> 'edges_new' as mar_03;
 select aiq.upsert_graph($g$
  {"nodes": [{"k":"person","n":"Priya Raman"}, {"k":"project","n":"Tide Dashboard"}],
   "edges": [{"s":0,"t":1,"r":"works_on"}]}$g$,
- '{"agent":"knit","run_id":"jun-02","valid_from":"2026-06-02T08:30:00Z"}') ->> 'edges_new' as jun_02;
+ jsonb_build_object('agent', 'knit', 'run_id', 'jun-02', 'valid_from', '2026-06-02T08:30:00Z',
+   'resource_id', (select id from content.resources where external_id = 'session-2026-06-02'))) ->> 'edges_new' as jun_02;
 
 insert into team.people (name) values ('Priya Raman') on conflict do nothing;
 select jsonb_pretty(aiq.dream() - 'since' - 'until') as dream;
@@ -81,9 +92,15 @@ select pg_temp.check((select array_agg(evidence ->> 'key') from aiq.judgements) 
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
 set local role authenticated;
-select aiq.claim_judgement(null, (select id from aiq.judgements where evidence ->> 'key' = 'p. raman')) ->> 'status' as claimed;
+create temp table claimed on commit drop as
+  select aiq.claim_judgement(null, (select id from aiq.judgements where evidence ->> 'key' = 'p. raman')) as j;
+select pg_temp.check((select j -> 'evidence' -> 'said' -> 0 ->> 'said' from claimed)
+                       = 'P. Raman: DuckDB read a year of the harbour logs in four seconds, so I would move the harbour analytics to it.',
+    '§1 the claim should carry what P. Raman said, from the 3 March session, as the reason quotes it');
+select pg_temp.check((select j -> 'evidence' -> 'candidates' -> 0 -> 'said' @> '[{"title": "Session, 12 January", "said": "Priya Raman, harbour analytics lead: the Harbour Rewrite stays on Postgres for now."}]' from claimed),
+    '§1 the candidate should carry what Priya Raman said on 12 January, as the reason quotes it');
 select aiq.complete_judgement(j.id, jsonb_build_object('decision', 'bind', 'target', j.evidence -> 'candidates' -> 0 ->> 'node_id'),
-         'Initial and surname match Priya Raman, the only candidate: a person on the team list', 'agent') ->> 'status' as decided
+         'Session, 3 March: "P. Raman: DuckDB read a year of the harbour logs in four seconds, so I would move the harbour analytics to it." Session, 12 January, of the only candidate: "Priya Raman, harbour analytics lead: the Harbour Rewrite stays on Postgres for now." The same initial and surname, both on the harbour analytics.', 'agent') ->> 'status' as decided
   from aiq.judgements j where j.evidence ->> 'key' = 'p. raman';
 reset role;
 select evidence ->> 'label' as name, status, decided_by, tier, reason
