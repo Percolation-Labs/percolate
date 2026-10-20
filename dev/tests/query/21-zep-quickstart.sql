@@ -163,9 +163,9 @@ end $$;
 select pg_temp.check((select count(*) from aiq.judgements where status = 'open') = 4,
     '§4: the four queued items wait for Ana''s agent');
 select pg_temp.decide('a. costa', 'person', true,
-    'Same surname and initial, a person both times; both work at Tagus Ceramics, and nothing either says conflicts.');
+    'Same surname and initial, a person both times; each is linked to a Tagus Ceramics, and nothing either says conflicts.');
 select pg_temp.decide('tagus ceramics', 'organization', true,
-    'Same name, typed an organization by one reader and a company by another; Ana works at both, so they are one employer.');
+    'Same name, Tagus Ceramics; the only difference is the kind each was written as, and nothing either says conflicts.');
 select pg_temp.check((select count(*) from aiq.judgements
                        where status = 'moot' and evidence ? 'settled_by'
                          and (evidence ->> 'key', evidence ->> 'claimed_kind')
@@ -226,7 +226,7 @@ create or replace function memory.context(p_name text) returns text
 language sql stable security invoker as $$
   select string_agg(format('- %s %s %s (%s to %s)', s.summary, replace(e.relation, '_', ' '), d.summary,
                            e.valid_from::date, coalesce(e.valid_to::date::text, 'now')),
-                    E'\n' order by e.valid_to nulls last, e.valid_from)
+                    E'\n' order by e.valid_to nulls last, e.valid_from, e.relation desc)
     from aiq.lookup(p_name) l
     join aiq.edges e on e.src_id = l.node_id
     join aiq.nodes s on s.id = e.src_id
