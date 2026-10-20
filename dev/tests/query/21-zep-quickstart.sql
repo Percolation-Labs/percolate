@@ -163,10 +163,10 @@ end $$;
 select pg_temp.check((select count(*) from aiq.judgements where status = 'open') = 4,
     '§4: the four queued items wait for Ana''s agent');
 select pg_temp.decide('a. costa', 'person', true,
-    'Same surname and initial, a person both times; both work at Tagus Ceramics, and nothing either says conflicts.');
+    'Same surname and initial, a person both times; each is linked to a Tagus Ceramics, and nothing either says conflicts.');
 select pg_temp.decide('ana costa', 'person', false, 'No candidate left: A. Costa, the one it had, is now this node.');
 select pg_temp.decide('tagus ceramics', 'organization', true,
-    'Same name, typed an organization by one reader and a company by another; Ana works at both, so they are one employer.');
+    'Same name, Tagus Ceramics; the only difference is the kind each was written as, and nothing either says conflicts.');
 select pg_temp.decide('tagus ceramics', 'company', false, 'No candidate left: the organization, the one it had, is now this node.');
 :as_operator
 :as_ana
