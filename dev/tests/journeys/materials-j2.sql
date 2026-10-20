@@ -74,7 +74,7 @@ from generate_series(1, 42) n;
 
 -- The batch asserts its own shape, because a journey that fans out over rows
 -- which turned out to be uniform proves nothing about a gate -- the failure
--- meta/postmortems/2026-09-04-query-layer-at-scale.md §2 calls being degenerate
+-- a query-layer postmortem (4 September) calls being degenerate
 -- in the dimension the thing under test depends on.
 do $$
 declare v_null int; v_quote int; v_withdrawn int; v_kinds int;

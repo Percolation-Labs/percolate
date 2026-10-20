@@ -18,7 +18,7 @@
 -- and the scripts cannot say different things. dev/check.sh's tree gate
 -- refuses a second spelling of the set_config revoke or the parser install
 -- under dev/, applications/, k8s/ or scenarios/.
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md, REM-55)
+-- (A fix made only at the copy that failed leaves its siblings broken; REM-55.)
 --
 -- IDEMPOTENT, because most of its callers meet a cluster that already has some
 -- of it: an upgrade gate on an old published image, a second database in a

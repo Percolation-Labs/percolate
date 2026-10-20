@@ -17,7 +17,7 @@
 # about seven spellings, none of them complete. upgrade-converges.sh had eight
 # copies and none named `percolate`, so no percolate.* object or grant had ever
 # been compared across an upgrade
-# (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §4, REM-45).
+# (REM-45).
 #
 # TWO REFUSALS, so a gate cannot pass by looking at nothing:
 #   * an empty set. A database where nothing belongs to the extension -- a

@@ -9,8 +9,7 @@
 # status rename (`runs_status_check ... is violated by some row`), 0.1.3 to
 # 0.1.5 on `column "recall_count" does not exist`, because build-sql.py
 # prepended only the migration named <old>--<this>, and the older hops in
-# specs/migrations/ were read by nothing
-# (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2.4).
+# specs/migrations/ were read by nothing.
 #
 # So: one database per tag, installed from that tag's own SQL, carrying a
 # finished workflow run -- the row the status rename exists for -- then

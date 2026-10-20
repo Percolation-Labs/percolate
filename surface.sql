@@ -54,8 +54,8 @@
 --    reading a clean run here should not conclude their role can call what it
 --    lists.
 --
--- All three are debts, not decisions. `meta/skills/spec-driven-development`
--- says the audit should exist before the thing it describes.
+-- All three are debts, not decisions. The audit
+-- should exist before the thing it describes.
 -- ============================================================
 
 \set ON_ERROR_STOP on
@@ -1306,7 +1306,7 @@ with caller as (select unnest(array['authenticated','web_anon']) as r)
 -- SELECT, not only the ones named `%_api`.
 --
 -- That name filter was this check's own blind spot, and it is the recurring
--- class meta/postmortems/README.md calls "a check that walks only the
+-- class our postmortems call "a check that walks only the
 -- configured cases has a hole shaped like the thing it is for". Adding a view
 -- called `<x>_api` is how a surface gets published, so the filter described
 -- how surfaces were EXPECTED to appear rather than what a caller can reach --

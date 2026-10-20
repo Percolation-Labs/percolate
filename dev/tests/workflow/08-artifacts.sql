@@ -199,8 +199,8 @@ begin
     -- The run above is started by a worker and is ownerless, so nobody may
     -- read it -- and this assertion passed anyway, because
     -- workflow.v_artifacts was owner-privileged and owned by the owner of the
-    -- tables it reads, which is RLS bypassed
-    -- (meta/postmortems/2026-09-11-owner-privileged-views.md). It is owned by
+    -- tables it reads, which is RLS bypassed.
+    -- It is owned by
     -- api_viewer now and answers per caller, so the run gets the owner a real
     -- one has and the view is read as them. An assertion about a join that
     -- only holds where no policy applies was asserting the bypass.

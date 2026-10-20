@@ -8,7 +8,7 @@
 -- WHY A DOMAIN AND NOT A HUNDRED FIXTURES. The interesting scenarios are the
 -- ones where a query written for the retrieval category is answered by data
 -- the graph category put there -- the seams are where this repo's bugs have
--- lived (`meta/skills/spec-driven-development`, "a scenario crossing two
+-- lived ("a scenario crossing two
 -- surfaces is worth more than either alone"). A fixture per scenario would be
 -- a hundred domains for a reader to hold in their head and no seams at all.
 --

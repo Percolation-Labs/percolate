@@ -12,7 +12,7 @@
 -- TWO PEOPLE WHO REALLY EXIST. `workflow.runs.owner_id` references
 -- `rbac.users`, and a tenancy probe run in a database where the second person
 -- has no row is a correct answer about nobody -- the failure
--- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md records twice.
+-- our postmortems record twice.
 -- So the two identities here are rows, inserted and rolled back with everything
 -- else this file writes.
 --

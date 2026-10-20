@@ -4,7 +4,7 @@ Three changes, none of them behavioural. Recorded as a patch rather than a
 vendored fork so that what we changed stays legible, and so this file becomes
 empty the day upstream supports PG19.
 
-meta/postgres-manifest.md carried this as "not root-caused to a one-line fix"
+Our extension manifest carried this as "not root-caused to a one-line fix"
 and an unresolved risk against three subsystems. It is root-caused now:
 
 1. Makefile: -std=c99 -> -std=gnu11.

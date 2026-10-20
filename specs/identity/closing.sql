@@ -21,8 +21,7 @@
 --     lake, contract, packages, identity/declarations -- and it named five
 --     schemas typed by hand, so `percolate` was never in it at all.
 --     percolate.apply_package reached a database with a NULL ACL and no
---     authorization check (meta/postmortems/2026-09-11-fixed-at-the-copy-that-
---     failed.md §2 and §4).
+--     authorization check.
 --
 -- So this is not an ORDER entry. build-sql.py appends it after everything else
 -- it emits, including the compiled contract types, and nothing can be listed

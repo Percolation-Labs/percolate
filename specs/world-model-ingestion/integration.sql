@@ -158,8 +158,8 @@ end $$;
 --   REM-74  the self-model's content.sql created its channel without it.
 --   REM-83  percolate.apply_package, above, for a package-declared source.
 --
--- Each was repaired at the call site, which is why there were three. By
--- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6 the third
+-- Each was repaired at the call site, which is why there were three. By our
+-- rule the third
 -- occurrence buys a gate rather than a fourth repair, and by
 -- challenge-the-process §9 the gate belongs at the lowest layer that can
 -- refuse it -- which is the table.
@@ -662,7 +662,7 @@ left join lateral content.resolve_file(r.id) f on true;
 -- (percolate-core worker/artifacts.py), which connects as `worker`; for a
 -- worker-facing function the grant IS the authorization (integration-rbac.sql
 -- in the engine), and the grant said otherwise
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md, REM-46).
+-- (REM-46).
 grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
     to worker;
 revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)

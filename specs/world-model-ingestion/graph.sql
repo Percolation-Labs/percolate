@@ -1654,7 +1654,7 @@ begin
     --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The
     --     candidate's name lives in aiq.soft_nodes, not node_keys, so eviction dropped it,
     --     and the next extraction of the same name became a candidate again and was decided
-    --     again. Measured 30 Sept (meta/spikes/2026-09-30-jev-decisions): 45 promotions,
+    --     again. Measured 30 Sept in a spike: 45 promotions,
     --     then aiq.resolve_mention found 0 of the 45 names.
     --
     --     ONLY WITHIN ONE ORG. A key is visible to whoever can see its node; its own
@@ -2641,7 +2641,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- PROPOSING IS LOOSE ON PURPOSE. 0.30 is far below resolve_mention's 0.62
 -- because this proposes and does not decide; the measured run that set it found
 -- the true company among the proposals for 279 of 285 candidates whose company
--- existed (meta/spikes/2026-09-30-jev-decisions).
+-- existed (a spike, 30 September).
 --
 -- Two exclusions, both refusals rather than preferences:
 --   * a pair already decided distinct (aiq.decided_distinct) is not proposed

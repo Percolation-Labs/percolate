@@ -4,8 +4,7 @@
 -- repo and found by executing a scenario, not by reasoning about one. They
 -- share a shape: nothing raised, nothing crashed, and the run reported a
 -- status that was not true. That shape is why the workflow engine is one of
--- the three surfaces this repo treats as load-bearing
--- (`meta/skills/spec-driven-development`, the section above §1).
+-- the three surfaces this repo treats as load-bearing.
 
 \set ON_ERROR_STOP on
 

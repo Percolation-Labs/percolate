@@ -21,8 +21,8 @@
 # measured on a daemon running :19, :19-0.1.6 and :19-showcase, where the
 # filter found 0 and the match below found 10. A guard written the obvious way
 # would have existed, reported nothing, and passed every bare call through:
-# meta/postmortems/README.md's "a check that cannot distinguish pass from fail",
-# which that file calls its largest recurring class by a distance.
+# "a check that cannot distinguish pass from fail", which our postmortems
+# call their largest recurring class by a distance.
 percolate_containers() {
     docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
         | awk -F'\t' '$2 ~ /percolate-postgres/ {print $1}' | sort
@@ -120,7 +120,7 @@ require_named_container() {
 # replaced.
 #
 # THAT IS AN INCIDENT RATHER THAN AN ARGUMENT, which is what licenses this
-# guard at all -- meta/postmortems/README.md's bar for a new check is an
+# guard at all -- our bar for a new check is an
 # incident, not a risk. It happened at 18:01:09 on 2026-09-12. A push of eight
 # HTML files from the shared checkout ran the stale hook, `--reload` with no
 # CONTAINER rebuilt `p8dev` from a tree 121 commits behind, and the run then

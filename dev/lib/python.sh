@@ -29,8 +29,8 @@
 # is answering this question themselves, and a script that overrules them is one
 # they will stop running.
 
-# OUTSIDE THE CHECKOUT, deliberately. `meta/postmortems/2026-09-12-a-gate-that-
-# can-write.md` argues the rule this has to satisfy: a pre-push hook may read
+# OUTSIDE THE CHECKOUT, deliberately. The rule this has to satisfy, learned
+# from a gate that could write: a pre-push hook may read
 # the tree and refuse the push, and may not write to the tree, to the branch, or
 # to anything shared. The hook calls check.sh, which calls this, so a venv under
 # `dev/` would be a hook writing into somebody's working copy during a push --

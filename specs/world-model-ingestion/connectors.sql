@@ -261,8 +261,8 @@ from content.connectors where enabled group by 1 order by 2 desc;
 -- fourth. `due_connectors` is SECURITY DEFINER, `select *` over whole rows,
 -- with no org or owner predicate -- so an anonymous caller could enumerate the
 -- entire catalogue through it. But revoking only that function would have been
--- the fix landing at the copy that failed
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md): line three
+-- the fix landing at the copy that failed:
+-- line three
 -- handed `web_anon` the RAW TABLE, which carries `headers` and the whole `auth`
 -- object that the view does not, so the function was not even the cheapest way
 -- in. The sibling sweep is what found the other four.

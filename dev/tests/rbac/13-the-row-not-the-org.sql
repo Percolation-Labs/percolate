@@ -5,7 +5,7 @@
 -- question instead -- rbac.may_access_org, "may this person act inside that
 -- tenancy" -- which a co-member, and on the shared tier anybody, answers yes.
 -- content.resolve_file moved to rbac.may_read in 75abb1d; its siblings stayed
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1, REM-46).
+-- (REM-46).
 -- Three more were worker plumbing granted to `authenticated` with no check at
 -- all, where the grant is the only authorization there is.
 --

@@ -2626,8 +2626,7 @@ alter view agentic.plugins_api      owner to api_viewer;
 -- agents_pickable too, and it was not: owned by app_owner, which owns
 -- agentic.agents, it bypassed agents_scoped and listed every tenant's private
 -- and org agents to every signed-in user. The column list keeps system_prompt
--- out; only the owner decides which rows. meta/postmortems/
--- 2026-09-11-owner-privileged-views.md.
+-- out; only the owner decides which rows.
 alter view agentic.agents_pickable  owner to api_viewer;
 revoke create on schema agentic from api_viewer;
 

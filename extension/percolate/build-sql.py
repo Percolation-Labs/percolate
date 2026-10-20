@@ -410,7 +410,7 @@ ORDER = [
 # the PUBLIC-EXECUTE revoke and its invariant, which are true only if nothing
 # is defined after them. That block used to end world-model-ingestion/
 # ingestion.sql, "the last file in ORDER", and six files were then added after
-# it (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §4). A
+# it. A
 # position in a list is a position somebody can append past; main() emits this
 # after the compiled types, so there is no later.
 CLOSING = ("identity/closing.sql", "the PUBLIC-EXECUTE revoke and its invariant over every schema the extension owns -- emitted after everything, so nothing can be defined after it")
@@ -546,8 +546,8 @@ begin
     -- Nobody a person can become may rewrite who they are. Every row rule in
     -- this script reads the caller from `request.jwt.claims`, and a role that
     -- can call set_config can put anybody's id there: through
-    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6,
-    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md). The revoke
+    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6).
+    -- The revoke
     -- needs a superuser and a function's ACL lives in each database, so this
     -- script can only refuse where it has not been done -- including on the
     -- upgrade of a database that predates the rule, which would otherwise
@@ -728,7 +728,7 @@ revoke execute on function public.percolate_record_build(
 -- whether the halves agreed. It could not fail. Both rows were written from
 -- one `git rev-parse` in the publishing workflow, so `count(distinct
 -- commit_sha) <= 1` was true by construction on every image ever published --
--- the shape meta/postmortems/README.md files under "a check that cannot
+-- the shape our postmortems file under "a check that cannot
 -- distinguish pass from fail". Filling the parser row with a release tag
 -- instead would have made it permanently FALSE, which is the same defect with
 -- the sign flipped, so the comparison is gone rather than repaired.
@@ -970,8 +970,7 @@ def write_upgrades(body: str) -> None:
     looking up the exact pair gave it none of them. Five of the six 0.2.0
     upgrade scripts failed on a released database -- measured on 0.1.5 and
     0.1.2, `column "recall_count" does not exist` -- while both upgrade gates
-    tested only the newest tag
-    (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2.4).
+    tested only the newest tag.
     A hop is prepended when it starts at or after the old version, so a
     database that already took a hop on an earlier upgrade never replays it.
     """

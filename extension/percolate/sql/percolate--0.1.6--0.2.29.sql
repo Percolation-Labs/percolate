@@ -198,8 +198,8 @@ begin
     -- Nobody a person can become may rewrite who they are. Every row rule in
     -- this script reads the caller from `request.jwt.claims`, and a role that
     -- can call set_config can put anybody's id there: through
-    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6,
-    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md). The revoke
+    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6).
+    -- The revoke
     -- needs a superuser and a function's ACL lives in each database, so this
     -- script can only refuse where it has not been done -- including on the
     -- upgrade of a database that predates the rule, which would otherwise
@@ -380,7 +380,7 @@ revoke execute on function public.percolate_record_build(
 -- whether the halves agreed. It could not fail. Both rows were written from
 -- one `git rev-parse` in the publishing workflow, so `count(distinct
 -- commit_sha) <= 1` was true by construction on every image ever published --
--- the shape meta/postmortems/README.md files under "a check that cannot
+-- the shape our postmortems file under "a check that cannot
 -- distinguish pass from fail". Filling the parser row with a release tag
 -- instead would have made it permanently FALSE, which is the same defect with
 -- the sign flipped, so the comparison is gone rather than repaired.
@@ -460,8 +460,8 @@ alter default privileges revoke execute on functions from public;
 -- relation arm had it; upgrade-converges.sh had eight copies and none had
 -- `percolate`, so no percolate.* object or grant had ever been compared; the
 -- PUBLIC-EXECUTE invariant at the end of the install named five schemas and
--- missed the sixth (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md
--- §4, REM-45). A schema added next year would have been missing from all of
+-- missed the sixth (REM-45).
+-- A schema added next year would have been missing from all of
 -- them, and none of them would have said so.
 --
 -- Postgres already records the answer. CREATE EXTENSION and ALTER EXTENSION
@@ -541,8 +541,8 @@ grant execute on function percolate.extension_schemas() to public;
 -- workflow.runs and aiq.nodes -- and only rbac.users came back. The rows were
 -- in the file; they would not go back in. dev/backup-carries-the-data.sh
 -- proves the write half of that round trip and never proved the read half,
--- which is the class meta/postmortems/2026-09-11-fixed-at-the-copy-that-
--- failed.md keeps naming. dev/restore-is-possible.sh now does the round trip.
+-- which is the class our postmortems
+-- keep naming. dev/restore-is-possible.sh now does the round trip.
 create or replace function percolate.uuidv5(p_namespace uuid, p_name text)
 returns uuid language sql immutable strict parallel safe
 set search_path = pg_catalog, public as $$
@@ -3458,8 +3458,8 @@ comment on table workflow.step_functions is
 -- Found by walking scenarios/evals/J2 as a user: the officer read the table
 -- before the documentation and had two unrunnable rows in the registry inside a
 -- minute. The docs do say to use the function, so this was never a
--- documentation defect -- it is meta/challenge-the-process's PUSH-DOWN
--- principle unapplied, on the one table that decides what a workflow may cause
+-- documentation defect -- it is the push-down principle (a fact
+-- belongs at the lowest layer that can refuse it) unapplied, on the one table that decides what a workflow may cause
 -- to run. A foreign key beats a CHECK beats a trigger beats a validator
 -- somebody has to call, and a validator somebody has to call is what this was.
 --
@@ -3468,8 +3468,8 @@ comment on table workflow.step_functions is
 -- and a CHECK may not read tables. This is the strongest form available.
 --
 -- MOVED AND NOT COPIED. register_step_function below now just inserts. Two
--- copies of one rule, checked against each other, is the defect recorded in
--- meta/postmortems/2026-09-04-docs-examples-nobody-ran.md, where a seat defined
+-- copies of one rule, checked against each other, is the defect recorded
+-- on 4 September, where a seat defined
 -- as two format strings eighty lines apart diverged and a gate spent an hour
 -- reporting a defect that was not there.
 create or replace function workflow.step_function_is_runnable()
@@ -3662,8 +3662,8 @@ revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from
 -- not stop the second from running. It is SECURITY INVOKER and granted to
 -- `authenticated`.
 --
--- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
--- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
+-- That is the seventeenth instance of a fix made only at the copy
+-- that failed, so the fix is not a second copy of the wrapping:
 -- it is this function, which both callers now ask.
 --
 -- THE WRAPPING ALONE DID NOT HOLD, and both callers now open the wrapped
@@ -5064,8 +5064,7 @@ revoke execute on function workflow.assert_schedule_access(text, text) from publ
 --     pattern that works today is the one the worked pipelines actually want:
 --     children write to a domain table, and the successor is a `sql` step over
 --     that table. Promote a real aggregation namespace on the second consumer
---     that cannot be expressed that way, per
---     meta/skills/spec-driven-development §5.
+--     that cannot be expressed that way.
 --   * PARTIAL-FAILURE TOLERANCE (`continue_on: failed`, `min_success`). One
 --     failed child currently cascade-cancels the successors, which for an
 --     11,200-fetch matrix against a public API means one 404 kills the run.
@@ -7459,8 +7458,8 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- second and the comment inside run_meta already explained why -- md5 produces
 -- a value whose version nibble is 0, which is not a UUID and compares unequal
 -- to a correctly derived one computed anywhere else. `fa59c8e` moved run_meta
--- and left its sibling behind, which is the postmortem's own class
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1): a fix
+-- and left its sibling behind, which is a recurring class of ours:
+-- a fix
 -- applied to one of two copies of one rule.
 --
 -- THE TWO WERE ALSO NOT THE SAME FUNCTION OF THEIR INPUTS, which is why this
@@ -10599,7 +10598,7 @@ $fn$ language sql immutable;
 -- and may_upload; "the login can become the table's owner" in
 -- assert_schedule_access; "no run executing" in a package. Four spellings of
 -- one fact is how one of them drifts
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §3, REM-44).
+-- (REM-44).
 --
 -- Two conditions, and both are now things a caller cannot fake:
 --   * no claims. Since user-rbac/roles.sql §6 only the roles that set identity
@@ -13818,9 +13817,8 @@ create unique index if not exists runs_owner_external_id_key
 -- assert_run_access() refuses; start_workflow's idempotency match has to CARRY
 -- ON and start a new run when the answer is no, so a raise is the wrong shape
 -- for it. Split rather than spelled twice: a second copy of this predicate is
--- how `resolve_file` came to ask the row while four siblings asked the org
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6). The
--- sentence is unchanged from the version assert_run_access carried.
+-- how `resolve_file` came to ask the row while four siblings asked the org.
+-- The sentence is unchanged from the version assert_run_access carried.
 --
 -- SECURITY DEFINER because it must give the same answer whoever asks: it reads
 -- workflow.runs, whose RLS would otherwise hide the very row being judged and
@@ -14610,7 +14608,7 @@ grant execute on function workflow.task_principal(uuid, text) to worker;
 -- signal_task and reusable_run all ask the same question of a caller-supplied
 -- run, and REM-77 extracted it so there would be one copy. A second spelling
 -- here is how `resolve_file` came to ask the row while four siblings asked the
--- org (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6).
+-- org.
 --
 -- READING runs_api/tasks_api INSTEAD WAS TRIED AND IS WRONG, and the measurement
 -- is the reason rather than a preference. Those views are owned by api_viewer
@@ -15178,11 +15176,11 @@ comment on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz) i
 
 -- SECURITY INVOKER, and it was not. The view ran as its owner, app_owner owns
 -- aiq.edges, and a table's owner bypasses its policies -- so `authenticated`
--- reading this view saw every org's edges. Recorded as a hazard in
--- meta/postmortems/2026-09-08-what-the-move-made-visible.md §2 and left,
+-- reading this view saw every org's edges. Recorded as a hazard on
+-- 8 September and left,
 -- because every edge then carried the shared org and no leak could be shown;
 -- the two-tenant sample shows it (15 edges through this view, 14 through the
--- table, as org A). meta/postmortems/2026-09-11-owner-privileged-views.md.
+-- table, as org A).
 create or replace view aiq.edges_current with (security_invoker = true) as
     select id, src_id, dst_id, relation, weight, valid_from, valid_to,
            provenance, org_id, created_at,
@@ -16157,7 +16155,7 @@ create table if not exists aiq.node_resolutions (
     -- decision_model: one option from a declared set in a forward pass, with no
     -- generation (Jev and its kind) -- neither an embedding score nor an LLM's
     -- answer. graph-identity.md said to add it with its first caller; that is
-    -- meta/spikes/2026-09-30-jev-decisions.
+    -- the Jev decisions spike of 30 September.
     tier         text not null
                      check (tier in ('registry','crosswalk','embedding','llm',
                                      'decision_model','agent','human')),
@@ -18690,8 +18688,8 @@ $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 --
 -- Chosen as the DEFAULT anyway because it is permissive-licensed, already in
 -- core Postgres, costs one GIN index and zero new dependencies. pg_search
--- (ParadeDB, real BM25) is the promote-on-evidence upgrade -- see
--- meta/postgres-manifest.md for its AGPLv3 posture, which is the one
+-- (ParadeDB, real BM25) is the promote-on-evidence upgrade. It is AGPLv3,
+-- which would make it the one
 -- non-permissive license in the collection and deserves a deliberate decision
 -- rather than a default.
 -- ============================================================
@@ -19579,7 +19577,7 @@ begin
             -- here and the row question has to be asked by name; it used to
             -- list every agent's name and model to any signed-in caller -- the
             -- probe 2e5995e removed from may_invoke, still open one function
-            -- over (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md).
+            -- over.
             -- A connection with no claims is an operator, as everywhere else.
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', a.name, 'model', a.model) order by a.name)
@@ -23477,7 +23475,7 @@ begin
     --
     -- register_upload got these two columns when the visibility column arrived
     -- and this sibling did not, which is the pattern
-    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md is about.
+    -- of a fix made only at the copy that failed.
     -- Found by dev/tests/evals coll-11 (REM-75), which had asserted since it
     -- was written that a polled record is readable by the poller.
     insert into content.resources (channel_id, external_id, uri, title, org_id,
@@ -23552,8 +23550,7 @@ begin
     -- answers "may this person act in that tenancy" -- and on the shared tier,
     -- or for a co-member's private upload, that is yes, so anyone who could
     -- name a resource could replace its chunks. content.resolve_file made the
-    -- same move in 75abb1d and this, its sibling, was left behind
-    -- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1).
+    -- same move in 75abb1d and this, its sibling, was left behind.
     -- may_write carries the claimless arm the worker relies on.
     select r.owner_id, r.org_id, r.visibility into v_owner, v_org, v_vis
       from content.resources r where r.id = p_resource_id;
@@ -24280,8 +24277,8 @@ end $$;
 --   REM-74  the self-model's content.sql created its channel without it.
 --   REM-83  percolate.apply_package, above, for a package-declared source.
 --
--- Each was repaired at the call site, which is why there were three. By
--- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6 the third
+-- Each was repaired at the call site, which is why there were three. By our
+-- rule the third
 -- occurrence buys a gate rather than a fourth repair, and by
 -- challenge-the-process §9 the gate belongs at the lowest layer that can
 -- refuse it -- which is the table.
@@ -24784,7 +24781,7 @@ left join lateral content.resolve_file(r.id) f on true;
 -- (percolate-core worker/artifacts.py), which connects as `worker`; for a
 -- worker-facing function the grant IS the authorization (integration-rbac.sql
 -- in the engine), and the grant said otherwise
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md, REM-46).
+-- (REM-46).
 grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
     to worker;
 revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
@@ -27637,8 +27634,7 @@ alter view agentic.plugins_api      owner to api_viewer;
 -- agents_pickable too, and it was not: owned by app_owner, which owns
 -- agentic.agents, it bypassed agents_scoped and listed every tenant's private
 -- and org agents to every signed-in user. The column list keeps system_prompt
--- out; only the owner decides which rows. meta/postmortems/
--- 2026-09-11-owner-privileged-views.md.
+-- out; only the owner decides which rows.
 alter view agentic.agents_pickable  owner to api_viewer;
 revoke create on schema agentic from api_viewer;
 
@@ -29630,7 +29626,7 @@ begin
     --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The
     --     candidate's name lives in aiq.soft_nodes, not node_keys, so eviction dropped it,
     --     and the next extraction of the same name became a candidate again and was decided
-    --     again. Measured 30 Sept (meta/spikes/2026-09-30-jev-decisions): 45 promotions,
+    --     again. Measured 30 Sept in a spike: 45 promotions,
     --     then aiq.resolve_mention found 0 of the 45 names.
     --
     --     ONLY WITHIN ONE ORG. A key is visible to whoever can see its node; its own
@@ -30617,7 +30613,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- PROPOSING IS LOOSE ON PURPOSE. 0.30 is far below resolve_mention's 0.62
 -- because this proposes and does not decide; the measured run that set it found
 -- the true company among the proposals for 279 of 285 candidates whose company
--- existed (meta/spikes/2026-09-30-jev-decisions).
+-- existed (a spike, 30 September).
 --
 -- Two exclusions, both refusals rather than preferences:
 --   * a pair already decided distinct (aiq.decided_distinct) is not proposed
@@ -35764,7 +35760,7 @@ create table if not exists claims.expresses (
 );
 comment on table claims.expresses is
     'That an occurrence in a revision expresses a claim, by which method, at what review status. Never updated; a change is a later row.';
--- The spike's index (meta/spikes/2026-09-18-claims-graph, "added after the first 1.1M run"): every read by revision
+-- The spike's index ("added after the first 1.1M run", claims-graph spike, 18 September): every read by revision
 -- and the projection's own "is this occurrence linked" check use it.
 create index if not exists expresses_occurrence on claims.expresses (revision_id, claim_key, part, id desc);
 create index if not exists expresses_claim on claims.expresses (claim_id);
@@ -40840,8 +40836,7 @@ on conflict (name) do update
 --     lake, contract, packages, identity/declarations -- and it named five
 --     schemas typed by hand, so `percolate` was never in it at all.
 --     percolate.apply_package reached a database with a NULL ACL and no
---     authorization check (meta/postmortems/2026-09-11-fixed-at-the-copy-that-
---     failed.md §2 and §4).
+--     authorization check.
 --
 -- So this is not an ORDER entry. build-sql.py appends it after everything else
 -- it emits, including the compiled contract types, and nothing can be listed

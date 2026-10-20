@@ -1,6 +1,5 @@
 # Experimental PG19-beta stack for validating specs/ against reality.
-# Adapted from ../../../p8k8/docker/Dockerfile.pg18 (precedent, per
-# meta/skills/spec-driven-development §5 — reuse the working pattern rather
+# Adapted from our earlier PG18 image (reuse the working pattern rather
 # than inventing a new one).
 
 # TWO STAGES, AND THE REASON IS THE PULL.
@@ -29,8 +28,8 @@ RUN apt-get update && v=$(dpkg-query -W -f='${Version}' postgresql-19) && apt-ge
     curl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# pgvector — core per meta/postgres-manifest.md
-# NOTE: v0.8.1 (what ../../../p8k8/docker/Dockerfile.pg18 pins) fails to build
+# pgvector — a core extension
+# NOTE: v0.8.1 (what our PG18 image pinned) fails to build
 # against PG19 beta headers (LWLock/slock_t/ConditionVariable missing from
 # hnsw.c's include chain) - trying latest tag instead.
 #
@@ -50,7 +49,7 @@ RUN apt-get update && v=$(dpkg-query -W -f='${Version}' postgresql-19) && apt-ge
 RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git \
     && cd pgvector && make OPTFLAGS="" && make install DESTDIR=/out && rm -rf /tmp/pgvector
 
-# pg_cron — core per meta/postgres-manifest.md, and the driver behind
+# pg_cron — a core extension, and the driver behind
 # workflow.tick() (workflow-engine/schema.sql §19).
 #
 # RESOLVED (was: "fails to build against PG19 beta3, not root-caused"). It was
@@ -65,7 +64,7 @@ RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.gi
     && cd pg_cron && git apply /tmp/pg_cron-pg19.patch \
     && make && make install DESTDIR=/out && rm -rf /tmp/pg_cron /tmp/pg_cron-pg19.patch
 
-# pg_partman — core per meta/postgres-manifest.md — untested pending the above.
+# pg_partman — a core extension — untested pending the above.
 # RUN cd /tmp && git clone --branch v5.2.4 https://github.com/pgpartman/pg_partman.git \
 #     && cd pg_partman && make && make install && rm -rf /tmp/pg_partman
 

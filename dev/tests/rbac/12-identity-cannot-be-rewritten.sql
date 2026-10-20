@@ -8,7 +8,7 @@
 -- Measured on the tour stack: carol read 24 nodes as herself and 229, alice's
 -- count, after writing alice's id into the setting. `workflow.current_run_id`,
 -- which the step functions trust to mean "my own run", fell the same way.
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2.1, §3.)
+-- (A fix made only at the copy that failed.)
 --
 -- The fix is one superuser statement per database (specs/user-rbac/roles.sql
 -- §6), not a check in each of the functions that read the setting. So this

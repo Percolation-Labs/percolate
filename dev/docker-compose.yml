@@ -91,8 +91,7 @@ services:
       # BOUNDS, EXPLICIT RATHER THAN PACKAGED (REM-113). None of these was set
       # anywhere in the estate. They are here as flags rather than in a conf so
       # the dev stack and the shipped compose say the same thing in the same
-      # place, and meta/postgres-manifest.md §"What the database refuses" is
-      # where the values are argued.
+      # place.
       #
       # max_connections: the default 100 faces up to 72 backends from ONE
       # agent-runtime process (REM-110), before the worker, PostgREST's pool and
@@ -307,7 +306,7 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # A `moonshotai:` agent model reads pydantic-ai's name for the Kimi key;
-      # the root .env keeps it as KIMI_API_KEY (meta/skills/live-credentials).
+      # the root .env keeps it as KIMI_API_KEY.
       MOONSHOTAI_API_KEY: ${KIMI_API_KEY:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
     volumes:

@@ -241,7 +241,7 @@ begin
     end if;
     -- Latency optimisation only. The manager's periodic resync is what makes
     -- convergence correct; a missed NOTIFY costs seconds, not consistency.
-    -- Channel namespaced per meta/module-composition.md.
+    -- Channel namespaced p8_ so modules sharing a database cannot collide.
     perform pg_notify('p8_pool_changed', new.name);
     return new;
 end;

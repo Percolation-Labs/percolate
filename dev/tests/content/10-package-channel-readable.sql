@@ -11,9 +11,8 @@
 -- This is the third file to write that pair. REM-75 fixed it in
 -- content.register_fetched, REM-74 in the self-model's content.sql, and this
 -- one in apply_package. Each repair was at the call site, which is why there
--- were three; §2 below is the gate that
--- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6 asks for
--- once a class arrives a third time.
+-- were three; §2 below is the gate a class
+-- earns once it arrives a third time.
 --
 -- NOTHING CAUGHT IT because the may_read arm in register_fetched's lookup is
 -- newer than any released tag -- every installed database is old enough to

@@ -730,9 +730,8 @@ create unique index if not exists runs_owner_external_id_key
 -- assert_run_access() refuses; start_workflow's idempotency match has to CARRY
 -- ON and start a new run when the answer is no, so a raise is the wrong shape
 -- for it. Split rather than spelled twice: a second copy of this predicate is
--- how `resolve_file` came to ask the row while four siblings asked the org
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6). The
--- sentence is unchanged from the version assert_run_access carried.
+-- how `resolve_file` came to ask the row while four siblings asked the org.
+-- The sentence is unchanged from the version assert_run_access carried.
 --
 -- SECURITY DEFINER because it must give the same answer whoever asks: it reads
 -- workflow.runs, whose RLS would otherwise hide the very row being judged and
@@ -1522,7 +1521,7 @@ grant execute on function workflow.task_principal(uuid, text) to worker;
 -- signal_task and reusable_run all ask the same question of a caller-supplied
 -- run, and REM-77 extracted it so there would be one copy. A second spelling
 -- here is how `resolve_file` came to ask the row while four siblings asked the
--- org (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6).
+-- org.
 --
 -- READING runs_api/tasks_api INSTEAD WAS TRIED AND IS WRONG, and the measurement
 -- is the reason rather than a preference. Those views are owned by api_viewer

@@ -74,8 +74,8 @@ end $$;
 -- Each returned rows the caller's policies refuse -- 15 edges instead of 14,
 -- another org's private agents with their system prompts. edges_current had
 -- been written down as a hazard two days earlier and left, because the data
--- then could not show a leak (meta/postmortems/
--- 2026-09-11-owner-privileged-views.md).
+-- then could not show a leak: a view owned by a
+-- privileged role reads past row security.
 --
 -- So the property itself: a view an end-user role can SELECT, over a table
 -- with RLS enabled and not forced, is either security_invoker or owned by a
