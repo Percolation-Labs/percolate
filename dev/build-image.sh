@@ -7,6 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
+. "$ROOT/dev/lib/machine.sh"
+require_free_disk "$ROOT"
 
 # THE POSTGRES MAJOR IS READ, NOT TYPED, and it is read from the file that
 # decides it. `extension/percolate_parser/Cargo.toml` names the pgrx feature
@@ -71,6 +73,7 @@ for arch in $PLATFORMS; do
     fi
     echo "==> percolate_parser ($arch) is STALE -- ${stale#"$ROOT"/} is newer than it; rebuilding"
   fi
+  [ -n "${LOCKED:-}" ] || { take_parser_lock; LOCKED=1; }
   echo "==> compiling percolate_parser for linux/$arch"
   # THE pgrx PIN HAS ONE HOME TOO, and it is the crate's own dependency line.
   # `cargo-pgrx` (the build tool) and `pgrx` (the crate) have to be the same

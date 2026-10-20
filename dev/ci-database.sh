@@ -64,6 +64,8 @@ DB="${DB:-p8ci}"
 # error. Three scripts asking this question three ways is what that file ends.
 . "$(cd "$(dirname "$0")" && pwd)/lib/python.sh"
 PY="$(percolate_python)" || exit 1
+. "$(cd "$(dirname "$0")" && pwd)/lib/machine.sh"
+require_free_disk "$PWD"
 
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$V" ] || { echo "percolate.control has no default_version" >&2; exit 1; }
