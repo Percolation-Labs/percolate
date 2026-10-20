@@ -26,12 +26,15 @@ pip install pyyaml
 REBUILD_PARSER=1 TAG=percolate-postgres:mine dev/build-image.sh
 ```
 
-The extension installed as CI installs it, in a container of its own, then the tests:
+The extension installed as CI installs it, in a container of its own, then every gate CI runs, including the
+tests, the upgrade checks and the docs' worked examples:
 
 ```bash
 IMAGE=percolate-postgres:mine CONTAINER=p8-mine DB=p8mine dev/ci-database.sh
-CONTAINER=p8-mine DB=p8mine REQUIRE_ALL=1 dev/tests/run.sh
+CONTAINER=p8-mine DB=p8mine dev/check.sh
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) lists what you need and how long each step takes.
 
 `extension/percolate/sql/percolate--<version>.sql` is generated. Edit `specs/`, then run
 `python3 extension/percolate/build-sql.py`. Its upgrade scripts are written for every released version, read from
