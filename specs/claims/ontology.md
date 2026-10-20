@@ -103,7 +103,7 @@ computed and thrown away; what persists is the `Discharge` rows it produced.
 Two claims usually move together because one *decision* constrained both, so the
 claim-to-claim edge loses the reason and pays n² edges for it. The decision is
 the hub. `depends_on` stays in the design because the source specifies it;
-the decision model, kept in an internal application, is the thing to measure before Phase 3 commits.
+the decision model is the thing to measure before Phase 3 commits.
 
 **No line numbers anywhere.** A claim bound to a line is dead on the first
 refactor, which is the whole of §8 of the brief.

@@ -109,8 +109,8 @@ tool it activates) falls out of `agentic.agents.tools` being a binding rather
 than code.
 
 **§14 tenancy — the development engine is the first tenant.** The source
-assumes this and is right, and we have the evidence: the self-model
-(an internal self-model application) already loads the development repository into
+assumes this and is right, and we have the evidence: an internal
+self-model application already loads the development repository into
 Percolate — 2,854 nodes, 8,271 edges, a claim × deployment matrix — using only
 the existing subsystems and nothing claims-specific. It is an application, so the
 claims layer is core and the engine is its tenant, not the reverse.
@@ -209,7 +209,7 @@ what happened rather than what should hold.
 This is a policy that pushes down: `status` is a vocabulary table with a foreign
 key, and the promotion path is a `SECURITY DEFINER` function that checks a
 permission, so an agent physically cannot write `active` — which is a stronger
-statement than a convention and is the shape the push-down rule (a vocabulary table with a foreign key, not an enum) asks for.
+statement than a convention and is what the push-down rule asks for.
 
 ## 11. What would kill it
 
@@ -231,7 +231,7 @@ query time, a maintained graph is an index with an expiry date.
 **The one part of the graph that argument does not reach** is the rejected
 alternative. No model re-derives what was never written down, however cheap it
 gets, because the options nobody took are not in the history to be mined — which
-is why the decision model, kept in an internal application, is authored rather than extracted, and why
+is why the decision model is authored rather than extracted, and why
 it stays load-bearing at any inference price.
 
 ## 12. Evaluation
@@ -278,7 +278,7 @@ things that passed.
 
 ## 14. The decision layer
 
-The decision model, kept in an internal application — **the options that were live, scored, with the
+The decision model records **the options that were live, scored, with the
 one taken marked.** Inside this layer rather than beside it: a claim says what
 must hold, a decision says what we chose and what we rejected, and they need the
 same anchoring, the same supersession-not-delete rule and the same vocabulary

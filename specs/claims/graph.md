@@ -3,7 +3,7 @@
 **Status:** specified 2026-09-18. Steps 1 and 2 of §15 are built in extension 0.2.11, step 3 in 0.2.12 and steps 4 to 6 and 9 in 0.2.13, with step 7's core half and step 8 (`specs/claims/schema.sql`, REM-473 to REM-481, REM-496), and the rest is unbuilt. The spike in §14 has chosen the physical design: typed append-only
 tables, recursive CTEs, and Datalog as the language the derived readings are specified in.
 Answers REM-434 (what identifies a claim) and proposes answers to REM-432 (what a
-relationship between two claims is). Read against extension 0.2.11.
+relationship between two claims is). Sections name the extension version they describe.
 
 **Where it sits.** This is the claims layer of [`brief.md`](brief.md) with a second tenant.
 The brief's tenant is the development engine: claims about code, anchored to symbols and
@@ -410,7 +410,7 @@ nothing else. Two judges reading the same 52 candidates agreed on 35, one callin
 them a relation and the other 21. **Revisit when** a judge's answers on 200 candidates are
 reproduced by a second judge on more than nine in ten.
 
-**As built (REM-659, extension 0.2.29, Percolation-Labs/percolate#211): the challenge runs
+**Merged for extension 0.2.29 (REM-659, Percolation-Labs/percolate#211): the challenge runs
 when a claim's vector lands, and the writer's own agent answers it.** A vector does not exist at save, so the hook
 is `aiq.semantic_sources.on_embedded`. `aiq.record_embeddings` calls it with the ids that landed, in its own
 subtransaction, and a failure there never fails the embed. The claims source names `claims.challenge_embedded`,
