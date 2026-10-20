@@ -51,8 +51,8 @@ Percolate was cut out of Percolation Labs' internal repository, and these stayed
 - for now, the prose design documents behind `specs/`: only their SQL moved at the cut, and whether the prose is
   published is being decided.
 
-Some comments and tests here still point at those (a `meta/...` path, a `specs/<dir>/<name>.md` that is not in this
-tree). They are being replaced with the point itself; `dev/no-private-citations.py --check`, one of the tree gates,
+Some comments and tests here still point at those: a path into the internal repository, or a prose spec that is
+not in this tree. They are being replaced with the point itself; `dev/no-private-citations.py --check`, one of the tree gates,
 refuses a new one, and `--all` counts what is left.
 
 ## The earlier Percolate
