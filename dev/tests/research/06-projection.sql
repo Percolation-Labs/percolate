@@ -1,4 +1,4 @@
--- A revision's claims, sources, citations and argument edges (REM-152, specs/tables/schema.md §3): they
+-- A revision's claims, sources, citations and argument edges (REM-152): they
 -- project atomically, a duplicate or dangling reference rolls the whole write back, all six 0.1 relations and
 -- an uncited source survive, a rebuild restores what is missing without rewriting the revision, and search
 -- over them returns only what the caller may read, with no client write on aiq.

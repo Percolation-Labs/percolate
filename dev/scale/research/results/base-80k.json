@@ -1,0 +1,122 @@
+{
+ "db": "s80000",
+ "claims": 960006,
+ "probes": {
+  "get_package head": {
+   "buffers": 127,
+   "ms": 1.559
+  },
+  "get_package draft-1": {
+   "buffers": 100,
+   "ms": 0.841
+  },
+  "list_packages (all readable)": {
+   "buffers": 1886842,
+   "ms": 14106.235
+  },
+  "list_packages first 20": {
+   "buffers": 1886835,
+   "ms": 21694.91
+  },
+  "list_packages owned": {
+   "buffers": 1531,
+   "ms": 488.585
+  },
+  "trust": {
+   "buffers": 6771,
+   "ms": 27.665
+  },
+  "trust_state": {
+   "buffers": 355,
+   "ms": 6.202
+  },
+  "readable": {
+   "buffers": 8,
+   "ms": 0.307
+  },
+  "revision_readable": {
+   "buffers": 12,
+   "ms": 1.025
+  },
+  "visible_head": {
+   "buffers": 26,
+   "ms": 0.573
+  },
+  "work_readable_in_full": {
+   "buffers": 8,
+   "ms": 0.43
+  },
+  "endorsements_affected_by": {
+   "buffers": 227,
+   "ms": 3.3
+  },
+  "revision_signals": {
+   "buffers": 6356,
+   "ms": 28.786
+  },
+  "my_saves": {
+   "buffers": 52,
+   "ms": 1.512
+  },
+  "claims of a revision": {
+   "buffers": 76,
+   "ms": 1.563
+  },
+  "claims matching a word": {
+   "buffers": 336121,
+   "ms": 4853.523
+  },
+  "claims matching a rare word": {
+   "buffers": 20650169,
+   "ms": 428902.494
+  },
+  "aiq.lexical, a common term": {
+   "buffers": 20648832,
+   "ms": 351173.776
+  },
+  "aiq.lexical, a rare term": {
+   "buffers": 20648832,
+   "ms": 218242.158
+  },
+  "a source's other citations": {
+   "buffers": 17497,
+   "ms": 67.098
+  },
+  "comments on a revision": {
+   "buffers": 1392,
+   "ms": 2.66
+  },
+  "useful votes on a revision": {
+   "buffers": 3,
+   "ms": 0.046
+  },
+  "submit_package": {
+   "buffers": 403,
+   "ms": 8.105
+  },
+  "revise_package": {
+   "buffers": 454,
+   "ms": 9.638
+  },
+  "set_useful (another's work)": {
+   "buffers": 90,
+   "ms": 2.728
+  },
+  "add_comment": {
+   "buffers": 54,
+   "ms": 0.918
+  },
+  "endorse": {
+   "buffers": 52,
+   "ms": 0.708
+  },
+  "set_saved": {
+   "buffers": 32,
+   "ms": 0.839
+  },
+  "erase_work (operator)": {
+   "buffers": 91136,
+   "ms": 248.965
+  }
+ }
+}

@@ -1336,7 +1336,15 @@ begin
     if v_n = 0 then
         raise exception 'no node is named % -- add_node_key names an existing '
                         'node, it does not create one', p_node_key;
-    elsif v_n > 1 then
+    end if;
+    -- lookup returns a reader the nearest of a key's scopes (REM-976), which
+    -- is a preference for reading and not a licence for a write: every scope
+    -- the caller can see that holds the same key counts here.
+    select count(distinct k2.node_id) into v_n
+      from aiq.lookup(p_node_key) l
+      join aiq.node_keys k2 on k2.key = l.key and k2.entity_type = l.entity_type
+       and (k2.kind = l.match_kind or (l.match_kind in ('canonical', 'soft') and k2.kind = 'canonical'));
+    if v_n > 1 then
         raise exception '% resolves to % nodes -- name the one you mean by its '
                         'canonical key', p_node_key, v_n;
     end if;
@@ -1675,11 +1683,22 @@ declare v_norm text := lower(trim(p_key));
 begin
     -- 1. exact canonical. distinct on (n.id) throughout, see the fuzzy
     -- branch below for why.
+    --
+    -- THE READER'S OWN NODE FIRST, then the org's, then the public one
+    -- (REM-976). With private memory one key can name a node per scope -- Maya's
+    -- private `place/leeds` and the public one -- and the caller who reads both
+    -- got two rows, which GRAPH refused as ambiguous. Within one kind and key
+    -- only the nearest scope is returned; two kinds under one key are still
+    -- two rows. Row security has already removed what the caller cannot read,
+    -- so a private node here is the caller's own (or, for an operator, anyone's).
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, 'canonical'::text, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind = 'canonical'
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, 'canonical'::text as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind = 'canonical')
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -1688,10 +1707,13 @@ begin
     -- from graph-identity.md). Several nodes is correct; the same node twice
     -- is not.
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, k.kind, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind in ('short','alias')
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, k.kind as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind in ('short','alias'))
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -1701,11 +1723,14 @@ begin
     -- what says under which kind the name was found; match_kind 'soft' says it
     -- was this step. Several kinds may hold one name, and each is a row.
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, 'soft'::text, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where lower(substr(k.key, strpos(k.key, '/') + 1)) = v_norm
-      and k.kind = 'canonical' and k.entity_type = 'soft'
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, 'soft'::text as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where lower(substr(k.key, strpos(k.key, '/') + 1)) = v_norm
+          and k.kind = 'canonical' and k.entity_type = 'soft')
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -2351,9 +2376,12 @@ begin
         -- seed by key and answers by id, and the result carried neither -- so
         -- nothing downstream could check that the string it wrote resolved to
         -- the node it meant.
+        -- And in whose scope it was found, since a key may name one per scope
+        -- and the nearest wins (REM-976).
         select jsonb_build_object('node_id', s.node_id, 'key', s.key,
                                   'entity_type', s.entity_type,
-                                  'match_kind', s.match_kind)
+                                  'match_kind', s.match_kind,
+                                  'scope', (select n.visibility from aiq.nodes n where n.id = s.node_id))
           into v_seed
           from aiq.lookup(p->>'arg', false, 1) s limit 1;
 

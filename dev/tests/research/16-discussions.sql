@@ -1,5 +1,5 @@
 -- loads: research-platform/schema.sql
--- Discussions (REM-507, architecture.md §5): a person posts in a thread on a
+-- Discussions (REM-507): a person posts in a thread on a
 -- listed revision, one of its claims, or a resource, taking a stance; a reply
 -- stays on its parent's target and claim; an agent is refused as human_only; a
 -- post about a private resource is readable exactly when the resource is.

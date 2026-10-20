@@ -1,5 +1,5 @@
 -- loads: research-platform/schema.sql
--- An application withdraws a grant it issued (architecture.md §7, REM-248).
+-- An application withdraws a grant it issued (REM-248).
 --
 --   1. the provisioner revokes a writer grant it issued, with a reason; the grant stays as history, revoked_by
 --      names the deciding person, the role leaves user_roles, and a second revocation changes nothing;

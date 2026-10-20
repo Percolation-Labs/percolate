@@ -2,7 +2,7 @@
 -- The research platform in core: one access decision, plans and usage,
 -- research revisions, engagement, and the trust read.
 --
--- specs/research-platform/architecture.md §2-§6. Written in beta mode: lean,
+-- Core owns them, so any application gets them without installing another. Written in beta mode: lean,
 -- and meant to be read, argued with and changed. build-sql.py replays this
 -- file on every upgrade, so every statement is idempotent.
 --
@@ -83,14 +83,14 @@ create table if not exists research.revisions (
 comment on table research.revisions is
     'An immutable version of a work, with its document, content hash, predecessor, and who wrote it as which kind of actor.';
 
--- WHAT A REVISION'S HASH WAS COMPUTED OVER, kept on the row (REM-151, specs/tables/schema.md §3). The
+-- WHAT A REVISION'S HASH WAS COMPUTED OVER, kept on the row (REM-151). The
 -- digest is sha256 over the jsonb text Postgres prints for the document. A later canonical form is a new
 -- hash_format_version, never a silent change to what an old content_hash meant.
 alter table research.revisions add column if not exists hash_algorithm text not null default 'sha256';
 alter table research.revisions add column if not exists hash_format_version text not null default 'pg-jsonb-text-1';
 
--- THE WORKFLOW RUN A REVISION WAS WRITTEN IN (REM-237, specs/tables/schema.md §3: run provenance "derived from
--- trusted request context and checked for consistency"). Filled from workflow.current_run_id, which only the
+-- THE WORKFLOW RUN A REVISION WAS WRITTEN IN (REM-237: run provenance is derived from
+-- trusted request context and checked for consistency). Filled from workflow.current_run_id, which only the
 -- engine's step executor publishes -- a person's role may not call set_config (REM-44) -- and checked by
 -- trg_revisions_row. Null when no step was executing. `on delete set null`, so pruning old runs never takes a
 -- revision with it; the revision keeps everything else it says about who wrote it.
@@ -105,7 +105,7 @@ alter table research.revisions add constraint revisions_predecessor_same_work
     foreign key (work_id, predecessor_id) references research.revisions (work_id, id);
 
 -- A DERIVATIVE WORK names its parent, and each of its revisions names the exact parent revision it answers
--- (schema.md §3). Core stores the relationship; which document types may nest is the product validator's.
+-- Core stores the relationship; which document types may nest is the product validator's.
 -- trg_revisions_row proves a base belongs to the parent.
 alter table research.works add column if not exists parent_work_id uuid references research.works(id);
 alter table research.revisions add column if not exists base_revision_id uuid references research.revisions(id);
@@ -195,7 +195,7 @@ create table if not exists research.argument_edges (
 comment on table research.argument_edges is
     'How one claim in a revision bears on another — supports, challenges, qualifies — so the argument is data rather than prose.';
 
--- SEARCH OVER CLAIMS AND SOURCES, SCOPED BY THE ROWS THEMSELVES (REM-152, specs/tables/schema.md §3). Lexical
+-- SEARCH OVER CLAIMS AND SOURCES, SCOPED BY THE ROWS THEMSELVES (REM-152). Lexical
 -- sources rather than entity projections: revision_readable decides what a search returns, and a package
 -- write adds no aiq row -- nobody needs a
 -- write grant on aiq, on the first insert or any other. The registration adds a generated search_tsv
@@ -276,7 +276,7 @@ create unique index if not exists endorsements_one_active
 -- only queries that imply its predicate, so trust scanned the table (specs/research-platform/scale.md §2).
 create index if not exists endorsements_by_revision on research.endorsements (revision_id);
 
--- WHAT WAS CHECKED, AS KEYS AND NOT ONLY AS PROSE (REM-154, specs/tables/schema.md §5). A document-scoped
+-- WHAT WAS CHECKED, AS KEYS AND NOT ONLY AS PROSE (REM-154). A document-scoped
 -- endorsement may name no claim; a claim-scoped one names at least one, and research.endorse refuses it
 -- otherwise. The free text stays beside the keys: it says how, the keys say which.
 alter table research.endorsements add column if not exists kind text not null default 'document'
@@ -406,7 +406,7 @@ comment on table research.publication_withdrawals is
     'A publication exposure that ended: the row as it stood, and who ended it when.';
 create index if not exists publication_withdrawals_by_work on research.publication_withdrawals (work_id);
 
--- ERASURE IS THE ONE WAY HISTORY LEAVES (specs/tables/schema.md §3: "a documented privileged lifecycle"). The row
+-- ERASURE IS THE ONE WAY HISTORY LEAVES (a documented privileged lifecycle). The row
 -- outlives the work it names, so it holds no foreign key: what was erased, by whom and why stays when the erased
 -- rows do not. `xact` is the transaction that erased it, and it is what research.refuse_rewrite asks, so the
 -- permission is exactly as wide as research.erase_work's one statement and ends with it. Nobody is granted this
@@ -586,8 +586,8 @@ begin
 end;
 $$;
 
--- REBUILD A REVISION'S PROJECTION FROM ITS OWN DOCUMENT (REM-152, schema.md §3: "Rebuilding projections never
--- rewrites revisions"). Operator-only: nothing grants it to authenticated, and identity/closing.sql takes
+-- REBUILD A REVISION'S PROJECTION FROM ITS OWN DOCUMENT (REM-152: rebuilding projections never
+-- rewrites revisions). Operator-only: nothing grants it to authenticated, and identity/closing.sql takes
 -- PUBLIC's EXECUTE away. It adds what is missing, with the ids the first projection gave them, then refuses a
 -- projection holding anything its document does not say -- a row that no rebuild can explain is corruption to
 -- look at, not something to delete quietly. The revision row itself is only read.
@@ -852,7 +852,7 @@ language sql stable security definer set search_path = pg_catalog, public as $$
                           and research.revision_readable(rf.revision_id)));
 $$;
 
--- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153, schema.md §4). Operator-only: nothing grants it. The
+-- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153). Operator-only: nothing grants it. The
 -- snapshot stays as a tombstone with its checksum, who removed it and why, so every revision that pinned it
 -- says "removed" rather than pointing at nothing -- and the file row is then free for content storage to prune.
 create or replace function content.remove_snapshot_bytes(p_snapshot uuid, p_reason text) returns void
@@ -1838,7 +1838,7 @@ create policy works_in_a_publication on research.works for select
 create or replace trigger trg_works_visibility before insert or update on research.works
     for each row execute function rbac.enforce_visibility();
 
--- EVERY REVISION'S LINEAGE AND PROVENANCE, checked on the row (REM-151, specs/tables/schema.md §3). The
+-- EVERY REVISION'S LINEAGE AND PROVENANCE, checked on the row (REM-151). The
 -- definers derive both from trusted claims; this makes one that gets it wrong fail instead of recording it.
 --   * A derivative work's revision names a base revision of its parent work; any other revision names none.
 --   * An agent's revision carries its credential and only an agent's does, and the credential is the actor's.
@@ -1886,7 +1886,7 @@ $$;
 create or replace trigger trg_revisions_row before insert on research.revisions
     for each row execute function research.enforce_revision_row();
 
--- HISTORY CANNOT BE REWRITTEN (REM-464, specs/tables/schema.md §3). The grants were the whole rule: a caller holds
+-- HISTORY CANNOT BE REWRITTEN (REM-464). The grants were the whole rule: a caller holds
 -- SELECT and nothing else. But every writer here is a SECURITY DEFINER running as the owner, and the owner holds
 -- UPDATE and DELETE, so the next definer written by somebody who has not read this file could change what an
 -- endorsement was of, and deleting a work took every revision with it by cascade. This refuses both from anybody,
