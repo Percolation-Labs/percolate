@@ -223,7 +223,7 @@ create or replace function memory.context(p_name text) returns text
 language sql stable security invoker as $$
   select string_agg(format('- %s %s %s (%s to %s)', s.summary, replace(e.relation, '_', ' '), d.summary,
                            e.valid_from::date, coalesce(e.valid_to::date::text, 'now')),
-                    E'\n' order by e.valid_to nulls last, e.valid_from)
+                    E'\n' order by e.valid_to nulls last, e.valid_from, e.relation desc)
     from aiq.lookup(p_name) l
     join aiq.edges e on e.src_id = l.node_id
     join aiq.nodes s on s.id = e.src_id
