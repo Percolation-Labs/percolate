@@ -1971,6 +1971,19 @@ alter table aiq.semantic_sources add column if not exists shipped boolean not nu
 alter table aiq.semantic_sources alter column shipped set default
     (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
+-- WHAT RUNS WHEN A SOURCE'S ROWS ARE EMBEDDED (REM-659). A function name taking
+-- (model text, ids uuid[]), called by aiq.record_embeddings after the vectors
+-- land, with the ids that landed. The claims source names
+-- claims.challenge_embedded, which puts each new claim to its writer against
+-- the claims nearest it: the challenge needs the vector, and this is the first
+-- moment one exists. A column rather than a call written into
+-- record_embeddings, because this schema knows nothing of claims, and the
+-- source that does says what it wants done. Written by app_owner only, like
+-- source_table, and resolved through to_regprocedure before it is called.
+alter table aiq.semantic_sources add column if not exists on_embedded text;
+comment on column aiq.semantic_sources.on_embedded is
+    'A function (model text, ids uuid[]) that record_embeddings calls after this source''s vectors land, or null for none.';
+
 -- The superseded implementation, removed rather than left to be found.
 --
 -- `aiq.semantic(source, vector, limit)` read `<source_table>.<embedding_col>`
@@ -3611,9 +3624,10 @@ revoke execute on function aiq.embed_batch_call(text, jsonb) from public;
 create or replace function aiq.record_embeddings(p_model text, p_rows jsonb)
 returns int as $$
 declare
-    m     aiq.embedding_models;
-    v_tbl text;
-    v_n   int;
+    m      aiq.embedding_models;
+    v_tbl  text;
+    v_n    int;
+    v_hook text;
 begin
     select * into m from aiq.embedding_models where name = p_model;
     if not found then
@@ -3636,6 +3650,26 @@ begin
             set embedding = excluded.embedding, embedded_at = now()
     $q$, v_tbl) using p_rows;
     get diagnostics v_n = row_count;
+
+    -- Each source's on_embedded, with the ids that landed (each hook keeps its
+    -- own rows). IT NEVER FAILS THE EMBEDDING: a vector rolled back with a
+    -- failed hook would be re-embedded on the next page, forever. The hook's
+    -- own subtransaction is undone, a WARNING says so, and whatever the hook
+    -- keeps as its state (claims.challenged) says what is still owed.
+    for v_hook in
+        select to_regprocedure(s.on_embedded || '(text,uuid[])')::regproc::text
+          from aiq.semantic_sources s
+         where s.on_embedded is not null and to_regprocedure(s.on_embedded || '(text,uuid[])') is not null
+         order by s.name
+    loop
+        begin
+            execute format('select %s($1, $2)', v_hook) using m.name,
+                (select array_agg((r->>'chunk_id')::uuid) from jsonb_array_elements(p_rows) r);
+        exception when others then
+            raise warning '% did not run after % vectors landed in % (%): what it does is still owed',
+                v_hook, v_n, m.name, sqlerrm;
+        end;
+    end loop;
     return v_n;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;

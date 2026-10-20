@@ -507,17 +507,46 @@ begin
         end if;
         if exists (select 1 from jsonb_each_text(coalesce(p_spans->'frame_match', '{}'::jsonb)) m
                     where m.key not in ('subject', 'outcome', 'population', 'setting', 'period', 'comparator', 'evidence_type')
-                       or m.value not in ('same', 'overlaps', 'differs', 'unknown')) then
-            raise check_violation using message = 'frame_match names the seven slots, each same, overlaps, differs or unknown';
+                       or m.value not in ('same', 'overlaps', 'differs', 'unknown', 'unstated')) then
+            raise check_violation using message = 'frame_match names the seven slots, each same, overlaps, differs, '
+                'unknown or unstated';
+        end if;
+        -- UNSTATED IS NOT UNKNOWN (REM-659). `unknown` is a slot nobody checked; `unstated` is a slot the proposer
+        -- checked and found that NEITHER claim states -- two method claims, neither naming a period, answer the same
+        -- open-ended question about it. The proposer says so, and it is checked where it can be: a frame either
+        -- occurrence carries that states the slot makes `unstated` false, and it is refused. Agreement between two
+        -- claims that leave a population or a period open is compatible with every value of it, so agrees accepts
+        -- unstated there. contradicts does not: two claims that state no period may be about different ones, so an
+        -- apparent opposition across it is not yet a contradiction. Measured: all 4 of the 21 challenge answers core
+        -- refused on 0.2.18 were agrees between method claims with no period on either side.
+        if exists (select 1 from jsonb_each_text(coalesce(p_spans->'frame_match', '{}'::jsonb)) m
+                    where m.value = 'unstated'
+                      and exists (select 1 from claims.frames fr
+                                   where ((fr.revision_id, fr.claim_key) = (p_evidence, p_src_key)
+                                          or (fr.revision_id, fr.claim_key) = (p_evidence2, p_dst_key))
+                                     and nullif(btrim(fr.frame->>m.key), '') is not null)) then
+            raise check_violation using message = 'frame_match says a slot is unstated that a claim''s frame states',
+                hint = 'unstated means neither claim states the slot; compare the stated values instead '
+                       '(same, overlaps or differs)';
         end if;
         if p_predicate in ('agrees', 'contradicts') and not (
                (select bool_and(coalesce(p_spans->'frame_match'->>k, 'unknown') = 'same')
                   from unnest(array['subject', 'outcome', 'evidence_type']) k)
-           and (select bool_and(coalesce(p_spans->'frame_match'->>k, 'unknown') in ('same', 'overlaps'))
+           and (select bool_and(coalesce(p_spans->'frame_match'->>k, 'unknown')
+                                = any (case when p_predicate = 'agrees' then array['same', 'overlaps', 'unstated']
+                                            else array['same', 'overlaps'] end))
                   from unnest(array['population', 'period']) k)) then
             raise check_violation using message = p_predicate || ' needs the same question: subject, outcome and '
-                'evidence_type same, population and period same or overlapping',
-                hint = 'A differing slot is different_scope; a missing one is uncertain, which is not a relation';
+                'evidence_type same, population and period same or overlapping'
+                || case when p_predicate = 'agrees' then ', or unstated by both' else '' end,
+                hint = case when p_predicate = 'agrees'
+                            then 'If neither claim states the population or period, mark that slot unstated. A slot '
+                                 'that differs is different_scope; one you did not check is unknown, which is not a '
+                                 'relation -- read both claims and mark it, or decide the challenge none'
+                            else 'contradicts needs both claims to state the same population and period; if either '
+                                 'leaves one open, the opposition may be a difference of scope: mark the slot differs '
+                                 'and propose different_scope, or decide none'
+                       end;
         end if;
         if p_predicate in ('agrees', 'contradicts', 'same_source_opposite')
            and (coalesce(p_spans->>'src', '') = '' or coalesce(p_spans->>'dst', '') = '') then
@@ -2292,11 +2321,13 @@ $$;
 do $$
 begin
     if to_regclass('aiq.semantic_sources') is not null then
-        insert into aiq.semantic_sources (name, source_table, content_col)
-        values ('claims', 'research.claims', 'text')
+        -- on_embedded: a claim is challenged once its vector exists (12b, REM-659).
+        insert into aiq.semantic_sources (name, source_table, content_col, on_embedded)
+        values ('claims', 'research.claims', 'text', 'claims.challenge_embedded')
         on conflict (name) do update
            set source_table = excluded.source_table,
                content_col  = excluded.content_col,
+               on_embedded  = excluded.on_embedded,
                shipped = excluded.shipped or semantic_sources.shipped;
     end if;
 end $$;
@@ -2445,6 +2476,202 @@ begin
       using v_vec, v_id, v_work, p_max_distance, v_cid, greatest(coalesce(p_limit, 5), 1);
 end;
 $$;
+
+-- ------------------------------------------------------------
+-- 12b. The challenge (graph.md §5 *Did you mean*, REM-659). When a claim's vector lands, the claim is put to its
+--      writer against the claims nearest it that they may read, and their own connected agent answers through the
+--      judgement queue (aiq.judgements kind 'challenge'). Nothing here calls a model: retrieval is claims.candidates,
+--      and the judgement is the writer's agent, whose answer is claims.assert_relation as that agent, so it lands
+--      proposed until the person confirms it.
+--
+-- WHEN. After the vector exists, which is not at save: a save queues the embedding (aiq.queue_source_embedding) and
+-- the worker embeds later. aiq.record_embeddings calls the source's on_embedded with the ids that landed, which for
+-- the claims source is claims.challenge_embedded below. What is still owed is claims.challenged's absence, so
+-- claims.challenge_waiting() asks every claim that has a vector and was never asked -- the backfill, and the repair
+-- after a hook that failed.
+--
+-- AS WHOM. Each claim as its own writer -- the owner of its work -- because the candidates are what that writer
+-- may read (identity is per visibility horizon, REM-434). The embed run is coalesced across saves and belongs to
+-- whoever saved first, so it is not the context for anybody's claim: claims.candidates runs through
+-- workflow.execute_for with the writer's identity, the engine's one way to read as a person under row security.
+--
+-- AGAINST WHAT. The claims already in the space when this one's vector lands -- the per-insert question the cost
+-- table was measured on -- and each PAIR is asked once. A pair already put to either side, whatever its answer, is
+-- not asked again: not of this claim (an occurrence re-saved in the next revision of its work keeps its claim, and
+-- asking again what the writer answered "none" to is the treadmill claims.candidates' relation exclusion exists to
+-- prevent), and not the other way round (two near claims embedded in one page would otherwise each challenge the
+-- other). A page is taken newest occurrence first, so of two claims that land together the later one is asked.
+-- NOT "only claims that arrived earlier": the worker embeds a backlog in id order, not arrival order, and a later
+-- claim embedded first would find its earlier twin missing, then be skipped by it -- the pair would never be asked.
+-- Both filters run after candidates' LIMIT, so twice top_k is fetched and the first top_k that survive are kept.
+--
+-- THE FLOOR IS THE DEPLOYMENT'S, PER MODEL, AND HAS NO DEFAULT -- claims.candidates' rule, given a place to live.
+-- No row for the model: nothing is challenged, a NOTICE says why, and nothing is recorded as asked, so setting the
+-- floor and calling claims.challenge_waiting() asks them all. graph.md §5 carries what a floor costs.
+-- ------------------------------------------------------------
+create table if not exists claims.challenge_floors (
+    model        text primary key references aiq.embedding_models (name) on delete cascade on update cascade,
+    max_distance float8 not null check (max_distance > 0 and max_distance <= 2),
+    top_k        int not null default 3 check (top_k between 1 and 10),
+    set_at       timestamptz not null default now()
+);
+comment on table claims.challenge_floors is
+    'The distance under which a newly embedded claim is challenged against the claims nearest it, per embedding model. No row: no challenge.';
+alter table claims.challenge_floors enable row level security;
+revoke all on claims.challenge_floors from public;
+
+-- Which occurrences have been asked, under which model: the queue's whole state. judgement_id is null when nothing
+-- came within the floor, which is the answer for 99% of claims and is recorded so it is not asked again.
+create table if not exists claims.challenged (
+    claim_row    uuid not null references research.claims (id) on delete cascade,
+    model        text not null,
+    asked_at     timestamptz not null default now(),
+    candidates   int not null,
+    judgement_id uuid,
+    primary key (claim_row, model)
+);
+comment on table claims.challenged is
+    'Each claim occurrence challenged after it was embedded: when, how many candidates it was put to its writer with, and the judgement.';
+alter table claims.challenged enable row level security;
+revoke all on claims.challenged from public;
+-- History like every table an occurrence cascades into: written once, deleted only by an erasure.
+create or replace trigger trg_refuse_rewrite before update or delete on claims.challenged
+    for each row execute function research.refuse_rewrite();
+create or replace trigger trg_refuse_truncate before truncate on claims.challenged
+    for each statement execute function research.refuse_rewrite();
+
+create or replace function claims.set_challenge_floor(p_model text, p_max_distance float8, p_top_k int default 3)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if p_max_distance is null then
+        delete from claims.challenge_floors where model = p_model;
+        return jsonb_build_object('model', p_model, 'challenged', false);
+    end if;
+    insert into claims.challenge_floors (model, max_distance, top_k) values (p_model, p_max_distance, p_top_k)
+    on conflict (model) do update
+        set max_distance = excluded.max_distance, top_k = excluded.top_k, set_at = now();
+    return jsonb_build_object('model', p_model, 'challenged', true, 'max_distance', p_max_distance, 'top_k', p_top_k);
+end;
+$$;
+revoke all on function claims.set_challenge_floor(text, float8, int) from public;
+
+create or replace function claims.challenge_embedded(p_model text, p_ids uuid[]) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    f       claims.challenge_floors;
+    c       record;
+    v_cands jsonb;
+    v_jid   uuid;
+    v_asked int := 0;
+    v_quiet int := 0;
+begin
+    select * into f from claims.challenge_floors where model = p_model;
+    if not found then
+        raise notice 'claims not challenged: no challenge floor for model %. select claims.set_challenge_floor(''%'', <distance>), '
+                     'then select claims.challenge_waiting() asks every claim waiting (specs/claims/graph.md §5 carries the cost of each floor)',
+                     p_model, p_model;
+        return jsonb_build_object('model', p_model, 'asked', 0, 'reason', 'no challenge floor for this model');
+    end if;
+    for c in
+        select rc.id, rc.revision_id, rc.claim_key, rc.text, w.owner_id, w.org_id, x.claim_id
+          from research.claims rc
+          join research.revisions v on v.id = rc.revision_id
+          join research.works w on w.id = v.work_id
+          cross join lateral (select e.claim_id, e.id from claims.expresses e
+                               where e.revision_id = rc.revision_id and e.claim_key = rc.claim_key
+                                 and e.part = 1 and e.op = 'assert'
+                               order by e.id desc limit 1) x
+         where rc.id = any(p_ids)
+           and not exists (select 1 from claims.challenged d where d.claim_row = rc.id and d.model = p_model)
+         order by x.id desc
+    loop
+        -- As the writer: candidates is security invoker, and execute_for runs it under their identity and row
+        -- security, as if they had asked it themselves.
+        v_cands := workflow.execute_for(c.owner_id,
+            'select claim_id, claim_key, revision_id, text, distance '
+            '  from claims.candidates(($1->>''revision'')::uuid, $1->>''key'', ($1->>''floor'')::float8, '
+            '                         ($1->>''k'')::int, null, $1->>''model'')',
+            false,
+            jsonb_build_object('revision', c.revision_id, 'key', c.claim_key, 'floor', f.max_distance,
+                               'k', f.top_k * 2, 'model', p_model));
+        select coalesce(jsonb_agg(k.v order by k.n), '[]'::jsonb) into v_cands
+          from (select t.value as v, t.ordinality as n
+                  from jsonb_array_elements(v_cands) with ordinality t
+                 where not exists (select 1 from aiq.judgements j
+                                    where j.kind = 'challenge'
+                                      and ((j.subject_node_id = c.claim_id
+                                            and j.evidence->'candidates' @> jsonb_build_array(
+                                                    jsonb_build_object('claim_id', t.value->'claim_id')))
+                                        or (j.subject_node_id = (t.value->>'claim_id')::uuid
+                                            and j.evidence->'candidates' @> jsonb_build_array(
+                                                    jsonb_build_object('claim_id', c.claim_id)))))
+                 order by t.ordinality limit f.top_k) k;
+        v_jid := null;
+        if jsonb_array_length(v_cands) > 0 then
+            -- One live challenge per claim. A later occurrence of a claim already waiting adds its candidates to
+            -- the open item rather than queueing a second; one a judge holds is left as they were given it.
+            insert into aiq.judgements (kind, subject_node_id, addressee, evidence, queued_by, org_id)
+            values ('challenge', c.claim_id, c.owner_id,
+                    jsonb_build_object('claim_id', c.claim_id, 'revision_id', c.revision_id, 'claim_key', c.claim_key,
+                                       'text', c.text, 'label', c.text, 'key', c.claim_key, 'model', p_model,
+                                       'max_distance', f.max_distance, 'candidates', v_cands),
+                    'claims.challenge_embedded', c.org_id)
+            on conflict (kind, subject_node_id) where status in ('open','claimed','to_human')
+            do update set evidence = aiq.judgements.evidence || jsonb_build_object('candidates',
+                              (aiq.judgements.evidence->'candidates') || (excluded.evidence->'candidates'))
+                    where aiq.judgements.status in ('open','to_human')
+            returning id into v_jid;
+            if v_jid is null then
+                select id into v_jid from aiq.judgements
+                 where kind = 'challenge' and subject_node_id = c.claim_id and status in ('open','claimed','to_human');
+            end if;
+            v_asked := v_asked + 1;
+        else
+            v_quiet := v_quiet + 1;
+        end if;
+        insert into claims.challenged (claim_row, model, candidates, judgement_id)
+        values (c.id, p_model, jsonb_array_length(v_cands), v_jid)
+        on conflict (claim_row, model) do nothing;
+    end loop;
+    return jsonb_build_object('model', p_model, 'asked', v_asked, 'silent', v_quiet,
+                              'max_distance', f.max_distance, 'top_k', f.top_k);
+end;
+$$;
+revoke all on function claims.challenge_embedded(text, uuid[]) from public;
+
+-- THE BACKFILL, and the repair. Every claim with a vector in the model's space (the default when none is named)
+-- that was never asked, oldest occurrence first so each is asked against the ones before it, in pages.
+create or replace function claims.challenge_waiting(p_model text default null, p_limit int default 5000)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_model text := coalesce(p_model, (select name from aiq.embedding_models where is_default));
+    v_tbl   text;
+    v_ids   uuid[];
+begin
+    if v_model is null then
+        return jsonb_build_object('asked', 0, 'reason', 'no default embedding model');
+    end if;
+    v_tbl := aiq.embedding_space_name(v_model);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        return jsonb_build_object('model', v_model, 'asked', 0, 'reason', 'the model has no space yet');
+    end if;
+    execute format($q$
+        select array_agg(id) from (
+            select rc.id from research.claims rc
+              join aiq.%I s on s.chunk_id = rc.id
+              cross join lateral (select e.id from claims.expresses e
+                                   where e.revision_id = rc.revision_id and e.claim_key = rc.claim_key
+                                     and e.part = 1 and e.op = 'assert' order by e.id desc limit 1) x
+             where not exists (select 1 from claims.challenged d where d.claim_row = rc.id and d.model = $1)
+             order by x.id limit $2) t$q$, v_tbl)
+      into v_ids using v_model, greatest(coalesce(p_limit, 5000), 1);
+    if v_ids is null then
+        return jsonb_build_object('model', v_model, 'asked', 0, 'silent', 0, 'waiting', 0);
+    end if;
+    return claims.challenge_embedded(v_model, v_ids) || jsonb_build_object('waiting', cardinality(v_ids));
+end;
+$$;
+revoke all on function claims.challenge_waiting(text, int) from public;
 
 -- A claim: the occurrences that expressed it at p_at, and its identity set over the confirmed same_as the caller
 -- may read (graph.md §5). Null when the caller may read no occurrence of it, so a private claim is not observable.
