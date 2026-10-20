@@ -626,7 +626,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.graph_schema','','plan-graph.md: what the graph contains, answered from the registry'),
 ('ai-query-layer','function','aiq.is_graph_schema','jsonb','the shape check upsert_graph applies, exposed so a caller can validate before sending'),
 ('ai-query-layer','function','aiq.facet_examples','text','worked examples per facet, which is what makes the schema legible to a model'),
-('ai-query-layer','function','aiq.resolve_ref','text,text,boolean,real,uuid','name to node, fuzzily -- the entry point for turning prose into a graph reference'),
+('ai-query-layer','function','aiq.resolve_ref','text,text,boolean,real,uuid,text,uuid','name to node, fuzzily -- the entry point for turning prose into a graph reference'),
 ('ai-query-layer','function','aiq.embed_call','jsonb,text','the embedding marker a step leaves for the worker to fulfil'),
 ('user-rbac','function','rbac.may_access_org','uuid','may this caller act inside this org at all -- moved here from content, which owned it only by being first to need it'),
 ('world-model-ingestion','function','content.assert_org_write','uuid,text','the org WRITE check -- the half that raises rather than filtering'),

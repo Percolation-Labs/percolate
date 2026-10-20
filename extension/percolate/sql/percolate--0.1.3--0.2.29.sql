@@ -16196,7 +16196,15 @@ begin
     if v_n = 0 then
         raise exception 'no node is named % -- add_node_key names an existing '
                         'node, it does not create one', p_node_key;
-    elsif v_n > 1 then
+    end if;
+    -- lookup returns a reader the nearest of a key's scopes (REM-976), which
+    -- is a preference for reading and not a licence for a write: every scope
+    -- the caller can see that holds the same key counts here.
+    select count(distinct k2.node_id) into v_n
+      from aiq.lookup(p_node_key) l
+      join aiq.node_keys k2 on k2.key = l.key and k2.entity_type = l.entity_type
+       and (k2.kind = l.match_kind or (l.match_kind in ('canonical', 'soft') and k2.kind = 'canonical'));
+    if v_n > 1 then
         raise exception '% resolves to % nodes -- name the one you mean by its '
                         'canonical key', p_node_key, v_n;
     end if;
@@ -16535,11 +16543,22 @@ declare v_norm text := lower(trim(p_key));
 begin
     -- 1. exact canonical. distinct on (n.id) throughout, see the fuzzy
     -- branch below for why.
+    --
+    -- THE READER'S OWN NODE FIRST, then the org's, then the public one
+    -- (REM-976). With private memory one key can name a node per scope -- Maya's
+    -- private `place/leeds` and the public one -- and the caller who reads both
+    -- got two rows, which GRAPH refused as ambiguous. Within one kind and key
+    -- only the nearest scope is returned; two kinds under one key are still
+    -- two rows. Row security has already removed what the caller cannot read,
+    -- so a private node here is the caller's own (or, for an operator, anyone's).
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, 'canonical'::text, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind = 'canonical'
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, 'canonical'::text as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind = 'canonical')
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -16548,10 +16567,13 @@ begin
     -- from graph-identity.md). Several nodes is correct; the same node twice
     -- is not.
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, k.kind, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind in ('short','alias')
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, k.kind as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind in ('short','alias'))
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -16561,11 +16583,14 @@ begin
     -- what says under which kind the name was found; match_kind 'soft' says it
     -- was this step. Several kinds may hold one name, and each is a row.
     return query
-    select distinct on (n.id)
-           n.id, n.entity_type, n.entity_id, k.key, 'soft'::text, 1.0::real
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where lower(substr(k.key, strpos(k.key, '/') + 1)) = v_norm
-      and k.kind = 'canonical' and k.entity_type = 'soft'
+    with m as (
+        select distinct on (n.id)
+               n.id, n.entity_type, n.entity_id, k.key, 'soft'::text as mk, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where lower(substr(k.key, strpos(k.key, '/') + 1)) = v_norm
+          and k.kind = 'canonical' and k.entity_type = 'soft')
+    select m.id, m.entity_type, m.entity_id, m.key, m.mk, 1.0::real from m
+     where m.r = (select min(b.r) from m b where b.entity_type = m.entity_type and b.key = m.key)
     limit p_limit;
     if found then return; end if;
 
@@ -17211,9 +17236,12 @@ begin
         -- seed by key and answers by id, and the result carried neither -- so
         -- nothing downstream could check that the string it wrote resolved to
         -- the node it meant.
+        -- And in whose scope it was found, since a key may name one per scope
+        -- and the nearest wins (REM-976).
         select jsonb_build_object('node_id', s.node_id, 'key', s.key,
                                   'entity_type', s.entity_type,
-                                  'match_kind', s.match_kind)
+                                  'match_kind', s.match_kind,
+                                  'scope', (select n.visibility from aiq.nodes n where n.id = s.node_id))
           into v_seed
           from aiq.lookup(p->>'arg', false, 1) s limit 1;
 
@@ -28596,13 +28624,24 @@ $$ language sql immutable;
 -- the one underneath it. `org_id = rbac.shared_org_id()` is the shared
 -- reference tier, which integration-rbac.sql calls "a real category here, not
 -- a loophole."
+-- A PRIVATE NODE BINDS ONLY ITS OWNER'S PRIVATE MENTION (REM-976). With per-owner
+-- private nodes (REM-962), a key on one tier can name Maya's private node and a
+-- public one. This matched across every scope on the tier, so a private mention
+-- could bind to a node its owner cannot read, and the owner lost sight of their
+-- own fact. p_visibility and p_owner are the MENTION's scope, which upsert_graph
+-- reads off the memory; omitted, they mean the caller's own. Of the nodes the
+-- mention may bind, the nearest scope wins: its owner's, then the org's, then
+-- public. Two at that scope are still a miss.
+drop function if exists aiq.resolve_ref(text, text, boolean, real, uuid);
 create or replace function aiq.resolve_ref(
     p_entity_type text, p_name text, p_fuzzy boolean default false,
-    p_threshold real default 0.45, p_org_id uuid default null
+    p_threshold real default 0.45, p_org_id uuid default null,
+    p_visibility text default 'private', p_owner uuid default null
 ) returns uuid as $$
 declare
-    v_norm text := lower(trim(p_name));
-    v_ids  uuid[];
+    v_norm  text := lower(trim(p_name));
+    v_owner uuid := case when p_visibility = 'private' then coalesce(p_owner, rbac.current_user_id()) end;
+    v_ids   uuid[];
 begin
     -- 1. exact canonical, scoped to the type AND the caller's tenancy.
     --
@@ -28613,18 +28652,24 @@ begin
     -- from` to read twice -- and when p_org_id is itself omitted the two
     -- elements collapse to the same value and the predicate is the shared tier
     -- alone, which is exactly what an unscoped call should resolve against.
-    select array_agg(distinct n.id) into v_ids
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
-      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
+    with m as (
+        select distinct n.id, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
+          and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
+          and (n.visibility <> 'private' or n.owner_id = v_owner))
+    select array_agg(m.id) into v_ids from m where m.r = (select min(r) from m);
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;  -- ambiguous: a miss
 
     -- 2. short / alias.
-    select array_agg(distinct n.id) into v_ids
-    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
-    where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
-      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
+    with m as (
+        select distinct n.id, case n.visibility when 'private' then 0 when 'org' then 1 else 2 end as r
+        from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+        where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
+          and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
+          and (n.visibility <> 'private' or n.owner_id = v_owner))
+    select array_agg(m.id) into v_ids from m where m.r = (select min(r) from m);
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;
 
@@ -28635,6 +28680,7 @@ begin
             from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
             where n.entity_type = p_entity_type and k.key % v_norm
               and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
+              and (n.visibility <> 'private' or n.owner_id = v_owner)
             group by n.id having max(similarity(k.key, v_norm)) >= p_threshold
             order by 2 desc limit 2) d;
         -- Exactly one candidate above threshold, or it is a miss. AN AMBIGUOUS
@@ -28938,7 +28984,7 @@ begin
         --     it as that type because aiq.nodes.entity_type already says so.
         if coalesce(v_scheme,'pg') = 'pg'
            and exists (select 1 from aiq.entity_registry where entity_type = v_kind) then
-            v_id := aiq.resolve_ref(v_kind, v_name, v_fuzzy, 0.45, v_org);
+            v_id := aiq.resolve_ref(v_kind, v_name, v_fuzzy, 0.45, v_org, v_vis, v_owner);
             if v_id is not null then
                 v_counts := jsonb_set(v_counts, '{pg}',
                             to_jsonb((v_counts->>'pg')::int + 1));
@@ -30848,7 +30894,7 @@ grant execute on function aiq.resolution_candidates(text, text, uuid, int, int, 
 
 -- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
 -- their own policies and the grant is safe.
-grant execute on function aiq.resolve_ref(text, text, boolean, real, uuid)
+grant execute on function aiq.resolve_ref(text, text, boolean, real, uuid, text, uuid)
                                                               to worker, authenticated;
 grant execute on function aiq.graph_schema()                  to worker, authenticated;
 grant execute on function aiq.is_graph_schema(jsonb)          to worker, authenticated;
