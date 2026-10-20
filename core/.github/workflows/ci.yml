@@ -122,9 +122,18 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_local_embed.py
 
+      - name: An embed step whose model runs in the worker is embedded there
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_worker_embeds_in_process.py
+
       - name: A search query gets a vector from the registered model
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_content_embed.py
+
+      # REM-662: claims and questions are not resources, so `op: embed` takes a source by name.
+      - name: A registered source is embedded by name, page by page
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_embed_source.py
       # REM-309: an article image is identified by its bytes and read through a revision.
       - name: Article images are checked by their bytes and read through a revision
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
