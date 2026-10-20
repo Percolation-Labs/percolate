@@ -828,8 +828,7 @@ fi
 if [ -z "${CI:-}" ] && [ -z "$(git config --get core.hooksPath 2>/dev/null)" ]; then
     echo "note: this clone runs no git hooks, so these gates do not run before a push."
     echo "      git config core.hooksPath dev/githooks    # arms it for EVERY worktree"
-    echo "      of this clone, and each push then reloads \$DB. Set DB=p8mine if you"
-    echo "      share this checkout with another session."
+    echo "      of this clone; each push then runs the tree gates, with no database."
     echo ""
 fi
 
