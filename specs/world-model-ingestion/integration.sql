@@ -324,6 +324,10 @@ create policy chunks_via_resource on content.resource_chunks for select
 grant usage on schema content to authenticated, worker, api_viewer;
 grant select on content.channels, content.resources, content.resource_chunks
     to authenticated, api_viewer;
+-- An owner deletes their own memory (REM-964): the delete policy add_scope_policy()
+-- generates admits only owner_id = the caller. Chunks follow by foreign key,
+-- vectors by trg_forget_vectors, graph facts by trg_forget_deleted_sources.
+grant delete on content.resources to authenticated;
 
 -- REVOKE BEFORE GRANT, on every one of them, and it is not ceremony.
 --

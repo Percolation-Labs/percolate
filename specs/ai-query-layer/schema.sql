@@ -1107,6 +1107,11 @@ begin
         $b$ language plpgsql;
     $f$, v_ins, array_to_string(aiq.projection_statements(r, 'new_rows'), E';\n'));
 
+    -- SECURITY DEFINER on the delete half only, because it is the half a caller
+    -- can reach directly: an owner deleting their own row (REM-964, a memory)
+    -- cannot write aiq.nodes, and should not need to. It removes the nodes of
+    -- exactly the rows that caller was allowed to delete, so it grants nothing.
+    -- The insert half is reached through SECURITY DEFINER writers already.
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
@@ -1114,7 +1119,7 @@ begin
             where entity_type = %2$L and entity_id in (select id from old_rows);
             return null;
         end;
-        $b$ language plpgsql;
+        $b$ language plpgsql security definer set search_path = pg_catalog, public;
     $f$, v_del, p_entity_type);
 
     -- DENY-BY-DEFAULT REACHES THE GENERATED FUNCTIONS TOO.

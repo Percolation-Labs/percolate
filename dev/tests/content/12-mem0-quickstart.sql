@@ -255,16 +255,72 @@ end $$;
 
 -- ---------------------------------------------------------------------
 -- 8. DELETE.  m.delete(memory_id)
+--
+-- The owner deletes the row, and what it alone supported goes with it: its
+-- chunks (foreign key), their vectors (trg_forget_vectors) and the graph
+-- facts no other memory asserts (trg_forget_deleted_sources). A fact another
+-- memory also asserts stays, on that memory's word alone (REM-964).
 -- ---------------------------------------------------------------------
+-- a second memory asserting a fact m-work already asserts
+select (content.register_text('memory', 'm-employer', '[{"content":"Maya is at Northwind."}]',
+            null, null, :maya_org, '{"agent":"planner","run":"r03"}')->>'resource_id') as m_employer \gset
+:as_operator
+select set_config('mem0.m_employer', :'m_employer', true) \g /dev/null
+set local role worker;
+select aiq.upsert_graph('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n":"Northwind Analytics"}],"edges":[{"s":0,"t":1,"r":"works_at"}]}',
+ json_build_object('resource_id', :'m_employer', 'agent', 'planner', 'run_id', 'r03', 'valid_from', '2026-02-01T09:00:00Z', 'org_id', :maya_org)::jsonb) \g /dev/null
+reset role;
+:as_maya
 do $$
 declare n int;
 begin
     delete from content.resources where id = current_setting('mem0.m_food')::uuid;
     get diagnostics n = row_count;
-    raise notice 'delete as the owner -> % row(s)', n;
-exception when insufficient_privilege then
-    raise notice 'delete as the owner -> refused: %', sqlerrm;
-    raise notice 'GAP REM-964: an owner cannot delete their own memory';
+    if n <> 1 then raise exception 'delete as the owner removed % rows of m-food', n; end if;
+    delete from content.resources where id = current_setting('mem0.m_employer')::uuid;
+    raise notice 'delete as the owner -> m-food and m-employer';
+end $$;
+:as_leo
+do $$
+declare n int;
+begin
+    -- a non-owner deletes nothing, even a row they could otherwise see
+    delete from content.resources where external_id = 'm-home';
+    get diagnostics n = row_count;
+    if n <> 0 then raise exception 'Leo deleted % of Maya''s memories', n; end if;
+end $$;
+:as_operator
+do $$
+declare v_food uuid := current_setting('mem0.m_food')::uuid; n int;
+begin
+    select count(*) into n from content.resources where id = v_food;
+    if n <> 0 then raise exception 'delete: m-food is still there'; end if;
+    select count(*) into n from content.resource_chunks where resource_id = v_food;
+    if n <> 0 then raise exception 'delete: % chunks of m-food remain', n; end if;
+    -- its one vector was [0,0,1]; m-gym's is the only other on the food axis
+    select count(*) into n from aiq.emb_mem0_demo_3d where embedding = '[0,0,1]';
+    if n <> 0 then raise exception 'delete: m-food''s vector remains'; end if;
+    select count(*) into n from aiq.edges where relation = 'diet';
+    if n <> 0 then raise exception 'delete: the diet fact only m-food asserted remains (% rows)', n; end if;
+    select count(*) into n from aiq.edges
+     where relation = 'works_at' and valid_to is null
+       and jsonb_array_length(provenance->'sources') = 1
+       and provenance->'sources'->0->>'run_id' = 'r01';
+    if n <> 1 then
+        raise exception 'delete: the works_at fact m-work also asserts should stand on m-work alone, got % rows', n;
+    end if;
+    select count(*) into n from content.resources where external_id = 'm-home';
+    if n <> 1 then raise exception 'delete: Leo''s delete removed m-home'; end if;
+    raise notice 'delete    -> m-food: 0 rows, 0 chunks, 0 vectors, 0 diet edges; works_at stands on m-work';
+end $$;
+:as_maya
+do $$
+declare n int;
+begin
+    select count(*) into n from content.resources where external_id = 'm-food';
+    if n <> 0 then raise exception 'Maya still reads m-food'; end if;
+    select count(*) into n from aiq.edges where relation = 'diet';
+    if n <> 0 then raise exception 'Maya still reads the diet fact'; end if;
 end $$;
 
 -- ---------------------------------------------------------------------

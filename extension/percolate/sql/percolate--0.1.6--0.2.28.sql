@@ -11094,6 +11094,14 @@ begin
     execute format('drop policy if exists %I on %s', v_tbl || '_scoped_write', p_table);
     execute format('create policy %I on %s for insert with check (%s)',
                    v_tbl || '_scoped_write', p_table, rbac.scope_write_predicate());
+    -- THE OWNER DELETES THEIR OWN ROW, and nobody else (REM-964). A policy is
+    -- not a privilege: no role may delete until a table grants DELETE, so this
+    -- arm changes nothing on a table that has not decided to. One that has
+    -- (content.resources) gets owner-only deletes from the same home as its
+    -- reads, rather than a hand-written predicate beside them.
+    execute format('drop policy if exists %I on %s', v_tbl || '_scoped_delete', p_table);
+    execute format('create policy %I on %s for delete using (owner_id = (select rbac.current_user_id()))',
+                   v_tbl || '_scoped_delete', p_table);
 end;
 $$ language plpgsql;
 
@@ -15835,6 +15843,11 @@ begin
         $b$ language plpgsql;
     $f$, v_ins, array_to_string(aiq.projection_statements(r, 'new_rows'), E';\n'));
 
+    -- SECURITY DEFINER on the delete half only, because it is the half a caller
+    -- can reach directly: an owner deleting their own row (REM-964, a memory)
+    -- cannot write aiq.nodes, and should not need to. It removes the nodes of
+    -- exactly the rows that caller was allowed to delete, so it grants nothing.
+    -- The insert half is reached through SECURITY DEFINER writers already.
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
@@ -15842,7 +15855,7 @@ begin
             where entity_type = %2$L and entity_id in (select id from old_rows);
             return null;
         end;
-        $b$ language plpgsql;
+        $b$ language plpgsql security definer set search_path = pg_catalog, public;
     $f$, v_del, p_entity_type);
 
     -- DENY-BY-DEFAULT REACHES THE GENERATED FUNCTIONS TOO.
@@ -24291,6 +24304,10 @@ create policy chunks_via_resource on content.resource_chunks for select
 grant usage on schema content to authenticated, worker, api_viewer;
 grant select on content.channels, content.resources, content.resource_chunks
     to authenticated, api_viewer;
+-- An owner deletes their own memory (REM-964): the delete policy add_scope_policy()
+-- generates admits only owner_id = the caller. Chunks follow by foreign key,
+-- vectors by trg_forget_vectors, graph facts by trg_forget_deleted_sources.
+grant delete on content.resources to authenticated;
 
 -- REVOKE BEFORE GRANT, on every one of them, and it is not ceremony.
 --
@@ -29110,6 +29127,61 @@ begin
                               'valid_from', v_e.valid_from, 'valid_to', v_e.valid_to);
 end;
 $$;
+
+-- ------------------------------------------------------------
+-- A DELETED MEMORY TAKES THE FACTS IT ALONE SUPPORTED WITH IT (REM-964).
+--
+-- An owner deletes their resource; its chunks go by foreign key, their
+-- vectors by trg_forget_vectors, its document node by the projection. The
+-- graph was the one place it survived: every edge upsert_graph wrote names
+-- the memory in provenance.sources, and nothing read that list on a delete,
+-- so "Maya is vegetarian" stayed a current diet edge with the deleted
+-- memory's id and quote on it.
+--
+-- graph-index.md §7's refcount, applied to a source that no longer exists:
+-- the memory's entries leave every edge's sources, an edge somebody else
+-- still asserts stays on their word, and an edge nobody else asserts is
+-- DELETED rather than retracted. A retraction keeps its provenance, which
+-- here is the deleted memory's own words. Its retraction history goes with
+-- it by foreign key. An authored edge carries no sources and is untouched.
+--
+-- Statement-level with a transition table, so a bulk delete is one pass; and
+-- SECURITY DEFINER because the owner deleting the memory cannot write
+-- aiq.edges, and should not need to.
+-- ------------------------------------------------------------
+create or replace function aiq.forget_deleted_sources() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    with gone as (select id::text as rid from deleted_rows),
+    touched as (
+        select e.id,
+               (select jsonb_agg(s)
+                  from jsonb_array_elements(e.provenance->'sources') s
+                 where s->>'resource_id' is null
+                    or s->>'resource_id' not in (select rid from gone)) as rest
+          from aiq.edges e
+         where jsonb_typeof(e.provenance->'sources') = 'array'
+           and exists (select 1 from jsonb_array_elements(e.provenance->'sources') s
+                        where s->>'resource_id' in (select rid from gone))
+    ),
+    shared as (
+        update aiq.edges e
+           set provenance = e.provenance || jsonb_build_object('sources', t.rest)
+          from touched t
+         where e.id = t.id and t.rest is not null
+        returning e.id
+    )
+    delete from aiq.edges e
+     using touched t
+     where e.id = t.id and t.rest is null;
+    return null;
+end $$;
+revoke execute on function aiq.forget_deleted_sources() from public;
+
+create or replace trigger trg_forget_deleted_sources
+    after delete on content.resources
+    referencing old table as deleted_rows
+    for each statement execute function aiq.forget_deleted_sources();
 
 -- ------------------------------------------------------------
 -- 7. The two workflow entry points (graph-index.md §5).
