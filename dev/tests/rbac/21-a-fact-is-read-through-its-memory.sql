@@ -22,6 +22,8 @@
 --   7. two owners naming the same things: Leo reads all 8 of his facts and none
 --      of Maya's, though Maya named five of his entities first, because a thing
 --      named in a private memory is its owner's node;
+--   8. no source, signed in: the candidates are the writer's, and claims with no
+--      user id are refused (REM-1012);
 --   6. the control: with the edge's source gate removed, Leo reads Maya's fact,
 --      so §1 can fail. (Last, because it rewrites the policy.)
 --
@@ -305,6 +307,52 @@ begin
     end if;
 end $$;
 
+-- 8. No source, signed in (REM-1012): a run carrying Maya's identity lands a
+-- graph naming no resource or session. Its candidates are private and hers, so
+-- she reads the fact back and Leo does not. On 0.2.23 they were private with
+-- no owner, and she read 0. Claims with no user id are refused.
+set local role worker;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-0000000962a1"}';
+select aiq.upsert_graph(
+    '{"nodes":[{"k":"soft","n":"Maya O. rem1012"},{"k":"soft","n":"cycling rem1012"}],
+      "edges":[{"s":0,"t":1,"r":"rem962_fact"}]}',
+    '{"agent":"knit"}') \g /dev/null
+set local request.jwt.claims = '{"role":"authenticated"}';
+do $$
+begin
+    perform aiq.upsert_graph('{"nodes":[{"k":"soft","n":"nobody rem1012"}],"edges":[]}', '{"agent":"knit"}');
+    raise exception 'upsert_graph wrote a private candidate for claims that name no user';
+exception when others then
+    if sqlerrm not like '%this caller names no user%' then raise; end if;
+end $$;
+set local request.jwt.claims = '';
+reset role;
+do $$
+begin
+    if exists (select 1 from aiq.soft_nodes where key like '%rem1012'
+                and (visibility <> 'private' or owner_id is distinct from
+                     '00000000-0000-4000-8000-0000000962a1')) then
+        raise exception 'a sourceless candidate written as Maya is not private to her (REM-1012)';
+    end if;
+end $$;
+:as_maya
+do $$
+begin
+    if (select count(*) from aiq.edges e join aiq.nodes s on s.id = e.src_id
+          join aiq.soft_nodes n on n.id = s.entity_id and s.entity_type = 'soft'
+         where e.relation = 'rem962_fact' and n.key like '%rem1012') <> 1 then
+        raise exception 'Maya cannot read the fact she wrote with no source (REM-1012)';
+    end if;
+end $$;
+:as_leo
+do $$
+begin
+    if exists (select 1 from aiq.soft_nodes where key like '%rem1012') then
+        raise exception 'Leo reads Maya''s sourceless private candidates';
+    end if;
+end $$;
+reset role;
+
 -- 6. The control: the policy as it was before this fix, endpoints only. Leo
 -- then reads Maya's private fact between public names, so §1 can fail.
 set local role app_owner;
@@ -323,4 +371,4 @@ reset role;
 
 rollback;
 
-\echo rbac/21: a fact is read through its memory -- no org, one org, any readable source, reference data, refused context, control
+\echo rbac/21: a fact is read through its memory -- no org, one org, any readable source, reference data, refused context, sourceless writer, control
