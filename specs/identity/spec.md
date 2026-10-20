@@ -183,7 +183,7 @@ to read and they are not unique, because the world is not unique:
 - `rbac.current_org_ids` has **three overloads** and one name.
 - Two spec sections in one file are both headed `run it`.
 
-Both of those stopped work this week, because something had unique-constrained
+Both of those stopped work once, because something had unique-constrained
 a label. A projection that needs a stable addressable key derives one; it does
 not demand that the label be one.
 
@@ -201,7 +201,7 @@ rather than accepting it and silently losing the guarantee.
 
 ## 7. The checks, because a policy nobody can fail is a preference
 
-Four catalogue assertions, in `checks.sql`, in `dev/check.sh`:
+Five catalogue assertions, in `checks.sql`, in `dev/check.sh`:
 
 1. Every table in a percolate schema has a `uuid` primary key named `id`.
 2. No primary key defaults to `gen_random_uuid()` / `uuidv4()`.
