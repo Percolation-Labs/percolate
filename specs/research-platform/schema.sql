@@ -579,6 +579,10 @@ begin
     perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
     perform claims.project_frames(p_revision);  -- and its frames, and the questions they answer (REM-476)
     perform claims.project_cites(p_revision);   -- and the origins its claims cite (REM-477)
+    -- And its claims, and any question its frames posed, are queued to be embedded (REM-662). Queued and never
+    -- embedded here: a vector is a model call, which a save never waits on. With no model to embed with, the
+    -- revision is projected all the same and a NOTICE says so (aiq.queue_source_embedding).
+    perform aiq.queue_source_embedding(format('the claims of revision %s', p_revision));
 end;
 $$;
 

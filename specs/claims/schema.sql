@@ -929,6 +929,9 @@ begin
     returning id into q;
     if q is null then
         select id into q from claims.questions where key = k;
+    else
+        -- A new question is queued to be embedded, the way a projected revision's claims are (REM-662).
+        perform aiq.queue_source_embedding('a posed question');
     end if;
     return q;
 end;
@@ -1213,9 +1216,11 @@ $$;
 -- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
 --
 -- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
--- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
--- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
--- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+-- model that runs inside the worker (fastembed), because there is nothing to call. That was why no deployment on an
+-- in-process model could index a question: the worker's `embed` op took only a resource id. It now takes a source by
+-- name (REM-662), and the workflow aiq.install_source_embed_workflow installs -- `embed_sources`, shipped with the
+-- extension -- embeds `questions` and `claims` with either kind of model, batched. This one stays for a deployment
+-- that wants questions alone on an HTTP model, and for claims.install_fact_question_workflow's first half.
 create or replace function claims.install_question_embed_workflow(p_model text default null,
                                                                   p_name text default 'embed_questions')
 returns text
@@ -3159,4 +3164,15 @@ begin
               where not exists (select 1 from claims.cites x where x.revision_id = c.revision_id) loop
         perform claims.project_cites(v);
     end loop;
+end $$;
+
+-- The workflow that gives claims and questions their vectors (REM-662), installed with the extension and on every
+-- upgrade, like the ingestion pipeline: it names no model, so it is the same document on a deployment that has none.
+-- research.project and claims.pose_question queue a run of it; aiq.schedule_source_embedding is the opt-in net under
+-- them. THE BACKFILL is one call, as an operator: `select aiq.queue_source_embedding('backfill')`, which starts a
+-- run that embeds every claim and question the default model's space lacks (up to 20,000 of each per run), and
+-- `select * from aiq.source_embedding_status()` says what is left.
+do $$
+begin
+    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions']);
 end $$;
