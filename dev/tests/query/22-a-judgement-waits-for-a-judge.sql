@@ -17,7 +17,9 @@
 --      cannot complete;
 --   6. a second dream queues nothing new;
 --   7. another soft node is a candidate -- an alias, or the same name as
---      another kind -- and a bind to it goes through.
+--      another kind -- and a bind to it goes through;
+--   9. the claimed item shows what was said about the subject and each
+--      candidate, with the message it came from; another member sees none.
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -195,6 +197,67 @@ select aiq.complete_judgement(current_setting('q22.costa')::uuid,
 reset role;
 select pg_temp.check(:'claimed_costa'::boolean and jsonb_array_length(:'bound'::jsonb->'resolution_ids') = 1,
     '7. the bind of A. Costa to the soft node Ana Costa did not go through: ' || :'bound');
+
+-- 9. A judge sees what was said (bob, 20 Oct): the claimed item carries, for
+--    the subject and each candidate, the facts touching it with the message
+--    they came from and its text, read as the caller. Another member, who may
+--    not read that conversation, gets none of it.
+reset role;
+set local request.jwt.claims = '';
+set local role app_owner;
+insert into rbac.users (id, email, status) values
+    ('00000000-0000-0000-0000-000000002201', 'q22-rui-teller@example.com', 'active'),
+    ('00000000-0000-0000-0000-000000002202', 'q22-outsider@example.com', 'active')
+on conflict (id) do nothing;
+insert into rbac.roles (name, description) values ('q22_member', 'test fixture') on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values ('q22_member', 'agents', 'invoke') on conflict do nothing;
+insert into rbac.user_roles (user_id, role) values ('00000000-0000-0000-0000-000000002201', 'q22_member') on conflict do nothing;
+select agentic.upsert_agent('{"name":"q22-notes","system_prompt":"Take notes."}') \g /dev/null
+update agentic.agents set visibility = 'public' where name = 'q22-notes';
+reset role;
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000002201"}';
+set local role authenticated;
+select (agentic.create_session('q22 notes')).id as q22_session \gset
+select (agentic.start_run('q22-notes', :'q22_session')).id as q22_run \gset
+reset role;
+set local role app_owner;
+insert into agentic.messages (id, run_id, session_id, role, content) values
+  ('22000000-0000-0000-0000-0000000000a1', :'q22_run', :'q22_session', 'user',
+   'Rui Lopes Q22 runs the Leixoes desk at Tagus Q22.'),
+  ('22000000-0000-0000-0000-0000000000a2', :'q22_run', :'q22_session', 'user',
+   'R. Lopes Q22 asked for the rail quote again.');
+reset role;
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000002201","role":"authenticated"}';
+set local role authenticated;
+select agentic.land_message_facts('22000000-0000-0000-0000-0000000000a1',
+  '{"nodes":[{"k":"person","n":"Rui Lopes Q22"},{"k":"company","n":"Tagus Q22"}],"edges":[{"s":0,"t":1,"r":"affiliated_with"}]}') \g /dev/null
+select agentic.land_message_facts('22000000-0000-0000-0000-0000000000a2',
+  '{"nodes":[{"k":"person","n":"R. Lopes Q22"},{"k":"company","n":"Tagus Q22"}],"edges":[{"s":0,"t":1,"r":"affiliated_with"}]}') \g /dev/null
+reset role;
+set local request.jwt.claims = '';
+select aiq.dream() is not null as dreamt \gset
+select id as lopes_j from aiq.judgements where evidence->>'key' = 'r. lopes q22' and status = 'open' \gset
+select k.node_id as lopes_node from aiq.node_keys k where k.key = 'person/r. lopes q22' and k.kind = 'canonical' \gset
+select set_config('q22.lopes', :'lopes_j', true), set_config('q22.lopes_node', :'lopes_node', true);
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000002201","role":"authenticated"}';
+set local role authenticated;
+select aiq.claim_judgement(null, current_setting('q22.lopes')::uuid) as lopes_claim \gset
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000002202","role":"authenticated"}';
+select jsonb_array_length(aiq.judgement_said(current_setting('q22.lopes_node')::uuid)) as others_see \gset
+select agentic.message_said('22000000-0000-0000-0000-0000000000a2') is null as outsider_blind \gset
+reset role;
+select pg_temp.check(exists (select 1 from jsonb_array_elements(:'lopes_claim'::jsonb->'evidence'->'said') s
+                              where s->>'said' like 'R. Lopes Q22 asked for the rail quote%'
+                                and s->>'message_id' = '22000000-0000-0000-0000-0000000000a2'),
+    '9. the claim does not show what was said about R. Lopes, with its message: ' || (:'lopes_claim'::jsonb->'evidence'->'said')::text);
+select pg_temp.check(exists (select 1 from jsonb_array_elements(:'lopes_claim'::jsonb->'evidence'->'candidates') c,
+                                           jsonb_array_elements(c->'said') s
+                              where s->>'said' like 'Rui Lopes Q22 runs the Leixoes desk%'),
+    '9. the candidate Rui Lopes does not carry what was said about it');
+select pg_temp.check(:'others_see'::int = 0,
+    '9. a member who may not read the conversation was shown what was said in it');
+select pg_temp.check(:'outsider_blind'::boolean,
+    '9. agentic.message_said gave a message''s text to a member who may not read its session');
 
 \echo 'query/22: dream queues what it cannot decide; an agent claims, binds, and the verdict is recorded'
 rollback;
