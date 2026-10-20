@@ -123,12 +123,19 @@ grant select on crm.ports, crm.bookings to authenticated;
 alter table crm.bookings enable row level security;
 create policy owner_reads on crm.bookings for select using (owner_id = (select rbac.current_user_id()));
 
--- Without the refresh, dream counts both promotions as refused and says nothing of why. In a savepoint, so the
+-- Without the refresh, dream refuses both promotions, and its receipt says why. In a savepoint, so the
 -- article's own run below starts from the same state.
 savepoint before_refresh;
+select aiq.dream() as dream_refused \gset
 select pg_temp.check((select (r ->> 'promotion_refused')::int = 2 and (r ->> 'promoted_exact')::int = 0
-                        from aiq.dream() r),
+                        from (select :'dream_refused'::jsonb r) x),
     '§2: with the catalogue not widened to ports, dream refuses both promotions');
+-- And says why, so the fix is in the receipt rather than in a promotion run by hand (REM-1041).
+select pg_temp.check((select r -> 'refusals' = '{"missing_triple": 2}'
+                         and r -> 'missing_triples' = '["(soft, ships_via, port)"]'
+                         and r ->> 'hint' like '%aiq.register_graph_vocabulary()%'
+                        from (select :'dream_refused'::jsonb r) x),
+    '§2: the receipt names the missing triple and the call that adds it: ' || :'dream_refused');
 rollback to savepoint before_refresh;
 select aiq.register_graph_vocabulary() ->> 'relations' as relations;
 
