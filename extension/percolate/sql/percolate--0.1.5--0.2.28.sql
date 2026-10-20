@@ -28504,6 +28504,7 @@ declare
     v_vis     text;
     v_owner   uuid;
     v_res_org uuid;
+    v_ownerless boolean := false;  -- private, no source, no user: see REM-1012
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -28610,6 +28611,18 @@ begin
                                                         'message_ids', p_context->'message_ids'));
     else
         v_vis := rbac.default_visibility(v_org);
+        -- A PRIVATE CANDIDATE WITH NO SOURCE IS ITS WRITER'S (REM-1012).
+        -- default_visibility says `private` for a caller with an identity and
+        -- no org, and nothing here set the owner, so the node was private to
+        -- nobody: measured on 0.2.23, knit signed in as one user left six
+        -- soft nodes owner-null, and that user read 0 edges and 0 facts to
+        -- embed. A caller whose claims name no user still writes edges
+        -- between rows that exist (content/07); only a new candidate needs an
+        -- owner, so the refusal is at the two inserts below.
+        if v_vis = 'private' then
+            v_owner := rbac.current_user_id();
+            v_ownerless := v_owner is null;
+        end if;
     end if;
 
     -- ---- LOCK IN A CANONICAL ORDER FIRST, or concurrent workers deadlock.
@@ -28734,6 +28747,12 @@ begin
             -- scope when the extraction named one and `public` when this is
             -- shared reference data, which is the same rule everything else
             -- in the collection uses.
+            if v_ownerless then
+                raise exception 'a graph with no resource or session is private to its writer, '
+                    'and this caller names no user, so new candidate % would be readable by '
+                    'nobody (agent: %)', v_name, coalesce(p_context->>'agent','?')
+                    using hint = 'sign in, or name the resource or session the facts were read from';
+            end if;
             insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     v_vis, v_owner)
@@ -28815,6 +28834,12 @@ begin
             -- Leo read 3 of his own 8 facts. Joining the two Leeds is
             -- resolution's decision, made where it can be seen, not a side
             -- effect of who wrote first.
+            if v_ownerless then
+                raise exception 'a graph with no resource or session is private to its writer, '
+                    'and this caller names no user, so new candidate % would be readable by '
+                    'nobody (agent: %)', v_name, coalesce(p_context->>'agent','?')
+                    using hint = 'sign in, or name the resource or session the facts were read from';
+            end if;
             insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility, owner_id)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     v_vis, v_owner)
