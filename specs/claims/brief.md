@@ -248,8 +248,8 @@ High existence with low selection means the anchoring is wrong, not the claims.
 Collapsing them into one number hides exactly the thing worth knowing. SZZ
 supplies the labels. Runnable on public repositories, so it can be published —
 and §14's rule is **dogfood for the story, publish the replay for the proof**,
-because a strong result on your own corpus with transcripts withheld is a
-criticism a withheld-transcript result invites, and we do not get to repeat it.
+because a strong result on your own corpus with the transcripts withheld is
+the criticism earlier systems drew, and we do not get to repeat the mistake.
 
 The retrieval benchmark is adopted wholesale: B0 (no memory), B1-notes (flat
 files), B1-mem0 (vector), **B1-rag (BM25 over our own content, flattened)**, then
