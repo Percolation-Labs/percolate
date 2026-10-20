@@ -6,7 +6,7 @@
 -- is pruned. It also had no test of any kind, which is a strange place for the
 -- coverage to stop.
 --
--- Written after walking scenarios/evals/J2 Act 8 as a user rather than as its
+-- Written after walking an internal journey evaluation (J2, act 8) as a user rather than as its
 -- author. Every assertion below is a thing that walk actually did, in the order
 -- it did it, and each one is a way the prune can be right or can be a quiet
 -- deletion somebody discovers later.
@@ -211,7 +211,7 @@ end $$;
 -- The empty manifest is the uninstall, and it leaves the plugins row for
 -- provenance (plugins.md §9). Before `plugins_api.installed` an operator could
 -- not tell that row from a plugin that installs something without joining out
--- to three tables (REM-250, measured on 0.1.5 walking scenarios/evals/J2 Act 8).
+-- to three tables (REM-250, measured on 0.1.5 walking journey J2, act 8).
 -- ---------------------------------------------------------------
 do $$
 begin

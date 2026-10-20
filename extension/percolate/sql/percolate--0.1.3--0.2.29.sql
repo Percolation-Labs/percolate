@@ -3572,7 +3572,7 @@ comment on table workflow.step_functions is
 --     workflow.register_step_function('ghost2','journey.no_such_fn');
 --     ERROR:  function journey.no_such_fn() does not exist
 --
--- Found by walking scenarios/evals/J2 as a user: the officer read the table
+-- Found by walking journey J2 as a user: the officer read the table
 -- before the documentation and had two unrunnable rows in the registry inside a
 -- minute. The docs do say to use the function, so this was never a
 -- documentation defect -- it is the push-down principle (a fact
@@ -3703,8 +3703,8 @@ $$ language plpgsql;
 -- It was not always so, and the history is the argument for it. The first
 -- version ran every statement as app_owner and defended it as "anyone who may
 -- define a workflow may read anything". Defining was gated; STARTING was not,
--- so a workflow an admin wrote read every tenant for whoever ran it. The tour
--- (scenarios/tour, act 8) had a member of one org start `ask_uploads` and get
+-- so a workflow an admin wrote read every tenant for whoever ran it. The end-to-end
+-- tour (act 8) had a member of one org start `ask_uploads` and get
 -- another org's runbook back from its SEARCH step.
 --
 -- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
@@ -6132,7 +6132,7 @@ begin
             -- `x'' || current_user || ''` expanded into a statement that ran and
             -- returned `xapp_owner`: arbitrary SQL out of ordinary row data,
             -- executing as the engine owner. Found by walking
-            -- scenarios/evals/J2, recorded in runs/2026-09-04-J2.md.
+            -- journey J2 on 4 September.
             --
             -- So the template survives to execution, where execute_sql_step
             -- resolves it through resolve_statement_params and the row becomes
@@ -10417,8 +10417,8 @@ on conflict (scope) do update
         requires_org = excluded.requires_org,
         description = excluded.description;
 
--- ORGS AND MEMBERSHIP -- the model specs/README.md defers and
--- scenarios/round-4.md names as the open one.
+-- ORGS AND MEMBERSHIP -- the model specs/README.md defers and an
+-- internal review round named as the open one.
 --
 -- Until now `aiq.current_org_ids()` read an `orgs` array off the JWT and
 -- nothing in Postgres said which orgs existed or who belonged to one. That is
@@ -12279,7 +12279,7 @@ create policy org_members_own_orgs on rbac.org_members for select
 -- answerable by a member. The scoping was right all along; nobody could reach
 -- it.
 --
--- Found by walking scenarios/evals/J1-mill-lane.md Act 1, and NOT findable by
+-- Found by walking journey J1 (Mill Lane), act 1, and NOT findable by
 -- either test that covers this ground: dev/tests/rbac/05 enumerates tables a
 -- client role can READ and asks whether each has a policy, so a table nobody
 -- can read never enters its loop; dev/tests/rbac/10 walks `checked_by` and
@@ -15909,7 +15909,7 @@ begin
     -- way registered cleanly, printed nothing, and then refused EVERY insert
     -- from then on -- `column n.id does not exist`, raised inside a generated
     -- trigger that names neither the entity type nor this function. Found by
-    -- scenarios/tour, whose package keyed its tables by their natural keys.
+    -- our end-to-end tour, whose package keyed its tables by their natural keys.
     if to_regclass(p_source_table) is not null and not exists (
         select 1 from pg_attribute
          where attrelid = to_regclass(p_source_table) and attname = 'id'
@@ -16115,7 +16115,7 @@ $$ language plpgsql;
 -- Deleted, and the deletion is the point rather than a tidy-up. This function
 -- read an `orgs` array straight off the JWT because user-rbac had no org model
 -- to ask -- a working seam, never a tenancy system, and the file's own comment
--- said so: "a real deployment replaces this", and scenarios/round-4.md carried
+-- said so: "a real deployment replaces this", and an internal review round carried
 -- it as the open item that would close "when it lands, this function is the
 -- single place that changes".
 --
@@ -19175,8 +19175,8 @@ $$ language plpgsql volatile security invoker;
 -- pair, including one identical `description` string 439 times for 18KB. That
 -- is paid in context on every conversation's first call, limit or no limit.
 --
--- Found by walking scenarios/evals/J1-mill-lane.md Act 6, where the workflow a
--- user would actually write failed on it; runs/2026-09-04-J1.md §3.2.
+-- Found by walking journey J1 (Mill Lane), act 6, where the workflow a
+-- user would actually write failed on it.
 -- `dev/tests/query/03-schema.sql` §7 holds the contract: every registered
 -- facet fits the budget at L1, states how to narrow, and narrows to something
 -- smaller.
@@ -19968,8 +19968,8 @@ returns jsonb as $$
             -- That mattered because the row-wise form put this facet 1.27x OVER
             -- workflow.max_payload_bytes, so a `sql` step calling the mode that
             -- `p8ql-schema-first` tells every agent to call FIRST failed
-            -- terminally. Found by walking scenarios/evals/J1-mill-lane.md Act
-            -- 6; the run log is runs/2026-09-04-J1.md §3.2.
+            -- terminally. Found by walking journey J1 (Mill Lane),
+            -- act 6.
             --
             -- `pairs` is the level-2 detail: which (src, dst) a relation admits
             -- is what you need once you have CHOSEN a relation, and the choice
@@ -20591,7 +20591,7 @@ begin
     -- EVERY MODE RUNS AS THE PERSON WHO STARTED THE RUN. Called from a step,
     -- this function's invoker is the engine owner, which bypasses RLS -- so a
     -- SEARCH or a TEXT read every tenant's chunks, and `ask_uploads` answered a
-    -- member of one org from another org's runbook (scenarios/tour, act 8).
+    -- member of one org from another org's runbook (our end-to-end tour, act 8).
     -- Now, inside a person's run, the query re-enters through
     -- workflow.execute_for as that person, and runs there under RLS; inside
     -- execute_for the invoker is no longer the engine owner, so it does not
@@ -24293,7 +24293,7 @@ select aiq.register_entity_table(
     -- into one org are two resources with one uri, and the second to reach
     -- `ready` died here on idx_node_keys_canonical -- the same failure the
     -- paragraph above records for titles, reached through dedup instead
-    -- (scenarios/tour, re-uploading a runbook; dev/tests/content/01 §2). The
+    -- (our end-to-end tour, re-uploading a runbook; dev/tests/content/01 §2). The
     -- object path is the FILE's identity, and a file is shared; nobody types
     -- it. A resource with a file is keyed by its own id.
     'case when n.file_id is not null then coalesce(n.external_id, n.id::text)
@@ -27365,7 +27365,7 @@ begin
     -- declares nothing, and everything the correct key installed last time is
     -- removed to match.
     --
-    -- Measured on 0.1.5 before this existed, walking scenarios/evals/J2 Act 8:
+    -- Measured on 0.1.5 before this existed, walking journey J2, act 8:
     --
     --   {"name":"p","skils":[...],"agnets":[...]}
     --     -> {"agents": [], "skills": [], "removed": [], "tool_servers": []}
@@ -31438,7 +31438,7 @@ grant execute on function aiq.quote_occurs(text, text) to authenticated, worker;
 -- A model's answer, as jsonb. The one thing a JSON parser accepts and jsonb
 -- does not is the NUL escape: `\u0000` is valid JSON and jsonb refuses it
 -- ("unsupported Unicode escape sequence"), because a Postgres text value
--- cannot hold a NUL. Models do emit it -- scenarios/tour's extractor wrote one
+-- cannot hold a NUL. Models do emit it -- our end-to-end tour's extractor wrote one
 -- into a quote from a GitHub issue -- and in a fan-in that casts each child's
 -- answer, one such window used to fail the landing of the whole document.
 -- Stripping it changes no meaning a Postgres row could have held.
@@ -32486,7 +32486,7 @@ begin
             -- PT409, NOT 40001. PostgREST runs every request in a transaction that
             -- retries on serialization_failure, so a deterministic 40001 is an
             -- infinite loop: the browser waits forever and the database takes
-            -- about five thousand rollbacks a second (measured, scenarios/tour).
+            -- about five thousand rollbacks a second (measured, in our end-to-end tour).
             -- PT409 is PostgREST's own convention for "answer with HTTP 409".
             raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='PT409';
         end if;
@@ -40558,7 +40558,7 @@ begin
     -- register_graph_vocabulary() with no payload -- the REFRESH form, which
     -- widens the cross product of relations already in the vocabulary and adds
     -- none -- so every relation a package declared was an authored triple its
-    -- own derivations could never land: scenarios/tour's knit wrote 0 of its
+    -- own derivations could never land: our end-to-end tour's knit wrote 0 of its
     -- edges, each named in the receipt as an unknown relation. The inverse
     -- label travels with it, so a model reaching for `affected_by` is flipped
     -- onto `affects` rather than dropped.

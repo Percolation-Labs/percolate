@@ -171,7 +171,7 @@ end $$;
 -- checksum, so both resources carry the same `uri` -- and the document node's
 -- canonical key was `coalesce(uri, external_id, id)`, so the second one to
 -- reach `ready` died in the projection trigger on idx_node_keys_canonical and
--- its ingest run failed terminally. Found by scenarios/tour re-uploading its
+-- its ingest run failed terminally. Found by our end-to-end tour re-uploading its
 -- runbook. The bytes' address is the file's identity, not the document's.
 do $$
 declare a uuid; v_1 uuid; v_2 uuid;

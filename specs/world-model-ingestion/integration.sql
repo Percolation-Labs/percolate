@@ -57,7 +57,7 @@ select aiq.register_entity_table(
     -- into one org are two resources with one uri, and the second to reach
     -- `ready` died here on idx_node_keys_canonical -- the same failure the
     -- paragraph above records for titles, reached through dedup instead
-    -- (scenarios/tour, re-uploading a runbook; dev/tests/content/01 §2). The
+    -- (our end-to-end tour, re-uploading a runbook; dev/tests/content/01 §2). The
     -- object path is the FILE's identity, and a file is shared; nobody types
     -- it. A resource with a file is keyed by its own id.
     'case when n.file_id is not null then coalesce(n.external_id, n.id::text)

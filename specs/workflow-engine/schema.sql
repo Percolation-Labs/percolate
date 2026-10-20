@@ -2746,7 +2746,7 @@ comment on table workflow.step_functions is
 --     workflow.register_step_function('ghost2','journey.no_such_fn');
 --     ERROR:  function journey.no_such_fn() does not exist
 --
--- Found by walking scenarios/evals/J2 as a user: the officer read the table
+-- Found by walking journey J2 as a user: the officer read the table
 -- before the documentation and had two unrunnable rows in the registry inside a
 -- minute. The docs do say to use the function, so this was never a
 -- documentation defect -- it is the push-down principle (a fact
@@ -2877,8 +2877,8 @@ $$ language plpgsql;
 -- It was not always so, and the history is the argument for it. The first
 -- version ran every statement as app_owner and defended it as "anyone who may
 -- define a workflow may read anything". Defining was gated; STARTING was not,
--- so a workflow an admin wrote read every tenant for whoever ran it. The tour
--- (scenarios/tour, act 8) had a member of one org start `ask_uploads` and get
+-- so a workflow an admin wrote read every tenant for whoever ran it. The end-to-end
+-- tour (act 8) had a member of one org start `ask_uploads` and get
 -- another org's runbook back from its SEARCH step.
 --
 -- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
@@ -5306,7 +5306,7 @@ begin
             -- `x'' || current_user || ''` expanded into a statement that ran and
             -- returned `xapp_owner`: arbitrary SQL out of ordinary row data,
             -- executing as the engine owner. Found by walking
-            -- scenarios/evals/J2, recorded in runs/2026-09-04-J2.md.
+            -- journey J2 on 4 September.
             --
             -- So the template survives to execution, where execute_sql_step
             -- resolves it through resolve_statement_params and the row becomes

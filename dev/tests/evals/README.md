@@ -220,6 +220,6 @@ Two failure modes specific to this file, both met while writing it:
   failure of the guarantee rather than of the query. Read through the `*_api`
   views, or say `role: app_owner` on that check and say why in `because`.
 
-p8-subsystems' `scenarios/` (internal) is upstream of this directory: exploration and verdicts in
+Internal scenarios are upstream of this directory: exploration and verdicts in
 prose. This is where the ones worth re-running forever get pinned, executable.
 Dogfooding, an internal practice, is the method that generates them.

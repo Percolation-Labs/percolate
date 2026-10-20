@@ -1051,7 +1051,7 @@ begin
     -- way registered cleanly, printed nothing, and then refused EVERY insert
     -- from then on -- `column n.id does not exist`, raised inside a generated
     -- trigger that names neither the entity type nor this function. Found by
-    -- scenarios/tour, whose package keyed its tables by their natural keys.
+    -- our end-to-end tour, whose package keyed its tables by their natural keys.
     if to_regclass(p_source_table) is not null and not exists (
         select 1 from pg_attribute
          where attrelid = to_regclass(p_source_table) and attname = 'id'
@@ -1257,7 +1257,7 @@ $$ language plpgsql;
 -- Deleted, and the deletion is the point rather than a tidy-up. This function
 -- read an `orgs` array straight off the JWT because user-rbac had no org model
 -- to ask -- a working seam, never a tenancy system, and the file's own comment
--- said so: "a real deployment replaces this", and scenarios/round-4.md carried
+-- said so: "a real deployment replaces this", and an internal review round carried
 -- it as the open item that would close "when it lands, this function is the
 -- single place that changes".
 --
@@ -4317,8 +4317,8 @@ $$ language plpgsql volatile security invoker;
 -- pair, including one identical `description` string 439 times for 18KB. That
 -- is paid in context on every conversation's first call, limit or no limit.
 --
--- Found by walking scenarios/evals/J1-mill-lane.md Act 6, where the workflow a
--- user would actually write failed on it; runs/2026-09-04-J1.md §3.2.
+-- Found by walking journey J1 (Mill Lane), act 6, where the workflow a
+-- user would actually write failed on it.
 -- `dev/tests/query/03-schema.sql` §7 holds the contract: every registered
 -- facet fits the budget at L1, states how to narrow, and narrows to something
 -- smaller.
@@ -5110,8 +5110,8 @@ returns jsonb as $$
             -- That mattered because the row-wise form put this facet 1.27x OVER
             -- workflow.max_payload_bytes, so a `sql` step calling the mode that
             -- `p8ql-schema-first` tells every agent to call FIRST failed
-            -- terminally. Found by walking scenarios/evals/J1-mill-lane.md Act
-            -- 6; the run log is runs/2026-09-04-J1.md §3.2.
+            -- terminally. Found by walking journey J1 (Mill Lane),
+            -- act 6.
             --
             -- `pairs` is the level-2 detail: which (src, dst) a relation admits
             -- is what you need once you have CHOSEN a relation, and the choice

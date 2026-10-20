@@ -244,7 +244,7 @@ end $$;
 -- PostgREST runs each request in a transaction that is retried on
 -- serialization_failure, which is right for a real serialization conflict and
 -- an infinite loop for a function that raises 40001 on purpose. Found by
--- `scenarios/tour`: saving an API source a second time without its revision
+-- our end-to-end tour: saving an API source a second time without its revision
 -- hung the request and drove about five thousand rollbacks a second until
 -- PostgREST was restarted. A conflict a person should see is `PT409`, which
 -- PostgREST answers as HTTP 409. Worker-only functions may keep 40001 -- their

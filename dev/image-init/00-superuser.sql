@@ -17,7 +17,7 @@
 -- script copies it into its container and runs it with psql -f, so the image
 -- and the scripts cannot say different things. dev/check.sh's tree gate
 -- refuses a second spelling of the set_config revoke or the parser install
--- under dev/, applications/, k8s/ or scenarios/.
+-- anywhere under dev/.
 -- (A fix made only at the copy that failed leaves its siblings broken; REM-55.)
 --
 -- IDEMPOTENT, because most of its callers meet a cluster that already has some

@@ -440,7 +440,7 @@ end $$;
 -- `SCHEMA "sql"` at 71,482 against a 65,536 limit, so a `sql` step calling
 -- either failed terminally with "this is terminal: the same response will be
 -- the same size on every attempt". Two correct designs that could not both be
--- followed. Found by walking scenarios/evals/J1-mill-lane.md Act 6.
+-- followed. Found by walking journey J1 (Mill Lane), act 6.
 --
 -- THE LIMIT IS READ FROM WHERE THE ENGINE READS IT, never retyped: the same
 -- coalesce(current_setting(...), 65536) as workflow.enforce_payload_ref_size,
