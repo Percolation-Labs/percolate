@@ -83,7 +83,7 @@ select set_config('request.jwt.claims', json_build_object('sub',
 set local role authenticated;
 select aiq.claim_judgement(null, (select id from aiq.judgements where evidence ->> 'key' = 'p. raman')) ->> 'status' as claimed;
 select aiq.complete_judgement(j.id, jsonb_build_object('decision', 'bind', 'target', j.evidence -> 'candidates' -> 0 ->> 'node_id'),
-         'P. Raman prefers DuckDB in the March session, on the same team list and project as Priya Raman', 'agent') ->> 'status' as decided
+         'Initial and surname match Priya Raman, the only candidate: a person on the team list', 'agent') ->> 'status' as decided
   from aiq.judgements j where j.evidence ->> 'key' = 'p. raman';
 reset role;
 select evidence ->> 'label' as name, status, decided_by, tier, reason
