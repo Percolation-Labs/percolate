@@ -173,13 +173,13 @@ declare
         -- percolate.link_judge, cast before format() so it names a function
         -- that exists; the criterion goes in as %L (REM-997).
         'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
-        'aiq.lexical(text,text,integer)',
+        'aiq.lexical(text,text,integer,jsonb)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
         'aiq.schema_p8ql(text)',
         'aiq.schema_workflow(text)',
-        'aiq.search(text,text,vector,text,integer,integer)',
-        'aiq.semantic_in(text,vector,text,integer)',
+        'aiq.search(text,text,vector,text,integer,integer,jsonb)',
+        'aiq.semantic_in(text,vector,text,integer,jsonb)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         -- One identifier, and it is never a caller's. claims.candidates reads
