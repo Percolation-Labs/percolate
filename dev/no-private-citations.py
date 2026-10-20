@@ -18,7 +18,8 @@ A citation is one of:
     or a URL into Percolation-Labs/percolate-core.
 
 Card ids (REM-123) are fine: they are opaque, not a path. The generated
-extension SQL is skipped, because it is a copy of specs/ and is fixed there.
+extension SQL is skipped, because it is a copy of specs/ and is fixed there,
+and so is core/, a mirror of percolate-core, fixed in that repository.
 """
 import os
 import re
@@ -34,7 +35,9 @@ PRIVATE_PATH = re.compile(r"(?:^|(?<=[\s`'\"(\[<]))(?:\.\./)*(?:p8-subsystems/)?
                           + "|".join(re.escape(d) for d in PRIVATE_DIRS) + r")/[\w.\-/]+")
 PROSE_SPEC = re.compile(r"(?<![\w./-])(specs/[\w\-]+(?:/[\w\-]+)*/[\w\-]+\.md)\b")
 PRIVATE_REPO = re.compile(r"\bp8-subsystems\b|\bpercolate-application\b|Percolation-Labs/percolate-core\b")
-SKIP = re.compile(r"^extension/percolate/sql/.*\.sql$|\.lock$|^dev/no-private-citations\.py$")
+# core/ is a read-only mirror of percolate-core: a citation there is fixed in
+# that repository, and refusing it here would only block the next sync.
+SKIP = re.compile(r"^extension/percolate/sql/.*\.sql$|\.lock$|^dev/no-private-citations\.py$|^core/")
 
 
 def git(*args):
