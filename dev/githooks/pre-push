@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The tree gates before every push: no Docker, no database, seconds. Armed with
+#     git config core.hooksPath dev/githooks
+# The database gates are `CONTAINER=... DB=... dev/check.sh`, which CI runs on
+# every pull request. `--tree` and not `--reload` since #88 in p8-subsystems: a
+# hook that rebuilds a database rebuilds whichever one the shell names.
+#
+# Git exports GIT_DIR to a hook, and every git call the gates make would read it.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$HERE/check.sh" --tree

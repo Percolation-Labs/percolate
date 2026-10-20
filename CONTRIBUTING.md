@@ -50,6 +50,5 @@ overwritten by the next sync.
 ## Pull requests
 
 `.github/workflows/check.yml` sends a pull request from a fork to GitHub's
-hosted runners, never to ours, and runs `dev/check.sh` there. To
-run the gates before every push, `git config core.hooksPath dev/githooks`.
-Each push then reloads `$DB`, so set `DB` to a database of your own.
+hosted runners, never to ours, and runs `dev/check.sh` there. To run the
+tree gates before every push, `git config core.hooksPath dev/githooks`.
