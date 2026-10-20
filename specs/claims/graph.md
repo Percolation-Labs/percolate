@@ -598,6 +598,11 @@ are the answer, not the question.
   question names the broader one in `refines`. `claims.answered` records which question a claim answers: the
   platform asserts it from the slots, confirmed because the match is computed, with stance `unknown` because a
   stance is judged. A frame with a subject but no outcome is kept and answers nothing.
+- **A refined question is found by its own words (0.2.29, REM-1099).** Its `search_text` is the frame's subject
+  and outcome followed by its refining slots in brackets. Before this a refined question read and embedded
+  exactly like the question it refines, and search listed every such pair as twins. Production on 20 Oct held
+  266 questions, all with distinct keys: 121 refined questions with their 121 bases, 24 phrased questions and none
+  posed twice. The upgrade drops the refined questions' vectors once and queues the embed run.
 - **As built: questions minted from a phrasing** (coalescing). A question
   may carry a `phrasing` (one polar sentence, 10 to 200 characters, ending in a question mark) in place of a
   frame, keyed `q:` plus its normalised words; a check requires a frame or a phrasing. `claims.pose_question`

@@ -36806,10 +36806,37 @@ grant execute on function claims.pose_question(text, text), claims.propose_answe
 -- the caller reads off `within`, and the nearest question is still shown so the caller can see what it missed.
 -- The floor has no default, for the reason candidates gives.
 -- ------------------------------------------------------------
+--
+-- A refined question carries its refining slots in its text (REM-1099). Without them it read exactly as the
+-- question it refines, so the two embedded to one vector and every by-meaning search listed the pair as twins.
 alter table claims.questions add column if not exists search_text text
-    generated always as (coalesce(phrasing, subject || ': ' || outcome)) stored;
+    generated always as (coalesce(phrasing, subject || ': ' || outcome
+                 || case when refinements = '{}'::jsonb then '' else ' (' || translate(refinements::text, '{}"', '') || ')' end)) stored;
 comment on column claims.questions.search_text is
-    'The words a question is found by: its phrasing, or its frame''s subject and outcome. Derived, never written.';
+    'The words a question is found by: its phrasing, or its frame''s subject and outcome with any refining slots. Derived, never written.';
+-- A database installed before carries the old expression. Moving it rewrites each refined question's text, so its
+-- vectors no longer say what it says: they are dropped once, here, and the embed run re-embeds them.
+do $$
+declare
+    m record;
+begin
+    if pg_get_expr((select adbin from pg_attrdef d join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+                     where d.adrelid = 'claims.questions'::regclass and a.attname = 'search_text'),
+                   'claims.questions'::regclass) not like '%translate%' then
+        alter table claims.questions alter column search_text
+            set expression as (coalesce(phrasing, subject || ': ' || outcome
+                               || case when refinements = '{}'::jsonb then '' else ' (' || translate(refinements::text, '{}"', '') || ')' end));
+        for m in select name from aiq.embedding_models loop
+            if to_regclass('aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null then
+                execute format('delete from aiq.%I e using claims.questions q where e.chunk_id = q.id and q.refines is not null',
+                               aiq.embedding_space_name(m.name));
+            end if;
+        end loop;
+        if to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
+            perform aiq.queue_source_embedding('refined questions reworded (REM-1099)');
+        end if;
+    end if;
+end $$;
 
 do $$
 begin
