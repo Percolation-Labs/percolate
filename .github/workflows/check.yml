@@ -159,7 +159,7 @@ jobs:
           # runs for over two hours. #314 took it off corpus-only PRs. Each main
           # batch still spent 17 minutes on it ahead of the database gate, on
           # the runner every p8 release and schema PR needs. Releases have a
-          # 10-minute SLA (percolate-application dev skill, "Release time").
+          # 10-minute SLA.
           LOADER='^(applications/percolate-self-model/|extension/|specs/contract/|dev/ci-database\.sh$|dev/lib/)|^specs/.*\.sql$'
           if printf '%s\n' "$files" | grep -qE "$LOADER"; then
             echo "selfmodel=true" >> "$GITHUB_OUTPUT"
@@ -356,8 +356,8 @@ jobs:
       # the crate would be a cache HIT on an image carrying the previous
       # cargo-pgrx. It used to hash the whole file, which also moved on every
       # extension version bump -- a miss, a two-gigabyte rebuild and save on
-      # every release PR, and parser-tests.yml ran out of disk doing it on
-      # p8-subsystems#184 (REM-235). The pin is the only line the image depends on.
+      # every release PR, and parser-tests.yml ran out of disk doing it
+      # (REM-235). The pin is the only line the image depends on.
       - name: Cache the pgrx toolchain image
         if: steps.local.outputs.hit != 'true'
         id: toolchain
@@ -417,7 +417,7 @@ jobs:
           # stale from a prefix hit or absent, and the save is about to
           # overwrite it either way. actions/cache has not run its post-job
           # save yet, and the file it will save is the one written below.
-          # Located by p8-subsystems-d1 reading this PR's log.
+          # Located by reading this PR's log.
           df -h / | tail -1 | sed 's/^/before save:   /'
           rm -f "$RUNNER_TEMP/pgrx-builder.tar"
           docker save pgrx-builder -o "$RUNNER_TEMP/pgrx-builder.tar"
@@ -578,5 +578,5 @@ jobs:
         if: always()
         run: docker ps -aq --filter "name=^$CONTAINER" | xargs -r docker rm -f -v >/dev/null
 
-  # THE SELF-MODEL JOB IS p8-subsystems', NOT THIS REPOSITORY'S. It loads
-  # applications/percolate-self-model, which stays there, so it runs there.
+  # THE SELF-MODEL JOB IS THE PRIVATE TREE'S, NOT THIS REPOSITORY'S. It loads
+  # an internal application that stays there, so it runs there.

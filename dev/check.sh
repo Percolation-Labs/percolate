@@ -109,13 +109,13 @@ done
 # Each gate is named for the QUESTION it asks rather than the script that asks
 # it, so a failure here and a failure in Actions are recognisably the same
 # failure, and so two scripts with similar names stop looking like one.
-# THIS IS PERCOLATE'S COPY, and it differs from p8-subsystems' dev/check.sh in
-# this list alone. p8-subsystems is where this extension was built, and its
+# THIS IS PERCOLATE'S COPY, and it differs from the private tree's dev/check.sh in
+# this list alone. The private tree is where this extension was built, and its
 # copy also gates the board, meta, the applications, the self-model and its
 # house voice, none of which this repository holds. Those gates are left out
 # here, not weakened: every gate that asks a question of the extension, its
 # SQL, its parser or its tree is the same line it was there, and DB_GATES
-# below is unchanged. Two extension gates still run only in p8-subsystems
+# below is unchanged. Two extension gates still run only in the private tree
 # until the move is finished, because they read files that stay there: "a
 # table the extension ships says somewhere why it exists" (the design specs)
 # and "the schema is the size it says it is" (specs/budget.toml).
@@ -599,7 +599,7 @@ self_model_from_zero() {
 # whose header says "THERE IS NO SECOND LIST". `grep -c defer dev/check.sh` was
 # 0 and `grep -n extversion dev/check.sh` was empty, so running every gate the
 # way this file promises still did not run this one, on any machine. Found by
-# `p8-subsystems-b0` while measuring the same class REM-56 is about.
+# a session measuring the same class REM-56 is about.
 #
 # A DB GATE, necessarily: it asks pg_extension, so it needs the database and it
 # needs the artefact installed, which is `dev/ci-database.sh` locally and the

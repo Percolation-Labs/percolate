@@ -175,8 +175,8 @@ jobs:
       #
       # The pin, not a hash of all of Cargo.toml: the whole file also moves on
       # every extension version bump, which made every release PR rebuild and
-      # save the image -- and this job ran out of disk doing it on
-      # p8-subsystems#184 (REM-235). Identical to check.yml's key, on purpose.
+      # save the image -- and this job ran out of disk doing it
+      # (REM-235). Identical to check.yml's key, on purpose.
       - name: Cache the pgrx toolchain image
         id: toolchain
         uses: actions/cache@v6
@@ -185,7 +185,7 @@ jobs:
           key: pgrx-builder-image-${{ runner.arch }}-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-pgrx${{ steps.pins.outputs.pgrx }}-${{ steps.base.outputs.digest }}
 
       # THE SAME RECLAIM AS check.yml's parser job, which this job went without
-      # and paid for: p8-subsystems#184's cargo-test died with `no space left on
+      # and paid for: a cargo-test died with `no space left on
       # device` once while saving a rebuilt image and again while LOADING a
       # cached one (REM-235). This job needs a Rust toolchain inside a container
       # and nothing else from the host.
