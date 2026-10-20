@@ -1,1 +1,1 @@
-mcp list_judgements '{}' | jq -c '.result[] | {label, claimed_kind, status, candidates: [.candidate_nodes[]? | {summary, entity_type, sim}]}'
+mcp list_judgements '{"status": "open"}' | jq -c '.result[] | {label, claimed_kind, candidates: [.candidate_nodes[] | "\(.summary) (\(.candidate))"]}'
