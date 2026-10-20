@@ -17,7 +17,9 @@
 --      cannot complete;
 --   6. a second dream queues nothing new;
 --   7. another soft node is a candidate -- an alias, or the same name as
---      another kind -- and a bind to it goes through.
+--      another kind -- and a bind to it goes through;
+--   8. binding one of a pair settles the other: it goes moot, naming the
+--      judgement that bound its twin.
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -33,7 +35,7 @@ end $$;
 -- Knit names two companies loosely; one typed company exists with a name
 -- close to the first; the second has an exact typed twin, which dream binds by
 -- rule and must not queue.
-select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Ana Q22"},{"k":"company","n":"Acme Corp Q22"},{"k":"company","n":"Borealis Q22"},
+select aiq.upsert_graph('{"nodes":[{"k":"person","n":"Ivo Q22"},{"k":"company","n":"Acme Corp Q22"},{"k":"company","n":"Borealis Q22"},
   {"k":"company","n":"Zephyr Holdings Q22"}],
   "edges":[{"s":0,"t":1,"r":"affiliated_with"},{"s":0,"t":3,"r":"affiliated_with"}]}', '{"agent":"knit","run_id":"q22"}');
 insert into demo.companies (id, name, org_id)
@@ -195,6 +197,12 @@ select aiq.complete_judgement(current_setting('q22.costa')::uuid,
 reset role;
 select pg_temp.check(:'claimed_costa'::boolean and jsonb_array_length(:'bound'::jsonb->'resolution_ids') = 1,
     '7. the bind of A. Costa to the soft node Ana Costa did not go through: ' || :'bound');
+-- 8. Its twin settles with it: "Ana Costa, candidate A. Costa" is moot and
+--    names the judgement that bound A. Costa.
+select pg_temp.check((select status = 'moot' and evidence->'settled_by'->>'judgement' = :'costa_j'
+                        from aiq.judgements where evidence->>'key' = 'ana costa q22'
+                       order by queued_at desc limit 1),
+    '8. the twin item was left open after its pair was bound');
 
 \echo 'query/22: dream queues what it cannot decide; an agent claims, binds, and the verdict is recorded'
 rollback;
