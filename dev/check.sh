@@ -127,6 +127,7 @@ TREE_GATES=(
   "No line this branch adds cites a repository a reader cannot open::$PY dev/no-private-citations.py --check"
   "The schema is the size it says it is::$PY dev/the-schema-has-a-budget.py"
   "A spec file shapes only the schema its directory owns::$PY dev/owns-its-schema.py"
+  "No file this branch adds is one a script writes::$PY dev/generated-output.py --check"
   "No closed vocabulary disagrees with its own copies::$PY dev/vocab-audit.py --check"
   "The semantic exceptions the database raises are core's, word for word::$PY dev/semantic-exceptions.py --check"
   "No assertion passes because its subject is missing::$PY dev/assertion-audit.py --check"
