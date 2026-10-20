@@ -23159,8 +23159,20 @@ begin
                                               where resource_id = v_res));
     end if;
 
-    update content.resources
-       set metadata = metadata || jsonb_build_object('text_hash', v_hash), updated_at = now()
+    -- AN IN-PLACE UPDATE KEEPS THE TEXT IT REPLACED (REM-966). record_chunks
+    -- deletes the old chunks, so before it runs their text and the time it was
+    -- replaced are appended to the resource's own `replaced` list, oldest first.
+    -- On the resource row, it is readable by exactly whoever can read the memory.
+    update content.resources r
+       set metadata = r.metadata || jsonb_build_object('text_hash', v_hash)
+                     || coalesce((select jsonb_build_object('replaced',
+                                      coalesce(r.metadata->'replaced', '[]'::jsonb)
+                                      || jsonb_build_array(jsonb_build_object(
+                                             'text', string_agg(c.content, E'\n' order by c.ordinal),
+                                             'replaced_at', now())))
+                                    from content.resource_chunks c where c.resource_id = r.id
+                                  having count(*) > 0), '{}'::jsonb),
+           updated_at = now()
      where id = v_res;
     v_n := content.record_chunks(v_res, p_chunks);
 

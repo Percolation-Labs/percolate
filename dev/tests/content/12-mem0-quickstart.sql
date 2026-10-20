@@ -155,8 +155,8 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 5. UPDATE.  m.update(memory_id, "Maya lives in Lisbon.")
 --
--- Two ways. In place, register_text rewrites the text and keeps no copy of
--- the old one (GAP). The way that keeps the record: add the new memory and
+-- Two ways. In place, register_text rewrites the text and keeps the old text,
+-- with when it was replaced, in the memory's `replaced` list. The way that keeps the record: add the new memory and
 -- close the fact it replaces, so the old one ends instead of vanishing.
 -- ---------------------------------------------------------------------
 select (content.register_text('memory', 'm-home-2', '[{"content":"Maya lives in Lisbon."}]',
@@ -174,7 +174,8 @@ select aiq.upsert_graph('{"nodes":[{"k":"soft","n":"Maya Okafor"},{"k":"soft","n
     json_build_object('resource_id', :'m_home2', 'agent', 'planner', 'run_id', 'r07', 'valid_from', '2026-06-01T10:00:00Z', 'org_id', :maya_org)::jsonb);
 reset role;
 
--- In place: the text is replaced and the old text is gone.
+-- In place: the text is replaced and the old text is kept, readable to whoever
+-- can read the memory (REM-966).
 :as_maya
 select content.register_text('memory', 'm-work', '[{"content":"Maya works at Harbour Health."}]',
            null, null, :maya_org)->>'resource_id' = :'m_work' as same_memory \gset
@@ -184,12 +185,31 @@ select content.register_text('memory', 'm-work', '[{"content":"Maya works at Har
     select 1/0;
 \endif
 do $$
-declare n int;
+declare r record;
 begin
-    select count(*) into n from content.resource_chunks where content like '%Northwind%';
-    raise notice 'update in place -> same memory, old text rows left: %', n;
-    if n = 0 then
-        raise notice 'GAP REM-966: an in-place update keeps no copy of the text it replaced';
+    select c.content, res.metadata->'replaced' as replaced into r
+      from content.resources res
+      join content.channels ch on ch.id = res.channel_id and ch.name = 'memory'
+      join content.resource_chunks c on c.resource_id = res.id
+     where res.external_id = 'm-work';
+    if r.content is distinct from 'Maya works at Harbour Health.' then
+        raise exception 'update in place: expected the new text, got %', r.content;
+    end if;
+    if jsonb_array_length(r.replaced) is distinct from 1 or r.replaced->0->>'text' not like '%Northwind%'
+       or (r.replaced->0->>'replaced_at')::timestamptz is null then
+        raise exception 'update in place: expected the Northwind text kept with its time, got %', r.replaced;
+    end if;
+    raise notice 'update in place -> same memory; replaced: % at %', r.replaced->0->>'text', r.replaced->0->>'replaced_at';
+end $$;
+-- Saving the same words again replaces nothing.
+select content.register_text('memory', 'm-work', '[{"content":"Maya works at Harbour Health."}]',
+           null, null, :maya_org)->>'status' as resave \gset
+do $$
+begin
+    if (select jsonb_array_length(res.metadata->'replaced') from content.resources res
+          join content.channels ch on ch.id = res.channel_id and ch.name = 'memory'
+         where res.external_id = 'm-work') is distinct from 1 then
+        raise exception 'an unchanged save added to the replaced list';
     end if;
 end $$;
 
