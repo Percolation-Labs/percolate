@@ -125,6 +125,7 @@ $$ language sql;
 -- P8_CONTENT_PORT=8081
 -- P8_MINIO_PORT=9000
 -- P8_MINIO_CONSOLE_PORT=9001
+-- P8_QUERY_MCP_PORT=8090
 -- OPENAI_API_KEY=sk-your-key
 -- EOF
 -- docker compose up -d --wait
