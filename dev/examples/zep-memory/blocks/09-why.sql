@@ -14,6 +14,6 @@ select e.relation, k.key as object, e.valid_from::date as held_from, e.valid_to:
 
 -- and every name bound to another, by whom, and why
 select s.claimed_kind || '/' || s.key as name, r.decided_by, r.tier,
-       left(coalesce(r.evidence ->> 'why', r.evidence ->> 'rule'), 70) as why
+       left(coalesce(r.evidence ->> 'why', r.evidence ->> 'reason', r.evidence ->> 'rule'), 70) as why
   from aiq.node_resolutions r join aiq.soft_nodes s on s.id = (r.evidence ->> 'soft_id')::uuid
  order by r.at;

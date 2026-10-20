@@ -2,7 +2,7 @@
 # Every block of "Advanced Percolate memory and semantic iteration", in order, from an empty directory, on part one's
 # stack (the LangGraph tour), against a real model and a real decider:
 #
-#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.25 \
+#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.26 \
 #         dev/examples/advanced-memory/run.sh [workdir]
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
@@ -12,7 +12,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.25}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.26}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}" "${JEV_API_KEY:?set JEV_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY; JK=$JEV_API_KEY
@@ -77,12 +77,12 @@ for f in $(ls $B | grep -v '^00-' | sort); do
   out=$CAP/${f%.*}.txt
   case $f in
     01b-connect.sh)
-      # Connecting the reader's own Claude edits their client's config, so the run does not; 03-judge.sh makes the
+      # Connecting the reader's own Claude edits their client's config, so the run does not; 03-claim.sh and 03b-decide.sh make the
       # same MCP calls their Claude makes, as the same signed-in person.
       { sed 's/^/$ /' $B/$f; echo "(not run here: it connects the reader's own Claude)"; } > $out ;;
     *.sh)
-      # the documented deviations again: the real Jev key, and this stack's own query-mcp port
-      sed -e "s#your-jev-key#$JK#" -e "s#localhost:8090#localhost:$P8_QUERY_MCP_PORT#" $B/$f > $W/blk.sh
+      # the one documented deviation in a shell block: the real Jev key
+      sed -e "s#your-jev-key#$JK#" $B/$f > $W/blk.sh
       { sed 's/^/$ /' $B/$f; . $W/blk.sh 2>&1; } > $out
       rm -f $W/blk.sh
       [ "$f" = 01-jev.sh ] && sleep 5 ;;
