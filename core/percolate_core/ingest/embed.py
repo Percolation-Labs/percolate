@@ -39,7 +39,7 @@ from ..core import as_service, credential_for
 from ..core.provider_errors import raise_for
 from ..worker.templates import TerminalError
 
-__all__ = ["embed_resource", "embed_texts"]
+__all__ = ["embed_resource", "embed_source", "embed_texts"]
 
 # Two ceilings, and a request stops at whichever comes first. Counts are what
 # providers document; characters are what actually breaks -- a batch of 96
@@ -167,7 +167,13 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
 
 
 async def embed_resource(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
-    """The `op: embed` step: every chunk of one resource, into one space."""
+    """The `op: embed` step: every chunk of one resource, into one space.
+
+    With `source` instead of a resource id it embeds a registered semantic
+    source by name (`embed_source`), which is how claims and questions get
+    their vectors (REM-662)."""
+    if spec.get("source"):
+        return await embed_source(spec, ctx)
     resource_id = spec.get("resource_id") or (ctx.get("run_input") or {}).get("resource_id")
     if not resource_id:
         raise TerminalError("an embed step needs a resource_id")
@@ -210,3 +216,78 @@ async def embed_resource(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str,
     return {"result": {"resource_id": resource_id, "model": call["model"],
                        "embedded": landed, "chunks": len(rows),
                        "requests": requests, "batch_size": batch_size}}
+
+
+# A page of rows per round trip. Small enough that one page's texts and vectors
+# are a few hundred KB in memory, large enough that a page is a handful of
+# batched provider calls rather than one.
+SOURCE_PAGE = 256
+# The most rows one task embeds. A backfill of a large corpus is several tasks
+# rather than one that holds a core for an hour; the next run picks up where
+# this one stopped, because what a space lacks is all the state there is.
+SOURCE_MAX_ROWS = 20_000
+
+
+async def embed_source(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """The `op: embed` step over a registered semantic source, by name (REM-662).
+
+    WHY THIS EXISTS. `embed_resource` embeds one resource's chunks, and a claim
+    or a question is not a resource. The `embed:` matrix that installs for them
+    compiles to one HTTP call per row, so a deployment whose model runs here
+    (fastembed, REM-628) -- production -- had no way to give a claim a vector,
+    and `claims.candidates` refused every claim by name. This is the same loop
+    as `embed_resource` with the row set asked of `aiq.texts_to_embed(source,
+    model, limit)`, which reads any registered source and returns the rows the
+    model's space has no vector for.
+
+    WHAT IS LEFT TO EMBED IS THE ONLY STATE. Each page is the rows still
+    missing, so a page that landed is gone from the next one, a task that dies
+    halfway loses nothing, and two tasks racing write the same vector twice
+    (record_embeddings upserts). The model is resolved once, before the first
+    page, so a default moved mid-run cannot split one run across two spaces.
+    """
+    source = str(spec["source"])
+    model = spec.get("model") or None
+    batch_size = int(spec.get("batch_size") or DEFAULT_BATCH)
+    page = max(1, int(spec.get("page") or SOURCE_PAGE))
+    cap = max(1, int(spec.get("max_rows") or SOURCE_MAX_ROWS))
+
+    async with as_service() as conn:
+        # An empty batch resolves the model, its provider and its request shape
+        # without embedding anything -- the probe content.install_ingest_workflow
+        # uses. Its body holds an empty list where the texts go, and embed_texts
+        # replaces that list per request, so one call serves every page.
+        call = json.loads(await conn.fetchval(
+            "select aiq.embed_batch_call($1, $2::jsonb)::text", model, []))
+    name = call["model"]
+
+    embedded = requests = pages = 0
+    more = False
+    while True:
+        if embedded >= cap:
+            more = True
+            break
+        async with as_service() as conn:
+            rows = json.loads(await conn.fetchval(
+                "select aiq.texts_to_embed($1, $2, $3)::text",
+                source, name, min(page, cap - embedded)))
+        if not rows:
+            break
+        texts = [r["content"] for r in rows]
+        vectors, n = await asyncio.to_thread(embed_texts, call, texts, batch_size)
+        payload = [{"chunk_id": r["chunk_id"], "embedding": v}
+                   for r, v in zip(rows, vectors)]
+        async with as_service() as conn:
+            landed = await conn.fetchval(
+                "select aiq.record_embeddings($1, $2::jsonb)", name, payload)
+        if not landed:
+            # Rows that come back and do not land would come back forever.
+            raise TerminalError(
+                f"{len(rows)} rows of source {source!r} were embedded and none landed in "
+                f"the {name} space, so the next page would be the same rows")
+        embedded += int(landed)
+        requests += n
+        pages += 1
+
+    return {"result": {"source": source, "model": name, "embedded": embedded,
+                       "pages": pages, "requests": requests, "more": more}}
