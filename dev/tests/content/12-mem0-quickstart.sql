@@ -134,22 +134,30 @@ select r.external_id, c.content from content.resources r
 -- ---------------------------------------------------------------------
 -- 4. SCOPES.  filters={"user_id": "maya", "agent_id": "coach"} / run_id
 --
--- agent and run are on every memory and on every edge's provenance. GAP:
--- p8ql cannot filter SEARCH by them, so the scoped search is SQL over it.
+-- agent and run are on every memory, and SEARCH narrows to them with BY AGENT
+-- and BY RUN (REM-965). The scope applies before the limit: asked where Maya
+-- lives, the planner's memories rank first, and a filter applied afterwards to
+-- the top two would leave the coach nothing.
 -- ---------------------------------------------------------------------
 do $$
-declare v text[];
+declare v jsonb; c text[];
 begin
-    select array_agg(c.content order by h.rrf_score desc) into v
-      from aiq.search('chunks', 'what does Maya eat', '[0,0,1]', 'mem0-demo-3d', 10) h
-      join content.resource_chunks c on c.id = h.chunk_id
-      join content.resources r on r.id = c.resource_id
-     where r.metadata->>'agent' = 'coach';
-    if v is distinct from array['Maya is vegetarian.', 'Maya prefers evening workouts.'] then
-        raise exception 'agent scope: expected the coach''s two memories, got %', v;
+    v := aiq.query('SEARCH "where does Maya live" FROM chunks USING mem0-demo-3d BY AGENT ''coach'' LIMIT 2', '[1,0,0]');
+    select array_agg(r->>'content' order by r->>'content') into c from jsonb_array_elements(v->'rows') r;
+    if c is distinct from array['Maya is vegetarian.', 'Maya prefers evening workouts.'] then
+        raise exception 'agent scope: expected the coach''s two memories though the planner''s outrank them, got %', v->'rows';
     end if;
-    raise notice 'agent_id=coach -> %', v;
-    raise notice 'GAP REM-965: p8ql SEARCH has no filter on a memory''s agent or run; scoped search is SQL';
+    raise notice 'agent_id=coach -> %', c;
+    v := aiq.query('SEARCH "Maya" FROM chunks USING mem0-demo-3d BY RUN ''r01'' LIMIT 5', '[1,0,0]');
+    select array_agg(r->>'content' order by r->>'content') into c from jsonb_array_elements(v->'rows') r;
+    if c is distinct from array['Maya lives in Leeds.', 'Maya works at Northwind Analytics.'] then
+        raise exception 'run scope: expected run r01''s two memories, got %', v->'rows';
+    end if;
+    raise notice 'run_id=r01 -> %', c;
+    v := aiq.query('SEARCH "Maya" FROM chunks USING mem0-demo-3d BY AGENT ''coach'' BY RUN ''r01''', '[1,0,0]');
+    if v->'rows' is distinct from '[]'::jsonb then
+        raise exception 'agent and run together narrow to their overlap, which is empty: %', v->'rows';
+    end if;
 end $$;
 
 -- ---------------------------------------------------------------------

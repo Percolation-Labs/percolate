@@ -63,7 +63,8 @@ pub extern "C-unwind" fn _PG_init() {
 //   [FUZZY] LOOKUP "<key>" [, "<key>" ...] [LIMIT n]
 //   SEMANTIC "<text>" FROM <source> [USING <model>] [LIMIT n]
 //   TEXT     "<text>" FROM <source> [LIMIT n]          -- lexical, ts_rank
-//   SEARCH   "<text>" FROM <source> [USING <model>] [LIMIT n]  -- RRF fusion
+//   SEARCH   "<text>" FROM <source> [USING <model>] [BY AGENT '<a>'] [BY RUN '<r>'] [LIMIT n]
+//                                                       -- RRF fusion, optionally one agent's or run's memories
 //   GRAPH    "<key>"  [DEPTH n] [TYPE <relation>] [AS OF '<time>'] [LIMIT n]
 //   SCHEMA   ["<facet>"] [FROM <name>]              -- what this database IS
 //   LAKE FROM <dataset> [, <dataset> ...] <select>  -- DuckDB, in the lake
@@ -115,6 +116,11 @@ pub struct ParsedQuery {
     /// GRAPH's `AS OF '<time>'`: walk the edges that held then rather than
     /// now (REM-999). Kept as the caller wrote it; the database casts it.
     pub as_of: Option<String>,
+    /// SEARCH's `BY AGENT '<a>'` and `BY RUN '<r>'`: only the memories that
+    /// agent or run wrote, filtered before the limit (REM-965). Each is a key
+    /// of the memory's metadata, and both together narrow to their overlap.
+    pub agent: Option<String>,
+    pub run: Option<String>,
 }
 
 impl ParsedQuery {
@@ -243,6 +249,8 @@ fn parse_lake(input: &str) -> Result<ParsedQuery, ParseError> {
         model: None,
         limit: LAKE_ROW_CAP,
         as_of: None,
+        agent: None,
+        run: None,
     })
 }
 
@@ -367,6 +375,8 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         model: None,
         limit: 20,
         as_of: None,
+        agent: None,
+        run: None,
     };
 
     // Ordinary SQL, recognised by how it starts rather than by an announcement.
@@ -436,7 +446,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         let is_keyword = !quoted[i]
             && matches!(
                 upper.as_str(),
-                "DEPTH" | "TYPE" | "FROM" | "USING" | "LIMIT" | "FUZZY" | "AS"
+                "DEPTH" | "TYPE" | "FROM" | "USING" | "LIMIT" | "FUZZY" | "AS" | "BY"
             );
         if is_keyword {
             break;
@@ -558,6 +568,25 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                 q.as_of = Some(v.clone());
                 i += 3;
             }
+            // BY AGENT '<a>' / BY RUN '<r>': Mem0's agent_id and run_id
+            // filters (REM-965). Two words, like AS OF, so the scope is named
+            // and a bare `BY 'coach'` cannot guess which one was meant.
+            "BY" => {
+                let which = toks.get(i + 1).map(|t| t.to_uppercase());
+                let v = toks.get(i + 2).ok_or(ParseError::MissingArgument(
+                    "BY AGENT and BY RUN each require a quoted name, e.g. BY AGENT 'coach'",
+                ))?;
+                match which.as_deref() {
+                    Some("AGENT") => q.agent = Some(v.clone()),
+                    Some("RUN") => q.run = Some(v.clone()),
+                    _ => {
+                        return Err(ParseError::MissingArgument(
+                            "BY names AGENT or RUN, e.g. BY AGENT 'coach' or BY RUN 'r02'",
+                        ))
+                    }
+                }
+                i += 3;
+            }
             "LIMIT" => {
                 let v = toks.get(i + 1).ok_or(ParseError::MissingArgument(
                     "LIMIT requires a number",
@@ -626,6 +655,14 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
     // it. Refused elsewhere rather than ignored: a search or a lookup "as of
     // March" that quietly answered for now is the failure this dialect's
     // other refusals exist to prevent.
+    // BY narrows a search to one agent's or one run's memories. Refused
+    // elsewhere, for the same reason as every rule above: a TEXT or a LOOKUP
+    // that quietly ignored the scope would answer for every agent.
+    if (q.agent.is_some() || q.run.is_some()) && q.mode != "SEARCH" {
+        return Err(ParseError::MissingArgument(
+            "BY AGENT and BY RUN apply to SEARCH -- they narrow it to the memories one agent or run wrote",
+        ));
+    }
     if q.as_of.is_some() && q.mode != "GRAPH" {
         return Err(ParseError::MissingArgument(
             "AS OF applies to GRAPH -- it walks the edges that held at that time",
@@ -679,6 +716,13 @@ fn aiq_parse(query: &str) -> pgrx::JsonB {
             "model": q.model,
             "limit": q.limit,
             "as_of": q.as_of,
+            // Absent unless BY was written, so a plan without it reads as before.
+            "scope": if q.agent.is_none() && q.run.is_none() { serde_json::Value::Null } else {
+                let mut m = serde_json::Map::new();
+                if let Some(a) = &q.agent { m.insert("agent".into(), a.clone().into()); }
+                if let Some(r) = &q.run { m.insert("run".into(), r.clone().into()); }
+                serde_json::Value::Object(m)
+            },
         })),
         Err(e) => pgrx::JsonB(serde_json::json!({
             "ok": false,
@@ -736,8 +780,8 @@ fn p8_query_grammar() -> pgrx::JsonB {
              "purpose": "Meaning-based search. The caller supplies the embedding; the database makes no model calls.",
              "example": "SEMANTIC \"battery safety\" FROM chunks USING nomic-embed-text"},
             {"mode": "SEARCH",
-             "syntax": "SEARCH \"<text>\" FROM <source> [USING <model>] [LIMIT n]",
-             "purpose": "Lexical and semantic rank fused. Named for the intent, not the fusion.",
+             "syntax": "SEARCH \"<text>\" FROM <source> [USING <model>] [BY AGENT '<agent>'] [BY RUN '<run>'] [LIMIT n]",
+             "purpose": "Lexical and semantic rank fused. Named for the intent, not the fusion. BY narrows it to the memories one agent or run wrote, before the limit.",
              "example": "SEARCH \"safety recall\" FROM chunks LIMIT 5"},
             {"mode": "LAKE",
              "syntax": "LAKE FROM <dataset> [, <dataset> ...] <select statement>",
@@ -1014,6 +1058,17 @@ mod tests {
         assert_eq!(h.mode, "SEARCH");
         assert_eq!(h.model.as_deref(), Some("nomic-embed-text"));
         assert_eq!(h.limit, 5);
+    }
+
+    #[pg_test]
+    fn search_narrows_by_agent_and_run() {
+        let q = parse_query("SEARCH \"what does Maya eat\" FROM chunks BY AGENT 'coach' BY RUN 'r02' LIMIT 3").unwrap();
+        assert_eq!(q.agent.as_deref(), Some("coach"));
+        assert_eq!(q.run.as_deref(), Some("r02"));
+        assert_eq!(q.limit, 3);
+        assert!(parse_query("TEXT \"x\" FROM chunks BY AGENT 'coach'").is_err());
+        assert!(parse_query("SEARCH \"x\" FROM chunks BY 'coach'").is_err());
+        assert!(parse_query("SEARCH \"x\" FROM chunks BY AGENT").is_err());
     }
 
     #[pg_test]
