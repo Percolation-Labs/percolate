@@ -1,5 +1,5 @@
 -- loads: research-platform/schema.sql
--- Trust history cannot be rewritten, and can be read as of a date (REM-464, specs/tables/schema.md §3).
+-- Trust history cannot be rewritten, and can be read as of a date (REM-464).
 --
 --   1. A work is written, listed, endorsed, published, withdrawn and unlisted, one step per transaction.
 --   2. research.trust_state answers each moment between two steps, and 'unknown' before the record starts.

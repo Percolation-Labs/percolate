@@ -3,7 +3,7 @@
 #
 #     CONTAINER=p8-ci DB=p8ci dev/research-concurrent-writes.sh
 #
-# specs/tables/schema.md §3: "Concurrent identical submissions return one revision." A rolled-back test
+# The rule under test: concurrent identical submissions return one revision. A rolled-back test
 # in one session cannot show that; two sessions have to overlap. So each first writer holds its
 # transaction open after writing, and the second arrives while the first still owns the key or the row:
 #

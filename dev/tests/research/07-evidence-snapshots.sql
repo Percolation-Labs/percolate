@@ -1,4 +1,4 @@
--- Cited evidence keeps the exact capture that was reviewed (REM-153, specs/tables/schema.md §4): a snapshot keeps
+-- Cited evidence keeps the exact capture that was reviewed (REM-153): a snapshot keeps
 -- its hash after the resource is refetched, only a readable capture can be pinned, an uncaptured source says so,
 -- a later capture needs a new revision, resolution asks the resource, and removing pinned bytes is explicit and
 -- leaves a tombstone.

@@ -1,4 +1,4 @@
--- What a research revision row may say about itself, whoever writes it (REM-151, specs/tables/schema.md §3):
+-- What a research revision row may say about itself, whoever writes it (REM-151):
 -- the hash and schema versions it was made with, a predecessor from its own work, a base revision from its
 -- parent work, and an actor, credential and caller that agree. Concurrency is dev/research-concurrent-writes.sh,
 -- because one rolled-back session cannot overlap itself.

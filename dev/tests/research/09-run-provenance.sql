@@ -1,5 +1,5 @@
--- A research revision records the workflow run it was written in, and nothing else (REM-237,
--- specs/tables/schema.md §3): no run when no step is executing, the run itself when one is, a revision inside
+-- A research revision records the workflow run it was written in, and nothing else (REM-237):
+-- no run when no step is executing, the run itself when one is, a revision inside
 -- somebody else's run or a system run is refused, a row naming a run that is not executing is a forgery, and a
 -- person cannot publish a run for themselves.
 --

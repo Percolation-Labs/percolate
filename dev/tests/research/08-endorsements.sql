@@ -1,5 +1,5 @@
--- Endorsements name the exact claims that were checked and keep their withdrawal history (REM-154,
--- specs/tables/schema.md §5): a claim-scoped endorsement names at least one claim of its own revision, a
+-- Endorsements name the exact claims that were checked and keep their withdrawal history (REM-154):
+-- a claim-scoped endorsement names at least one claim of its own revision, a
 -- withdrawal is one event and a retry converges on it, an agent cannot endorse, a correction inherits nothing,
 -- and the endorsements a correction affects can be listed.
 --
