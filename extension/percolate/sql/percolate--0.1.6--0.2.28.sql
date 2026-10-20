@@ -31259,6 +31259,294 @@ $y$, p_name, p_queue, p_rate_key, v_model));
 end;
 $$ language plpgsql;
 
+-- ------------------------------------------------------------
+-- A REGISTERED SEMANTIC SOURCE IS EMBEDDED BY NAME (REM-662).
+--
+-- Registering a source (aiq.semantic_sources) makes its rows embeddable,
+-- visible to the planner and covered by the orphan sweep; it embeds nothing.
+-- `chunks` has its pipeline above, keyed by resource. `claims` and
+-- `questions` had none that could run in production: their rows are not
+-- resources, so the worker's `op: embed` could not take them, and the
+-- `embed:` matrix claims.install_question_embed_workflow installs compiles to
+-- one HTTP call per row -- refused for a model that runs in the worker, which
+-- is what production embeds with (REM-628). So research.claims was a
+-- registered source with an empty space, and claims.candidates refused every
+-- claim by name.
+--
+-- ONE STEP FOR ANY SOURCE, not one per corpus. `op: embed` with `source:` in
+-- place of a resource id (percolate-core ingest/embed.py, embed_source) pages
+-- through aiq.texts_to_embed(source, model, limit) -- the rows of that source
+-- the model's space has no vector for -- embeds each page with the code both
+-- kinds of provider already share, and writes it through
+-- aiq.record_embeddings, which only `worker` may call. Batched like the chunk
+-- path, so a page is a few provider requests (or none, in process) rather
+-- than one task per row, and nothing carries a vector through tasks.output.
+--
+-- WHAT A SPACE LACKS IS THE QUEUE. No pending table and no flag on the row:
+-- a row with no vector in the default model's space is the work, so a task
+-- that dies halfway loses nothing, a backfill is the same call as a save,
+-- and a model registered next month finds every row waiting. The cost is an
+-- anti-join over the source per page, which walks the id index and stops at
+-- the page size while there is work, and reads the whole index once when
+-- there is none. That is fine at the measured scale (thousands of claims a
+-- week) and is what to revisit before a source holds tens of millions.
+-- A row whose text CHANGES keeps its old vector; research.claims rows never
+-- change (a new revision is new rows), and a question's phrasing is fixed
+-- once posed.
+-- ------------------------------------------------------------
+
+-- The rows of a registered source that a model's space (the default model's
+-- when null) has no vector for, in the shape content.chunks_to_embed returns:
+-- [{chunk_id, content}], because chunk_id is what a space is keyed by.
+--
+-- SECURITY DEFINER AND `worker` ONLY. It reads every row of the source,
+-- whoever may read it, because the embedder is the deployment's and a vector
+-- discloses nothing a reader's own search does not already filter: every
+-- space's read policy is the source's (aiq.police_embedding_spaces). Granted
+-- to nobody else, so no person reads another's text through it. The table
+-- and column come from aiq.semantic_sources, which only app_owner writes, and
+-- go through regclass and %I; the limit is a bound parameter.
+create or replace function aiq.texts_to_embed(p_source text, p_model text default null, p_limit int default 500)
+returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    s     aiq.semantic_sources;
+    m     aiq.embedding_models;
+    v_tbl text;
+    v_out jsonb;
+begin
+    select * into s from aiq.semantic_sources where name = p_source;
+    if not found then
+        raise no_data_found using message = format('no semantic source named %s is registered', coalesce(p_source, '(null)')),
+            hint = 'aiq.semantic_sources lists them';
+    end if;
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+    end if;
+    if m.name is null then
+        raise no_data_found using message = format('embedding model %s is not registered', coalesce(p_model, '(the default)'));
+    end if;
+    v_tbl := aiq.embedding_space_name(m.name);
+    execute format($q$
+        select coalesce(jsonb_agg(jsonb_build_object('chunk_id', x.id, 'content', x.t) order by x.id), '[]'::jsonb)
+          from (select src.id, src.%2$I::text as t from %1$s src
+                 where nullif(btrim(src.%2$I::text), '') is not null %3$s
+                 order by src.id limit $1) x$q$,
+        s.source_table::regclass, s.content_col,
+        -- No space yet: everything is missing, and record_embeddings creates it.
+        case when to_regclass('aiq.' || quote_ident(v_tbl)) is null then ''
+             else format('and not exists (select 1 from aiq.%I e where e.chunk_id = src.id)', v_tbl) end)
+      into v_out
+      using least(greatest(coalesce(p_limit, 500), 1), 5000);
+    return v_out;
+end;
+$$;
+revoke all on function aiq.texts_to_embed(text, text, int) from public;
+grant execute on function aiq.texts_to_embed(text, text, int) to worker;
+
+-- The workflow that embeds them: one `work` step per source, siblings, so a
+-- source that fails does not cost the others their vectors. NO MODEL IN THE
+-- DOCUMENT. Each run embeds with whatever is default when it runs, which is
+-- what lets the extension install this before any model is registered, and
+-- what claims.candidates and find_question read when they are not told a
+-- model.
+--
+-- NOT PACED BY DEFAULT, and the reason is the shape rather than a judgement
+-- about CPU. A save joins the run already waiting (aiq.queue_source_embedding),
+-- so a burst of saves is one task per source, and a task is a serial loop of
+-- batches on one worker. A bucket would pace tasks, of which there are few.
+-- The shipped install also cannot seed one: workflow.rate_limits holds the
+-- deployment's rows only, and a row the install wrote would collide with
+-- itself on restore (dev/restore-is-possible.sh found exactly that). A
+-- deployment that wants one passes p_rate_key, and the bucket is created
+-- before the step names it, because a rate_key with no row is never claimed
+-- by anyone (see the graph branch of install_ingest_workflow below).
+create or replace function aiq.install_source_embed_workflow(
+    p_sources     text[]  default array['claims', 'questions'],
+    p_name        text    default 'embed_sources',
+    p_queue       text    default 'ingest',
+    p_rate_key    text    default null,
+    p_capacity    numeric default 2,
+    p_refill_rate numeric default 0.1
+) returns text
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    v_src   text;
+    v_steps text := '';
+begin
+    if coalesce(array_length(p_sources, 1), 0) = 0 then
+        raise check_violation using message = 'name at least one semantic source to embed';
+    end if;
+    foreach v_src in array p_sources loop
+        if v_src !~ '^[a-z_][a-z0-9_]*$' then
+            raise check_violation using message = format('source %s is not a plain name, so it cannot name a step', v_src);
+        end if;
+        if not exists (select 1 from aiq.semantic_sources where name = v_src) then
+            raise no_data_found using message = format('no semantic source named %s is registered', v_src),
+                hint = 'aiq.semantic_sources lists them';
+        end if;
+        v_steps := v_steps || format($y$
+  - id: embed_%1$s
+    work: true
+    queue: %2$s%3$s
+    input:
+      op: embed
+      source: %1$s
+$y$, v_src, p_queue, case when p_rate_key is not null then E'\n    rate_key: ' || p_rate_key else '' end);
+    end loop;
+
+    if p_rate_key is not null then
+        insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+        values (p_rate_key, p_capacity, p_capacity, p_refill_rate)
+        on conflict (key) do update
+            set capacity = excluded.capacity, refill_rate = excluded.refill_rate;
+    end if;
+
+    perform workflow.define_yaml(format(E'name: %s\nsteps:', p_name) || v_steps);
+    return format('%s: embeds %s with the default model, on queue %s', p_name, array_to_string(p_sources, ', '), p_queue);
+end;
+$$;
+revoke all on function aiq.install_source_embed_workflow(text[], text, text, text, numeric, numeric) from public;
+
+-- WHAT A SAVE CALLS: make sure a run will embed what it just wrote, without
+-- embedding anything. research.project calls it once per projected revision
+-- and claims.pose_question once per question, in the writer's transaction, so
+-- the task commits with the rows and the worker claims it after.
+--
+-- ONE WAITING RUN COVERS EVERY SAVE. The step reads what the space lacks when
+-- it RUNS, so while a task of this workflow is still waiting to be claimed,
+-- whatever this transaction wrote is already in its future and a second run
+-- would find nothing. Asked through the live-task index (queue, status). A
+-- task that is already running may have read its last page, so it does not
+-- count, and the save starts another.
+--
+-- IT NEVER FAILS A SAVE. No default model, a default that cannot be called,
+-- or no workflow installed: the revision is projected and a NOTICE says what
+-- is missing and the one call that fills the gap once it is fixed. Anything
+-- else that goes wrong starting the run is a WARNING, not the writer's error.
+create or replace function aiq.queue_source_embedding(p_why text default null, p_name text default 'embed_sources')
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_model text;
+    v_def   workflow.definitions;
+    v_queue text;
+    v_run   uuid;
+    v_why   text := coalesce(p_why, 'new rows');
+begin
+    select name into v_model from aiq.embedding_models where is_default;
+    if v_model is null then
+        raise notice '% not embedded: this deployment has no default embedding model, so claims.candidates and '
+                     'claims.find_question have no space to read. Set is_default on a model in aiq.embedding_models, '
+                     'then select aiq.queue_source_embedding() embeds everything waiting.', v_why;
+        return jsonb_build_object('queued', false, 'reason', 'no default embedding model');
+    end if;
+    -- The probe install_ingest_workflow uses: an empty batch resolves the
+    -- provider and the request shape without embedding anything.
+    begin
+        perform aiq.embed_batch_call(v_model, '[]'::jsonb);
+    exception when others then
+        raise notice '% not embedded: the default embedding model % cannot be called (%)', v_why, v_model, sqlerrm;
+        return jsonb_build_object('queued', false, 'reason', 'the default embedding model cannot be called',
+                                  'model', v_model, 'detail', sqlerrm);
+    end;
+    v_def := workflow.current_definition(p_name);
+    if v_def.id is null then
+        raise notice '% not embedded: no workflow named % is installed. select aiq.install_source_embed_workflow(), '
+                     'then select aiq.queue_source_embedding().', v_why, p_name;
+        return jsonb_build_object('queued', false, 'reason', format('no workflow named %s', p_name));
+    end if;
+    select min(s->>'queue') into v_queue from jsonb_array_elements(v_def.spec->'steps') s;
+    select t.run_id into v_run
+      from workflow.tasks t join workflow.runs r on r.id = t.run_id
+     where t.queue = v_queue and t.status = 'ready' and r.workflow_def_id = v_def.id
+     limit 1;
+    if v_run is not null then
+        return jsonb_build_object('queued', true, 'run_id', v_run, 'model', v_model, 'joined', true);
+    end if;
+    begin
+        v_run := workflow.start_workflow(p_name, jsonb_build_object('why', v_why));
+    exception when others then
+        raise warning '% not embedded: starting % failed (%)', v_why, p_name, sqlerrm;
+        return jsonb_build_object('queued', false, 'reason', 'the run did not start', 'detail', sqlerrm);
+    end;
+    return jsonb_build_object('queued', true, 'run_id', v_run, 'model', v_model, 'joined', false);
+end;
+$$;
+revoke all on function aiq.queue_source_embedding(text, text) from public;
+
+-- How far each source of the workflow is from embedded, in the default
+-- model's space: what an operator reads after a backfill, and what says
+-- "nothing is being embedded" on a deployment with no model. Operator-only:
+-- the counts are over every tenant's rows.
+create or replace function aiq.source_embedding_status(p_name text default 'embed_sources')
+returns table (source text, model text, rows_total bigint, missing bigint)
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    v_model text;
+    v_tbl   text;
+    s       aiq.semantic_sources;
+    v_space boolean;
+begin
+    select name into v_model from aiq.embedding_models where is_default;
+    v_tbl := case when v_model is not null then aiq.embedding_space_name(v_model) end;
+    v_space := v_tbl is not null and to_regclass('aiq.' || quote_ident(v_tbl)) is not null;
+    for s in
+        select ss.* from aiq.semantic_sources ss
+         where ss.name in (select st->'input'->>'source'
+                             from workflow.definitions d, jsonb_array_elements(d.spec->'steps') st
+                            where d.id = (workflow.current_definition(p_name)).id)
+         order by ss.name
+    loop
+        source := s.name;
+        model := v_model;
+        execute format('select count(*) from %s src where nullif(btrim(src.%I::text), '''') is not null',
+                       s.source_table::regclass, s.content_col) into rows_total;
+        if v_model is null then
+            missing := rows_total;
+        elsif not v_space then
+            missing := rows_total;
+        else
+            execute format('select count(*) from %s src where nullif(btrim(src.%I::text), '''') is not null
+                              and not exists (select 1 from aiq.%I e where e.chunk_id = src.id)',
+                           s.source_table::regclass, s.content_col, v_tbl) into missing;
+        end if;
+        return next;
+    end loop;
+end;
+$$;
+revoke all on function aiq.source_embedding_status(text) from public;
+
+-- THE SCHEDULE, opt-in like aiq.schedule_dream: a save already queues its
+-- own run, and this is the net under everything else -- a question posed by a
+-- path that does not queue, a run that failed, a model registered after the
+-- rows. Fires on the engine's clock (workflow.tick); re-running it changes
+-- the cron and keeps one schedule.
+create or replace function aiq.schedule_source_embedding(p_cron text default '*/10 * * * *',
+                                                         p_enabled boolean default true,
+                                                         p_name text default 'embed_sources')
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_id uuid;
+begin
+    if (workflow.current_definition(p_name)).id is null then
+        raise no_data_found using message = format('no workflow named %s is installed', p_name),
+            hint = 'select aiq.install_source_embed_workflow()';
+    end if;
+    select id into v_id from workflow.schedules where name = p_name;
+    if v_id is null then
+        v_id := workflow.schedule_workflow(p_name, p_name, p_cron);
+    else
+        update workflow.schedules set cron_expr = p_cron where id = v_id;
+    end if;
+    perform workflow.set_schedule_enabled(p_name, p_enabled);
+    return jsonb_build_object('schedule', p_name, 'cron', p_cron, 'enabled', p_enabled, 'id', v_id);
+end;
+$$;
+revoke all on function aiq.schedule_source_embedding(text, boolean, text) from public;
+
 create or replace function content.install_ingest_workflow(
     p_model text default null,
     p_queue text default 'ingest',
@@ -33328,6 +33616,10 @@ begin
     perform claims.project_edges(p_revision);   -- and its argument edges as relations (REM-474)
     perform claims.project_frames(p_revision);  -- and its frames, and the questions they answer (REM-476)
     perform claims.project_cites(p_revision);   -- and the origins its claims cite (REM-477)
+    -- And its claims, and any question its frames posed, are queued to be embedded (REM-662). Queued and never
+    -- embedded here: a vector is a model call, which a save never waits on. With no model to embed with, the
+    -- revision is projected all the same and a NOTICE says so (aiq.queue_source_embedding).
+    perform aiq.queue_source_embedding(format('the claims of revision %s', p_revision));
 end;
 $$;
 
@@ -34942,7 +35234,13 @@ begin
     perform rbac.require_app_provisioner();
     insert into rbac.users (id, email, status)
     values (p_user, p_user::text || '@users.percolate.invalid', 'active')
-    on conflict (id) do nothing;
+    -- NO CONFLICT TARGET (REM-792). The email is made from the id and has its
+    -- own unique index, and `on conflict (id)` makes only the id an arbiter:
+    -- two first calls for one new person both passed the id check, and the
+    -- second met users_email_key as a unique violation. Measured on 0.2.22,
+    -- eight concurrent calls failed in 18 of 20 batches, and the app answered
+    -- 409. Either index clashing means this person is already here.
+    on conflict do nothing;
 end;
 $$;
 
@@ -34958,7 +35256,9 @@ begin
     insert into rbac.api_keys (id, user_id, label, key_hash, scopes)
     values (p_key, p_user, coalesce(nullif(p_label, ''), 'application credential'),
             'application:' || p_key::text, coalesce(p_scopes, '{}'))
-    on conflict (id) do nothing;
+    -- No target, as for the user above: key_hash is made from the id and is
+    -- unique too (REM-792).
+    on conflict do nothing;
 end;
 $$;
 
@@ -36020,6 +36320,9 @@ begin
     returning id into q;
     if q is null then
         select id into q from claims.questions where key = k;
+    else
+        -- A new question is queued to be embedded, the way a projected revision's claims are (REM-662).
+        perform aiq.queue_source_embedding('a posed question');
     end if;
     return q;
 end;
@@ -36304,9 +36607,11 @@ $$;
 -- aiq.land_embeddings. Run as an operator it indexes every question; run as a person, what they can read.
 --
 -- ONLY FOR A MODEL SERVED OVER HTTP. An `embed:` step compiles to an HTTP call, and the compiler refuses one for a
--- model that runs inside the worker (fastembed), because there is nothing to call. The worker's `embed` op embeds
--- a resource's chunks by resource id, and a question is not a resource, so a deployment whose only model runs in
--- the worker cannot index questions yet: that needs a worker op over claims.questions_to_embed.
+-- model that runs inside the worker (fastembed), because there is nothing to call. That was why no deployment on an
+-- in-process model could index a question: the worker's `embed` op took only a resource id. It now takes a source by
+-- name (REM-662), and the workflow aiq.install_source_embed_workflow installs -- `embed_sources`, shipped with the
+-- extension -- embeds `questions` and `claims` with either kind of model, batched. This one stays for a deployment
+-- that wants questions alone on an HTTP model, and for claims.install_fact_question_workflow's first half.
 create or replace function claims.install_question_embed_workflow(p_model text default null,
                                                                   p_name text default 'embed_questions')
 returns text
@@ -38250,6 +38555,17 @@ begin
               where not exists (select 1 from claims.cites x where x.revision_id = c.revision_id) loop
         perform claims.project_cites(v);
     end loop;
+end $$;
+
+-- The workflow that gives claims and questions their vectors (REM-662), installed with the extension and on every
+-- upgrade, like the ingestion pipeline: it names no model, so it is the same document on a deployment that has none.
+-- research.project and claims.pose_question queue a run of it; aiq.schedule_source_embedding is the opt-in net under
+-- them. THE BACKFILL is one call, as an operator: `select aiq.queue_source_embedding('backfill')`, which starts a
+-- run that embeds every claim and question the default model's space lacks (up to 20,000 of each per run), and
+-- `select * from aiq.source_embedding_status()` says what is left.
+do $$
+begin
+    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions']);
 end $$;
 
 
