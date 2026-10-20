@@ -12,7 +12,7 @@
 -- rate was exactly 0.00% and every single `valid_from` was null. The pair was
 -- decorative.
 --
--- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
+-- That is the regime our build-knit-dream theory note (§10) calls
 -- running the model in its known-broken state: an append-only knowledge graph
 -- has no depression term, and retraction is the balance condition the capacity
 -- result depends on. §14 turns it into a test -- if the retraction rate is

@@ -192,7 +192,7 @@ jobs:
       # consequential write in the repository -- the one that renames the
       # extension's generated SQL and every path that mounts it -- ended up the
       # write subject to the fewest checks. `references.sh` was added after
-      # 0.1.6 published with `k8s/kind/manifests/postgres.yaml` still mounting
+      # 0.1.6 published with the kind stack's postgres manifest still mounting
       # `percolate--0.1.5.sql`, so main went red one commit after the release
       # went green; its postmortem (6 September)
       # named the remaining eight as a known hole and said what to do about a
@@ -227,7 +227,7 @@ jobs:
           # five files and this used to stage four. `bump_extension_version.py`
           # calls the manifest "the FIFTH file carrying the number, and the one
           # that drifted", updates it, and prints
-          # `k8s/kind/manifests/postgres.yaml: 2 mount reference(s) -> <v>` --
+          # that the kind manifest's two mount references moved to <v> --
           # and that write was then thrown away with the runner, because it
           # lives outside `extension/`. So 0.1.6 published with the manifest
           # still mounting `percolate--0.1.5.sql`: a kind cluster brought up

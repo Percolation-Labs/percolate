@@ -242,7 +242,7 @@ services:
   # These `command:`s are ARGS to the image ENTRYPOINT (compose appends; only
   # Kubernetes replaces), and they are spelled for the pinned 0.1.6 image --
   # `content serve`, not the `p8 serve content` every spec now uses. They flip
-  # with the image pin, together with the pool rows in k8s/. PACKAGING.md.
+  # with the image pin, together with the pool rows of the private kind stack. PACKAGING.md.
   #
   # None of them holds a table grant. Every database interaction is a
   # SECURITY DEFINER function call, and each sets the caller's claims per
@@ -470,7 +470,7 @@ services:
     # 2026-09-11, and quay.io/minio/minio now refuses anonymous pulls, so a
     # fresh machine could not start this stack. RustFS passed the same checks
     # against percolate-core's storage and lake code
-    # (research-notes/object-store-2026-10-19/). The fallback is
+    # (an internal evaluation, 19 October). The fallback is
     # chrislusf/seaweedfs:4.48, which passed them too.
     #
     # PINNED BY DIGEST, the multi-arch index of rustfs/rustfs:1.0.3: a tag can

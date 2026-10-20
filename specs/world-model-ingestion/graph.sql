@@ -48,7 +48,7 @@ comment on table aiq.graph_vocabulary is
 -- NULLABLE for the reason relation_types.is_symmetric is: null is UNDECLARED and
 -- reads as false, so a writer that said nothing and a writer that said false
 -- stay distinguishable. aiq.dream() acts only on relations declared true.
--- Measured on research-notes/mem0-baseline's fixture: the four relations that
+-- Measured on our mem0 baseline's fixture: the four relations that
 -- hold one value recover 7 of its 11 supersessions with no false one; treating
 -- every relation as single-valued recovers 8 and invents 22.
 alter table aiq.graph_vocabulary add column if not exists single_valued boolean;

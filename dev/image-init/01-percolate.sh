@@ -20,7 +20,7 @@
 # which psql has no clean way to skip.
 #
 # The whole directory is the hook: dev/Dockerfile.pg19 copies it over
-# /docker-entrypoint-initdb.d, k8s/kind/up.sh puts it in the ConfigMap it
+# /docker-entrypoint-initdb.d, the private kind stack puts it in the ConfigMap it
 # mounts there, and to try a change without building anything, mount
 # dev/image-init over that directory of any published image.
 set -e

@@ -348,7 +348,7 @@ create table if not exists aiq.edges (
     -- Null means "still holds". Set it to retract rather than deleting the
     -- row: a derivation that DELETEs what it can no longer derive leaves
     -- nothing to audit, and an append-only graph with no retraction path is
-    -- the regime research-notes/build-knit-dream-theory.pdf §10 warns about.
+    -- the regime our build-knit-dream theory note (§10) warns about.
     -- Read through `aiq.edges_current` unless you want retracted history.
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,

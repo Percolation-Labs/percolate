@@ -1,6 +1,6 @@
 -- A package cannot add a door the core would refuse (REM-47).
 --
--- packages/apply.py piped a package's storage through psql and nothing looked
+-- Our package loader piped a package's storage through psql and nothing looked
 -- at what it added. percolate-dev and incident-review created tables with a
 -- nullable org_id and no RLS; their manifests named no `org:`, so
 -- apply_package projected every row onto the shared tier as a public node; and

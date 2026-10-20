@@ -165,7 +165,7 @@ end $$;
 -- rate was exactly 0.00% and every single `valid_from` was null. The pair was
 -- decorative.
 --
--- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
+-- That is the regime our build-knit-dream theory note (§10) calls
 -- running the model in its known-broken state: an append-only knowledge graph
 -- has no depression term, and retraction is the balance condition the capacity
 -- result depends on. §14 turns it into a test -- if the retraction rate is
@@ -13393,7 +13393,7 @@ attempt failed.$c$;
 -- (c2) The rest of the read surface: the registry, the audit trail, the
 --      edges, the four aggregates, and rate limits minus the personal data.
 --
---      These arrived as `applications/percolate-ui/sql/ui-views.sql`, applied
+--      These arrived as an internal UI's SQL file, applied
 --      to a live deployment by hand, and that was the defect rather than the
 --      views. `dev/owns-its-schema.py` states the rule: an application may
 --      FILL a core schema and may not SHAPE one, because needing a view on a
@@ -15240,7 +15240,7 @@ create table if not exists aiq.edges (
     -- Null means "still holds". Set it to retract rather than deleting the
     -- row: a derivation that DELETEs what it can no longer derive leaves
     -- nothing to audit, and an append-only graph with no retraction path is
-    -- the regime research-notes/build-knit-dream-theory.pdf §10 warns about.
+    -- the regime our build-knit-dream theory note (§10) warns about.
     -- Read through `aiq.edges_current` unless you want retracted history.
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,
@@ -23003,7 +23003,7 @@ alter table content.channels alter column shipped set default
 -- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
 -- at each insert site)". That was a real decision and it put the guarantee one
 -- layer above where it can be refused. It held for as long as every insert
--- site remembered: the first NEW caller (applications/percolate-self-model)
+-- site remembered: the first NEW caller (an internal loader)
 -- used `on conflict do nothing`, which is the ordinary idiom and finds no
 -- conflict here, and created FIVE identical channels in one session before
 -- anything noticed.
@@ -26440,7 +26440,7 @@ comment on function agentic.agent_call(text,text,text,text,text) is
 -- first one.
 --
 -- Until REM-70 every tool that read a document translated it itself, and each
--- knew one dialect. `packages/apply.py` knew a package's `output_schema` (a file
+-- knew one dialect. Our package loader knew a package's `output_schema` (a file
 -- in the package directory) and nothing of `description`/`properties`;
 -- percolate-core's `core/samples.py` and `percolate agent push` knew
 -- `description`/`properties` and nothing of `output_schema`. Three
@@ -26529,7 +26529,7 @@ begin
             ('output_schema',
              '`output_schema` is a package manifest''s reference to a FILE in the '
              'package; the loader that can see the package directory inlines it '
-             '(packages/apply.py) -- send the schema itself as `properties` or '
+             '-- send the schema itself as `properties` or '
              '`structured_output_schema`.'),
             ('prompt',
              'There is no `prompt` key (brief.md §6): the system prompt is the '
@@ -26581,8 +26581,8 @@ begin
         raise exception
             'agent %: `structured_output_schema` is the string %, which looks like '
             'a file reference. The database never sees a package directory, so the '
-            'loader resolves it and sends the schema (packages/apply.py does this '
-            'for a manifest''s `output_schema`, as it does for a skill''s body).',
+            'loader resolves it and sends the schema (as a package loader does '
+            'for a manifest''s `output_schema` and a skill''s body).',
             p_doc->>'name', p_doc->'structured_output_schema';
     end if;
     if p_doc ? 'type' and p_doc->>'type' <> 'object' then
@@ -28171,7 +28171,7 @@ comment on table aiq.graph_vocabulary is
 -- NULLABLE for the reason relation_types.is_symmetric is: null is UNDECLARED and
 -- reads as false, so a writer that said nothing and a writer that said false
 -- stay distinguishable. aiq.dream() acts only on relations declared true.
--- Measured on research-notes/mem0-baseline's fixture: the four relations that
+-- Measured on our mem0 baseline's fixture: the four relations that
 -- hold one value recover 7 of its 11 supersessions with no false one; treating
 -- every relation as single-valued recovers 8 and invents 22.
 alter table aiq.graph_vocabulary add column if not exists single_valued boolean;
@@ -40456,7 +40456,7 @@ end $$;
 comment on function percolate.check_package_schema(name) is
     'Refuse a package schema holding a PUBLIC-executable SECURITY DEFINER function, '
     'an org_id that is nullable or not defaulted to rbac.shared_org_id(), or an '
-    'org_id table without RLS and a policy. packages/apply.py runs it in the '
+    'org_id table without RLS and a policy. a package loader runs it in the '
     'transaction that applies storage; apply_package runs it on every schema an '
     'entity type names.';
 
@@ -40620,7 +40620,7 @@ begin
         if v_e->>'kind'='http_pull' and v_e->'config' ? 'api' then
             if rbac.current_user_id() is null then
                 raise exception 'An API source package needs an installation owner.'
-                using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
+                using hint = 'Apply it as the user who will own it, so rbac.current_user_id() names them. The source and its runs belong to this user.';
             end if;
             -- The same refusal and the same complete block content.save_api_source
             -- stores, so a packaged source cannot mean something the UI's would
@@ -40655,7 +40655,7 @@ begin
         -- rbac.default_visibility() rather than a literal, because a package
         -- install has two shapes and they want different answers: an operator
         -- installing deployment configuration gets `public` with no owner, and
-        -- a signed-in installer (packages/apply.py --owner) gets `private`
+        -- a signed-in installer gets `private`
         -- against their own owner_id. Both are readable; a constant would be
         -- right for one of them. It is the same call the API branch's sibling
         -- and content.register_upload already make, so this is not a third
@@ -40719,7 +40719,7 @@ end $$;
 -- Operator-only. It is SECURITY DEFINER and installs agents, tool servers,
 -- sources and workflows, and it carried Postgres's PUBLIC default until
 -- 2026-09-11 -- dev/tests/rbac/04 listed six schemas and this one was not among
--- them. packages/apply.py calls it as app_owner, which owns it.
+-- them. A package loader calls it as app_owner, which owns it.
 revoke execute on function percolate.apply_package(jsonb) from public;
 
 comment on function percolate.apply_package(jsonb) is

@@ -88,7 +88,7 @@ end $$;
 -- 2. THE SAME AGENT IN THE ROW DIALECT IS THE SAME ROW.
 --
 -- This is REM-70's acceptance criterion at the layer that decides it. The two
--- loaders that used to translate -- `packages/apply.py` and percolate-core's
+-- loaders that used to translate -- our package loader and percolate-core's
 -- `core/samples.py` -- now send the document through untouched, so "both tools
 -- install the same row" is the statement that these two documents do, and it is
 -- asserted here rather than inferred from the two tools agreeing today.
@@ -149,7 +149,7 @@ begin
     for v_case in
         select * from (values
             -- key sent,              must appear in the refusal
-            ('"output_schema": "schemas/motif.json"', 'output_schema', 'packages/apply.py'),
+            ('"output_schema": "schemas/motif.json"', 'output_schema', 'structured_output_schema'),
             ('"prompt": "do the thing"',              'prompt',        'description'),
             ('"systm_prompt": "typo"',                'systm_prompt',  'system_prompt'),
             ('"structured_output": true',             'structured_output', 'thinking aides'),
