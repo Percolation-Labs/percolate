@@ -7,7 +7,7 @@ select rbac.create_user_with_password('ana@example.com', 'a long passphrase for 
 insert into rbac.user_roles (user_id, role)
 select id, 'member' from rbac.users where email = 'ana@example.com' on conflict do nothing;
 
--- 2. The relations memory may use. From 0.2.25 the conversation reader reads them at each run (REM-1057).
+-- 2. The relations memory may use.
 select aiq.register_graph_vocabulary($v$[
   {"relation": "lives_in",  "single_valued": true},
   {"relation": "works_at"},
@@ -15,15 +15,7 @@ select aiq.register_graph_vocabulary($v$[
   {"relation": "prefers"}
 ]$v$) ->> 'relations' as relations;
 
--- 3. The embedding model, for search over memories.
-insert into aiq.embedding_models (name, dim, provider, endpoint, credential_ref, is_default)
-values ('text-embedding-3-small', 1536, 'openai', 'https://api.openai.com/v1/embeddings', 'LLM_API_KEY', true)
-on conflict (name) do nothing;
-select aiq.register_embedding_space('text-embedding-3-small') is not null as space;
--- 4. The two readers: the extractor agent, and the workflow that runs it over a conversation.
-select aiq.install_structure_null('gpt-4o') is not null as extractor;
-select agentic.install_reflect_workflow('gpt-4o');
--- 5. A channel for memories written directly, and the query tool the assistant reads through.
+-- 3. A channel for memories written directly, and the query tool the assistant reads through.
 insert into content.channels (name, kind, config, visibility)
 values ('memory', 'manual', '{"description": "memories written directly, with no pipeline"}', 'public')
 on conflict do nothing;
