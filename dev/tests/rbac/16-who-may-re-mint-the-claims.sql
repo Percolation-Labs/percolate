@@ -48,6 +48,16 @@ insert into t16_declared values
  'the lake task''s owner, resolving dataset names as that person. Same reason '
  'as execute_for, one layer out: the scope comes from lake_task_scope(task), '
  'which reads the task, and a task carries an owner rather than claims.'),
+('workflow.tick(timestamp with time zone)', 'sub, role, actor, api_key_id',
+ 'the schedule''s owner, with the actor and credential that created the schedule, '
+ 'through workflow.claims_as -- execute_for''s shape -- for the start alone, so the '
+ 'steps start_workflow drains run as the owner from the first (REM-1121). Restored '
+ 'after the start and in the per-schedule handler. Drops orgs, as execute_for does.'),
+('workflow.start_child_workflow(uuid,text,jsonb)', 'sub, role, actor, api_key_id',
+ 'the parent run''s owner and starter, through workflow.claims_as, only when the '
+ 'caller carries no user (a worker completing the parent task), so the child is '
+ 'theirs and resolves its definition as them (REM-1121). Restored on both exit '
+ 'paths. Drops orgs, as execute_for does.'),
 ('content.lake_existing(uuid,uuid,text,text)', 'sub',
  'the run owner, to ask may_write about a dataset that already exists. The '
  'owner is an ARGUMENT here rather than read from a task, and the function is '
