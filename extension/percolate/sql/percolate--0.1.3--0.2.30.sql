@@ -35657,12 +35657,19 @@ begin
 end;
 $$;
 
+-- A MODERATOR ACTS ONLY ON A COMMENT THEY CAN READ (REM-1113). rbac.require
+-- honours an engagement:moderate grant held in the request's org, and this
+-- then withdrew any comment by id: a moderator granted in one org reached
+-- another org's private revisions, and success against "not found" said which
+-- ids existed. The comment's target must be readable to the moderator, as
+-- set_like asks, and an unreadable one is "not found" like a missing one.
 create or replace function engagement.moderate_comment(p_comment uuid, p_reason text) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_user uuid := rbac.require('engagement', 'moderate');
 begin
-    update engagement.comments set withdrawn_at = now(), withdrawn_by = v_user, withdraw_reason = p_reason
-     where id = p_comment and withdrawn_at is null;
+    update engagement.comments c set withdrawn_at = now(), withdrawn_by = v_user, withdraw_reason = p_reason
+     where c.id = p_comment and c.withdrawn_at is null
+       and engagement.target_readable(c.revision_id, c.resource_id);
     if not found then
         raise no_data_found using message = 'Comment not found';
     end if;
