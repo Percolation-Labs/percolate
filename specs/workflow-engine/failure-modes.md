@@ -292,8 +292,8 @@ you blocked rather than throttled.
 send an exhausted account's refusal as HTTP 429, the status a rate limit uses,
 and only the body's `error.code` (`insufficient_quota`) tells them apart.
 Waiting fixes a rate limit and does nothing for an empty account.
-*Seen:* 797 extraction tasks each queued five attempts against an account that
-could not succeed (a production backfill, 2026-09-11). The http_call handler was
+*Seen:* a backfill whose extraction tasks each queued five attempts against an
+account that could not succeed. The http_call handler was
 taught the difference; embedding, transcription and API ingestion each decided
 for themselves and were not, and transcription also retried a revoked key.
 *Closes it:* one classifier, percolate-core `core/provider_errors.py`, that

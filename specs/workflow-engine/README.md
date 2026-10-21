@@ -353,12 +353,14 @@ typo; the engine catches what a reader of the *graph* would call unsound.
   `workflow.compiler_capabilities()`, which reads whatever `.so` is loaded, and
   `define_yaml()` refuses rather than silently dropping the key (`spec.md` §16).
 
-  The second kind has no probe at all. `aiq.query()` on the live stack was an
+  The second kind had no probe at all. `aiq.query()` on the live stack was an
   older body than `specs/ai-query-layer/schema.sql`, missing the `SCHEMA` mode
   route — so a mode the parser had just learned to parse raised `unhandled mode
   SCHEMA` from the executor. **`surface.sql` cannot catch this**: it asks
   whether a declared capability *exists*, and a stale function exists. Existence
-  and currency are different questions and only the first one is audited.
+  and currency are different questions, and `dev/currency.sh` now audits the
+  second: it builds a pristine database from the committed script and diffs
+  `pg_proc` against the running one (`failure-modes.md` §6).
 - **Nothing is benchmarked, and the scale claims have no evidence behind them.**
   `spec.md` §7 targets tens of thousands of completions/sec and millions of
   live tasks. The largest numbers actually run are **589 tasks total, a 32-task

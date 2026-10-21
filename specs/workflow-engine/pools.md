@@ -211,16 +211,18 @@ per-tenant if and when namespaces do (§11).
 
 ### 4.1 It is `percolate-core`, not a new service
 
-**Proposed, not built.** A fifth subpackage alongside `core`, `worker`, `content`
-and `agentic`, following the way the others compose: `percolate_core/manager/` exposing a `router()`
+**Partly built.** A fifth subpackage alongside `core`, `worker`, `content` and
+`agentic`, following the way the others compose. `percolate_core/manager/`
+exists and `pool render` works; `diff` and `run` are stubs that say so, and the
+`router()` and `lifespan()` below are not written yet. The design is a `router()`
 (readiness plus a read-only pool status surface), a `lifespan()` that owns the
 Kubernetes client and the reconcile task, and the `pool` Typer group the parent
 CLI mounts.
 
 ```
-percolate pool run       # proposed: the reconcile loop
-percolate pool render    # proposed: print what would be applied, apply nothing
-percolate pool diff      # proposed: render against live cluster state
+percolate pool run       # the reconcile loop (a stub today)
+percolate pool render    # print what would be applied, apply nothing (built)
+percolate pool diff      # render against live cluster state (a stub today)
 ```
 
 **The subpackage is `manager`; the command group is `pool`.** The mismatch is
@@ -229,7 +231,7 @@ being operated on, not the process that implements it. An operator reconciles
 pools, and `manager` is the answer to a question they did not ask.
 
 ```bash
-pip install 'percolate-core[manager]'   # proposed extra: + kubernetes-asyncio
+pip install 'percolate-core[manager]'   # + kubernetes-asyncio
 ```
 
 It mounts the way every other subpackage does: `percolate_core/manager/`
@@ -933,8 +935,9 @@ untested. A reference manager implements §4.2 in stdlib Python and
   an unenforced default-deny is worse than none — the cluster setup probes
   rather than assumes.
 
-**Still designed, not run:** the manager itself, as a `percolate-core`
-subpackage. The reference manager is §4.2's loop, not that subpackage, and it
+**Still designed, not run:** the shipped manager's loop. `percolate_core.manager`
+renders a pool today, and its `diff` and `run` are stubs. The reference manager
+is §4.2's loop, not that subpackage, and it
 implements the resync half without the LISTEN half — which is sound because
 §4.2 already says NOTIFY is a latency optimisation and the resync is the
 correctness mechanism. Gate 2b asserts both objects are *gone*, not the order
@@ -948,5 +951,5 @@ pg_cron: a pool pinned at one replica by a task claimed by a pod deleted four
 minutes earlier.
 
 The honest summary: the **data model** is verified, the **control loop** is
-verified against a reference implementation, and the **shipped manager** does
-not exist yet.
+verified against a reference implementation, and the **shipped manager**
+renders but does not yet reconcile.
