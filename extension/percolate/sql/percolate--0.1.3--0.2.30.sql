@@ -10058,6 +10058,12 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- an agent somebody else owns, or nobody does, and gives one away. An
     -- administrator's grants_all role holds both.
     ('agents',             'update_any', 'agentic.upsert_agent'),
+    -- The same two authorities for the other kinds an author writes (REM-1111):
+    -- <kind>:update creates names and edits the caller's own, <kind>:update_any
+    -- edits anyone's. grants_all picks these up with the rest.
+    ('skills',             'update_any', 'agentic.assert_may_write_authored'),
+    ('tool_servers',       'update_any', 'agentic.assert_may_write_authored'),
+    ('plugins',            'update_any', 'agentic.assert_may_write_authored'),
     -- Same argument on the content side. `content.assert_org_write` already
     -- asks whether the caller may act inside the org; nothing asked whether
     -- they may put bytes in it at all, so any member of any org could upload.
@@ -26457,6 +26463,58 @@ as $$
             and pg_catalog.has_table_privilege(session_user, p_table, 'insert'));
 $$;
 
+-- AN AUTHOR CHANGES ONLY WHAT THEY OWN, IN AN ORG THEY BELONG TO, for every
+-- kind an author writes (REM-1111, REM-1112). may_author says whether the
+-- caller may author that kind at all; this says whether they may write THIS
+-- row. Each upsert below ends in `on conflict (name) do update` as its owner,
+-- past row security, so without it a holder of skills:update rewrote another
+-- person's skill by naming it, and an org_id passed in the spec placed a row
+-- in an org the caller was not in (rbac.org_or_shared checks nothing). It was
+-- written once for agents (REM-1067) and its siblings kept the old shape; the
+-- REM-1088 audit reproduced all three, so the rule now has one home.
+--
+--   org     an org_id the caller may not act in is refused (rbac.may_access_org:
+--           a member, the shared org, or an operator).
+--   owner   unless an operator or a holder of <kind>:update_any (which an
+--           administrator's grants_all role holds): no owner_id but the
+--           caller's, and no existing row of that name owned by anyone else,
+--           seeded rows (no owner) included.
+--
+-- The caller passes what it found under that name, so this reads no table and
+-- builds no statement. It is not SECURITY DEFINER and nobody is granted it: it
+-- runs inside the upsert that calls it.
+create or replace function agentic.assert_may_write_authored(
+    p_resource text, p_noun text, p_name text, p_spec jsonb, p_found boolean, p_owner uuid)
+returns void
+language plpgsql
+set search_path = pg_catalog, public
+as $$
+declare
+    v_a text := case when p_noun ~ '^[aeiou]' then 'an ' else 'a ' end || p_noun;
+begin
+    if p_spec ? 'org_id' and p_spec->>'org_id' is not null
+       and not rbac.may_access_org((p_spec->>'org_id')::uuid) then
+        raise exception '% %: you may not place it in an organization you are not a member of',
+            p_noun, p_name using errcode = 'insufficient_privilege',
+            hint = 'leave org_id out, or name an org you belong to';
+    end if;
+    if rbac.is_operator()
+       or rbac.has_permission(rbac.current_user_id(), p_resource, 'update_any') then
+        return;
+    end if;
+    if p_spec ? 'owner_id' and (p_spec->>'owner_id')::uuid is distinct from rbac.current_user_id() then
+        raise exception '% %: only an administrator may give % to someone else',
+            p_noun, p_name, v_a using errcode = 'insufficient_privilege',
+            hint = 'needs ' || p_resource || ':update_any';
+    end if;
+    if p_found and p_owner is distinct from rbac.current_user_id() then
+        raise exception '% % belongs to someone else, so you may not change it',
+            p_noun, p_name using errcode = 'insufficient_privilege',
+            hint = 'author it under another name, or ask an administrator (' || p_resource || ':update_any)';
+    end if;
+end;
+$$;
+
 -- THE GENERAL BUILDER, and `extractor_call` below is now one guard on top of
 -- it. The split was asked for by a consumer, and the reason is the shape of
 -- what was here rather than a missing feature.
@@ -26825,22 +26883,17 @@ begin
     -- what is theirs; editing an agent somebody else owns (or nobody does: the
     -- seeded ones) needs an operator or agents:update_any, which only an
     -- administrator holds (Sirsh, 20 Oct). Attach and detach write through
-    -- here, so they inherit it.
-    if not (rbac.is_operator()
-            or rbac.has_permission(rbac.current_user_id(), 'agents', 'update_any')) then
-        if p_spec ? 'owner_id'
-           and (p_spec->>'owner_id')::uuid is distinct from rbac.current_user_id() then
-            raise exception 'agent %: only an administrator may give an agent to someone else',
-                p_spec->>'name' using errcode = 'insufficient_privilege', hint = 'needs agents:update_any';
-        end if;
-        if exists (select 1 from agentic.agents a
-                    where a.name = p_spec->>'name'
-                      and a.owner_id is distinct from rbac.current_user_id()) then
-            raise exception 'agent % belongs to someone else, so you may not change it',
-                p_spec->>'name' using errcode = 'insufficient_privilege',
-                hint = 'author it under another name, or ask an administrator (agents:update_any)';
-        end if;
-    end if;
+    -- here, so they inherit it. The org half is REM-1112's: an agents:update
+    -- holder placed an org-visible agent in an org they were not in.
+    declare
+        v_found boolean := false;
+        v_owner uuid;
+    begin
+        select true, a.owner_id into v_found, v_owner
+          from agentic.agents a where a.name = p_spec->>'name';
+        perform agentic.assert_may_write_authored('agents', 'agent', p_spec->>'name', p_spec,
+                                                  coalesce(v_found, false), v_owner);
+    end;
 
     -- THE TOOL BINDING IS SHAPE-CHECKED HERE, because the near-miss spellings
     -- WIDEN it rather than failing.
@@ -27117,6 +27170,15 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs tool_servers:update';
     end if;
+    declare
+        v_found boolean := false;
+        v_owner uuid;
+    begin
+        select true, t.owner_id into v_found, v_owner
+          from agentic.tool_servers t where t.name = p_spec->>'name';
+        perform agentic.assert_may_write_authored('tool_servers', 'tool server', p_spec->>'name', p_spec,
+                                                  coalesce(v_found, false), v_owner);
+    end;
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
@@ -27232,6 +27294,15 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs skills:update';
     end if;
+    declare
+        v_found boolean := false;
+        v_owner uuid;
+    begin
+        select true, t.owner_id into v_found, v_owner
+          from agentic.skills t where t.name = p_spec->>'name';
+        perform agentic.assert_may_write_authored('skills', 'skill', p_spec->>'name', p_spec,
+                                                  coalesce(v_found, false), v_owner);
+    end;
 
     insert into agentic.skills (name, description, when_to_use, content,
                                 requires_tools, audience, category, tags, plugin,
@@ -27498,6 +27569,11 @@ declare
     v_agents  text[];
     v_e       jsonb;
     v_gone    text[] := '{}';
+    -- THE PRUNE REMOVES ONLY WHAT THE CALLER MAY CHANGE (REM-1111). Any author
+    -- can stamp a plugin's name on their own skill or server, so `where plugin
+    -- = v_name` alone let one person's manifest delete another's rows.
+    v_any     boolean := rbac.is_operator()
+                         or rbac.has_permission(rbac.current_user_id(), 'plugins', 'update_any');
     v_batch   text[];
     v_gap     text;
     v_unknown text;
@@ -27513,6 +27589,15 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs plugins:update';
     end if;
+    declare
+        v_found boolean := false;
+        v_owner uuid;
+    begin
+        select true, t.owner_id into v_found, v_owner
+          from agentic.plugins t where t.name = v_name;
+        perform agentic.assert_may_write_authored('plugins', 'plugin', v_name, p_manifest,
+                                                  coalesce(v_found, false), v_owner);
+    end;
 
     -- A KEY THIS FUNCTION DOES NOT READ IS A MISTAKE, NOT AN EXTENSION, and on
     -- this function specifically it is a dangerous one. A manifest PRUNES what
@@ -27626,6 +27711,7 @@ begin
     begin
         with d as (delete from agentic.agents
                     where plugin = v_name and not (name = any(v_agents))
+                      and (v_any or owner_id = rbac.current_user_id())
                 returning name)
         select coalesce(array_agg('agent:' || name), '{}') into v_batch from d;
         v_gone := v_gone || v_batch;
@@ -27647,7 +27733,8 @@ begin
       into v_gap
       from agentic.skills k
       join agentic.agents a on k.name = any(a.skills)
-     where k.plugin = v_name and not (k.name = any(v_skills));
+     where k.plugin = v_name and not (k.name = any(v_skills))
+       and (v_any or k.owner_id = rbac.current_user_id());
     if v_gap is not null then
         raise exception
             'plugin %: cannot remove % -- unpin it first, or keep it in the manifest.',
@@ -27656,6 +27743,7 @@ begin
 
     with d as (delete from agentic.skills
                 where plugin = v_name and not (name = any(v_skills))
+                      and (v_any or owner_id = rbac.current_user_id())
             returning name)
     select coalesce(array_agg('skill:' || name), '{}') into v_batch from d;
     v_gone := v_gone || v_batch;
@@ -27668,7 +27756,8 @@ begin
       join agentic.agents a
         on exists (select 1 from jsonb_array_elements(a.tools) b
                     where b->>'server' = t.name)
-     where t.plugin = v_name and not (t.name = any(v_servers));
+     where t.plugin = v_name and not (t.name = any(v_servers))
+       and (v_any or t.owner_id = rbac.current_user_id());
     if v_gap is not null then
         raise exception
             'plugin %: cannot remove % -- rebind it first, or keep it in the manifest.',
@@ -27677,6 +27766,7 @@ begin
 
     with d as (delete from agentic.tool_servers
                 where plugin = v_name and not (name = any(v_servers))
+                      and (v_any or owner_id = rbac.current_user_id())
             returning name)
     select coalesce(array_agg('server:' || name), '{}') into v_batch from d;
     v_gone := v_gone || v_batch;

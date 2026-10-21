@@ -333,6 +333,12 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- an agent somebody else owns, or nobody does, and gives one away. An
     -- administrator's grants_all role holds both.
     ('agents',             'update_any', 'agentic.upsert_agent'),
+    -- The same two authorities for the other kinds an author writes (REM-1111):
+    -- <kind>:update creates names and edits the caller's own, <kind>:update_any
+    -- edits anyone's. grants_all picks these up with the rest.
+    ('skills',             'update_any', 'agentic.assert_may_write_authored'),
+    ('tool_servers',       'update_any', 'agentic.assert_may_write_authored'),
+    ('plugins',            'update_any', 'agentic.assert_may_write_authored'),
     -- Same argument on the content side. `content.assert_org_write` already
     -- asks whether the caller may act inside the org; nothing asked whether
     -- they may put bytes in it at all, so any member of any org could upload.

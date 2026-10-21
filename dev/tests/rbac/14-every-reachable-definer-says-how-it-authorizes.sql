@@ -72,7 +72,7 @@ grant select on t14_declared to public;
 insert into t14_declared (fn, mechanism, why) values
 -- ---------- agentic --------------------------------------------------------
 ('agentic.apply_plugin(jsonb)', 'agentic.may_author',
- 'installs a plugin''s servers, skills and agents; refused without plugins:update'),
+ 'installs a plugin''s servers, skills and agents; refused without plugins:update, another person''s plugin unless plugins:update_any, and its prune removes only the caller''s rows (REM-1111)'),
 ('agentic.apply_summary(jsonb)', 'agentic.upsert_summary',
  'writes only through upsert_summary, which refuses a session that is not the caller''s'),
 ('agentic.attach_skill(text,text,jsonb)', 'agentic.may_author',
@@ -98,13 +98,13 @@ insert into t14_declared (fn, mechanism, why) values
 ('agentic.start_run(text,uuid,uuid,uuid,text,text,text,uuid)', 'agentic.may_invoke',
  'refuses an agent the caller may not invoke, and a session or parent run that is not theirs'),
 ('agentic.upsert_agent(jsonb)', 'agentic.may_author',
- 'refused without agents:update; edits only the caller''s own agent and never gives one away, unless operator or agents:update_any (REM-1067)'),
+ 'refused without agents:update; edits only the caller''s own agent and never gives one away, unless operator or agents:update_any (REM-1067); never in an org the caller is not in (REM-1112)'),
 ('agentic.upsert_skill(jsonb)', 'agentic.may_author',
- 'refused without skills:update'),
+ 'refused without skills:update; the caller''s own skill only, unless skills:update_any, and never in an org the caller is not in (REM-1111)'),
 ('agentic.upsert_summary(uuid,text)', 'owner',
  'refuses a session that is not the caller''s'),
 ('agentic.upsert_tool_server(jsonb)', 'agentic.may_author',
- 'refused without tool_servers:update'),
+ 'refused without tool_servers:update; the caller''s own server only, unless tool_servers:update_any, and never in an org the caller is not in (REM-1111)'),
 -- ---------- aiq --------------------------------------------------------------
 ('aiq.schema_drift()', 'none',
  'returns each facet name and md5 hashes of how it renders now and when last recorded: whether the shipped documents changed, and no row of anybody''s'),
