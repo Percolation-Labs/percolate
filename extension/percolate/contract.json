@@ -1291,6 +1291,19 @@
     },
     {
       "admits": [
+        "awaiting_estimate",
+        "awaiting_approval",
+        "budget_paused"
+      ],
+      "column": "hold",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "person",
         "agent",
         "platform"

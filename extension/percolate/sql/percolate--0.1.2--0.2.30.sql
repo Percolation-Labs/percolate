@@ -1300,6 +1300,36 @@ create table if not exists workflow.runs (
 comment on table workflow.runs is
     'One execution of a definition, with its input, its status and the compensation state of its saga.';
 
+-- A RUN CAN BE HELD, AND A HELD RUN STARTS NOTHING (REM-1126). Its status stays 'running', because completion,
+-- cancellation, stop_failed_run, the child hand-back and schedule overlap all read 'running' as "still going", and
+-- a held run is still going: it is waiting for a person, as a signal step does. Why it is held is the hold:
+-- awaiting_estimate (a policy applies and the run has no complete estimate yet), awaiting_approval (the estimate is
+-- over the policy's limits) or budget_paused (its spend reached runs.budget). A task already running finishes;
+-- nothing new is claimed, autorun or drained until the hold is cleared, which is the cap's whole overshoot.
+-- integration-rbac.sql sets and clears it; the vocabulary is the drop-then-add CHECK beside runs_status_check.
+alter table workflow.runs add column if not exists hold text;
+alter table workflow.runs add column if not exists held_at timestamptz;
+-- What the run may spend, in pydantic-ai RunUsage's own limit names so the dry-run estimate (REM-1125) hands the
+-- stand-in exactly the budget the real run gets: {request_limit, total_tokens_limit, cost_limit (USD),
+-- wall_seconds_limit}. NULL, or a key left out, is no cap.
+alter table workflow.runs add column if not exists budget jsonb;
+
+create or replace function workflow.run_is_held(p_run_id uuid) returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select exists (select 1 from workflow.runs where id = p_run_id and hold is not null);
+$$;
+
+-- A budget names only RunUsage's limits, each a positive number. Anything else is refused rather than ignored: a
+-- misspelt `cost_limt` would otherwise be a run that believes it is capped.
+create or replace function workflow.budget_is_valid(p_budget jsonb) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select jsonb_typeof(p_budget) = 'object'
+       and not exists (select 1 from jsonb_each(p_budget) e
+                        where e.key not in ('request_limit','total_tokens_limit','cost_limit','wall_seconds_limit')
+                           or jsonb_typeof(e.value) <> 'number' or (e.value)::numeric <= 0);
+$$;
+revoke execute on function workflow.run_is_held(uuid) from public;
+
 -- ------------------------------------------------------------
 -- 3. Tasks
 -- ------------------------------------------------------------
@@ -2159,6 +2189,7 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
         order by priority desc, created_at
         for update skip locked
         limit v_lookahead
@@ -2214,6 +2245,7 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
         order by priority desc, created_at
         for update skip locked
         limit p_batch_size + v_lookahead
@@ -2882,6 +2914,10 @@ begin
     -- different traces in any collector reading them. The one place in this
     -- engine where a run is provably caused by another run is the one place
     -- the trace was not carried across.
+    --
+    -- The run about to be inserted is a child, which parent_task_id says only after start_workflow returns. A run
+    -- policy (integration-rbac.sql, REM-1126) reads this so it does not hold a child its parent was decided for.
+    perform set_config('workflow.starting_child', p_task_id::text, true);
     begin
         v_child := workflow.start_workflow(
             p_workflow_name, p_input, null,
@@ -2892,11 +2928,13 @@ begin
         -- Restored on both paths: a worker's complete_task cascade can start
         -- several children in one transaction, and a failed one must not
         -- leave the next running as this parent's owner.
+        perform set_config('workflow.starting_child', '', true);
         if v_was is not null then
             perform set_config('request.jwt.claims', v_was, true);
         end if;
         raise;
     end;
+    perform set_config('workflow.starting_child', '', true);
     if v_was is not null then
         perform set_config('request.jwt.claims', v_was, true);
     end if;
@@ -4281,7 +4319,7 @@ begin
     loop
         select id, kind into v_id, v_kind from workflow.tasks
         where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
-          and run_after <= now()
+          and run_after <= now() and not workflow.run_is_held(p_run_id)
         order by kind, created_at
         limit 1;
         exit when v_id is null or v_done >= p_max;
@@ -4378,6 +4416,10 @@ create or replace trigger trg_apply_timer_delay
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
 begin
     if new.status = 'ready' and old.status is distinct from 'ready' then
+        -- A held run executes nothing (REM-1126). The step stays ready, and clearing the hold drains it.
+        if new.kind <> 'timer' and workflow.run_is_held(new.run_id) then
+            return null;
+        end if;
         if new.kind = 'sql' then
             perform workflow.execute_sql_step(new.id);
         elsif new.kind = 'matrix' then
@@ -8640,6 +8682,12 @@ registered after the workflow that names it.$c$;
 alter table workflow.runs  drop constraint if exists runs_status_check;
 alter table workflow.runs  add  constraint runs_status_check
     check (status in ('running','succeeded','failed','cancelled'));
+alter table workflow.runs  drop constraint if exists runs_hold_check;
+alter table workflow.runs  add  constraint runs_hold_check
+    check (hold in ('awaiting_estimate','awaiting_approval','budget_paused'));
+alter table workflow.runs  drop constraint if exists runs_budget_check;
+alter table workflow.runs  add  constraint runs_budget_check
+    check (budget is null or workflow.budget_is_valid(budget));
 alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
@@ -9057,7 +9105,23 @@ with served as (
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
-      and t.queue not in (select s.queue from served s);
+      and t.queue not in (select s.queue from served s)
+  union all
+    -- A HELD RUN STARTS NOTHING (REM-1126), so its ready steps are unclaimable on purpose, and the remedy is a
+    -- person's: approve it, or raise its budget.
+    select t.id, t.run_id, t.queue, t.step_key, null::text,
+           ('the run is held: ' || r.hold)::text,
+           case r.hold
+                when 'awaiting_approval' then format('its estimate is over the run policy''s limits -- '
+                                                     'select workflow.approve_run(%L)', r.id)
+                when 'budget_paused'     then format('it spent its budget -- select workflow.raise_budget(%L, '
+                                                     '''{"cost_limit": ...}'')', r.id)
+                else format('a run policy applies and its estimate is incomplete -- wait for the dry run, or '
+                            'select workflow.approve_run(%L)', r.id) end,
+           now() - t.created_at
+    from workflow.tasks t
+    join workflow.runs r on r.id = t.run_id
+    where t.status = 'ready' and r.hold is not null;
 
 -- ------------------------------------------------------------
 -- 4. The backlog, as an operator needs it rather than as a count.
@@ -13810,7 +13874,9 @@ create or replace view workflow.runs_api as
          -- platform started the run (REM-171). The credential it carried is not published.
          r.started_actor,
          -- appended: the {{run.*}} keys the input did not supply (REM-1016)
-         r.unsupplied_input
+         r.unsupplied_input,
+         -- appended: why a running run is waiting for a person, since when, and what it may spend (REM-1126)
+         r.hold, r.held_at, r.budget
   from workflow.runs r
   left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
@@ -15345,6 +15411,280 @@ revoke execute on function workflow.plan_graph(text, int)    from authenticated;
 revoke execute on function workflow.plan_document(text, int) from authenticated;
 revoke execute on function workflow.plan_defects(text)       from authenticated;
 revoke execute on function workflow.plan_probe(text, int)    from authenticated;
+
+-- ------------------------------------------------------------
+-- WHAT A RUN MAY SPEND WITHOUT A PERSON (REM-1126; feedback 9ea269ac, points 2 and 3)
+-- ------------------------------------------------------------
+-- A policy row, per owner or for the deployment (owner_id null), decides from a run's estimate (REM-1125's
+-- workflow.run_estimates, its step_key-null row) whether the run goes ahead or waits for a person to approve it. A run
+-- draws on runs.budget, which the policy's default_budget fills when the caller set none, and is paused at its cap
+-- until a person raises it. Waiting and paused are runs.hold (schema.sql says why not a status): the run row says it
+-- is waiting for a person, as a signal step's row does, and nothing fails.
+--
+-- No policy row, no change: a run starts unheld, its estimate is informational and its budget whatever it was given.
+-- A child run is not held: its parent's run was the one decided. start_child_workflow names the parent only after
+-- start_workflow returns, so it says so for the insert in workflow.starting_child.
+--
+-- Written only by the deployment's operator: nothing here is granted to `authenticated`, because a person who could
+-- write their own policy row could approve their own runs by raising the limit.
+create table if not exists workflow.run_policies (
+    id                uuid primary key default uuidv7(),
+    owner_id          uuid references rbac.users (id) on delete cascade,
+    -- Run without a person while the estimate is within each limit that is set; a limit left NULL does not hold.
+    auto_cost_usd     numeric check (auto_cost_usd > 0),
+    auto_tokens       bigint  check (auto_tokens > 0),
+    auto_wall_seconds numeric check (auto_wall_seconds > 0),
+    default_budget    jsonb   check (default_budget is null or workflow.budget_is_valid(default_budget)),
+    note              text,
+    updated_at        timestamptz not null default now()
+);
+comment on table workflow.run_policies is
+    'Per owner, or for the deployment when owner_id is null: what a run may be estimated to spend and still start without a person, and the budget a run gets when it names none.';
+create unique index if not exists run_policies_one_per_owner
+    on workflow.run_policies (owner_id) nulls not distinct;
+alter table workflow.run_policies enable row level security;
+
+-- The owner's own row, else the deployment's, else none.
+create or replace function workflow.run_policy_for(p_owner_id uuid)
+returns workflow.run_policies
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select p.* from workflow.run_policies p
+     where p.owner_id = p_owner_id or p.owner_id is null
+     order by p.owner_id nulls last
+     limit 1;
+$$;
+revoke execute on function workflow.run_policy_for(uuid) from public;
+
+-- Fires after trg_set_run_owner (BEFORE triggers run in name order), so owner_id is the starter's.
+create or replace function workflow.apply_run_policy_on_start() returns trigger as $$
+declare v_p workflow.run_policies;
+begin
+    -- Neither a child (its parent's run was decided) nor REM-1125's dry run of a held run (the estimate the held run
+    -- waits for) is held. Both say so through a setting their own SQL makes for the insert, never the run's input,
+    -- which is the caller's and would let anyone skip approval; `authenticated` cannot call set_config (REM-44).
+    if new.parent_task_id is not null
+       or nullif(current_setting('workflow.starting_child', true), '') is not null
+       or nullif(current_setting('workflow.starting_dry_run', true), '') is not null then
+        return new;
+    end if;
+    v_p := workflow.run_policy_for(new.owner_id);
+    if v_p.id is null then
+        return new;
+    end if;
+    new.budget  := coalesce(new.budget, v_p.default_budget);
+    new.hold    := 'awaiting_estimate';
+    new.held_at := now();
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_zz_run_policy
+    before insert on workflow.runs
+    for each row execute function workflow.apply_run_policy_on_start();
+
+-- What the run has spent so far: the sum of REM-1125's per-attempt usage, and wall seconds since it started.
+create or replace function workflow.run_spent(p_run_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare v jsonb;
+begin
+    select jsonb_build_object('wall_seconds', round(extract(epoch from now() - r.created_at)))
+      into v from workflow.runs r where r.id = p_run_id;
+    return v || (select jsonb_build_object(
+                     'requests', coalesce(sum(u.requests), 0),
+                     'total_tokens', coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)), 0),
+                     'cost_usd', sum(u.cost_usd))
+                   from workflow.task_usage u where u.run_id = p_run_id);
+end;
+$$;
+revoke execute on function workflow.run_spent(uuid) from public;
+
+-- Which limit of runs.budget the spend has reached, or null. Each RunUsage limit against its own measure.
+create or replace function workflow.budget_reached(p_budget jsonb, p_spent jsonb) returns text
+language sql immutable set search_path = pg_catalog, public as $$
+    select case
+        when (p_budget->>'cost_limit')::numeric <= (p_spent->>'cost_usd')::numeric then 'cost_limit'
+        when (p_budget->>'total_tokens_limit')::numeric <= (p_spent->>'total_tokens')::numeric then 'total_tokens_limit'
+        when (p_budget->>'request_limit')::numeric <= (p_spent->>'requests')::numeric then 'request_limit'
+        when (p_budget->>'wall_seconds_limit')::numeric <= (p_spent->>'wall_seconds')::numeric then 'wall_seconds_limit'
+    end;
+$$;
+
+-- Pause the run when its spend has reached its budget. Called after each attempt's usage is recorded (the trigger
+-- below) and by raise_budget. Only an unheld, running run is paused; returns whether it is paused now.
+create or replace function workflow.check_run_budget(p_run_id uuid) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare r workflow.runs;
+begin
+    select * into r from workflow.runs where id = p_run_id for update;
+    if r.id is null or r.status <> 'running' then
+        return false;
+    end if;
+    if r.hold is null and r.budget is not null
+       and workflow.budget_reached(r.budget, workflow.run_spent(p_run_id)) is not null then
+        update workflow.runs set hold = 'budget_paused', held_at = now(), updated_at = now() where id = p_run_id;
+        return true;
+    end if;
+    return r.hold = 'budget_paused';
+end;
+$$;
+revoke execute on function workflow.check_run_budget(uuid) from public;
+
+-- Each attempt's usage, as record_task_usage writes or rewrites it, is checked against the run's cap at once.
+create or replace function workflow.check_run_budget_on_usage() returns trigger as $$
+begin
+    perform workflow.check_run_budget(new.run_id);
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_task_usage_budget
+    after insert or update on workflow.task_usage
+    for each row execute function workflow.check_run_budget_on_usage();
+
+-- Decide a run held for its estimate: within every limit the policy sets, it starts; over any, or with a limit the
+-- estimate cannot be judged against (a cost limit and no priced estimate, or an unbounded fan-out, whose totals are
+-- only a floor), it waits for a person. An incomplete
+-- estimate (REM-1125 leaves the run row's totals NULL while any step has no basis) keeps it awaiting_estimate.
+-- Decides only a run still awaiting its estimate or an approval: a paused or released run is not re-held by a
+-- revised estimate.
+create or replace function workflow.decide_run(p_run_id uuid, p_cost_usd numeric, p_tokens bigint,
+                                               p_wall_seconds numeric, p_complete boolean,
+                                               p_bounded boolean default true) returns text
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    r   workflow.runs;
+    v_p workflow.run_policies;
+    v_over boolean;
+begin
+    select * into r from workflow.runs where id = p_run_id for update;
+    -- `is distinct from`, not `not in`: an unheld run's hold is NULL, and NULL not in (...) is NULL, which let a
+    -- revised estimate re-hold a run already released, approved, or never held (a child, a dry run).
+    if r.id is null or r.status <> 'running'
+       or (r.hold is distinct from 'awaiting_estimate' and r.hold is distinct from 'awaiting_approval') then
+        return r.hold;
+    end if;
+    if not p_complete then
+        return r.hold;
+    end if;
+    v_p := workflow.run_policy_for(r.owner_id);
+    v_over := not p_bounded
+           or (v_p.auto_cost_usd is not null and (p_cost_usd is null or p_cost_usd > v_p.auto_cost_usd))
+           or (v_p.auto_tokens is not null and (p_tokens is null or p_tokens > v_p.auto_tokens))
+           or (v_p.auto_wall_seconds is not null and (p_wall_seconds is null or p_wall_seconds > v_p.auto_wall_seconds));
+    if v_over then
+        update workflow.runs set hold = 'awaiting_approval', held_at = now(), updated_at = now() where id = p_run_id;
+        return 'awaiting_approval';
+    end if;
+    perform workflow.release_run(p_run_id);
+    return null;
+end;
+$$;
+revoke execute on function workflow.decide_run(uuid, numeric, bigint, numeric, boolean, boolean) from public;
+
+-- REM-1125 writes the run's estimate when the run is created (from history) and rewrites it after the dry run
+-- (sum_run_estimate); each time, the run row decides. Its totals are NULL while any step has no basis, which is
+-- an incomplete estimate; 'dry_run_unbounded' totals are a floor ("at least"), which no limit can pass.
+create or replace function workflow.decide_run_on_estimate() returns trigger as $$
+begin
+    if new.step_key is null then
+        perform workflow.decide_run(new.run_id, new.est_cost_usd,
+                                    new.est_input_tokens + new.est_output_tokens, new.est_wall_seconds,
+                                    new.basis <> 'none' and new.est_input_tokens is not null
+                                    and new.est_output_tokens is not null and new.est_wall_seconds is not null,
+                                    new.basis <> 'dry_run_unbounded');
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_run_estimates_decide
+    after insert or update on workflow.run_estimates
+    for each row execute function workflow.decide_run_on_estimate();
+
+-- Clear the hold and start what was waiting: worker steps become claimable as they stand, in-database ones drain.
+create or replace function workflow.release_run(p_run_id uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    update workflow.runs set hold = null, held_at = null, updated_at = now() where id = p_run_id;
+    perform workflow.drain_sql_steps(p_run_id);
+end;
+$$;
+revoke execute on function workflow.release_run(uuid) from public;
+
+-- A PERSON APPROVES a run waiting for approval or for its estimate. The rule signal_task applies: the run's owner,
+-- or someone holding workflow_runs:signal. Returns the run's status line.
+create or replace function workflow.approve_run(p_run_id uuid) returns text
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_hold text;
+begin
+    perform workflow.assert_run_access(p_run_id, 'signal');
+    select hold into v_hold from workflow.runs where id = p_run_id for update;
+    if v_hold = 'budget_paused' then
+        raise exception 'run % is paused at its budget, not waiting for approval', p_run_id
+            using hint = 'raise the cap with workflow.raise_budget(run_id, budget)';
+    end if;
+    if v_hold in ('awaiting_estimate', 'awaiting_approval') then
+        perform workflow.release_run(p_run_id);
+    end if;
+    return (select line from workflow.run_cost(p_run_id));
+end;
+$$;
+
+-- A PERSON RAISES THE CAP. The keys given replace those in runs.budget (null removes one); if the new budget is
+-- above what was spent, a paused run resumes. Returns the run's status line, which says if it is still paused.
+create or replace function workflow.raise_budget(p_run_id uuid, p_budget jsonb) returns text
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_budget jsonb;
+begin
+    perform workflow.assert_run_access(p_run_id, 'signal');
+    select jsonb_strip_nulls(coalesce(budget, '{}'::jsonb) || p_budget) into v_budget
+      from workflow.runs where id = p_run_id for update;
+    update workflow.runs set budget = nullif(v_budget, '{}'::jsonb), updated_at = now() where id = p_run_id;
+    if (select hold from workflow.runs where id = p_run_id) = 'budget_paused'
+       and workflow.budget_reached(v_budget, workflow.run_spent(p_run_id)) is null then
+        perform workflow.release_run(p_run_id);
+    end if;
+    return (select line from workflow.run_cost(p_run_id));
+end;
+$$;
+
+-- ONE STATUS LINE PER RUN: spent, estimated and cap, in the measure the cap is set in (cost when it is priced,
+-- tokens otherwise), with the hold when there is one. The parts are returned too, for a caller that lays them out.
+create or replace function workflow.run_cost(p_run_id uuid)
+returns table (spent jsonb, estimated jsonb, cap jsonb, hold text, line text)
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare
+    r     workflow.runs;
+    v_s   jsonb;
+    v_e   jsonb;
+    v_usd boolean;
+begin
+    perform workflow.assert_run_access(p_run_id, 'select');
+    select * into r from workflow.runs where id = p_run_id;
+    v_s := workflow.run_spent(p_run_id);
+    select jsonb_build_object('cost_usd', e.est_cost_usd, 'total_tokens', e.est_input_tokens + e.est_output_tokens,
+                              'wall_seconds', e.est_wall_seconds, 'basis', e.basis)
+      into v_e from workflow.run_estimates e where e.run_id = p_run_id and e.step_key is null;
+    v_usd := r.budget ? 'cost_limit' or (v_s->>'cost_usd') is not null or (v_e->>'cost_usd') is not null;
+    return query select v_s, v_e, r.budget, r.hold,
+        concat_ws(' · ',
+            r.status || coalesce(' (' || replace(r.hold, '_', ' ') || ')', ''),
+            case when v_usd
+                 then format('spent $%s, estimated %s, cap %s',
+                             to_char(coalesce((v_s->>'cost_usd')::numeric, 0), 'FM999990.00'),
+                             coalesce('$' || to_char((v_e->>'cost_usd')::numeric, 'FM999990.00'), 'unknown'),
+                             coalesce('$' || to_char((r.budget->>'cost_limit')::numeric, 'FM999990.00'), 'none'))
+                 else format('spent %s tokens, estimated %s, cap %s',
+                             coalesce(v_s->>'total_tokens', '0'),
+                             coalesce(v_e->>'total_tokens', 'unknown'),
+                             coalesce(r.budget->>'total_tokens_limit', 'none')) end);
+end;
+$$;
+
+revoke execute on function workflow.approve_run(uuid), workflow.raise_budget(uuid, jsonb), workflow.run_cost(uuid)
+    from public;
+grant execute on function workflow.approve_run(uuid), workflow.raise_budget(uuid, jsonb), workflow.run_cost(uuid)
+    to authenticated;
 
 
 -- ============================================================
@@ -41061,6 +41401,8 @@ declare
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',
+        -- A deployment's run policies (REM-1126) are its own decisions, like its queue config.
+        'workflow.run_policies',
         'workflow.runs',
         'workflow.schedules',
         'workflow.task_dependencies',
@@ -41540,6 +41882,7 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
  ('workflow','run_estimates','step_key','value','the whole run: its row totals the step rows (REM-1125)'),
+ ('workflow','run_policies','owner_id','value','the deployment''s policy, which applies to anyone without their own (REM-1126)'),
 
 -- Two partial indexes on agentic, both absences, and both worth a second look
 -- by whoever owns that subsystem: a null here reads as "not configured yet"
