@@ -145,9 +145,11 @@ app.add_typer(
 # holding admin credentials with no other tooling around.
 from .core.cli import app as _auth_app
 from .core.cli import sample_app as _sample_app
+from .core.cli import package_app as _package_app
 
 app.add_typer(_auth_app, name="auth", help="Bootstrap the first identity, and sign tokens")
 app.add_typer(_sample_app, name="sample", help="Load a sample dataset")
+app.add_typer(_package_app, name="package", help="Install a package")
 
 # Direct for the same reason as `auth`: the query tool server is standard
 # library only, so there is no extra to be missing.

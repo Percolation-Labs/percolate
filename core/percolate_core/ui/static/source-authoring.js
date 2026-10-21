@@ -45,9 +45,9 @@ export function sourcePackage(id, settings, {ingestQueue="ingest",workflowQueue=
 }
 
 export function packageText(manifest) {
-  // JSON is a YAML subset, accepted by packages/apply.py and define_yaml.
+  // JSON is a YAML subset, accepted by `percolate package apply` and define_yaml.
   return "# Percolate data source package. Save this file as manifest.yaml in a package directory.\n"
-    + "# Apply with: python packages/apply.py <directory>\n"
+    + "# Apply with: percolate package apply <directory> --dsn <owner-level DSN>\n"
     + "# Configure the named worker queues, embedding model and agent in the destination workspace.\n"
     + "# Source configurations are installed if absent; existing source settings are not replaced by the package loader.\n"
     + JSON.stringify(manifest,null,2)+"\n";

@@ -212,7 +212,7 @@ async def check_the_loader_sends_the_document_and_translates_nothing() -> None:
     `structured_output_schema`.
 
     This file used to assert that THIS loader translated, and that assertion
-    passed while `p8-subsystems/packages/apply.py` -- which knew a different
+    passed while our package loader -- which knew a different
     dialect and not this one -- installed the same extractor with an empty
     prompt. Three loaders, three mappings, and `upsert_agent` dropping whatever
     it did not recognise (REM-70). So the assertion is now the opposite one, and
