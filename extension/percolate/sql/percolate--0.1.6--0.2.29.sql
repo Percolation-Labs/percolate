@@ -9600,6 +9600,244 @@ comment on function workflow.plan_graph(text, int) is
     'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
     'with every reach that does not resolve reported as a defect.';
 
+-- ------------------------------------------------------------
+-- WHAT A RUN WILL COST, AND WHAT IT DID (REM-1125).
+--
+-- A workflow is checked data, so Percolate could say a plan is well-formed and
+-- not what it costs. Two tables answer that, in one set of units: the agent
+-- runtime's own (pydantic-ai RunUsage: requests, input and output tokens, tool
+-- calls, cost in USD where the model has a price), plus tasks and wall seconds
+-- from the engine. There are no credits: core meters `llm_tokens` and budgets
+-- trees in RunUsage's names, and a second unit would need a price table nobody
+-- keeps.
+--
+--   workflow.task_usage     what each task attempt spent, as it happens. The
+--                           runtime held this in hand and dropped it for every
+--                           step that was not a claim assertion (C7 keeps only
+--                           those). A run's spend so far is a sum over it, which
+--                           is what a budget cap (REM-1126) reads mid-flight.
+--   workflow.run_estimates  one row per step and one for the whole run: the
+--                           estimate written when the run is created, and the
+--                           actuals beside it when it ends. Calibration is one
+--                           select over it.
+--
+-- AN ESTIMATE IS HISTORY FIRST. A step that has run before in this definition
+-- is estimated from the median of its last runs; a step that has not is marked
+-- basis 'none', and a dry run against a stand-in model fills it (REM-1125's
+-- second half). Copied keys, not live foreign keys, on task_usage: task
+-- retention may remove the task, and the spend must outlive it.
+-- ------------------------------------------------------------
+create table if not exists workflow.task_usage (
+    task_id       uuid not null,
+    attempt       int not null,
+    run_id        uuid not null,
+    step_key      text not null,
+    requests      int not null default 0 check (requests >= 0),
+    input_tokens  bigint not null default 0 check (input_tokens >= 0),
+    output_tokens bigint not null default 0 check (output_tokens >= 0),
+    tool_calls    int not null default 0 check (tool_calls >= 0),
+    cost_usd      numeric check (cost_usd >= 0),
+    model         text,
+    wall_seconds  numeric check (wall_seconds >= 0),
+    recorded_at   timestamptz not null default now(),
+    primary key (task_id, attempt)
+);
+comment on table workflow.task_usage is
+    'What one task attempt spent, in the agent runtime''s units, kept after the task is pruned (REM-1125).';
+create index if not exists task_usage_run on workflow.task_usage (run_id);
+
+create table if not exists workflow.run_estimates (
+    run_id              uuid not null references workflow.runs(id) on delete cascade,
+    step_key            text,                -- null: the whole run
+    basis               text not null check (basis in ('history', 'dry_run', 'mixed', 'none')),
+    est_tasks           int,
+    est_wall_seconds    numeric,
+    est_requests        int,
+    est_input_tokens    bigint,
+    est_output_tokens   bigint,
+    est_cost_usd        numeric,
+    estimated_at        timestamptz not null default now(),
+    estimator           text not null,
+    actual_tasks        int,
+    actual_wall_seconds numeric,
+    actual_requests     int,
+    actual_input_tokens bigint,
+    actual_output_tokens bigint,
+    actual_cost_usd     numeric,
+    actual_at           timestamptz,
+    unique nulls not distinct (run_id, step_key)
+);
+comment on table workflow.run_estimates is
+    'A run''s cost estimated before it ran, per step and in total, and what it actually cost beside it (REM-1125).';
+
+-- What a task attempt spent, reported by the worker that holds its lease, in
+-- RunUsage's own keys; unknown keys are ignored, so a newer runtime's extra
+-- counters do not break an older extension. A repeated report of the same
+-- attempt replaces it. Refused, silently like complete_task, without the lease.
+create or replace function workflow.record_task_usage(
+    p_task_id uuid, p_attempt int, p_usage jsonb, p_worker_id text default null)
+returns void as $$
+declare t workflow.tasks;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found or workflow.lease_violation(p_task_id, p_worker_id, 'record usage') is not null then
+        return;
+    end if;
+    insert into workflow.task_usage (task_id, attempt, run_id, step_key, requests, input_tokens, output_tokens,
+                                     tool_calls, cost_usd, model, wall_seconds)
+    values (p_task_id, p_attempt, t.run_id, regexp_replace(t.step_key, '\[\d+\]$', ''),
+            coalesce((p_usage->>'requests')::int, 0), coalesce((p_usage->>'input_tokens')::bigint, 0),
+            coalesce((p_usage->>'output_tokens')::bigint, 0), coalesce((p_usage->>'tool_calls')::int, 0),
+            nullif(p_usage->>'cost', '')::numeric, p_usage->>'model',
+            extract(epoch from now() - t.claimed_at))
+    on conflict (task_id, attempt) do update
+       set requests = excluded.requests, input_tokens = excluded.input_tokens,
+           output_tokens = excluded.output_tokens, tool_calls = excluded.tool_calls,
+           cost_usd = excluded.cost_usd, model = excluded.model, wall_seconds = excluded.wall_seconds,
+           recorded_at = now();
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- One past run, step by step, in the estimate's units. A matrix child counts
+-- toward its step, so fan-out is the step's task count.
+create or replace function workflow.run_step_costs(p_run_id uuid)
+returns table (step_key text, tasks int, wall_seconds numeric, requests int, input_tokens bigint,
+               output_tokens bigint, cost_usd numeric)
+language sql stable set search_path = pg_catalog, public as $$
+    with t as (
+        select regexp_replace(t.step_key, '\[\d+\]$', '') as step_key, count(*)::int as tasks,
+               extract(epoch from max(t.completed_at) - min(coalesce(t.claimed_at, t.created_at)))::numeric as wall
+          from workflow.tasks t
+         where t.run_id = p_run_id and t.compensates_task_id is null
+         group by 1),
+    u as (
+        select u.step_key, sum(u.requests)::int as requests, sum(u.input_tokens)::bigint as input_tokens,
+               sum(u.output_tokens)::bigint as output_tokens, sum(u.cost_usd) as cost_usd
+          from workflow.task_usage u where u.run_id = p_run_id group by 1)
+    select coalesce(t.step_key, u.step_key), coalesce(t.tasks, 0), t.wall,
+           coalesce(u.requests, 0), coalesce(u.input_tokens, 0), coalesce(u.output_tokens, 0), u.cost_usd
+      from t full join u on u.step_key = t.step_key;
+$$;
+
+-- The estimate written when a run is created: each step of its definition from
+-- the median of its last succeeded runs (up to twenty), and the run row as the
+-- sum. A step with no history keeps basis 'none' and nulls, which is a fact a
+-- policy reads, not a zero.
+create or replace function workflow.estimate_from_history(p_run_id uuid, p_runs int default 20)
+returns void as $$
+declare
+    v_name text;
+    v_steps text[];
+begin
+    select d.name, array(select s->>'key' from jsonb_array_elements(coalesce(d.spec->'steps', '[]')) s)
+      into v_name, v_steps
+      from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id where r.id = p_run_id;
+    if v_name is null then
+        return;
+    end if;
+    with past as (
+        select r.id from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
+         where d.name = v_name and r.status = 'succeeded' and r.id <> p_run_id
+         order by r.created_at desc limit greatest(p_runs, 1)),
+    costs as (select c.* from past p cross join lateral workflow.run_step_costs(p.id) c),
+    est as (
+        select s.k as step_key, count(c.step_key) as n,
+               percentile_disc(0.5) within group (order by c.tasks) as tasks,
+               percentile_cont(0.5) within group (order by c.wall_seconds) as wall,
+               percentile_disc(0.5) within group (order by c.requests) as requests,
+               percentile_disc(0.5) within group (order by c.input_tokens) as input_tokens,
+               percentile_disc(0.5) within group (order by c.output_tokens) as output_tokens,
+               percentile_cont(0.5) within group (order by c.cost_usd) as cost_usd
+          from unnest(v_steps) s(k) left join costs c on c.step_key = s.k
+         group by s.k)
+    insert into workflow.run_estimates (run_id, step_key, basis, est_tasks, est_wall_seconds, est_requests,
+                                        est_input_tokens, est_output_tokens, est_cost_usd, estimator)
+    select p_run_id, e.step_key, case when e.n > 0 then 'history' else 'none' end,
+           e.tasks, e.wall, e.requests, e.input_tokens, e.output_tokens, e.cost_usd, 'history/median-20'
+      from est e
+    on conflict (run_id, step_key) do nothing;
+    perform workflow.sum_run_estimate(p_run_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The run row from its steps: sums, null when any step is unknown, so a total
+-- never quietly leaves a step out; basis says how the parts were known.
+create or replace function workflow.sum_run_estimate(p_run_id uuid) returns void
+language sql security definer set search_path = pg_catalog, public as $$
+    insert into workflow.run_estimates (run_id, step_key, basis, est_tasks, est_wall_seconds, est_requests,
+                                        est_input_tokens, est_output_tokens, est_cost_usd, estimator)
+    select p_run_id, null,
+           case when bool_and(basis = 'none') then 'none'
+                when bool_and(basis = 'history') then 'history'
+                when bool_and(basis = 'dry_run') then 'dry_run' else 'mixed' end,
+           case when bool_or(basis = 'none') then null else sum(est_tasks) end,
+           case when bool_or(basis = 'none') then null else sum(est_wall_seconds) end,
+           case when bool_or(basis = 'none') then null else sum(est_requests) end,
+           case when bool_or(basis = 'none') then null else sum(est_input_tokens) end,
+           case when bool_or(basis = 'none') then null else sum(est_output_tokens) end,
+           case when bool_or(basis = 'none') or bool_or(est_cost_usd is null and coalesce(est_requests, 0) > 0)
+                then null else sum(est_cost_usd) end,
+           'sum of steps'
+      from workflow.run_estimates where run_id = p_run_id and step_key is not null
+    having count(*) > 0
+    on conflict (run_id, step_key) do update
+       set basis = excluded.basis, est_tasks = excluded.est_tasks, est_wall_seconds = excluded.est_wall_seconds,
+           est_requests = excluded.est_requests, est_input_tokens = excluded.est_input_tokens,
+           est_output_tokens = excluded.est_output_tokens, est_cost_usd = excluded.est_cost_usd,
+           estimated_at = now(), estimator = excluded.estimator;
+$$;
+
+-- What it cost, beside what it was expected to, when the run ends. A step with
+-- no estimate row gets one, basis 'none', so every actual is in the table.
+create or replace function workflow.record_run_actuals(p_run_id uuid) returns void
+language sql security definer set search_path = pg_catalog, public as $$
+    insert into workflow.run_estimates (run_id, step_key, basis, estimator)
+    select p_run_id, c.step_key, 'none', 'no estimate' from workflow.run_step_costs(p_run_id) c
+    on conflict (run_id, step_key) do nothing;
+    update workflow.run_estimates e
+       set actual_tasks = c.tasks, actual_wall_seconds = c.wall_seconds, actual_requests = c.requests,
+           actual_input_tokens = c.input_tokens, actual_output_tokens = c.output_tokens,
+           actual_cost_usd = c.cost_usd, actual_at = now()
+      from workflow.run_step_costs(p_run_id) c
+     where e.run_id = p_run_id and e.step_key = c.step_key;
+    update workflow.run_estimates e
+       set actual_tasks = s.tasks, actual_wall_seconds = s.wall, actual_requests = s.requests,
+           actual_input_tokens = s.input_tokens, actual_output_tokens = s.output_tokens,
+           actual_cost_usd = s.cost_usd, actual_at = now()
+      from (select sum(tasks)::int as tasks,
+                   extract(epoch from (select coalesce(r.completed_at, now()) - r.created_at
+                                         from workflow.runs r where r.id = p_run_id))::numeric as wall,
+                   sum(requests)::int as requests, sum(input_tokens)::bigint as input_tokens,
+                   sum(output_tokens)::bigint as output_tokens, sum(cost_usd) as cost_usd
+              from workflow.run_step_costs(p_run_id)) s
+     where e.run_id = p_run_id and e.step_key is null;
+$$;
+
+create or replace function workflow.trg_runs_estimate() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    perform workflow.estimate_from_history(new.id);
+    return null;
+end $$;
+create or replace trigger trg_runs_estimate after insert on workflow.runs
+    for each row execute function workflow.trg_runs_estimate();
+
+create or replace function workflow.trg_runs_actuals() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if workflow.is_terminal(new.status) and not workflow.is_terminal(old.status) then
+        perform workflow.record_run_actuals(new.id);
+    end if;
+    return null;
+end $$;
+create or replace trigger trg_runs_actuals after update of status on workflow.runs
+    for each row execute function workflow.trg_runs_actuals();
+
+revoke all on function workflow.record_task_usage(uuid, int, jsonb, text), workflow.run_step_costs(uuid),
+    workflow.estimate_from_history(uuid, int), workflow.sum_run_estimate(uuid),
+    workflow.record_run_actuals(uuid), workflow.trg_runs_estimate(), workflow.trg_runs_actuals() from public;
+grant execute on function workflow.record_task_usage(uuid, int, jsonb, text) to worker;
+
 
 -- ============================================================
 -- user-rbac/schema.sql
@@ -40312,10 +40550,12 @@ declare
         'workflow.definitions',
         'workflow.queue_config',
         'workflow.rate_limits',
+        'workflow.run_estimates',
         'workflow.runs',
         'workflow.schedules',
         'workflow.task_dependencies',
         'workflow.task_events',
+        'workflow.task_usage',
         'workflow.tasks'
     ];
 begin
@@ -40789,6 +41029,7 @@ delete from percolate.null_means where column_name = 'org_id';
 insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
+ ('workflow','run_estimates','step_key','value','the whole run: its row totals the step rows (REM-1125)'),
 
 -- Two partial indexes on agentic, both absences, and both worth a second look
 -- by whoever owns that subsystem: a null here reads as "not configured yet"
@@ -40862,6 +41103,7 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
+ ('workflow','run_estimates','natural','a sidecar keyed by workflow.runs(id) and a step key, one row per step and one for the run (REM-1125)'),
  ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
  ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),
  ('claims','execution_results','natural','one producer result per task attempt and agent run, detached from operational retention (REM-590)'),

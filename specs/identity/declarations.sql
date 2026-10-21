@@ -51,6 +51,7 @@ delete from percolate.null_means where column_name = 'org_id';
 insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
+ ('workflow','run_estimates','step_key','value','the whole run: its row totals the step rows (REM-1125)'),
 
 -- Two partial indexes on agentic, both absences, and both worth a second look
 -- by whoever owns that subsystem: a null here reads as "not configured yet"
@@ -124,6 +125,7 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
+ ('workflow','run_estimates','natural','a sidecar keyed by workflow.runs(id) and a step key, one row per step and one for the run (REM-1125)'),
  ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
  ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),
  ('claims','execution_results','natural','one producer result per task attempt and agent run, detached from operational retention (REM-590)'),
