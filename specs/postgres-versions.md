@@ -1,7 +1,11 @@
 # Which PostgreSQL Percolate runs on
 
-**The extension needs PostgreSQL 18 or later.** Nothing in it is newer than 18:
-`uuidv7()` is the newest construct it uses. It used to need a PostgreSQL 19 beta
+**Percolate is supported on PostgreSQL 19, the only major the gate runs**
+(REM-1084): the published image is built on it, `dev/check.sh` runs against it,
+and get-percolate's own-Postgres check runs on `postgres:19rc1-bookworm`. Nothing
+in the SQL is newer than 18, since `uuidv7()` is the newest construct it uses,
+and 18 passed 41 of 43 gates once on 1 October (below). No gate runs it, so 18 is
+a measured possibility and not a supported version. It used to need a PostgreSQL 19 beta
 for SQL/PGQ, which declared one property graph, `aiq.knowledge_graph`, read by
 `GRAPH` depth 1. SQL/PGQ was withdrawn from PostgreSQL 19 before GA (October
 2026). The graph was only ever a view over `aiq.nodes` and `aiq.edges_current`,
