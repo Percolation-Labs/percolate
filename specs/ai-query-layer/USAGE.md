@@ -41,16 +41,17 @@ misleading:
 ```sql
 -- p8 is a SUPERUSER. Superusers bypass RLS unconditionally, so querying as p8
 -- shows you EVERY tenant's rows and hides every access bug. Switch to a real
--- role first.
-set role authenticated;
-
+-- role -- but set the identity FIRST: `authenticated` may not call set_config.
+--
 -- RLS reads identity from a request-scoped GUC that PostgREST normally sets
 -- per request. In a SQL client you set it yourself, and it must be inside a
--- transaction (set_config's third argument = "local").
+-- transaction (set_config's third argument = "local"). The caller below is the
+-- sample's Org A admin, a member of Org A (dev/init/02-seed.sql).
 begin;
 select set_config('request.jwt.claims',
-  '{"sub":"00000000-0000-0000-0000-000000000009",
-    "orgs":["11111111-1111-1111-1111-111111111111"]}', true);
+  '{"sub":"11111111-1111-1111-1111-111111111111",
+    "orgs":["a0000000-0000-0000-0000-00000000000a"]}', true);
+set local role authenticated;
 
 select * from aiq.query('LOOKUP "acme"');
 
@@ -74,10 +75,10 @@ whole session, so you set them once per pgAdmin tab and drop the
 `BEGIN`/`COMMIT` entirely:
 
 ```sql
-set role authenticated;
 select set_config('request.jwt.claims',
-  '{"sub":"00000000-0000-0000-0000-000000000009",
-    "orgs":["11111111-1111-1111-1111-111111111111"]}', false);
+  '{"sub":"11111111-1111-1111-1111-111111111111",
+    "orgs":["a0000000-0000-0000-0000-00000000000a"]}', false);
+set role authenticated;
 
 select * from aiq.lookup('acme');          -- scoped
 select * from aiq.query('GRAPH "acme"');   -- still scoped
@@ -269,7 +270,6 @@ select * from aiq.lookup_many(array['acme','nadler']);  -- a list, one call
  entity_type |      key      | match_kind | score
 -------------+---------------+------------+-------
  company     | acme robotics | fuzzy      |  0.69
- event       | acme-recall   | fuzzy      |  0.32
 ```
 
 Fuzzy is **off by default** — a misspelling returns zero rows unless you ask
@@ -289,7 +289,7 @@ select * from aiq.query('LOOKUP "acme", "nadler", "does-not-exist"');
  input_key |  key   | match_kind | score
 -----------+--------+------------+-------
  acme      | acme   | canonical  |     1
- nadler    | nadler | canonical  |     1
+ nadler    | nadler | short      |     1
 ```
 
 Two things to notice. **`input_key` comes back with each row**, so you can tell
@@ -300,7 +300,7 @@ as a set difference on the input:
 ```json
 {"mode": "LOOKUP",
  "rows": [{"input_key": "acme",   "key": "acme",   "match_kind": "canonical"},
-          {"input_key": "nadler", "key": "nadler", "match_kind": "canonical"}],
+          {"input_key": "nadler", "key": "nadler", "match_kind": "short"}],
  "unresolved": ["does-not-exist"]}
 ```
 
@@ -504,6 +504,10 @@ uuid, so a capped walk dropped whatever the uuids happened to drop.
 cannot phrase: *how* two things are joined, and by what. Output below is real,
 from the same sample graph.
 
+`PATH` and `RELEVANCE` need the graph algorithms, which ship switched off: run
+`select aiq.enable_graph_algorithms('authenticated', true);` as the owner first
+(see RELEVANCE, below).
+
 ```sql
 select * from aiq.query('PATH "acme", "marcus oyelaran" LIMIT 3');
 ```
@@ -647,7 +651,7 @@ select * from aiq.lexical('chunks', 'R7 arm');
 ```
                         content                         | score
 --------------------------------------------------------+--------
- The R7 robotic arm may fail under sustained load; unit | 0.0985
+ The R7 robotic arm may fail under sustained load; a … | 0.0985
 ```
 
 This is the mode that exists because **`LOOKUP` and `FUZZY LOOKUP` both return zero
@@ -816,7 +820,7 @@ SCHEMA "workflow"
 SCHEMA "sql" FROM resource_chunks
 ```
 
-Four facets ship:
+Five facets ship:
 
 | Facet | What it answers |
 |---|---|
@@ -824,6 +828,7 @@ Four facets ship:
 | `workflow` | Enough to author a workflow unaided: the legal step kinds, the allow-listed functions a `sql:` step may call with their real signatures, the queues and agents a step may route to, and worked YAML. |
 | `sql` | Tables, views, columns and constraints **your role** can `SELECT`, and whether row-level security applies to each. |
 | `graph` | Registered entity types and the enforced edge catalogue — which relations exist, between which types, and what they mean. |
+| `lake` | Parquet and Iceberg datasets in object storage you may read: columns and types, row counts, vector and shape columns. Query them with `LAKE`; narrow with `FROM <substring>`. |
 
 ### Three things it does that documentation cannot
 
@@ -944,9 +949,13 @@ curl -s "http://localhost:3000/nodes_api?entity_type=eq.company&select=summary,o
 ```
 
 ```json
-[{"summary":"Orbital Systems","org_id":null},
- {"summary":"Acme Robotics","org_id":"11111111-…"}]
+[{"summary":"Acme Robotics","org_id":"f2999e5c-bccd-5883-a78a-65e124ca69d1"},
+ {"summary":"Northwind Capital","org_id":"a0000000-0000-0000-0000-00000000000a"},
+ …]
 ```
+
+`f2999e5c-…` is the shared tier (`rbac.shared_org_id()`); Northwind Capital is Org A's own,
+visible here because the token is Org A's.
 
 ---
 
@@ -960,15 +969,15 @@ JWT**, never a parameter.
 
 Verified over REST with three tokens against the same query:
 
-| Token | `LOOKUP "acme"` |
+| Token | `LOOKUP "nwnd"` |
 |---|---|
-| org1 | returns the row |
-| org2 | empty |
+| Org A | returns the row |
+| Org B | empty |
 | no `orgs` claim | empty |
 
-This propagates through traversal too: an org1 user asking `GRAPH "acme"` gets
-3 neighbours, not 4 — Nadler Dynamics belongs to org2 and is filtered out
-mid-walk.
+This propagates through traversal too: an Org A user asking `GRAPH "nwnd"` gets
+no neighbours — its one edge runs to `estg` (Eastgate Holdings), which belongs
+to Org B and is filtered out mid-walk.
 
 So: **an empty result usually means identity, not absence.** Check that you
 set `request.jwt.claims` (SQL) or sent a token with the right `orgs` (REST)
