@@ -44,6 +44,8 @@ JUDGEMENT = "01a10000-0000-0000-0000-000000000003"
 NODE = "01a10000-0000-0000-0000-000000000004"
 GRAPH = {"nodes": [{"k": "person", "n": "Maya Okafor"}, {"k": "place", "n": "Lisbon"}],
          "edges": [{"s": 0, "t": 1, "r": "lives_in"}]}
+RELATE = {"decision": "relate", "relations": [{"target": NODE, "predicate": "same_as",
+                                                "spans": {"src": "keeps the time", "dst": "records when"}}]}
 LAPSED = {"code": "42501", "details": None, "hint": "claim it again",
           "message": "complete_judgement: your claim on this item has lapsed"}
 
@@ -128,6 +130,21 @@ class ThePersonsAgentReadsAndJudges(unittest.IsolatedAsyncioTestCase):
         _pg, server = self.start()
         names = [t.name for t in await McpProvider().list_tools(server)]
         self.assertEqual(names[1:], [c[0] for c in CASES])
+
+    async def test_a_challenge_is_answered_with_a_relation(self):
+        # REM-659: a challenge is decided relate, with the relations, and the tool passes them through whole --
+        # and its schema says so, or a client that follows the schema could never send one.
+        tool = {t.name: t for t in await McpProvider().list_tools(self.start()[1])}["decide_judgement"]
+        verdict = tool.input_schema["properties"]["verdict"]["properties"]
+        self.assertIn("relate", verdict["decision"]["enum"])
+        self.assertEqual(verdict["relations"]["items"]["required"], ["target", "predicate"])
+        pg, server = self.start()
+        result = await self.call(server, "decide_judgement",
+                                 {"id": JUDGEMENT, "verdict": RELATE, "reason": "B1 says what A1 says."})
+        self.assertFalse(result.is_error, result)
+        (seen,) = pg.calls()
+        self.assertEqual(seen["body"], {"p_id": JUDGEMENT, "p_verdict": RELATE,
+                                        "p_reason": "B1 says what A1 says.", "p_tier": "agent"})
 
     async def test_each_tool_reaches_its_sql_as_the_caller(self):
         for name, args, profile, fn, body in CASES:
