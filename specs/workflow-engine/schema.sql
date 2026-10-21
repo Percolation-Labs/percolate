@@ -440,6 +440,36 @@ create table if not exists workflow.runs (
 comment on table workflow.runs is
     'One execution of a definition, with its input, its status and the compensation state of its saga.';
 
+-- A RUN CAN BE HELD, AND A HELD RUN STARTS NOTHING (REM-1126). Its status stays 'running', because completion,
+-- cancellation, stop_failed_run, the child hand-back and schedule overlap all read 'running' as "still going", and
+-- a held run is still going: it is waiting for a person, as a signal step does. Why it is held is the hold:
+-- awaiting_estimate (a policy applies and the run has no complete estimate yet), awaiting_approval (the estimate is
+-- over the policy's limits) or budget_paused (its spend reached runs.budget). A task already running finishes;
+-- nothing new is claimed, autorun or drained until the hold is cleared, which is the cap's whole overshoot.
+-- integration-rbac.sql sets and clears it; the vocabulary is the drop-then-add CHECK beside runs_status_check.
+alter table workflow.runs add column if not exists hold text;
+alter table workflow.runs add column if not exists held_at timestamptz;
+-- What the run may spend, in pydantic-ai RunUsage's own limit names so the dry-run estimate (REM-1125) hands the
+-- stand-in exactly the budget the real run gets: {request_limit, total_tokens_limit, cost_limit (USD),
+-- wall_seconds_limit}. NULL, or a key left out, is no cap.
+alter table workflow.runs add column if not exists budget jsonb;
+
+create or replace function workflow.run_is_held(p_run_id uuid) returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select exists (select 1 from workflow.runs where id = p_run_id and hold is not null);
+$$;
+
+-- A budget names only RunUsage's limits, each a positive number. Anything else is refused rather than ignored: a
+-- misspelt `cost_limt` would otherwise be a run that believes it is capped.
+create or replace function workflow.budget_is_valid(p_budget jsonb) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select jsonb_typeof(p_budget) = 'object'
+       and not exists (select 1 from jsonb_each(p_budget) e
+                        where e.key not in ('request_limit','total_tokens_limit','cost_limit','wall_seconds_limit')
+                           or jsonb_typeof(e.value) <> 'number' or (e.value)::numeric <= 0);
+$$;
+revoke execute on function workflow.run_is_held(uuid) from public;
+
 -- ------------------------------------------------------------
 -- 3. Tasks
 -- ------------------------------------------------------------
@@ -1299,6 +1329,7 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
         order by priority desc, created_at
         for update skip locked
         limit v_lookahead
@@ -1354,6 +1385,7 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
         order by priority desc, created_at
         for update skip locked
         limit p_batch_size + v_lookahead
@@ -3374,7 +3406,7 @@ begin
     loop
         select id, kind into v_id, v_kind from workflow.tasks
         where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
-          and run_after <= now()
+          and run_after <= now() and not workflow.run_is_held(p_run_id)
         order by kind, created_at
         limit 1;
         exit when v_id is null or v_done >= p_max;
@@ -3471,6 +3503,10 @@ create or replace trigger trg_apply_timer_delay
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
 begin
     if new.status = 'ready' and old.status is distinct from 'ready' then
+        -- A held run executes nothing (REM-1126). The step stays ready, and clearing the hold drains it.
+        if new.kind <> 'timer' and workflow.run_is_held(new.run_id) then
+            return null;
+        end if;
         if new.kind = 'sql' then
             perform workflow.execute_sql_step(new.id);
         elsif new.kind = 'matrix' then
@@ -7711,6 +7747,12 @@ registered after the workflow that names it.$c$;
 alter table workflow.runs  drop constraint if exists runs_status_check;
 alter table workflow.runs  add  constraint runs_status_check
     check (status in ('running','succeeded','failed','cancelled'));
+alter table workflow.runs  drop constraint if exists runs_hold_check;
+alter table workflow.runs  add  constraint runs_hold_check
+    check (hold in ('awaiting_estimate','awaiting_approval','budget_paused'));
+alter table workflow.runs  drop constraint if exists runs_budget_check;
+alter table workflow.runs  add  constraint runs_budget_check
+    check (budget is null or workflow.budget_is_valid(budget));
 alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
@@ -8128,7 +8170,23 @@ with served as (
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
-      and t.queue not in (select s.queue from served s);
+      and t.queue not in (select s.queue from served s)
+  union all
+    -- A HELD RUN STARTS NOTHING (REM-1126), so its ready steps are unclaimable on purpose, and the remedy is a
+    -- person's: approve it, or raise its budget.
+    select t.id, t.run_id, t.queue, t.step_key, null::text,
+           ('the run is held: ' || r.hold)::text,
+           case r.hold
+                when 'awaiting_approval' then format('its estimate is over the run policy''s limits -- '
+                                                     'select workflow.approve_run(%L)', r.id)
+                when 'budget_paused'     then format('it spent its budget -- select workflow.raise_budget(%L, '
+                                                     '''{"cost_limit": ...}'')', r.id)
+                else format('a run policy applies and its estimate is incomplete -- wait for the dry run, or '
+                            'select workflow.approve_run(%L)', r.id) end,
+           now() - t.created_at
+    from workflow.tasks t
+    join workflow.runs r on r.id = t.run_id
+    where t.status = 'ready' and r.hold is not null;
 
 -- ------------------------------------------------------------
 -- 4. The backlog, as an operator needs it rather than as a count.
