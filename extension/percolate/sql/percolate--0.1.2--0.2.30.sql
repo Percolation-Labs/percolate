@@ -25613,8 +25613,8 @@ create or replace trigger trg_ingest_run_fails_resource
 -- channel that is right there. Every artifact write failed that way.
 --
 -- The other global channel, sample-corpus, is public for the same reason. What
--- a step writes THROUGH this channel still takes its own visibility from
--- rbac.default_visibility(p_org_id), so nothing here publishes an artifact.
+-- a step writes THROUGH this channel takes its run's owner, org and
+-- visibility (register_artifact, REM-1119), so nothing here publishes an artifact.
 insert into content.channels (name, kind, config, visibility)
 select 'workflow_artifacts', 'file_upload',
        -- No ingest_workflow: registering an artifact must not start an
@@ -25668,9 +25668,12 @@ create or replace function workflow.register_artifact(
     p_org_id       uuid default null
 ) returns uuid as $$
 declare
-    t      workflow.tasks;
-    v_res  uuid;
-    v_file uuid;
+    t       workflow.tasks;
+    r       workflow.runs;
+    v_chan  uuid;
+    v_res   uuid;
+    v_file  uuid;
+    v_vis   text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     if not found then
@@ -25678,39 +25681,46 @@ begin
             'no task % -- an artifact belongs to the task that produced it, and the '
             'task id is what makes the ref traceable back to a step', p_task_id;
     end if;
+    select * into r from workflow.runs where id = t.run_id;
+
+    -- AN ARTIFACT IS THE RUN'S, NOT AN UPLOAD (REM-1119). This called
+    -- content.register_upload with no claims, which went wrong both ways. On
+    -- the worker's own login may_upload refused it (its claimless arm needs
+    -- INSERT on content.resources from session_user, and worker holds none),
+    -- so a step whose output was over the cap could not be offloaded at all;
+    -- run as the table owner, as the tests do, the artifact took
+    -- default_visibility's no-identity answer and landed public and ownerless
+    -- whatever the run was. The authority here is the worker grant and the
+    -- task, and the resource takes the run's owner, org and visibility, so
+    -- it is readable by exactly who can read the run. A run with no owner is
+    -- an operator's; its artifact keeps what default_visibility says of that
+    -- (a private row needs an owner), as before. p_org_id is kept for the
+    -- callers that pass it and ignored: the run says where its output belongs.
+    v_vis := case when r.owner_id is null and r.visibility = 'private'
+                  then rbac.default_visibility(null) else r.visibility end;
+    select id into v_chan from content.channels
+     where name = 'workflow_artifacts' and org_id = rbac.shared_org_id();
+
+    insert into content.files (checksum, bucket, object_key, size_bytes, content_type)
+    values (p_checksum, p_bucket, p_object_key, p_size_bytes, p_content_type)
+    on conflict (checksum) do update set checksum = excluded.checksum
+    returning id into v_file;
 
     -- external_id is the TASK id, so a retry converges on one resource instead
     -- of leaving a trail of orphans -- the same idempotency the engine already
     -- gets from tasks.idempotency_key. Bytes are deduped independently by
     -- checksum, so two tasks writing identical output share one files row and
-    -- still get a resource each.
-    v_res := content.register_upload(
-        p_channel      => 'workflow_artifacts',
-        p_checksum     => p_checksum,
-        p_bucket       => p_bucket,
-        p_object_key   => p_object_key,
-        p_size_bytes   => p_size_bytes,
-        p_content_type => p_content_type,
-        p_title        => coalesce(p_title, t.step_key),
-        p_org_id       => p_org_id,
-        p_metadata     => jsonb_build_object('workflow', jsonb_build_object(
-                              'run_id', t.run_id, 'task_id', t.id,
-                              'step_key', t.step_key, 'attempt', t.attempts)),
-        p_external_id  => p_task_id::text,
-        p_trace_id     => (select trace_id from workflow.runs where id = t.run_id));
-
-    -- register_upload's ON CONFLICT touches updated_at and nothing else, which
-    -- is right for a puller re-seeing the same item and WRONG here: attempt 2
-    -- of a task can legitimately produce different bytes, and leaving the
-    -- resource pointed at attempt 1's file would be a failure that reports
-    -- success. Repoint it, and mark it stored -- an artifact is retrievable
-    -- the moment it lands and has no chunking stage to wait for.
-    select id into v_file from content.files where checksum = p_checksum;
-    update content.resources
-       set file_id = v_file, status = 'stored', updated_at = now()
-     where id = v_res
-       and (file_id is distinct from v_file or status <> 'stored');
-
+    -- still get a resource each. A retry can produce different bytes, so the
+    -- conflict repoints the file; an artifact is stored the moment it lands.
+    insert into content.resources (channel_id, file_id, title, org_id, owner_id, visibility,
+                                   metadata, external_id, status)
+    values (v_chan, v_file, coalesce(p_title, t.step_key), r.org_id, r.owner_id, v_vis,
+            jsonb_build_object('workflow', jsonb_build_object(
+                'run_id', t.run_id, 'task_id', t.id, 'step_key', t.step_key, 'attempt', t.attempts)),
+            p_task_id::text, 'stored')
+    on conflict (channel_id, external_id) do update
+        set file_id = excluded.file_id, status = 'stored', updated_at = now()
+    returning id into v_res;
     return v_res;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
