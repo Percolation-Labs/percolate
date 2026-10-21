@@ -660,6 +660,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','function','rbac.remove_org_member','uuid,uuid','revoking membership, which takes effect on the next request rather than at token expiry'),
 ('user-rbac','function','rbac.change_password','text,text','spec.md §4: a caller rotates their own password, old one required'),
 ('user-rbac','function','rbac.grant_role','uuid,text','spec.md §4: role assignment, gated on users/admin -- the escalation guard dev/tests/rbac/07 pins'),
+('user-rbac','function','rbac.define_role','text,text[],text','REM-1082: a role is defined by a function that refuses a permission no policy checks'),
+('user-rbac','function','rbac.grant_role_by_email','text,text','REM-1082: a role granted by email, refusing an address nobody holds'),
 -- The research platform (specs/research-platform/schema.sql).
 ('research-platform','function','engagement.add_comment','uuid,text,text','a person comments on an exact revision, optionally one of its claims'),
 ('research-platform','function','engagement.discuss','text,uuid,uuid,uuid,text,text','a person posts in a thread on a revision, a claim or a resource, with a stance (REM-507)'),
