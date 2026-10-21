@@ -11361,17 +11361,54 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Found setting up the dogfood stack for its first real user, 2026-09-11.
 -- The creator becomes the org's admin in the same transaction, so a new org is
 -- never memberless.
-create or replace function rbac.create_org(p_slug text, p_name text)
+-- AND AT A FIXED ID, BY THE INSTALLER (REM-1082). A sample or a setup script names its tenants by id, because its
+-- documents and tokens do, and it inserted the row to do it. With p_id it is the id, and a second call with the same
+-- id renames rather than failing, so a replay converges. The installer creates an org with no members; a person
+-- who creates one becomes its admin as before.
+drop function if exists rbac.create_org(text, text);
+create or replace function rbac.create_org(p_slug text, p_name text, p_id uuid default null)
 returns uuid as $$
 declare v_id uuid; v_user uuid := rbac.current_user_id();
 begin
-    if v_user is null or not rbac.has_permission(v_user, 'orgs', 'admin') then
+    if not (rbac.is_installer() or (v_user is not null and rbac.has_permission(v_user, 'orgs', 'admin'))) then
         raise exception 'creating an org needs orgs/admin' using errcode = '42501';
     end if;
-    insert into rbac.orgs (slug, name) values (p_slug, p_name) returning id into v_id;
-    insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin');
+    insert into rbac.orgs (id, slug, name) values (coalesce(p_id, uuidv7()), p_slug, p_name)
+    on conflict (id) do update set slug = excluded.slug, name = excluded.name
+    returning id into v_id;
+    if v_user is not null then
+        insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin')
+        on conflict (org_id, user_id) do nothing;
+    end if;
     insert into rbac.auth_events (user_id, event_type, detail)
-    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug));
+    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug,
+                                                      'by', coalesce(v_user::text, 'installer')));
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- A PERSON WITH NO PASSWORD (REM-1082): a sample's reader, or a service account a token is signed for. Active, since
+-- nobody verifies an address the installer typed. Idempotent on the id or the email, so a replay returns the same
+-- person. users:admin or the installer, like grant_role_by_email.
+create or replace function rbac.create_user(p_email text, p_id uuid default null)
+returns uuid as $$
+declare v_id uuid;
+begin
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise exception 'not authorized to create users'
+            using errcode = 'insufficient_privilege', hint = 'needs users:admin';
+    end if;
+    select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
+    if v_id is not null then
+        if p_id is not null and v_id <> p_id then
+            raise exception '% already belongs to user %, not %', p_email, v_id, p_id using errcode = 'unique_violation';
+        end if;
+        update rbac.users set status = 'active' where id = v_id and status <> 'active';
+        return v_id;
+    end if;
+    insert into rbac.users (id, email, status) values (coalesce(p_id, uuidv7()), btrim(p_email), 'active')
+    on conflict (id) do update set status = 'active'
+    returning id into v_id;
     return v_id;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -12450,7 +12487,7 @@ grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, a
 -- nothing and widened the anonymous surface by three functions -- exactly the
 -- allow-by-omission this section exists to refuse.
 grant execute on function rbac.add_org_member(uuid, uuid, text) to authenticated;
-grant execute on function rbac.create_org(text, text) to authenticated;
+grant execute on function rbac.create_org(text, text, uuid), rbac.create_user(text, uuid) to authenticated;
 grant execute on function rbac.remove_org_member(uuid, uuid) to authenticated;
 -- add_scope_columns() executes DDL and stays owner-only, like
 -- aiq.register_entity_table(): a deployment calls it during migration, never
@@ -36348,6 +36385,27 @@ begin
 end;
 $$;
 
+-- WHOSE ROW A READING SHOWS (graph.md §4, REM-1115). An assertion table is append-only and a reading takes one
+-- row per tuple. It took the latest, whoever wrote it, so any reader of a revision -- or an agent, or the question
+-- job proposing across everyone's claims -- wrote the latest row and replaced the work owner's confirmed label or
+-- stance in every read; withdraw_answer then let them erase it. §4 refuses exactly that ("latest wins would erase
+-- the disagreement Percolate exists to show"). So every reading orders by this first: a row by an owner of a work
+-- the row is evidenced by, or by the platform (a re-projection's retraction must still apply), outranks any row by
+-- anybody else, and within each rank the latest wins as before. Two owners disagreeing still show the later one,
+-- which is the dispute restate_relation lets the other side record. Nothing is rewritten, so an owner's reading
+-- that a later row once hid shows again with no repair. SECURITY DEFINER because the invoker reads that call it
+-- may see neither a transaction's actor nor the works' owners; it answers a yes or no about one actor, for revisions the caller may read.
+create or replace function claims.authoritative(p_tx bigint, p_evidence uuid, p_evidence2 uuid)
+returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select t.actor_kind = 'platform'
+        or exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                    where v.id in (p_evidence, p_evidence2) and w.owner_id = t.actor_id
+                      -- Only about a revision the caller may read, so it cannot be asked who owns a private work.
+                      and research.revision_readable(v.id))
+      from claims.tx t where t.id = p_tx;
+$$;
+
 -- The writer's answer to a rewording (graph.md §5, REM-483). The projection links a reworded key to its earlier claim
 -- as a proposal; the work's owner answers. "same" confirms that link, a later row. "new" retracts it, mints a claim
 -- for the new wording, links the occurrence to it, and when asked records that the new claim supersedes the old,
@@ -36431,8 +36489,9 @@ begin
             insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
             values (p_revision, p_claim_key, cur.claim_id, cur.method, cur.status, 'retract', t);
             for answer in select * from (
-                select distinct on (a.question_id) a.* from claims.answered a
-                 where a.evidence=p_revision and a.claim_key=p_claim_key order by a.question_id,a.id desc) x
+                select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+                 where a.evidence=p_revision and a.claim_key=p_claim_key
+                 order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
                 where x.op='assert' and x.claim_id=cur.claim_id loop
                 insert into claims.answered(claim_id,question_id,stance,status,op,evidence,claim_key,tx)
                 values(cur.claim_id,answer.question_id,answer.stance,answer.status,'retract',p_revision,p_claim_key,t),
@@ -36460,8 +36519,9 @@ begin
     -- The frame was projected while this occurrence still proposed the old identity. Move each active
     -- question assertion to the writer's new identity with two append-only rows, preserving the old reading.
     for answer in select * from (
-        select distinct on (a.question_id) a.* from claims.answered a
-         where a.evidence=p_revision and a.claim_key=p_claim_key order by a.question_id,a.id desc) x
+        select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+         where a.evidence=p_revision and a.claim_key=p_claim_key
+         order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
         where x.op='assert' and x.claim_id=cur.claim_id loop
         insert into claims.answered(claim_id,question_id,stance,status,op,evidence,claim_key,tx)
         values(cur.claim_id,answer.question_id,answer.stance,answer.status,'retract',p_revision,p_claim_key,t),
@@ -37224,9 +37284,22 @@ declare
     t      bigint;
     v_id   bigint;
 begin
-    select a.* into v_last from claims.answered a
+    -- THE CALLER'S OWN STANCE, unless they own the work (REM-1115). This took the latest row whoever wrote it, so a
+    -- reader who first proposed a stance on someone else's revision could then withdraw "it" and, with the readings
+    -- taking the latest row, leave the writer's confirmed answer showing nothing. A non-owner withdraws their own
+    -- latest row; an owner withdraws what the readings show, which claims.authoritative ranks first.
+    select a.* into v_last from claims.answered a join claims.tx x on x.id = a.tx
      where a.evidence = p_revision and a.claim_key = p_claim_key and a.question_id = p_question
-     order by a.id desc limit 1;
+       and (x.actor_id = v_user
+            or exists (select 1 from research.revisions v join research.works w on w.id = v.work_id
+                        where v.id = p_revision and w.owner_id = v_user))
+     order by claims.authoritative(a.tx, a.evidence, null) desc, a.id desc limit 1;
+    if v_last.id is null and exists (select 1 from claims.answered a
+                                      where a.evidence = p_revision and a.claim_key = p_claim_key
+                                        and a.question_id = p_question and a.op = 'assert') then
+        raise insufficient_privilege using message = 'Only whoever made a stance, or the work''s owner, withdraws it',
+            hint = 'no_grant';
+    end if;
     if v_last.id is null or v_last.op = 'retract' then
         raise no_data_found using message = 'No stance to withdraw';
     end if;
@@ -37266,7 +37339,8 @@ language sql stable security definer set search_path = pg_catalog, public as $$
                a.claim_id, a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key, a.p
           from claims.answered a join readable using (evidence) join claims.tx t on t.id = a.tx
          where t.at <= p_at
-         order by a.claim_id, a.question_id, t.at desc, a.id desc),
+         order by a.claim_id, a.question_id, claims.authoritative(a.tx, a.evidence, null) desc,
+                  t.at desc, a.id desc),
     live as (
         select l.*, w.public_id as work
           from latest l
@@ -37426,7 +37500,8 @@ begin
             select distinct on (a.claim_id, a.question_id) a.question_id, a.stance, a.op, a.evidence
               from claims.answered a join claims.tx t on t.id = a.tx
              where a.question_id in (select id from near) and t.at <= $3
-             order by a.claim_id, a.question_id, t.at desc, a.id desc)
+             order by a.claim_id, a.question_id, claims.authoritative(a.tx, a.evidence, null) desc,
+                      t.at desc, a.id desc)
         select n.id, n.search_text, n.d, n.d <= $4,
                count(*) filter (where l.stance = 'yes' and l.op = 'assert')::int,
                count(*) filter (where l.stance = 'no' and l.op = 'assert')::int,
@@ -37453,12 +37528,12 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         select distinct on (a.claim_id) a.claim_id, a.stance, a.op
           from claims.answered a join claims.tx t on t.id = a.tx
          where a.question_id = p_question and t.at <= p_from
-         order by a.claim_id, t.at desc, a.id desc),
+         order by a.claim_id, claims.authoritative(a.tx, a.evidence, null) desc, t.at desc, a.id desc),
     at_to as (
         select distinct on (a.claim_id) a.claim_id, a.stance, a.op, a.evidence, a.claim_key, t.at, t.actor_kind
           from claims.answered a join claims.tx t on t.id = a.tx
          where a.question_id = p_question and t.at <= p_to
-         order by a.claim_id, t.at desc, a.id desc),
+         order by a.claim_id, claims.authoritative(a.tx, a.evidence, null) desc, t.at desc, a.id desc),
     paired as (
         select coalesce(n.claim_id, f.claim_id) as claim, n.evidence, n.claim_key,
                case when f.op = 'assert' and f.stance <> 'unknown' then f.stance end as s_then,
@@ -37688,7 +37763,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         select distinct on (a.claim_id, a.question_id) a.question_id, a.stance, a.op
           from claims.answered a join claims.tx t on t.id = a.tx
          where a.question_id in (select question_id from link) and t.at <= p_at
-         order by a.claim_id, a.question_id, t.at desc, a.id desc)
+         order by a.claim_id, a.question_id, claims.authoritative(a.tx, a.evidence, null) desc,
+                  t.at desc, a.id desc)
     select l.question_id, q.search_text, l.status, l.p, l.at,
            count(*) filter (where s.stance = 'yes' and s.op = 'assert')::int,
            count(*) filter (where s.stance = 'no' and s.op = 'assert')::int,
@@ -38488,7 +38564,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                    t.at, t.actor_kind
               from claims.relations r join claims.tx t on t.id = r.tx
              where (r.src = p_claim or r.dst = p_claim) and t.at <= p_at
-             order by r.src, r.predicate, r.dst, r.evidence, r.evidence2, r.keys, r.id desc) c
+             order by r.src, r.predicate, r.dst, r.evidence, r.evidence2, r.keys,
+                      claims.authoritative(r.tx, r.evidence, r.evidence2) desc, r.id desc) c
      where c.op = 'assert';
 $$;
 
@@ -38500,7 +38577,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       from (select distinct on (a.evidence, a.question_id) a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key
               from claims.answered a join claims.tx t on t.id = a.tx
              where a.claim_id = p_claim and t.at <= p_at
-             order by a.evidence, a.question_id, a.id desc) x
+             order by a.evidence, a.question_id, claims.authoritative(a.tx, a.evidence, null) desc,
+                      a.id desc) x
      where x.op = 'assert';
 $$;
 
@@ -39008,11 +39086,15 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
          t as (select distinct on (e.claim_key) e.claim_key, e.claim_id, e.method, e.status, e.op from claims.expresses e
                 where e.revision_id = p_to and e.part = 1 order by e.claim_key, e.id desc),
          fr as (select distinct on (r.src, r.predicate, r.dst, r.keys) r.src, r.predicate, r.dst, r.op
-                  from claims.relations r where r.evidence = p_from and r.evidence2 is null
-                 order by r.src, r.predicate, r.dst, r.keys, r.id desc),
+                  from claims.relations r join claims.tx t on t.id = r.tx
+                 where r.evidence = p_from and r.evidence2 is null
+                 order by r.src, r.predicate, r.dst, r.keys,
+                          claims.authoritative(r.tx, r.evidence, null) desc, r.id desc),
          tr as (select distinct on (r.src, r.predicate, r.dst, r.keys) r.src, r.predicate, r.dst, r.op
-                  from claims.relations r where r.evidence = p_to and r.evidence2 is null
-                 order by r.src, r.predicate, r.dst, r.keys, r.id desc)
+                  from claims.relations r join claims.tx t on t.id = r.tx
+                 where r.evidence = p_to and r.evidence2 is null
+                 order by r.src, r.predicate, r.dst, r.keys,
+                          claims.authoritative(r.tx, r.evidence, null) desc, r.id desc)
     select case when f.claim_id is null then 'added'
                 when t.method = 'unchanged' then 'carried'
                 else 'reworded' end,
@@ -39044,7 +39126,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         select distinct on (a.claim_id) a.claim_id, a.question_id, a.stance, a.status, a.op, a.evidence, a.claim_key, t.at
           from claims.answered a join claims.tx t on t.id = a.tx
          where a.question_id in (select id from qs) and t.at <= p_at
-         order by a.claim_id, t.at desc, a.id desc)
+         order by a.claim_id, claims.authoritative(a.tx, a.evidence, null) desc, t.at desc, a.id desc)
     select l.stance, jsonb_agg(jsonb_build_object('claim', l.claim_id, 'question', l.question_id,
                                                   'revision_id', l.evidence, 'claim_key', l.claim_key,
                                                   'status', l.status) order by l.at, l.claim_id)
@@ -39089,7 +39171,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
            (select count(*)::int from claims.frames f where f.revision_id = h.rev),
            (select count(distinct a.claim_key)::int from
                (select distinct on (x.claim_key,x.question_id) x.* from claims.answered x join claims.tx t on t.id=x.tx
-                 where x.evidence=h.rev and t.at<=now() order by x.claim_key,x.question_id,x.id desc) a
+                 where x.evidence=h.rev and t.at<=now()
+                 order by x.claim_key,x.question_id,claims.authoritative(x.tx, x.evidence, null) desc,x.id desc) a
              where a.op='assert' and exists(select 1 from claims.occurrences_at(a.claim_id,now(),array[h.rev]) o
                                             where o.claim_key=a.claim_key))
       from (select research.visible_head(w.id) as rev from research.works w where w.public_id = p_public_id) h
@@ -39302,7 +39385,8 @@ begin
       from (select distinct on (x.evidence, x.claim_key, x.question_id) x.*
               from claims.answered x join claims.tx t on t.id = x.tx
              where x.evidence = any(selected) and t.at <= cutoff
-             order by x.evidence, x.claim_key, x.question_id, x.id desc) a
+             order by x.evidence, x.claim_key, x.question_id,
+                      claims.authoritative(x.tx, x.evidence, null) desc, x.id desc) a
      where a.op = 'assert' and a.claim_id = p_claim
        and exists (select 1 from claims.occurrences_at(p_claim, cutoff, selected) o
                     where (o.revision_id, o.claim_key) = (a.evidence, a.claim_key));
@@ -39388,6 +39472,8 @@ grant execute on function claims.relations_at(uuid, timestamptz), claims.claim(u
                           claims.challenged_through(uuid, timestamptz), claims.history(uuid),
                           claims.candidates(uuid, text, float8, int, vector, text),
                           claims.revision_diff(uuid, uuid) to authenticated;
+-- The readings above call it as their invoker (REM-1115).
+grant execute on function claims.authoritative(bigint, uuid, uuid) to authenticated;
 
 -- REM-590. Detached execution identity survives workflow retention. No prompts, credentials or raw SQL
 -- enter the public projection. Unknown provider versions and missing results remain unknown.

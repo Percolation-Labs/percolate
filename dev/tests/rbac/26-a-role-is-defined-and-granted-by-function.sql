@@ -75,6 +75,33 @@ begin
         null;
     end;
 
+    -- 4a. An org and a passwordless reader at fixed ids, which is what a sample needs, and a replay converges.
+    if rbac.create_org('rem1082-two', 'Two', '00000000-0000-4000-8000-000000108204') is distinct from
+       '00000000-0000-4000-8000-000000108204'::uuid then
+        raise exception 'create_org did not use the fixed id';
+    end if;
+    perform rbac.create_org('rem1082-two', 'Two, renamed', '00000000-0000-4000-8000-000000108204');
+    if (select name from rbac.orgs where id = '00000000-0000-4000-8000-000000108204') is distinct from 'Two, renamed' then
+        raise exception 'a replayed create_org did not converge';
+    end if;
+    if exists (select 1 from rbac.org_members where org_id = '00000000-0000-4000-8000-000000108204') then
+        raise exception 'an org the installer created has a member nobody chose';
+    end if;
+    if rbac.create_user('rem1082-reader@example.test', '00000000-0000-4000-8000-000000108205')
+       is distinct from '00000000-0000-4000-8000-000000108205'::uuid
+       or rbac.create_user('rem1082-reader@example.test', '00000000-0000-4000-8000-000000108205')
+       is distinct from '00000000-0000-4000-8000-000000108205'::uuid then
+        raise exception 'create_user did not return the same reader on a replay';
+    end if;
+    if (select status from rbac.users where id = '00000000-0000-4000-8000-000000108205') is distinct from 'active' then
+        raise exception 'the reader is not active';
+    end if;
+    begin
+        perform rbac.create_user('rem1082-ana@example.test', '00000000-0000-4000-8000-000000108206');
+        raise exception 'create_user moved an email to another id';
+    exception when unique_violation then null;
+    end;
+
     -- 4. Enrolment from the installer session, through the function.
     perform rbac.add_org_member('00000000-0000-4000-8000-000000108203', uid);
     if not exists (select 1 from rbac.org_members where org_id = '00000000-0000-4000-8000-000000108203' and user_id = uid) then
@@ -95,6 +122,16 @@ begin
     begin
         perform rbac.grant_role_by_email('rem1082-ben@example.test', 'rem1082-reviewer');
         raise exception 'an ordinary person granted themselves a role';
+    exception when insufficient_privilege then null;
+    end;
+    begin
+        perform rbac.create_user('rem1082-mallory@example.test');
+        raise exception 'an ordinary person created a user';
+    exception when insufficient_privilege then null;
+    end;
+    begin
+        perform rbac.create_org('rem1082-mine', 'Mine');
+        raise exception 'an ordinary person created an org';
     exception when insufficient_privilege then null;
     end;
 end $$;
