@@ -317,7 +317,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('engagement.withdraw_comment(uuid,text)', 'rbac.require',
  'engagement:insert, and only the author''s own comment'),
 ('engagement.moderate_comment(uuid,text)', 'rbac.require',
- 'engagement:moderate, a separately granted human-only capability'),
+ 'engagement:moderate, a separately granted human-only capability, and only on a comment whose target the moderator can read (REM-1113)'),
 ('engagement.set_like(uuid,boolean)', 'rbac.require',
  'engagement:insert on a readable comment, never the caller''s own'),
 ('engagement.revision_signals(uuid)', 'research.revision_readable',

@@ -16,6 +16,7 @@
 --   9  the status line says spent, estimated and cap
 --  10  an owner's own policy row wins over the deployment's
 --  11  an unbounded fan-out's estimate is a floor, so it waits for approval even under every limit
+--  12  a sub-workflow's child run is not held: its parent's run was the one decided, and the parent finishes
 --
 -- The estimate and the spend are REM-1125's (workflow/32): its run_estimates row decides the run through
 -- trg_run_estimates_decide, and each attempt's record_task_usage checks the cap through trg_task_usage_budget.
@@ -60,6 +61,15 @@ steps:
   - id: note
     sql: "select 1 as n"
 $y$);
+
+select workflow.define_yaml($y$
+name: wf33_child
+steps:
+  - id: n
+    sql: "select 1 as n"
+$y$);
+insert into workflow.definitions (name, spec) values
+    ('wf33_parent', '{"steps":[{"key":"call","kind":"sub_workflow","queue":"none","input":{"workflow":"wf33_child"}}]}'::jsonb);
 
 do $$
 declare
@@ -170,6 +180,16 @@ begin
            est_wall_seconds = 1
      where run_id = r and step_key is null;
     perform pg_temp.check(pg_temp.hold(r) = 'awaiting_approval', '11 an unbounded floor waits: ' || pg_temp.hold(r));
+
+    -- 12
+    r := workflow.start_workflow('wf33_parent', '{}'::jsonb);
+    perform pg_temp.estimate(r, 0.10, 100, 10);
+    perform pg_temp.check(pg_temp.hold(r) = 'none', '12 the parent starts within the limits');
+    perform pg_temp.check((select pg_temp.hold(c.id) from workflow.runs c
+                            where c.parent_task_id = (select id from workflow.tasks where run_id = r and step_key = 'call'))
+                          = 'none', '12 its child run is not held');
+    perform pg_temp.check((select status from workflow.runs where id = r) = 'succeeded',
+                          '12 and the parent finishes: ' || (select status from workflow.runs where id = r));
 end $$;
 
 rollback;

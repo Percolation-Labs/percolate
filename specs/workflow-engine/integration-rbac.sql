@@ -1658,7 +1658,8 @@ revoke execute on function workflow.plan_probe(text, int)    from authenticated;
 -- is waiting for a person, as a signal step's row does, and nothing fails.
 --
 -- No policy row, no change: a run starts unheld, its estimate is informational and its budget whatever it was given.
--- A child run (parent_task_id set) is not held again; its parent's run was the one decided.
+-- A child run is not held: its parent's run was the one decided. start_child_workflow names the parent only after
+-- start_workflow returns, so it says so for the insert in workflow.starting_child.
 --
 -- Written only by the deployment's operator: nothing here is granted to `authenticated`, because a person who could
 -- write their own policy row could approve their own runs by raising the limit.
@@ -1694,7 +1695,7 @@ revoke execute on function workflow.run_policy_for(uuid) from public;
 create or replace function workflow.apply_run_policy_on_start() returns trigger as $$
 declare v_p workflow.run_policies;
 begin
-    if new.parent_task_id is not null then
+    if new.parent_task_id is not null or nullif(current_setting('workflow.starting_child', true), '') is not null then
         return new;
     end if;
     v_p := workflow.run_policy_for(new.owner_id);

@@ -1992,20 +1992,55 @@ $$ language plpgsql;
 
 -- Current form. It reached this shape in section 21g (Sub-workflows had never executed.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
+-- A RUN THE ENGINE STARTS FOR SOMEBODY STARTS AS THEM (REM-1121). tick fires a
+-- person's schedule and start_child_workflow starts a sub_workflow when a
+-- worker completes its parent task; both run with no claims, so the run was
+-- created with no owner and the sql, p8ql and matrix steps start_workflow
+-- drains on the spot ran as the definer, past row security, before the owner
+-- was stamped on afterwards. The name resolved as an operator too, so a child
+-- could name a definition its owner cannot see. So the engine puts the
+-- starter's claims in place for the start -- the same sub, actor and
+-- credential a request from them would carry, which set_run_owner reads --
+-- and returns what was there, for the caller to restore. Not granted to
+-- anybody: only the engine's own SECURITY DEFINER functions call it.
+create or replace function workflow.claims_as(p_owner uuid, p_actor text, p_credential uuid)
+returns text as $$
+declare v_was text := current_setting('request.jwt.claims', true);
+begin
+    perform set_config('request.jwt.claims',
+        -- execute_for's shape exactly, so a step drained here and a step run
+        -- later by execute_for see one caller (rbac/16 holds both).
+        jsonb_strip_nulls(jsonb_build_object(
+            'sub', p_owner, 'role', 'authenticated',
+            'actor', case when p_actor in ('agent', 'platform') then p_actor end,
+            'api_key_id', p_credential))::text, true);
+    return coalesce(v_was, '');
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
 create or replace function workflow.start_child_workflow(p_task_id uuid, p_workflow_name text, p_input jsonb)
 returns uuid as $$
 declare
     v_child  uuid;
     v_status text;
     v_ctx    jsonb;
+    v_parent workflow.runs;
+    v_was    text;
 begin
+    -- AS THE PARENT'S OWNER when the engine is the caller (REM-1121): a
+    -- worker completing the parent task carries no claims. A start from
+    -- inside the owner's own request already carries theirs.
+    select r.* into v_parent from workflow.runs r join workflow.tasks t on t.run_id = r.id
+     where t.id = p_task_id;
+    if v_parent.owner_id is not null and rbac.current_user_id() is null then
+        v_was := workflow.claims_as(v_parent.owner_id, v_parent.started_actor, v_parent.started_credential_id);
+    end if;
     -- STARTABLE, not merely present: the same question start_workflow asks one
     -- call along, so this cannot admit a run that the starter then refuses.
     if (workflow.current_definition(p_workflow_name)).id is null then
-        -- Not an authorization message, and the distinction matters: this
-        -- runs as `worker`, which rbac.is_operator() admits, so may_start()
-        -- does not filter here. A definition missing from THIS path is
-        -- genuinely unregistered.
+        -- Run as the parent's owner (above), so a definition they cannot
+        -- see is as missing here as one nobody registered; a parent with no
+        -- owner is an operator's and sees every one.
         raise exception
             'sub_workflow step names workflow %, which is not registered', p_workflow_name;
     end if;
@@ -2019,12 +2054,30 @@ begin
     -- different traces in any collector reading them. The one place in this
     -- engine where a run is provably caused by another run is the one place
     -- the trace was not carried across.
-    v_child := workflow.start_workflow(
-        p_workflow_name, p_input, null,
-        (select r.trace_id from workflow.runs r
-           join workflow.tasks t on t.run_id = r.id
-          where t.id = p_task_id));
-
+    --
+    -- The run about to be inserted is a child, which parent_task_id says only after start_workflow returns. A run
+    -- policy (integration-rbac.sql, REM-1126) reads this so it does not hold a child its parent was decided for.
+    perform set_config('workflow.starting_child', p_task_id::text, true);
+    begin
+        v_child := workflow.start_workflow(
+            p_workflow_name, p_input, null,
+            (select r.trace_id from workflow.runs r
+               join workflow.tasks t on t.run_id = r.id
+              where t.id = p_task_id));
+    exception when others then
+        -- Restored on both paths: a worker's complete_task cascade can start
+        -- several children in one transaction, and a failed one must not
+        -- leave the next running as this parent's owner.
+        perform set_config('workflow.starting_child', '', true);
+        if v_was is not null then
+            perform set_config('request.jwt.claims', v_was, true);
+        end if;
+        raise;
+    end;
+    perform set_config('workflow.starting_child', '', true);
+    if v_was is not null then
+        perform set_config('request.jwt.claims', v_was, true);
+    end if;
     update workflow.runs set parent_task_id = p_task_id where id = v_child;
     update workflow.tasks set child_run_id = v_child where id = p_task_id;
 
@@ -4011,6 +4064,7 @@ declare
     v_missed  timestamp;
     v_guard   int;
     v_due     boolean;
+    v_was     text;
 begin
     for s in
         select * from workflow.schedules
@@ -4107,12 +4161,19 @@ begin
             -- than a second mechanism here: if this transaction is retried,
             -- start_workflow() returns the existing run instead of a second
             -- one.
+            -- As the schedule's owner, from its first step (REM-1121): see
+            -- workflow.claims_as. A schedule with no owner is an operator's.
+            v_was := case when s.owner_id is not null
+                          then workflow.claims_as(s.owner_id, s.created_actor, s.created_credential_id) end;
             v_run_id := workflow.start_workflow(
                 s.workflow_name,
                 s.input,
                 'schedule:' || s.name || ':' ||
                     to_char(v_minute at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
                 null);
+            if v_was is not null then
+                perform set_config('request.jwt.claims', v_was, true);
+            end if;
 
             -- 21j: authority follows provenance. A schedule already has an
             -- owner, set from the verified JWT of whoever created it, and the
@@ -4141,7 +4202,13 @@ begin
         exception when others then
             -- One broken schedule must not stop the other schedules from
             -- firing. The subtransaction rolls back, the record of WHY does
-            -- not: this update runs after the rollback.
+            -- not: this update runs after the rollback. The rollback also
+            -- undoes the owner's claims, but the next schedule in this loop
+            -- must not depend on that (integration-rbac §execute_for says
+            -- why), so they are restored here as well (REM-1121).
+            if v_was is not null then
+                perform set_config('request.jwt.claims', v_was, true);
+            end if;
             update workflow.schedules
                set last_tick_at  = v_minute,
                    last_error    = sqlerrm,
