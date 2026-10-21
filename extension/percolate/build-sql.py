@@ -457,9 +457,9 @@ NOT_SHIPPED = {
     "trace-field/schema.sql":
         "not a sixth subsystem -- specs/README.md's scope test records that "
         "removing it leaves all five doing their jobs, and its proposals compile "
-        "to ordinary workflow.tasks rows. The additions it wants are carried, "
-        "with the trigger that would promote each, in workflow-engine/roadmap.md "
-        "\u00a75; they get built there or deleted there. Shipping the schema now "
+        "to ordinary workflow.tasks rows. The additions it wants are workflow-engine "
+        "step kinds nobody has committed to; they get built there or deleted there. "
+        "Shipping the schema now "
         "would put tables in the product ahead of that decision.",
     "world-model-ingestion/tradecraft.sql":
         "grading and corroboration over evidence classes. Core-eligible under "
