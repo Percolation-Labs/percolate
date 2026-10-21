@@ -19923,11 +19923,39 @@ $$ language plpgsql stable;
 -- facets it captured, so a CI step can print what changed rather than only
 -- that something did.
 --
--- Caller-scoped facets are captured as the OWNER sees them, and that is the
--- honest definition: the revision describes what this DATABASE is, while a
--- caller's read describes what that caller can reach. A read of a
+-- Caller-scoped facets are captured as a signed-out reader sees them (below):
+-- the revision describes what this DATABASE says to anyone, while a caller's
+-- read describes what that caller can reach. A read of a
 -- caller-scoped facet therefore carries `scoped: true` next to the global
 -- revision, so nobody mistakes the hash for a hash of what they received.
+--
+-- AS A SIGNED-OUT READER WOULD SEE IT, not as the owner (REM-1122). The stored
+-- document is readable by every signed-in caller (the grant at the foot of
+-- this file), and a facet's provider narrows by caller -- the workflow facet
+-- lists the agents and definitions its caller may read -- so a capture run as
+-- an operator stored the names of everybody's private agents and workflows
+-- where anyone could select them. So capture renders with claims that name no
+-- user and are not an operator's, and schema_drift renders the same way, so
+-- the two still compare one view. The claims are restored before returning.
+create or replace function aiq.render_facet_public(p_facet text)
+returns jsonb as $$
+declare
+    v_was text := current_setting('request.jwt.claims', true);
+    v     jsonb;
+begin
+    perform set_config('request.jwt.claims', '{"role":"web_anon"}', true);
+    begin
+        v := aiq.render_facet(p_facet, null);
+    exception when others then
+        perform set_config('request.jwt.claims', coalesce(v_was, ''), true);
+        raise;
+    end;
+    perform set_config('request.jwt.claims', coalesce(v_was, ''), true);
+    return v;
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+revoke execute on function aiq.render_facet_public(text) from public;
+
 create or replace function aiq.capture_schema_revisions()
 returns table (facet text, revision int, hash text) as $$
 declare
@@ -19938,7 +19966,7 @@ declare
     v_rev  int;
 begin
     for f in select * from aiq.schema_facets order by name loop
-        v_doc  := aiq.render_facet(f.name, null);
+        v_doc  := aiq.render_facet_public(f.name);
         v_hash := md5(v_doc::text);
 
         select r.hash into v_last from aiq.schema_revisions r
@@ -19961,16 +19989,16 @@ $$ language plpgsql volatile security definer set search_path = pg_catalog, publ
 create or replace function aiq.schema_drift()
 returns table (facet text, live_hash text, recorded_hash text, recorded_at timestamptz) as $$
     select f.name,
-           md5(aiq.render_facet(f.name, null)::text),
+           md5(aiq.render_facet_public(f.name)::text),
            r.hash,
            r.captured_at
     from aiq.schema_facets f
     left join lateral (
         select hash, captured_at from aiq.schema_revisions
         where facet = f.name order by revision desc limit 1) r on true
-    where r.hash is distinct from md5(aiq.render_facet(f.name, null)::text)
+    where r.hash is distinct from md5(aiq.render_facet_public(f.name)::text)
     order by f.name;
-$$ language sql stable security definer set search_path = pg_catalog, public;
+$$ language sql volatile security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 13c. The read. `SCHEMA` with no argument is the index.
@@ -20279,9 +20307,17 @@ begin
                     nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536),
                 'max_fanout', 'declared per matrix step; there is no global default, '
                               'because the ceiling is the thing the author must think about'),
+            -- The definitions THIS CALLER may read, as definitions_scoped
+            -- says (REM-1122). This listed every one, so a signed-in caller
+            -- learned the names of other people's private workflows --
+            -- including the per-source ones save_api_source compiles.
             'definitions', coalesce((select jsonb_agg(jsonb_build_object(
-                    'name', name, 'version', version) order by name, version)
-                from workflow.definitions where deleted_at is null), '[]'::jsonb)),
+                    'name', d.name, 'version', d.version) order by d.name, d.version)
+                from workflow.definitions d
+                where d.deleted_at is null
+                  and (rbac.is_operator()
+                       or rbac.may_read(d.owner_id, d.org_id, d.visibility)
+                       or rbac.has_permission(rbac.current_user_id(), 'workflow_definitions', 'select'))), '[]'::jsonb)),
         'examples', aiq.facet_examples('workflow'));
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
@@ -20675,7 +20711,10 @@ grant execute on function aiq.schema_graph(text)   to authenticated;
 -- Capture writes history, so it is the operator's, not the caller's. It is
 -- the same shape as workflow.reap_stale_tasks: scheduled maintenance, granted
 -- to `scheduler`, callable from CI beside ../../surface.sql.
-grant execute on function aiq.capture_schema_revisions() to scheduler;
+-- No grant to scheduler (REM-1122): it holds no USAGE on aiq, so the grant
+-- that was here could not be used. Capture is an operator's act, from CI.
+-- Revoked rather than only dropped, or an upgraded database keeps it.
+revoke execute on function aiq.capture_schema_revisions() from scheduler;
 grant execute on function aiq.schema_drift() to scheduler, authenticated;
 revoke execute on function aiq.register_schema_facet(text, text, text, text, boolean) from public;
 revoke execute on function aiq.register_schema_example(text, text, text, text, text, int) from public;
