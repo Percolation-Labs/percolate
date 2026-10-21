@@ -774,6 +774,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','function','claims.assert_relation','text,text,text,uuid,uuid,text,jsonb,text','specs/claims/graph.md §11: the owner of the asserting revision states a relation between two claims; an agent proposes and is refused confirmed (REM-474)'),
 ('claims','function','claims.restate_relation','bigint,text,boolean,text','specs/claims/graph.md §11: a later status or a retraction of a relation, as a new row (REM-474)'),
 ('claims','table','claims.tx',null,'specs/claims/graph.md §9: a transaction''s id, time and actor kind, behind a link or relation the caller may read; nothing else of it is granted (REM-475)'),
+('claims','function','claims.authoritative','bigint,uuid,uuid','specs/claims/graph.md §4: whether a claims transaction is the platform''s or by an owner of a revision the caller may read, which orders every reading so another reader''s row never replaces an owner''s; called by the invoker readings (REM-1115)'),
 ('claims','function','claims.relations_at','uuid,timestamptz','specs/claims/graph.md §10: the relations touching one claim as they stood at a time, under the caller''s row security (REM-475)'),
 ('claims','function','claims.identity_set','uuid,timestamptz','specs/claims/graph.md §5: the claims joined by confirmed same_as the caller may read (REM-475)'),
 ('claims','function','claims.claim','uuid,timestamptz','specs/claims/graph.md §10: a claim, its occurrences and identity set; null when the caller may read no occurrence (REM-475)'),
