@@ -8,7 +8,7 @@ worked example in the documentation authors the first one.
 
 Until REM-70 each tool that read a document mapped it onto columns itself, and
 each knew one dialect: `core/samples.py` and `percolate agent push` knew
-`description`/`properties`, `p8-subsystems/packages/apply.py` knew a package
+`description`/`properties`, our package loader knew a package
 manifest's file-path `output_schema`, and `agentic.upsert_agent` accepted any
 document and dropped the keys it did not read. So a manifest written the way the
 documentation writes an agent installed, reported success, and left an agent with

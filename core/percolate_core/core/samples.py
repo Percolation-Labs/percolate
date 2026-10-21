@@ -367,7 +367,7 @@ async def apply_plugin(conn: Any, doc: dict[str, Any]) -> list[str]:
     them -- a schema document's `description` and `properties` onto the row's
     `system_prompt` and `structured_output_schema` -- because `upsert_agent` read
     only the row keys and dropped the rest in silence. Three loaders did that,
-    each knowing one dialect, which is REM-70: `p8-subsystems/packages/apply.py`
+    each knowing one dialect, which is REM-70: our package loader
     knew a package's file-path `output_schema` and not this one, so the same
     extractor installed differently depending on which tool applied it, and a
     package manifest written the documented way installed an agent with no prompt

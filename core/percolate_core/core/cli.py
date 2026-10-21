@@ -770,3 +770,71 @@ async def _first_embed_verdict(conn: Any, resource_ids: list[str],
         if asyncio.get_running_loop().time() > deadline:
             return None, False
         await asyncio.sleep(1.0)
+
+
+# ---------------------------------------------------------------------------
+# `percolate package apply` -- install a package, as the user who will own it.
+# ---------------------------------------------------------------------------
+
+package_app = typer.Typer(help="Install a package.", no_args_is_help=True)
+
+
+@package_app.command("apply")
+def package_apply(
+    path: str = typer.Argument(..., help="The package directory (holds manifest.yaml), or the manifest file."),
+    owner: str | None = typer.Option(None, help="User UUID who owns its API sources and scheduled runs."),
+    dsn: str | None = typer.Option(None, help="Owner-level DSN. Default: P8_ADMIN_DSN, then P8_DSN."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Read and resolve the manifest, write nothing."),
+) -> None:
+    """Apply a package through `percolate.apply_package`.
+
+    The database decides everything a package means; this reads the YAML,
+    inlines the files it points at, applies its storage with the schema check
+    in the same transaction, and calls the function. With --owner, the call
+    runs as that user: an API source package needs one, and its source and
+    runs belong to them.
+    """
+    import json
+    import uuid as _uuid
+    from pathlib import Path
+
+    from . import packages
+
+    try:
+        who = _uuid.UUID(owner) if owner else None
+    except ValueError:
+        typer.secho(f"--owner {owner!r} is not a UUID", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    try:
+        manifest, root = packages.load(Path(path))
+    except ImportError:
+        typer.secho("pip install 'percolate-core[sample]' (reading a manifest needs pyyaml)",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    except packages.PackageError as err:
+        typer.secho(str(err), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if dry_run:
+        typer.echo(json.dumps(manifest, indent=2))
+        return
+    chosen = dsn or os.environ.get("P8_ADMIN_DSN") or os.environ.get("P8_DSN")
+    if not chosen:
+        typer.secho("no DSN: pass --dsn, or set P8_ADMIN_DSN (or P8_DSN)", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    async def _run() -> Any:
+        conn = await _connect(chosen)
+        try:
+            return await packages.apply(conn, manifest, root, who)
+        finally:
+            await conn.close()
+
+    try:
+        result = asyncio.run(_run())
+    except packages.PackageError as err:
+        typer.secho(str(err), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    except Exception as err:  # the database's refusal, in its own words: asyncpg's text carries DETAIL and HINT
+        typer.secho(f"{type(err).__name__}: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(json.loads(result), indent=2) if isinstance(result, str) else result)
