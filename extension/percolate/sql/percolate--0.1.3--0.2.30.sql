@@ -9921,7 +9921,11 @@ declare
 begin
     select d.name, array(select s->>'key' from jsonb_array_elements(coalesce(d.spec->'steps', '[]')) s)
       into v_name, v_steps
-      from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id where r.id = p_run_id;
+      from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id where r.id = p_run_id
+       -- A dry run's own shadow run is the estimate, not a run to estimate, and estimating it would recurse.
+       -- Known by the setting estimate_unknown_steps holds while it starts one, never by the run's input,
+       -- which is the caller's to write.
+       and nullif(current_setting('workflow.starting_dry_run', true), '') is null;
     if v_name is null then
         return;
     end if;
@@ -9946,6 +9950,8 @@ begin
            e.tasks, e.wall, e.requests, e.input_tokens, e.output_tokens, e.cost_usd, 'history/median-20'
       from est e
     on conflict (run_id, step_key) do nothing;
+    -- What history did not know, the plan's shape and a dry run fill.
+    perform workflow.estimate_unknown_steps(p_run_id);
     perform workflow.sum_run_estimate(p_run_id);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -9961,7 +9967,7 @@ language sql security definer set search_path = pg_catalog, public as $$
                 -- Any unbounded step makes the run's totals a floor, and says so.
                 when bool_or(basis = 'dry_run_unbounded') then 'dry_run_unbounded'
                 when bool_and(basis = 'history') then 'history'
-                when bool_and(basis = 'dry_run') then 'dry_run' else 'mixed' end,
+                when bool_and(basis in ('dry_run', 'dry_run_bound')) then 'dry_run' else 'mixed' end,
            case when bool_or(basis = 'none') then null else sum(est_tasks) end,
            case when bool_or(basis = 'none') then null else sum(est_wall_seconds) end,
            case when bool_or(basis = 'none') then null else sum(est_requests) end,
@@ -10005,6 +10011,169 @@ language sql security definer set search_path = pg_catalog, public as $$
      where e.run_id = p_run_id and e.step_key is null;
 $$;
 
+-- A STEP NOBODY HAS RUN, estimated from what it is (REM-1125, part 2).
+--
+-- Only an agent step (an http_call to the agent runtime, workflow.agent_name_path)
+-- spends model tokens a stand-in can stand in for. Every other step is estimated
+-- from the plan alone, as one task and no tokens (a decision as one request to its
+-- decider), and its wall time is left unknown rather than invented. A matrix fans out to the bound it declares
+-- (max_fanout): basis dry_run_bound. A stand-in model returns minimal lists, so
+-- what it returns is never taken as the count. workflow.validate_matrix_steps
+-- already refuses a matrix with no max_fanout, so every fan-out a plan can declare
+-- is bounded, a model-written plan included. dry_run_unbounded, a floor that the
+-- run row carries up, is kept for a fan-out with no declared ceiling should one
+-- ever be admitted.
+--
+-- The model steps are dry-run: a SHADOW RUN of a generated definition holding
+-- only them, each call flagged dry_run, which the runtime answers on a free
+-- stand-in model (pydantic-ai's TestModel) with tools off. Its own run carries
+-- dry_run_of, so it is not estimated or held, and it gets the original run's
+-- budget, because a plan that reads its budget changes shape. When it ends,
+-- workflow.record_dry_run writes what each step spent into the original, times
+-- the step's fan-out.
+-- An agent step: the one kind a stand-in model can run for free. A decision is
+-- a paid call to its decider, so it is never run in a dry run; it is estimated
+-- from its shape as one request, the decider's price per call.
+create or replace function workflow.is_model_step(p_step jsonb) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select p_step->>'kind' = 'http_call' and workflow.agent_name_path(p_step->'input'->>'url') is not null;
+$$;
+
+-- Which run a shadow run estimates. Written only by estimate_unknown_steps, as the
+-- definer: the run's input names the original too, for a reader, but input is the
+-- caller's, so a run that wrote dry_run_of there must neither skip approval nor
+-- write its spend into somebody else's estimate.
+create table if not exists workflow.dry_runs (
+    shadow_run_id uuid primary key references workflow.runs(id) on delete cascade,
+    of_run_id     uuid not null references workflow.runs(id) on delete cascade,
+    started_at    timestamptz not null default now()
+);
+comment on table workflow.dry_runs is
+    'A dry run''s shadow run and the run it estimates, recorded by the definer that started it (REM-1125).';
+create index if not exists dry_runs_of on workflow.dry_runs (of_run_id);
+
+create or replace function workflow.estimate_unknown_steps(p_run_id uuid) returns void as $$
+declare
+    st      jsonb;
+    v_key   text;
+    v_bound int;
+    v_model boolean;
+    v_tasks int;
+    v_basis text;
+    v_shadow jsonb := '[]'::jsonb;
+    v_def   text;
+    v_shadow_run uuid;
+    v_waits boolean;
+begin
+    for st in
+        select s from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id,
+               jsonb_array_elements(coalesce(d.spec->'steps', '[]')) s
+         where r.id = p_run_id
+    loop
+        v_key := st->>'key';
+        continue when not exists (select 1 from workflow.run_estimates
+                                   where run_id = p_run_id and step_key = v_key and basis = 'none');
+        if st->>'kind' = 'matrix' then
+            v_bound := coalesce(nullif(st->'input'->>'max_fanout', '')::int, nullif(st->'input'->>'limit', '')::int);
+            v_tasks := coalesce(v_bound, 1);
+            v_basis := case when v_bound is not null then 'dry_run_bound' else 'dry_run_unbounded' end;
+            v_model := workflow.is_model_step(st->'input'->'template');
+        else
+            v_tasks := 1;
+            v_basis := 'dry_run';
+            v_model := workflow.is_model_step(st);
+        end if;
+        if v_model then
+            -- Tokens wait for the stand-in. The step stays 'none' until it answers, and keeps its fan-out.
+            update workflow.run_estimates set est_tasks = v_tasks, estimator = 'awaiting dry run:' || v_basis
+             where run_id = p_run_id and step_key = v_key;
+            v_shadow := v_shadow || jsonb_build_array(
+                workflow.dry_run_step(case when st->>'kind' = 'matrix' then st->'input'->'template' else st end, v_key));
+        else
+            update workflow.run_estimates
+               set basis = v_basis, est_tasks = v_tasks,
+                   est_requests = case when coalesce(st->'input'->'template', st)->>'kind' = 'decision'
+                                       then v_tasks else 0 end,
+                   est_input_tokens = 0,
+                   est_output_tokens = 0,
+                   est_cost_usd = case when coalesce(st->'input'->'template', st)->>'kind' = 'decision'
+                                       then null else 0 end,
+                   est_wall_seconds = null,
+                   estimator = 'shape', estimated_at = now()
+             where run_id = p_run_id and step_key = v_key;
+        end if;
+    end loop;
+    -- ONLY WHEN SOMETHING WAITS ON IT. A dry run is a second run whose agent calls go to the runtime, so it is
+    -- started only for a run a policy holds until it is estimated (REM-1126's hold); with no policy the estimate
+    -- is informational, and history and shape are enough. Started for every run, it put agent tasks on the http
+    -- queue of every deployment, which an older runtime would have answered on the real model, at a real price.
+    if jsonb_array_length(v_shadow) > 0
+       and exists (select 1 from pg_attribute where attrelid = 'workflow.runs'::regclass
+                     and attname = 'hold' and not attisdropped) then
+        execute 'select hold = ''awaiting_estimate'' from workflow.runs where id = $1' into v_waits using p_run_id;
+    end if;
+    if coalesce(v_waits, false) then
+        v_def := 'dry-run:' || p_run_id;
+        insert into workflow.definitions (name, spec) values (v_def, jsonb_build_object('steps', v_shadow));
+        -- Transaction-local and unforgeable over REST (authenticated holds no set_config): the shadow
+        -- run is neither estimated (above) nor held for approval (REM-1126) while this is set.
+        perform set_config('workflow.starting_dry_run', p_run_id::text, true);
+        begin
+            v_shadow_run := workflow.start_workflow(v_def, jsonb_build_object('dry_run_of', p_run_id));
+        exception when others then
+            perform set_config('workflow.starting_dry_run', '', true);
+            raise;
+        end;
+        perform set_config('workflow.starting_dry_run', '', true);
+        insert into workflow.dry_runs (shadow_run_id, of_run_id) values (v_shadow_run, p_run_id);
+        -- The same budget the real run will see, where budgets exist (REM-1126).
+        if exists (select 1 from pg_attribute where attrelid = 'workflow.runs'::regclass
+                     and attname = 'budget' and not attisdropped) then
+            execute 'update workflow.runs s set budget = o.budget from workflow.runs o
+                      where s.id = $1 and o.id = $2' using v_shadow_run, p_run_id;
+        end if;
+    end if;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- One model step as the stand-in runs it: no dependencies, upstream results
+-- replaced by a placeholder (a dry run has none to give), and the call flagged so
+-- the runtime answers on the stand-in with tools off.
+create or replace function workflow.dry_run_step(p_step jsonb, p_key text) returns jsonb
+language sql immutable set search_path = pg_catalog, public as $$
+    select (regexp_replace(
+                ((case when p_step->'input'->'body' is not null
+                       then jsonb_set(jsonb_set(p_step, '{input,body,dry_run}', 'true'),
+                                      '{input,body,tool_choice}', '"none"')
+                       else p_step end)
+                 - 'depends_on' - 'when' || jsonb_build_object('key', p_key))::text,
+                '\{\{\s*steps\.[^}]*\}\}', '(a stand-in for an earlier step''s result)', 'g'))::jsonb;
+$$;
+
+-- What a shadow run spent, written into the run it estimated: per step, times
+-- the step's fan-out, with the basis its shape decided. Then the run row again,
+-- which a policy reads.
+create or replace function workflow.record_dry_run(p_shadow_run uuid) returns void as $$
+declare v_of uuid;
+begin
+    select of_run_id into v_of from workflow.dry_runs where shadow_run_id = p_shadow_run;
+    if v_of is null then
+        return;
+    end if;
+    update workflow.run_estimates e
+       set basis = coalesce(nullif(split_part(e.estimator, ':', 2), ''), 'dry_run'),
+           est_requests = c.requests * coalesce(e.est_tasks, 1),
+           est_input_tokens = c.input_tokens * coalesce(e.est_tasks, 1),
+           est_output_tokens = c.output_tokens * coalesce(e.est_tasks, 1),
+           est_cost_usd = coalesce(c.cost_usd, 0) * coalesce(e.est_tasks, 1),
+           est_wall_seconds = c.wall_seconds,
+           estimator = 'dry run on a stand-in model', estimated_at = now()
+      from workflow.run_step_costs(p_shadow_run) c
+     where e.run_id = v_of and e.step_key = c.step_key and e.basis = 'none';
+    perform workflow.sum_run_estimate(v_of);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
 create or replace function workflow.trg_runs_estimate() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
 begin
@@ -10018,7 +10187,11 @@ create or replace function workflow.trg_runs_actuals() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
 begin
     if workflow.is_terminal(new.status) and not workflow.is_terminal(old.status) then
-        perform workflow.record_run_actuals(new.id);
+        if exists (select 1 from workflow.dry_runs where shadow_run_id = new.id) then
+            perform workflow.record_dry_run(new.id);
+        else
+            perform workflow.record_run_actuals(new.id);
+        end if;
     end if;
     return null;
 end $$;
@@ -10027,7 +10200,9 @@ create or replace trigger trg_runs_actuals after update of status on workflow.ru
 
 revoke all on function workflow.record_task_usage(uuid, int, jsonb, text), workflow.run_step_costs(uuid),
     workflow.estimate_from_history(uuid, int), workflow.sum_run_estimate(uuid),
-    workflow.record_run_actuals(uuid), workflow.trg_runs_estimate(), workflow.trg_runs_actuals() from public;
+    workflow.record_run_actuals(uuid), workflow.trg_runs_estimate(), workflow.trg_runs_actuals(),
+    workflow.is_model_step(jsonb), workflow.estimate_unknown_steps(uuid), workflow.dry_run_step(jsonb, text),
+    workflow.record_dry_run(uuid) from public;
 grant execute on function workflow.record_task_usage(uuid, int, jsonb, text) to worker;
 
 
@@ -40985,6 +41160,7 @@ declare
         -- from every backup. Found by the sibling sweep this file's own header
         -- asks for, not by anybody noticing a restore.
         'workflow.definitions',
+        'workflow.dry_runs',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',
@@ -41540,6 +41716,7 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
+ ('workflow','dry_runs','natural','a sidecar keyed by workflow.runs(id): the run a shadow dry run estimates (REM-1125)'),
  ('workflow','run_estimates','natural','a sidecar keyed by workflow.runs(id) and a step key, one row per step and one for the run (REM-1125)'),
  ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
  ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),

@@ -1,7 +1,7 @@
 -- A RUN IS ESTIMATED BEFORE IT SPENDS, AND ITS COST IS RECORDED BESIDE THE ESTIMATE (REM-1125).
 --
---   1. a run of a definition that has never run is estimated basis 'none':
---      every step, and the run, with nulls rather than zeros;
+--   1. a run of a definition that has never run, with no model step, is estimated from its
+--      shape: a task per step, no tokens, and its time left unknown;
 --   2. a worker holding a task's lease records what the attempt spent, in the
 --      agent runtime's units; without the lease, nothing is recorded;
 --   3. when the run ends, the actuals sit beside the estimate, per step and in
@@ -27,14 +27,16 @@ do $$
 declare v_run uuid := workflow.start_workflow('t_est_1125', '{}'::jsonb);
 begin
     insert into est_ids values ('run1', v_run);
-    if (select array_agg(step_key || ':' || basis order by step_key nulls first)
-          from workflow.run_estimates where run_id = v_run) is distinct from array[null, 'judge:none', 'read:none'] then
-        raise exception 'a first run should be estimated basis none per step, and as a run: %',
+    -- No history: steps that call no model are estimated from the plan's shape (part 2), one task each
+    -- and no tokens; nothing is invented for their time.
+    if (select array_agg(coalesce(step_key, '(run)') || ':' || basis order by step_key nulls first)
+          from workflow.run_estimates where run_id = v_run) is distinct from array['(run):dry_run', 'judge:dry_run', 'read:dry_run'] then
+        raise exception 'a first run should be estimated from its shape: %',
             (select jsonb_agg(to_jsonb(e)) from workflow.run_estimates e where run_id = v_run);
     end if;
-    if (select basis from workflow.run_estimates where run_id = v_run and step_key is null) is distinct from 'none'
-       or (select est_input_tokens from workflow.run_estimates where run_id = v_run and step_key is null) is not null then
-        raise exception 'an unknown run must not total to a number';
+    if (select (est_tasks, est_input_tokens, est_wall_seconds) from workflow.run_estimates
+         where run_id = v_run and step_key is null) is distinct from (2, 0::bigint, null::numeric) then
+        raise exception 'a shape estimate counts tasks and invents no time';
     end if;
 end $$;
 

@@ -619,6 +619,7 @@ declare
         -- from every backup. Found by the sibling sweep this file's own header
         -- asks for, not by anybody noticing a restore.
         'workflow.definitions',
+        'workflow.dry_runs',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',
