@@ -1695,7 +1695,12 @@ revoke execute on function workflow.run_policy_for(uuid) from public;
 create or replace function workflow.apply_run_policy_on_start() returns trigger as $$
 declare v_p workflow.run_policies;
 begin
-    if new.parent_task_id is not null or nullif(current_setting('workflow.starting_child', true), '') is not null then
+    -- Neither a child (its parent's run was decided) nor REM-1125's dry run of a held run (the estimate the held run
+    -- waits for) is held. Both say so through a setting their own SQL makes for the insert, never the run's input,
+    -- which is the caller's and would let anyone skip approval; `authenticated` cannot call set_config (REM-44).
+    if new.parent_task_id is not null
+       or nullif(current_setting('workflow.starting_child', true), '') is not null
+       or nullif(current_setting('workflow.starting_dry_run', true), '') is not null then
         return new;
     end if;
     v_p := workflow.run_policy_for(new.owner_id);
@@ -1788,7 +1793,10 @@ declare
     v_over boolean;
 begin
     select * into r from workflow.runs where id = p_run_id for update;
-    if r.id is null or r.status <> 'running' or r.hold not in ('awaiting_estimate', 'awaiting_approval') then
+    -- `is distinct from`, not `not in`: an unheld run's hold is NULL, and NULL not in (...) is NULL, which let a
+    -- revised estimate re-hold a run already released, approved, or never held (a child, a dry run).
+    if r.id is null or r.status <> 'running'
+       or (r.hold is distinct from 'awaiting_estimate' and r.hold is distinct from 'awaiting_approval') then
         return r.hold;
     end if;
     if not p_complete then

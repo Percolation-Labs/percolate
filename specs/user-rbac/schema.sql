@@ -320,6 +320,7 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('workflow_runs',      'cancel', 'workflow.assert_run_access'),
     ('workflow_runs',      'signal', 'workflow.assert_run_access'),
     ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'update', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'delete', 'workflow.assert_schedule_access'),
     -- Using an agent and reading its row are different authorities, and only
