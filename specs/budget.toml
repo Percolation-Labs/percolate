@@ -30,6 +30,6 @@
 # not specs/.
 
 [declared]
-tables    = 124
+tables    = 126
 views     = 49
-functions = 528
+functions = 535

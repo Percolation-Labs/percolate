@@ -1262,6 +1262,22 @@
     },
     {
       "admits": [
+        "history",
+        "dry_run",
+        "dry_run_bound",
+        "dry_run_unbounded",
+        "mixed",
+        "none"
+      ],
+      "column": "basis",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "workflow",
+      "table": "run_estimates",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "none",
         "compensating",
         "compensated"

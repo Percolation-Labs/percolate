@@ -621,10 +621,12 @@ declare
         'workflow.definitions',
         'workflow.queue_config',
         'workflow.rate_limits',
+        'workflow.run_estimates',
         'workflow.runs',
         'workflow.schedules',
         'workflow.task_dependencies',
         'workflow.task_events',
+        'workflow.task_usage',
         'workflow.tasks'
     ];
 begin
