@@ -11117,17 +11117,54 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Found setting up the dogfood stack for its first real user, 2026-09-11.
 -- The creator becomes the org's admin in the same transaction, so a new org is
 -- never memberless.
-create or replace function rbac.create_org(p_slug text, p_name text)
+-- AND AT A FIXED ID, BY THE INSTALLER (REM-1082). A sample or a setup script names its tenants by id, because its
+-- documents and tokens do, and it inserted the row to do it. With p_id it is the id, and a second call with the same
+-- id renames rather than failing, so a replay converges. The installer creates an org with no members; a person
+-- who creates one becomes its admin as before.
+drop function if exists rbac.create_org(text, text);
+create or replace function rbac.create_org(p_slug text, p_name text, p_id uuid default null)
 returns uuid as $$
 declare v_id uuid; v_user uuid := rbac.current_user_id();
 begin
-    if v_user is null or not rbac.has_permission(v_user, 'orgs', 'admin') then
+    if not (rbac.is_installer() or (v_user is not null and rbac.has_permission(v_user, 'orgs', 'admin'))) then
         raise exception 'creating an org needs orgs/admin' using errcode = '42501';
     end if;
-    insert into rbac.orgs (slug, name) values (p_slug, p_name) returning id into v_id;
-    insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin');
+    insert into rbac.orgs (id, slug, name) values (coalesce(p_id, uuidv7()), p_slug, p_name)
+    on conflict (id) do update set slug = excluded.slug, name = excluded.name
+    returning id into v_id;
+    if v_user is not null then
+        insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin')
+        on conflict (org_id, user_id) do nothing;
+    end if;
     insert into rbac.auth_events (user_id, event_type, detail)
-    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug));
+    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug,
+                                                      'by', coalesce(v_user::text, 'installer')));
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- A PERSON WITH NO PASSWORD (REM-1082): a sample's reader, or a service account a token is signed for. Active, since
+-- nobody verifies an address the installer typed. Idempotent on the id or the email, so a replay returns the same
+-- person. users:admin or the installer, like grant_role_by_email.
+create or replace function rbac.create_user(p_email text, p_id uuid default null)
+returns uuid as $$
+declare v_id uuid;
+begin
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise exception 'not authorized to create users'
+            using errcode = 'insufficient_privilege', hint = 'needs users:admin';
+    end if;
+    select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
+    if v_id is not null then
+        if p_id is not null and v_id <> p_id then
+            raise exception '% already belongs to user %, not %', p_email, v_id, p_id using errcode = 'unique_violation';
+        end if;
+        update rbac.users set status = 'active' where id = v_id and status <> 'active';
+        return v_id;
+    end if;
+    insert into rbac.users (id, email, status) values (coalesce(p_id, uuidv7()), btrim(p_email), 'active')
+    on conflict (id) do update set status = 'active'
+    returning id into v_id;
     return v_id;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -12206,7 +12243,7 @@ grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, a
 -- nothing and widened the anonymous surface by three functions -- exactly the
 -- allow-by-omission this section exists to refuse.
 grant execute on function rbac.add_org_member(uuid, uuid, text) to authenticated;
-grant execute on function rbac.create_org(text, text) to authenticated;
+grant execute on function rbac.create_org(text, text, uuid), rbac.create_user(text, uuid) to authenticated;
 grant execute on function rbac.remove_org_member(uuid, uuid) to authenticated;
 -- add_scope_columns() executes DDL and stays owner-only, like
 -- aiq.register_entity_table(): a deployment calls it during migration, never
