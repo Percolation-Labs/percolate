@@ -2680,12 +2680,14 @@ select jsonb_build_object(
         select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
                    'caller', c.caller, 'callee', c.callee,
                    'present', exists (select 1 from provided v where v.proname = c.callee),
-                   'callable', coalesce(a.callable, false),
+                   -- Both ends: a wrapper any role may call still cannot cross into a compiled
+                   -- function the role holds no grant on (REM-1087).
+                   'callable', coalesce(a.callable, false) and coalesce(cc.callable, false),
                    -- The diagnostic carries its own fix, the way the
                    -- slot-exhaustion error does. A reader who has to go and
                    -- find the remedy usually finds a different one.
                    'remedy', case
-                             when coalesce(a.callable, false) then null
+                             when coalesce(a.callable, false) and coalesce(cc.callable, false) then null
                              -- The gate that is actually shut, when it is one:
                              -- the graph algorithms are the only surface here
                              -- that ships granted to nobody. Anything else
@@ -2699,7 +2701,9 @@ select jsonb_build_object(
                                          c.caller, current_user)
                              end))
                    order by c.caller, c.callee)
-          from crossings c left join callers a on a.caller = c.caller), '[]'::jsonb),
+          from crossings c left join callers a on a.caller = c.caller
+          left join lateral (select bool_or(has_function_privilege(current_user, p.oid, 'execute')) as callable
+                               from pg_proc p where p.proname = c.callee) cc on true), '[]'::jsonb),
     'missing', coalesce((
         select jsonb_agg(distinct c.callee)
           from crossings c
@@ -2708,7 +2712,8 @@ select jsonb_build_object(
     'unreachable', coalesce((
         select jsonb_agg(distinct c.caller order by c.caller)
           from crossings c left join callers a on a.caller = c.caller
-         where not coalesce(a.callable, false)), '[]'::jsonb),
+         where not coalesce(a.callable, false)
+            or not exists (select 1 from pg_proc p where p.proname = c.callee and has_function_privilege(current_user, p.oid, 'execute'))), '[]'::jsonb),
     -- `ok` FOLDS IN REACHABILITY, so the one field a preflight actually reads
     -- is false on a stack where nothing will run. A report whose summary says
     -- true while its own rows say the caller cannot execute a single crossing
@@ -2717,7 +2722,8 @@ select jsonb_build_object(
         select 1 from crossings c
           left join callers a on a.caller = c.caller
          where not exists (select 1 from provided v where v.proname = c.callee)
-            or not coalesce(a.callable, false)))
+            or not coalesce(a.callable, false)
+            or not exists (select 1 from pg_proc p where p.proname = c.callee and has_function_privilege(current_user, p.oid, 'execute'))))
 $$;
 
 comment on function aiq.extension_boundary() is

@@ -346,6 +346,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- measurement; they are deliberately absent here, because a row in this list
 -- is a promise and a parked proposal is not one.
 ('ai-query-layer','function','aiq.related','text[],integer,text,integer,timestamptz,boolean','graph-algorithms.md §5.1: ranked relatedness, which a depth cap cannot express'),
+('ai-query-layer','function','aiq.require_graph_algorithms','','graph-algorithms.md: every wrapper''s first statement; says the algorithms are off for the caller''s role and names aiq.enable_graph_algorithms (REM-1087)'),
+('ai-query-layer','function','aiq.graph_algorithms_available','','graph-algorithms.md: whether the compiled half is installed, which require_graph_algorithms asks first'),
 ('ai-query-layer','function','aiq.graph_paths','text,text,integer,integer,integer,text,timestamptz','graph-algorithms.md §5.2: k cheapest routes -- the one read path that honours valid_to'),
 ('ai-query-layer','function','aiq.graph_connect','text[],integer,text','graph-algorithms.md §5.5: the smallest subgraph joining a result set'),
 ('ai-query-layer','function','aiq.graph_dense','text,integer,integer,integer,text','graph-algorithms.md §5.3: k-core and cliques, bounded before the exponential part runs'),
