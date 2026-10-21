@@ -6,6 +6,7 @@
 --   3. the model steps go to a shadow run of a generated definition: only those steps, each
 --      call flagged dry_run with tools off, upstream results replaced by a placeholder, the
 --      shadow run itself unestimated;
+--   3b. a shadow task is claimed only by a worker that declares the dry_run capability;
 --   4. when the shadow run ends, its spend lands in the original run's estimate, times each
 --      step's fan-out.
 --
@@ -87,6 +88,31 @@ begin
     if exists (select 1 from workflow.run_estimates where run_id = v_shadow) then
         raise exception 'a shadow run must not be estimated itself';
     end if;
+end $$;
+
+-- 3b. A shadow task goes only to a worker that declares it can run one: a worker that does not
+-- would make the real call. Claimed with the capability, it is a shadow task (so the refusal below
+-- is not an empty queue); handed back, so step 4 runs it.
+do $$
+declare
+    v_shadow uuid := (select v from dry_ids where k = 'shadow');
+    t workflow.tasks;
+begin
+    if exists (select 1 from workflow.claim_task('t-dry-http', 'w-old'))
+       or exists (select 1 from workflow.claim_tasks('t-dry-http', 'w-old', 10))
+       or exists (select 1 from workflow.claim_task('t-dry-http', 'w-other', array['gpu'])) then
+        raise exception 'a worker that did not declare dry_run was handed a dry run''s task';
+    end if;
+    select * into t from workflow.claim_task('t-dry-http', 'w-new', array['dry_run']);
+    if t.run_id is distinct from v_shadow then
+        raise exception 'a worker that declares dry_run should claim the shadow task, claimed %', to_jsonb(t);
+    end if;
+    if (select count(*) from workflow.claim_tasks('t-dry-http', 'w-new', 10, array['dry_run'])) is distinct from 1::bigint then
+        raise exception 'the batch claim should hand the other shadow task to a dry_run worker';
+    end if;
+    update workflow.tasks set status = 'ready', claimed_by = null, claimed_at = null, heartbeat_at = null,
+                              attempts = attempts - 1
+     where run_id = v_shadow and status = 'running';
 end $$;
 
 -- 4. The runtime answers both on the stand-in; the shadow run ends.

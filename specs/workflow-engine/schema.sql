@@ -440,6 +440,36 @@ create table if not exists workflow.runs (
 comment on table workflow.runs is
     'One execution of a definition, with its input, its status and the compensation state of its saga.';
 
+-- A RUN CAN BE HELD, AND A HELD RUN STARTS NOTHING (REM-1126). Its status stays 'running', because completion,
+-- cancellation, stop_failed_run, the child hand-back and schedule overlap all read 'running' as "still going", and
+-- a held run is still going: it is waiting for a person, as a signal step does. Why it is held is the hold:
+-- awaiting_estimate (a policy applies and the run has no complete estimate yet), awaiting_approval (the estimate is
+-- over the policy's limits) or budget_paused (its spend reached runs.budget). A task already running finishes;
+-- nothing new is claimed, autorun or drained until the hold is cleared, which is the cap's whole overshoot.
+-- integration-rbac.sql sets and clears it; the vocabulary is the drop-then-add CHECK beside runs_status_check.
+alter table workflow.runs add column if not exists hold text;
+alter table workflow.runs add column if not exists held_at timestamptz;
+-- What the run may spend, in pydantic-ai RunUsage's own limit names so the dry-run estimate (REM-1125) hands the
+-- stand-in exactly the budget the real run gets: {request_limit, total_tokens_limit, cost_limit (USD),
+-- wall_seconds_limit}. NULL, or a key left out, is no cap.
+alter table workflow.runs add column if not exists budget jsonb;
+
+create or replace function workflow.run_is_held(p_run_id uuid) returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select exists (select 1 from workflow.runs where id = p_run_id and hold is not null);
+$$;
+
+-- A budget names only RunUsage's limits, each a positive number. Anything else is refused rather than ignored: a
+-- misspelt `cost_limt` would otherwise be a run that believes it is capped.
+create or replace function workflow.budget_is_valid(p_budget jsonb) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select jsonb_typeof(p_budget) = 'object'
+       and not exists (select 1 from jsonb_each(p_budget) e
+                        where e.key not in ('request_limit','total_tokens_limit','cost_limit','wall_seconds_limit')
+                           or jsonb_typeof(e.value) <> 'number' or (e.value)::numeric <= 0);
+$$;
+revoke execute on function workflow.run_is_held(uuid) from public;
+
 -- ------------------------------------------------------------
 -- 3. Tasks
 -- ------------------------------------------------------------
@@ -1283,8 +1313,21 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- using `select * from claim_task(...)` are unaffected; one using
 -- `(claim_task(...)).id` now gets zero rows instead of one NULL, which is the
 -- correction.
+--
+-- A DRY RUN'S TASK GOES ONLY TO A WORKER THAT SAYS IT CAN RUN ONE (REM-1125).
+-- A dry run's agent calls are flagged `dry_run`, and the agent runtime answers
+-- them on a stand-in model with no tools. A worker whose runtime predates that
+-- flag would make the real call: a real model, real tools, real spend, which is
+-- the thing the estimate exists to prevent. The risk sits at the claim, so the
+-- refusal does too: a worker passes the capabilities it has, and a task of a
+-- run in `workflow.dry_runs` is skipped unless 'dry_run' is among them. The
+-- default is none, so every worker written before this argument existed is
+-- refused those tasks rather than trusted with them. The worker vouches for
+-- its runtime because the shipped worker and runtime are one image.
 drop function if exists workflow.claim_task(text, text);
-create or replace function workflow.claim_task(p_queue text, p_worker_id text)
+drop function if exists workflow.claim_task(text, text, text[]);
+create or replace function workflow.claim_task(p_queue text, p_worker_id text,
+                                               p_capabilities text[] default '{}')
 returns setof workflow.tasks as $$
 declare
     t           workflow.tasks;
@@ -1299,6 +1342,9 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
+          and ('dry_run' = any(p_capabilities)
+               or not exists (select 1 from workflow.dry_runs d where d.shadow_run_id = run_id))
         order by priority desc, created_at
         for update skip locked
         limit v_lookahead
@@ -1340,7 +1386,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- candidate window, and the rows that are looked at and not claimed stay
 -- locked for the transaction exactly as claim_task's do -- concurrent claimers
 -- skip them rather than block, which is what SKIP LOCKED is for.
-create or replace function workflow.claim_tasks(p_queue text, p_worker_id text, p_batch_size int default 10)
+drop function if exists workflow.claim_tasks(text, text, int);
+create or replace function workflow.claim_tasks(p_queue text, p_worker_id text, p_batch_size int default 10,
+                                                p_capabilities text[] default '{}')
 returns setof workflow.tasks as $$
 declare
     t           workflow.tasks;
@@ -1354,6 +1402,9 @@ begin
     for t in
         select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
+          and not workflow.run_is_held(run_id)
+          and ('dry_run' = any(p_capabilities)
+               or not exists (select 1 from workflow.dry_runs d where d.shadow_run_id = run_id))
         order by priority desc, created_at
         for update skip locked
         limit p_batch_size + v_lookahead
@@ -2022,6 +2073,10 @@ begin
     -- different traces in any collector reading them. The one place in this
     -- engine where a run is provably caused by another run is the one place
     -- the trace was not carried across.
+    --
+    -- The run about to be inserted is a child, which parent_task_id says only after start_workflow returns. A run
+    -- policy (integration-rbac.sql, REM-1126) reads this so it does not hold a child its parent was decided for.
+    perform set_config('workflow.starting_child', p_task_id::text, true);
     begin
         v_child := workflow.start_workflow(
             p_workflow_name, p_input, null,
@@ -2032,11 +2087,13 @@ begin
         -- Restored on both paths: a worker's complete_task cascade can start
         -- several children in one transaction, and a failed one must not
         -- leave the next running as this parent's owner.
+        perform set_config('workflow.starting_child', '', true);
         if v_was is not null then
             perform set_config('request.jwt.claims', v_was, true);
         end if;
         raise;
     end;
+    perform set_config('workflow.starting_child', '', true);
     if v_was is not null then
         perform set_config('request.jwt.claims', v_was, true);
     end if;
@@ -2499,9 +2556,9 @@ create or replace view workflow.v_decision_history as
 -- user-rbac/schema.sql §9), because a worker is not a user and cannot
 -- satisfy a user-scoped policy. search_path pinned, same CVE-2018-1058
 -- hardening as every other SECURITY DEFINER function in this collection.
-alter function workflow.claim_task(text, text)
+alter function workflow.claim_task(text, text, text[])
     security definer set search_path = pg_catalog, public;
-alter function workflow.claim_tasks(text, text, int)
+alter function workflow.claim_tasks(text, text, int, text[])
     security definer set search_path = pg_catalog, public;
 alter function workflow.claim_task_rate_limited(text, text)
     security definer set search_path = pg_catalog, public;
@@ -2655,8 +2712,8 @@ grant usage on schema workflow to worker, scheduler, authenticated;
 -- reduces that to this list, and removes the forge-the-audit-log problem.
 -- Read-only, and the only thing an autoscaler needs.
 grant execute on function workflow.queue_depth(text) to worker;
-grant execute on function workflow.claim_task(text, text) to worker;
-grant execute on function workflow.claim_tasks(text, text, int) to worker;
+grant execute on function workflow.claim_task(text, text, text[]) to worker;
+grant execute on function workflow.claim_tasks(text, text, int, text[]) to worker;
 grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
 grant execute on function workflow.heartbeat_task(uuid, text) to worker;
 -- The worker paces its heartbeat from the queue's own timeout rather than
@@ -3421,7 +3478,7 @@ begin
     loop
         select id, kind into v_id, v_kind from workflow.tasks
         where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
-          and run_after <= now()
+          and run_after <= now() and not workflow.run_is_held(p_run_id)
         order by kind, created_at
         limit 1;
         exit when v_id is null or v_done >= p_max;
@@ -3518,6 +3575,10 @@ create or replace trigger trg_apply_timer_delay
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
 begin
     if new.status = 'ready' and old.status is distinct from 'ready' then
+        -- A held run executes nothing (REM-1126). The step stays ready, and clearing the hold drains it.
+        if new.kind <> 'timer' and workflow.run_is_held(new.run_id) then
+            return null;
+        end if;
         if new.kind = 'sql' then
             perform workflow.execute_sql_step(new.id);
         elsif new.kind = 'matrix' then
@@ -6222,7 +6283,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- Behaviour is identical for a task with no rate_key, so nothing that worked
 -- before changes.
 -- ------------------------------------------------------------
--- workflow.claim_task(text,text) is defined in section 10.
+-- workflow.claim_task(text,text,text[]) is defined in section 10.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
@@ -7780,6 +7841,12 @@ registered after the workflow that names it.$c$;
 alter table workflow.runs  drop constraint if exists runs_status_check;
 alter table workflow.runs  add  constraint runs_status_check
     check (status in ('running','succeeded','failed','cancelled'));
+alter table workflow.runs  drop constraint if exists runs_hold_check;
+alter table workflow.runs  add  constraint runs_hold_check
+    check (hold in ('awaiting_estimate','awaiting_approval','budget_paused'));
+alter table workflow.runs  drop constraint if exists runs_budget_check;
+alter table workflow.runs  add  constraint runs_budget_check
+    check (budget is null or workflow.budget_is_valid(budget));
 alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
@@ -8197,7 +8264,23 @@ with served as (
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
-      and t.queue not in (select s.queue from served s);
+      and t.queue not in (select s.queue from served s)
+  union all
+    -- A HELD RUN STARTS NOTHING (REM-1126), so its ready steps are unclaimable on purpose, and the remedy is a
+    -- person's: approve it, or raise its budget.
+    select t.id, t.run_id, t.queue, t.step_key, null::text,
+           ('the run is held: ' || r.hold)::text,
+           case r.hold
+                when 'awaiting_approval' then format('its estimate is over the run policy''s limits -- '
+                                                     'select workflow.approve_run(%L)', r.id)
+                when 'budget_paused'     then format('it spent its budget -- select workflow.raise_budget(%L, '
+                                                     '''{"cost_limit": ...}'')', r.id)
+                else format('a run policy applies and its estimate is incomplete -- wait for the dry run, or '
+                            'select workflow.approve_run(%L)', r.id) end,
+           now() - t.created_at
+    from workflow.tasks t
+    join workflow.runs r on r.id = t.run_id
+    where t.status = 'ready' and r.hold is not null;
 
 -- ------------------------------------------------------------
 -- 4. The backlog, as an operator needs it rather than as a count.
@@ -9137,13 +9220,17 @@ language sql security definer set search_path = pg_catalog, public as $$
     insert into workflow.run_estimates (run_id, step_key, basis, est_tasks, est_wall_seconds, est_requests,
                                         est_input_tokens, est_output_tokens, est_cost_usd, estimator)
     select p_run_id, null,
-           case when bool_and(basis = 'none') then 'none'
+           -- Any step not yet known leaves the run not known: its totals are null below, and the label agrees.
+           case when bool_or(basis = 'none') then 'none'
                 -- Any unbounded step makes the run's totals a floor, and says so.
                 when bool_or(basis = 'dry_run_unbounded') then 'dry_run_unbounded'
                 when bool_and(basis = 'history') then 'history'
                 when bool_and(basis in ('dry_run', 'dry_run_bound')) then 'dry_run' else 'mixed' end,
            case when bool_or(basis = 'none') then null else sum(est_tasks) end,
-           case when bool_or(basis = 'none') then null else sum(est_wall_seconds) end,
+           -- A step whose time is not known (a worker step estimated from its shape) leaves the run's time
+           -- unknown, as an unpriced step leaves its cost unknown: sum() skipping it would understate.
+           case when bool_or(basis = 'none') or bool_or(est_wall_seconds is null) then null
+                else sum(est_wall_seconds) end,
            case when bool_or(basis = 'none') then null else sum(est_requests) end,
            case when bool_or(basis = 'none') then null else sum(est_input_tokens) end,
            case when bool_or(basis = 'none') then null else sum(est_output_tokens) end,

@@ -58,6 +58,10 @@ insert into t16_declared values
  'caller carries no user (a worker completing the parent task), so the child is '
  'theirs and resolves its definition as them (REM-1121). Restored on both exit '
  'paths. Drops orgs, as execute_for does.'),
+('aiq.render_facet_public(text)', 'role',
+ 'no user and not an operator: {"role":"web_anon"}, so a captured schema document holds '
+ 'only what a signed-out reader sees, never an operator''s view of private agents and '
+ 'definitions (REM-1122). It drops everything, which is the point; restored on both paths.'),
 ('content.lake_existing(uuid,uuid,text,text)', 'sub',
  'the run owner, to ask may_write about a dataset that already exists. The '
  'owner is an ARGUMENT here rather than read from a task, and the function is '

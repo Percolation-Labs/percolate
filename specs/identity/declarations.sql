@@ -52,6 +52,7 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
  ('workflow','run_estimates','step_key','value','the whole run: its row totals the step rows (REM-1125)'),
+ ('workflow','run_policies','owner_id','value','the deployment''s policy, which applies to anyone without their own (REM-1126)'),
 
 -- Two partial indexes on agentic, both absences, and both worth a second look
 -- by whoever owns that subsystem: a null here reads as "not configured yet"
