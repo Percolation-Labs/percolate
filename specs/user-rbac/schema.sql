@@ -333,6 +333,12 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- an agent somebody else owns, or nobody does, and gives one away. An
     -- administrator's grants_all role holds both.
     ('agents',             'update_any', 'agentic.upsert_agent'),
+    -- The same two authorities for the other kinds an author writes (REM-1111):
+    -- <kind>:update creates names and edits the caller's own, <kind>:update_any
+    -- edits anyone's. grants_all picks these up with the rest.
+    ('skills',             'update_any', 'agentic.assert_may_write_authored'),
+    ('tool_servers',       'update_any', 'agentic.assert_may_write_authored'),
+    ('plugins',            'update_any', 'agentic.assert_may_write_authored'),
     -- Same argument on the content side. `content.assert_org_write` already
     -- asks whether the caller may act inside the org; nothing asked whether
     -- they may put bytes in it at all, so any member of any org could upload.
@@ -1016,7 +1022,8 @@ $$ language sql stable parallel safe set search_path = pg_catalog, public;
 
 create or replace function rbac.scope_write_predicate() returns text as $fn$
     select $q$((select rbac.is_operator())
-       or ((owner_id is null or owner_id = (select rbac.current_user_id()))
+       or ((owner_id = (select rbac.current_user_id())
+            or (owner_id is null and org_id <> rbac.shared_org_id()))
            and (org_id = rbac.shared_org_id()
                 or org_id in (select rbac.current_org_ids()))
            and (visibility <> 'org' or org_id <> rbac.shared_org_id())))$q$;
@@ -1059,11 +1066,25 @@ create or replace function rbac.may_read(
             and p_org_id in (select rbac.current_org_ids()));
 $$ language sql stable parallel safe;
 
+-- AN OWNERLESS ROW IN THE SHARED ORG IS AN OPERATOR'S (REM-1116). The null
+-- owner arm used to hold everywhere, and in the shared org every signed-in
+-- caller "reaches" the org, so anyone could write a row nobody owns: a
+-- scheduled pull's resource, a seed, a workflow artifact. Through the
+-- policies nothing reached it (no request role holds UPDATE or DELETE on a
+-- scoped table), but record_chunks asks this function past row security, and
+-- any signed-in caller replaced those resources' chunks. Inside a real org an
+-- ownerless row stays the members' to write, which is what it means there.
+-- scope_write_predicate above says the same, and rbac/11 holds them equal.
 create or replace function rbac.may_write(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
     select rbac.is_operator()
-        or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
+        -- `is not distinct from` and a non-null owner, not `=`: with no owner
+        -- `=` is NULL, NULL or false is NULL, and `if not may_write(...)`
+        -- does not raise on NULL. The first draft of this fix did exactly
+        -- that and content/21 caught it.
+        or (((p_owner_id is not null and p_owner_id is not distinct from rbac.current_user_id())
+             or (p_owner_id is null and not rbac.is_shared_org(p_org_id)))
             and (rbac.is_shared_org(p_org_id)
                  or p_org_id in (select rbac.current_org_ids()))
             and (p_visibility <> 'org' or not rbac.is_shared_org(p_org_id)));
@@ -1392,17 +1413,54 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Found setting up the dogfood stack for its first real user, 2026-09-11.
 -- The creator becomes the org's admin in the same transaction, so a new org is
 -- never memberless.
-create or replace function rbac.create_org(p_slug text, p_name text)
+-- AND AT A FIXED ID, BY THE INSTALLER (REM-1082). A sample or a setup script names its tenants by id, because its
+-- documents and tokens do, and it inserted the row to do it. With p_id it is the id, and a second call with the same
+-- id renames rather than failing, so a replay converges. The installer creates an org with no members; a person
+-- who creates one becomes its admin as before.
+drop function if exists rbac.create_org(text, text);
+create or replace function rbac.create_org(p_slug text, p_name text, p_id uuid default null)
 returns uuid as $$
 declare v_id uuid; v_user uuid := rbac.current_user_id();
 begin
-    if v_user is null or not rbac.has_permission(v_user, 'orgs', 'admin') then
+    if not (rbac.is_installer() or (v_user is not null and rbac.has_permission(v_user, 'orgs', 'admin'))) then
         raise exception 'creating an org needs orgs/admin' using errcode = '42501';
     end if;
-    insert into rbac.orgs (slug, name) values (p_slug, p_name) returning id into v_id;
-    insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin');
+    insert into rbac.orgs (id, slug, name) values (coalesce(p_id, uuidv7()), p_slug, p_name)
+    on conflict (id) do update set slug = excluded.slug, name = excluded.name
+    returning id into v_id;
+    if v_user is not null then
+        insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin')
+        on conflict (org_id, user_id) do nothing;
+    end if;
     insert into rbac.auth_events (user_id, event_type, detail)
-    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug));
+    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug,
+                                                      'by', coalesce(v_user::text, 'installer')));
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- A PERSON WITH NO PASSWORD (REM-1082): a sample's reader, or a service account a token is signed for. Active, since
+-- nobody verifies an address the installer typed. Idempotent on the id or the email, so a replay returns the same
+-- person. users:admin or the installer, like grant_role_by_email.
+create or replace function rbac.create_user(p_email text, p_id uuid default null)
+returns uuid as $$
+declare v_id uuid;
+begin
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise exception 'not authorized to create users'
+            using errcode = 'insufficient_privilege', hint = 'needs users:admin';
+    end if;
+    select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
+    if v_id is not null then
+        if p_id is not null and v_id <> p_id then
+            raise exception '% already belongs to user %, not %', p_email, v_id, p_id using errcode = 'unique_violation';
+        end if;
+        update rbac.users set status = 'active' where id = v_id and status <> 'active';
+        return v_id;
+    end if;
+    insert into rbac.users (id, email, status) values (coalesce(p_id, uuidv7()), btrim(p_email), 'active')
+    on conflict (id) do update set status = 'active'
+    returning id into v_id;
     return v_id;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -2481,7 +2539,7 @@ grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, a
 -- nothing and widened the anonymous surface by three functions -- exactly the
 -- allow-by-omission this section exists to refuse.
 grant execute on function rbac.add_org_member(uuid, uuid, text) to authenticated;
-grant execute on function rbac.create_org(text, text) to authenticated;
+grant execute on function rbac.create_org(text, text, uuid), rbac.create_user(text, uuid) to authenticated;
 grant execute on function rbac.remove_org_member(uuid, uuid) to authenticated;
 -- add_scope_columns() executes DDL and stays owner-only, like
 -- aiq.register_entity_table(): a deployment calls it during migration, never

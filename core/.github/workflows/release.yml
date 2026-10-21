@@ -454,21 +454,28 @@ jobs:
       # The push above starts no workflow on get-percolate: on 2026-09-14 this
       # job pushed chart 0.1.14 at 08:08Z and no docs run followed; it reached the
       # index only when a person merged #44 at 08:24. get-percolate's docs.yml
-      # now publishes any committed chart the index lacks every 15 minutes, so
-      # this waits for that, and fails naming the chart if it never appears,
-      # rather than reporting a release whose chart nobody can install.
-      - name: Wait for the chart to be published
+      # runs only when dispatched (REM-1098: a merge there must publish nothing),
+      # so this dispatches it, then waits and fails naming the chart if it never
+      # appears, rather than reporting a release whose chart nobody can install.
+      - name: Publish the chart, and wait for the index to list it
         if: inputs.publish
         working-directory: get-percolate
+        env:
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
+          REPO: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
         run: |
           git pull --rebase --quiet
           CHART=$(sed -n 's/^chart *= *"\([0-9.]*\)".*/\1/p' versions.toml | head -1)
           INDEX=https://percolation-labs.github.io/get-percolate/charts/index.yaml
+          curl -fsSL "$INDEX" | grep -q "^    version: $CHART$" && { echo "chart $CHART is already in $INDEX"; exit 0; }
+          gh workflow run docs.yml --repo "$REPO" --ref main || {
+            echo "::error::P8_RELEASE_TOKEN could not dispatch docs.yml on $REPO, so chart $CHART is committed and unpublished. Run: gh workflow run docs.yml -R $REPO" >&2
+            exit 1; }
           for _ in $(seq 1 50); do
             curl -fsSL "$INDEX" | grep -q "^    version: $CHART$" && { echo "chart $CHART is in $INDEX"; exit 0; }
             sleep 30
           done
-          echo "::error::chart $CHART is committed on get-percolate but $INDEX does not list it after 25 minutes. Its scheduled docs.yml run should have published it; check get-percolate's docs runs." >&2
+          echo "::error::chart $CHART is committed on get-percolate but $INDEX does not list it after 25 minutes; check the docs.yml run this step dispatched on $REPO." >&2
           exit 1
 
       # The dev stack gets a PULL REQUEST, and a person still merges it (REM-540). What is stale over there, the dev

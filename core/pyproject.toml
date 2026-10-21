@@ -1,6 +1,6 @@
 [project]
 name = "percolate-core"
-version = "0.2.9"
+version = "0.2.10"
 description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -130,7 +130,10 @@ packages = ["percolate_core"]
 # comment.
 artifacts = ["percolate_core/ui/static/*"]
 
+# Every link a PyPI reader can open (REM-1080): this repository and the tree
+# the specs live in are private, so the source link is the public mirror of
+# this package inside percolate, and Homepage is where Percolate is installed.
 [project.urls]
-Homepage = "https://github.com/Percolation-Labs/percolate-core"
-Repository = "https://github.com/Percolation-Labs/percolate-core"
-Specs = "https://github.com/Percolation-Labs/p8-subsystems"
+Homepage = "https://github.com/Percolation-Labs/get-percolate"
+Repository = "https://github.com/Percolation-Labs/percolate/tree/main/core"
+Specs = "https://github.com/Percolation-Labs/percolate/tree/main/specs"

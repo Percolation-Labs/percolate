@@ -19,6 +19,21 @@ headed by the version that first carried them, which `git tag --contains` on
 each item's commit decided, not the heading's guess. Nothing has been written
 for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
 
+## 0.2.9
+
+- **`percolate package apply` installs a package, as the user who will own it**
+  (REM-1105). The UI's help and both package exports told a reader to run
+  `packages/apply.py`, a script only the private tree had. The command reads
+  the UI's export as written (a file, or a directory holding `manifest.yaml`),
+  inlines the files a manifest points at, applies its storage with
+  `percolate.check_package_schema()` in the same transaction, and calls
+  `percolate.apply_package` as `app_owner`, with `--owner` as the user
+  `rbac.current_user_id()` names. Checked against extension 0.2.28: an API
+  source package is refused without an owner, installs private to a
+  bootstrapped admin, and re-applies to one source; storage with a nullable
+  `org_id` is refused and its schema rolled back. Needs the `sample` extra
+  (pyyaml).
+
 ## 0.2.6
 
 **Pairing: extension 0.2.23.** Tag `v0.2.6`, commit `23c813b`.

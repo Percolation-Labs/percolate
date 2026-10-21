@@ -178,6 +178,12 @@ the latest value. A claims graph must not: two people asserting different things
 claim is the information, and "latest wins" would erase the disagreement Percolate exists to
 show.
 
+As built (REM-1115): every reading orders an assertion table's rows by `claims.authoritative`, so
+a row by an owner of a work the row rests on, or by the platform, outranks a later row by anybody
+else. Before this the readings took the latest row whoever wrote it, and a reader's or an agent's
+assertion replaced the owner's. Two owners still disagree in the open: the later of their rows
+shows, which is the dispute `restate_relation` lets the other side record.
+
 ## 5. Identity
 
 REM-434's first question, in three scopes. They are different questions and get different
@@ -612,7 +618,10 @@ are the answer, not the question.
   reader, with the judge's probability in `p`, and `confirmed` when the work's owner makes it as a person.
   `claims.withdraw_answer` retracts a stance by a later row, for whoever made it or the work's owner.
   `claims.question_web(at, min_works)` is an invoker read of every question the caller can see answered from at
-  least `min_works` works, one latest answer per claim, `unknown` left out. Question `same_as` (two phrasings,
+  least `min_works` works, one answer per claim, `unknown` left out. Which answer is §4's rule as built (REM-1115):
+  every reading ranks a row by an owner of the work it is evidenced by, or by the platform, above any other, and
+  takes the latest within that rank. So a reader's or an agent's proposal shows only where the owner has said
+  nothing, never in place of what they said, and `withdraw_answer` takes back the caller's own row. Question `same_as` (two phrasings,
   one question) is not built yet.
 - **A frame is required for comparative relations, not for writing** (REM-432 q3). A claim
   without a frame can be published, supported and challenged within its package. It cannot

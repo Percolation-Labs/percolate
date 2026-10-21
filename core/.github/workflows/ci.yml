@@ -76,6 +76,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_agent_cors.py
 
+      # The client half of a package install: the UI's export reads as written,
+      # files become contents, a missing schema is refused before any write.
+      # The database half is percolate's dev/tests/content/05 and 08.
+      - name: A package installs from what the UI exports (REM-1105)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_package_apply.py
+
       # The live half of this needs a database and lives in dev/ui_reads.py.
       # What runs here is the structure that made the live check possible: the
       # screens share their read contracts with the audit, so a projection
