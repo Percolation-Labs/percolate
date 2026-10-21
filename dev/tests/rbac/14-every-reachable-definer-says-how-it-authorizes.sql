@@ -218,6 +218,8 @@ insert into t14_declared (fn, mechanism, why) values
  'each candidate the text index returns is kept only if the caller may read its revision (REM-500)'),
 ('research.search_sources(text,integer,integer)', 'research.revision_readable',
  'each candidate the text index returns is kept only if the caller may read its revision (REM-519)'),
+('claims.authoritative(bigint,uuid,uuid)', 'research.revision_readable',
+ 'answers whether the actor of one claims transaction owns the work of a revision the caller may read, or is the platform: a yes or no that orders the readings (REM-1115), no row, name or count'),
 ('claims.readable_links_of(uuid[],uuid[])', 'research.revision_readable',
  'returns only the links incident to the given origins that origin_links_readable would admit, by applying that policy''s own test to each (REM-1003)'),
 ('claims.execution_receipt(bigint)', 'research.revision_readable',
