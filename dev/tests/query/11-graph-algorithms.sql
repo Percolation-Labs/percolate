@@ -569,8 +569,12 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 13. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
 --
--- graph-algorithms.md ships these off by default: installed, inert, callable
--- by nobody but the owner until a deliberate grant. That is what makes an
+-- graph-algorithms.md ships these off by default: installed, inert, and the
+-- compiled half callable by nobody but the owner until a deliberate grant.
+-- The wrappers ARE reachable by the signed-in roles since REM-1087, so that a
+-- caller with the switch off is told so and told the call that opens it; each
+-- refuses before it touches the compiled half, which query/25 proves. What
+-- must stay shut is the compiled half and the switch itself. That is what makes an
 -- experimental surface safe to put in a release, and it is worth an assertion
 -- because the failure is silent in the wrong direction -- a function created
 -- after integration-rbac.sql's blanket revoke keeps PUBLIC EXECUTE, and
@@ -581,11 +585,7 @@ declare v_open text;
 begin
     select string_agg(p.proname, ', ') into v_open
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-     where ((n.nspname = 'aiq' and p.proname in
-             ('related','graph_paths','graph_connect','graph_dense','graph_trust',
-              'graph_frontier','graph_snapshot','graph_reach_build',
-              'graph_components','graph_induced',
-              'graph_algorithms_available','enable_graph_algorithms'))
+     where ((n.nspname = 'aiq' and p.proname = 'enable_graph_algorithms')
          or p.proname like 'p8\_graph\_%')
        and (has_function_privilege('authenticated', p.oid, 'execute')
          or has_function_privilege('web_anon', p.oid, 'execute'));
@@ -595,7 +595,7 @@ begin
             'on a fresh install: %. They ship off by default; enabling them is '
             'aiq.enable_graph_algorithms(role).', v_open;
     end if;
-    raise notice 'query/11: shipped off by default -- no end-user role can call them';
+    raise notice 'query/11: shipped off by default -- no end-user role can reach the compiled half';
 end $$;
 
 -- And the gate opens, which is the other half: a posture nobody can leave is

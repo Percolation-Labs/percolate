@@ -17538,12 +17538,14 @@ select jsonb_build_object(
         select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
                    'caller', c.caller, 'callee', c.callee,
                    'present', exists (select 1 from provided v where v.proname = c.callee),
-                   'callable', coalesce(a.callable, false),
+                   -- Both ends: a wrapper any role may call still cannot cross into a compiled
+                   -- function the role holds no grant on (REM-1087).
+                   'callable', coalesce(a.callable, false) and coalesce(cc.callable, false),
                    -- The diagnostic carries its own fix, the way the
                    -- slot-exhaustion error does. A reader who has to go and
                    -- find the remedy usually finds a different one.
                    'remedy', case
-                             when coalesce(a.callable, false) then null
+                             when coalesce(a.callable, false) and coalesce(cc.callable, false) then null
                              -- The gate that is actually shut, when it is one:
                              -- the graph algorithms are the only surface here
                              -- that ships granted to nobody. Anything else
@@ -17557,7 +17559,9 @@ select jsonb_build_object(
                                          c.caller, current_user)
                              end))
                    order by c.caller, c.callee)
-          from crossings c left join callers a on a.caller = c.caller), '[]'::jsonb),
+          from crossings c left join callers a on a.caller = c.caller
+          left join lateral (select bool_or(has_function_privilege(current_user, p.oid, 'execute')) as callable
+                               from pg_proc p where p.proname = c.callee) cc on true), '[]'::jsonb),
     'missing', coalesce((
         select jsonb_agg(distinct c.callee)
           from crossings c
@@ -17566,7 +17570,8 @@ select jsonb_build_object(
     'unreachable', coalesce((
         select jsonb_agg(distinct c.caller order by c.caller)
           from crossings c left join callers a on a.caller = c.caller
-         where not coalesce(a.callable, false)), '[]'::jsonb),
+         where not coalesce(a.callable, false)
+            or not exists (select 1 from pg_proc p where p.proname = c.callee and has_function_privilege(current_user, p.oid, 'execute'))), '[]'::jsonb),
     -- `ok` FOLDS IN REACHABILITY, so the one field a preflight actually reads
     -- is false on a stack where nothing will run. A report whose summary says
     -- true while its own rows say the caller cannot execute a single crossing
@@ -17575,7 +17580,8 @@ select jsonb_build_object(
         select 1 from crossings c
           left join callers a on a.caller = c.caller
          where not exists (select 1 from provided v where v.proname = c.callee)
-            or not coalesce(a.callable, false)))
+            or not coalesce(a.callable, false)
+            or not exists (select 1 from pg_proc p where p.proname = c.callee and has_function_privilege(current_user, p.oid, 'execute'))))
 $$;
 
 comment on function aiq.extension_boundary() is
@@ -21326,6 +21332,29 @@ language sql stable as $$
     select to_regprocedure('p8_graph_ppr(uuid[],float8,float8,int,int,bool,text,bigint)') is not null
 $$;
 
+-- EVERY WRAPPER'S FIRST STATEMENT (REM-1087). The graph algorithms ship switched off per role, and the switch is the
+-- grant on the compiled p8_graph_* functions. When it is shut, a caller should be told so and told the call that opens
+-- it. The wrappers used to carry that grant too, so a direct call met Postgres's bare `permission denied for function
+-- related`, which names neither. Now the signed-in roles reach the wrappers, which are security invoker and so cannot
+-- reach the compiled half without the grant, and this says which switch is shut. aiq.query catches the
+-- insufficient_privilege it raises and words it for a p8ql caller, as before.
+create or replace function aiq.require_graph_algorithms() returns void
+language plpgsql stable as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()'
+            using errcode = 'feature_not_supported';
+    end if;
+    if not has_function_privilege(current_user,
+            'p8_graph_ppr(uuid[],float8,float8,int,int,bool,text,bigint)'::regprocedure, 'execute') then
+        raise exception 'the graph algorithms ship switched off, and they are off for role %', current_user
+            using errcode = 'insufficient_privilege',
+                  hint = format('the database owner turns them on with select aiq.enable_graph_algorithms(%L)',
+                                current_user);
+    end if;
+end $$;
+
 -- ------------------------------------------------------------
 -- 1. The snapshot — an operational surface, not a query one.
 --
@@ -21347,10 +21376,7 @@ create or replace function aiq.graph_snapshot(
     p_as_of        timestamptz default null
 ) returns jsonb language plpgsql volatile as $$
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     return p8_graph_snapshot(
         p_refresh, p_relations, p_weight_floor,
         case when p_as_of is null then null
@@ -21374,10 +21400,7 @@ end $$;
 create or replace function aiq.graph_snapshot_drop()
 returns jsonb language plpgsql volatile as $$
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     return p8_graph_snapshot_drop();
 end $$;
 
@@ -21457,10 +21480,7 @@ declare
     v_seeds uuid[];
     v_res   jsonb;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     -- Names resolve through the ONE resolver, exactly as the dialect's modes
     -- do. A second, private key lookup in this file would be a second answer
     -- to "which node is called that", and the first one to drift is the one
@@ -21512,10 +21532,7 @@ create or replace function aiq.graph_paths(
 ) returns jsonb language plpgsql stable as $$
 declare v_src uuid; v_dst uuid; v_res jsonb;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     select node_id into v_src from aiq.lookup(p_src_key, false, 1);
     select node_id into v_dst from aiq.lookup(p_dst_key, false, 1);
     if v_src is null or v_dst is null then
@@ -21550,10 +21567,7 @@ create or replace function aiq.graph_connect(
 ) returns jsonb language plpgsql stable as $$
 declare v_ids uuid[]; v_res jsonb;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     select array_agg(l.node_id) into v_ids
       from unnest(p_keys) k
       cross join lateral (select * from aiq.lookup(k, false, 1)) l;
@@ -21580,10 +21594,7 @@ create or replace function aiq.graph_dense(
 ) returns jsonb language plpgsql stable as $$
 declare v_id uuid; v_res jsonb;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     select node_id into v_id from aiq.lookup(p_key, false, 1);
     if v_id is null then
         return jsonb_build_object('ok', true, 'unresolved', jsonb_build_array(p_key));
@@ -21652,10 +21663,7 @@ create or replace function aiq.graph_trust(
 language plpgsql stable as $$
 declare v_seeds uuid[]; v_res jsonb;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     select array_agg(l.node_id) into v_seeds
       from unnest(p_keys) k
       cross join lateral (select * from aiq.lookup(k, false, 1)) l;
@@ -21706,10 +21714,7 @@ create or replace function aiq.graph_frontier(
 ) returns jsonb language plpgsql stable as $$
 declare v_id uuid;
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     select node_id into v_id from aiq.lookup(p_key, false, 1);
     if v_id is null then
         return jsonb_build_object('ok', true, 'unresolved', jsonb_build_array(p_key));
@@ -21726,6 +21731,8 @@ create or replace function aiq.graph_reach_build(
     p_depth int default 3, p_budget_ms int default 60000
 ) returns jsonb language plpgsql volatile as $$
 begin
+    -- It had no guard at all, so a missing parser or a shut switch met a bare error here too (REM-1087).
+    perform aiq.require_graph_algorithms();
     return p8_graph_reach_build(p_depth, p_budget_ms);
 end $$;
 
@@ -21749,10 +21756,7 @@ create or replace function aiq.graph_components(
 ) returns table(node_id uuid, component uuid, size int)
 language plpgsql stable as $$
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     return query select * from p8_graph_components(p_min_size, p_budget_ms);
 end $$;
 
@@ -21761,10 +21765,7 @@ create or replace function aiq.graph_induced(
 ) returns table(src_id uuid, dst_id uuid, relation text, weight double precision)
 language plpgsql stable as $$
 begin
-    if not aiq.graph_algorithms_available() then
-        raise exception 'the graph algorithms are not installed -- they ship in '
-            'percolate_parser, the same extension as aiq_parse()';
-    end if;
+    perform aiq.require_graph_algorithms();
     return query select * from p8_graph_induced(
         p_node_ids, p_relation,
         case when p_as_of is null then null
@@ -21842,8 +21843,12 @@ begin
     loop
         if p_enabled then
             execute format('grant execute on function %s to %I', r.sig, p_role);
-        else
+        -- Switching off closes the compiled half only. The wrappers stay reachable, so the next call is told the
+        -- switch is off and how to turn it on, not `permission denied` (REM-1087).
+        elsif (r.sig::text) like 'p8\_graph\_%' then
             execute format('revoke execute on function %s from %I', r.sig, p_role);
+        else
+            continue;
         end if;
         v_did := v_did || r.sig::text;
     end loop;
@@ -21861,6 +21866,27 @@ begin
                 then 'the first call in each backend builds an adjacency snapshot, '
                      'so the cost is paid once per connection rather than once per query'
                 else 'revoked' end);
+end $$;
+
+-- The wrappers and their guard are reachable by the signed-in roles (REM-1087), so a shut switch is reported by name.
+-- Named roles, not PUBLIC, because identity/closing.sql revokes PUBLIC execute everywhere; web_anon is left out, since
+-- an unauthenticated caller has no switch to be told about. The gate is unchanged: it is the grant on the compiled
+-- p8_graph_* functions, which stays the owner's to give.
+do $$
+declare r record; g name;
+begin
+    for r in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname = 'aiq'
+                and p.proname in ('related','graph_paths','graph_connect','graph_dense','graph_trust',
+                                  'graph_frontier','graph_snapshot','graph_snapshot_drop','graph_components',
+                                  'graph_induced','graph_reach_build','graph_algorithms_available',
+                                  'require_graph_algorithms') loop
+        foreach g in array array['authenticated', 'worker', 'api_viewer']::name[] loop
+            if exists (select 1 from pg_roles where rolname = g) then
+                execute format('grant execute on function %s to %I', r.sig, g);
+            end if;
+        end loop;
+    end loop;
 end $$;
 
 comment on function aiq.enable_graph_algorithms(name, boolean) is
