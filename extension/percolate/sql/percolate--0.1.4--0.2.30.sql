@@ -4946,7 +4946,15 @@ begin
     -- Validate everything that can be validated NOW. A schedule that cannot
     -- possibly fire should fail in the caller's hand, not once a minute into
     -- last_error where nobody is looking.
-    perform workflow.assert_schedule_access(p_name, 'create');
+    -- REWRITING ONE IS NOT CREATING ONE (REM-1120). The insert below ends in
+    -- `on conflict (name) do update` of the workflow, cron and input and keeps
+    -- owner_id, so asking 'create' let a holder of workflow_schedules:create
+    -- repoint somebody else's schedule, which then fired the new workflow as
+    -- its owner. An existing name asks 'update': its owner, or a holder of
+    -- workflow_schedules:update, which only an administrator's role holds.
+    perform workflow.assert_schedule_access(p_name,
+        case when exists (select 1 from workflow.schedules where name = p_name)
+             then 'update' else 'create' end);
 
     -- Startable, for the reason start_child_workflow gives above.
     if (workflow.current_definition(p_workflow)).id is null then
@@ -10233,6 +10241,7 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('workflow_runs',      'cancel', 'workflow.assert_run_access'),
     ('workflow_runs',      'signal', 'workflow.assert_run_access'),
     ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'update', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'delete', 'workflow.assert_schedule_access'),
     -- Using an agent and reading its row are different authorities, and only
