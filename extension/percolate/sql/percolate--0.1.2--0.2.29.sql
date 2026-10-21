@@ -11123,7 +11123,10 @@ create or replace function rbac.add_org_member(
     p_org_id uuid, p_user_id uuid, p_role text default 'member'
 ) returns void as $$
 begin
-    if not (rbac.has_permission(rbac.current_user_id(), 'orgs', 'admin')
+    -- The installer too (REM-1082), so a setup script or a doc enrols someone through this function rather than by
+    -- inserting the row, which skipped the audit event and the org-admin rule.
+    if not (rbac.is_installer()
+            or rbac.has_permission(rbac.current_user_id(), 'orgs', 'admin')
             or exists (select 1 from rbac.org_members m
                         where m.org_id = p_org_id
                           and m.user_id = rbac.current_user_id()
@@ -11830,6 +11833,92 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- 6a. DEFINING ROLES AND GRANTING THEM WITHOUT WRITING ROWS (REM-1082).
+-- ------------------------------------------------------------
+-- An administrator set up access by inserting rows, and a row is silent when it
+-- is wrong: a role given a permission no policy reads looks populated and
+-- grants nothing. rbac.permission_kinds is the closed vocabulary of pairs some
+-- policy or function checks, so define_role refuses any pair outside it, naming
+-- it and the actions its resource does have. grant_role_by_email resolves the
+-- person and refuses an address nobody holds, where an insert would have needed
+-- the id looked up by hand.
+--
+-- WHO MAY. A users:admin, or THE INSTALLER: a session with no claims whose login
+-- may write rbac.user_roles, which is the privileged local session bootstrap_admin
+-- runs from. Not rbac.is_operator(), which is also true for a worker login with no
+-- claims, and a worker must never hand out roles.
+create or replace function rbac.is_installer() returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select nullif(current_setting('request.jwt.claims', true), '') is null
+       and has_table_privilege(session_user, 'rbac.user_roles', 'insert');
+$$;
+
+-- p_permissions as 'resource:action', the spelling rbac.permission_kinds is read in.
+create or replace function rbac.define_role(p_name text, p_permissions text[], p_description text default null)
+returns jsonb as $$
+declare
+    v_unknown text[];
+    v_known   text;
+begin
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise exception 'not authorized to define roles'
+            using errcode = 'insufficient_privilege', hint = 'needs users:admin';
+    end if;
+    if coalesce(btrim(p_name), '') = '' then
+        raise exception 'a role needs a name' using errcode = 'check_violation';
+    end if;
+    select array_agg(p order by p) into v_unknown
+      from unnest(coalesce(p_permissions, '{}')) p
+     where not exists (select 1 from rbac.permission_kinds k where k.resource || ':' || k.action = p);
+    if v_unknown is not null then
+        select string_agg(k.resource || ':' || k.action, ', ' order by k.resource, k.action) into v_known
+          from rbac.permission_kinds k
+         where k.resource in (select split_part(u, ':', 1) from unnest(v_unknown) u);
+        raise exception 'no policy or function checks %, so a role holding it would grant nothing',
+                        array_to_string(v_unknown, ', ')
+            using errcode = 'check_violation',
+                  hint = coalesce('the pairs checked on that resource: ' || v_known,
+                                  'no pair is checked on that resource; select * from rbac.permission_kinds lists every one');
+    end if;
+    insert into rbac.roles (name, description) values (p_name, p_description)
+    on conflict (name) do update set description = coalesce(excluded.description, rbac.roles.description);
+    insert into rbac.role_permissions (role, resource, action)
+    select p_name, split_part(p, ':', 1), split_part(p, ':', 2) from unnest(coalesce(p_permissions, '{}')) p
+    on conflict do nothing;
+    return jsonb_build_object('role', p_name,
+        'permissions', (select coalesce(jsonb_agg(rp.resource || ':' || rp.action order by rp.resource, rp.action), '[]')
+                          from rbac.role_permissions rp where rp.role = p_name));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function rbac.grant_role_by_email(p_email text, p_role text)
+returns uuid as $$
+declare v_uid uuid;
+begin
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise exception 'not authorized to grant roles'
+            using errcode = 'insufficient_privilege', hint = 'needs users:admin';
+    end if;
+    select id into v_uid from rbac.users where lower(email) = lower(btrim(p_email));
+    if v_uid is null then
+        raise exception 'no user has the email %', p_email
+            using errcode = 'no_data_found', hint = 'they sign up first, or rbac.create_user_with_password creates them';
+    end if;
+    if not exists (select 1 from rbac.roles where name = p_role) then
+        raise exception 'no role named %', p_role
+            using errcode = 'no_data_found', hint = 'rbac.define_role creates one';
+    end if;
+    insert into rbac.grants (user_id, role, granted_by, basis)
+    select v_uid, p_role, rbac.current_user_id(), 'operator'
+     where not exists (select 1 from rbac.grants g where g.user_id = v_uid and g.role = p_role and g.revoked_at is null);
+    insert into rbac.user_roles (user_id, role) values (v_uid, p_role) on conflict do nothing;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_uid, 'role_granted', jsonb_build_object('role', p_role, 'by', coalesce(rbac.current_user_id()::text, 'installer')));
+    return v_uid;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 6b. THE FIRST ADMINISTRATOR.
 -- ------------------------------------------------------------
 -- grant_role() cannot make the first one -- it is gated on
@@ -12094,6 +12183,7 @@ revoke execute on function rbac.request_password_reset(text, text, interval)
 grant execute on function rbac.verify_api_key(text) to web_anon, authenticated;
 grant execute on function rbac.change_password(text, text) to authenticated;
 grant execute on function rbac.grant_role(uuid, text) to authenticated;
+grant execute on function rbac.define_role(text, text[], text), rbac.grant_role_by_email(text, text) to authenticated;
 grant execute on function rbac.revoke_session(uuid) to authenticated;
 grant execute on function rbac.revoke_all_sessions() to authenticated;
 -- has_permission()/current_user_id() are called FROM RLS policies, which
