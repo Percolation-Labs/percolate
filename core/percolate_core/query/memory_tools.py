@@ -62,25 +62,36 @@ TOOLS: dict[str, _Spec] = {
     "claim_judgement": (
         "Claim one judgement to decide: it is held for you for a while, and comes with its evidence (the name, "
         "what was said about it, the candidates it might be, with summaries) and how_to_decide, which names the "
-        "verdicts you may give and the candidate ids a bind may name. Give an id to claim that one; otherwise the "
-        "next open item. Answers {\"empty\": true} when nothing waits.",
+        "verdicts you may give and the candidate ids a bind may name. A challenge is one of the person's own "
+        "claims, just saved, with the claims already in the graph nearest it that they may read. Give an id to "
+        "claim that one; otherwise the next open item. Answers {\"empty\": true} when nothing waits.",
         {"type": "object",
          "properties": {"id": {"type": "string", "description": "a judgement id from list_judgements"},
-                        "kinds": {"type": "array", "items": {"type": "string", "enum": ["bind", "merge", "withdraw"]}}}},
+                        "kinds": {"type": "array", "items": {"type": "string",
+                                                             "enum": ["bind", "merge", "withdraw", "challenge"]}}}},
         "aiq", "claim_judgement",
         lambda a: {"p_id": a.get("id"), "p_kinds": a.get("kinds")},
     ),
     "decide_judgement": (
         "Decide a judgement you hold, with your reason. verdict is one of the shapes how_to_decide named: "
         "{\"decision\":\"bind\",\"target\":\"<candidate node id>\"}, {\"decision\":\"distinct\"}, "
-        "{\"decision\":\"none\"}, or {\"decision\":\"human\"} to hand it to a person. Recorded as decided by your "
-        "agent, with the reason, and undoable. Refused once your hold has lapsed: claim it again.",
+        "{\"decision\":\"none\"}, or {\"decision\":\"human\"} to hand it to a person. A challenge is decided "
+        "{\"decision\":\"relate\",\"relations\":[{\"target\":\"<candidate claim id>\",\"predicate\":\"same_as\","
+        "\"spans\":{...}}]} -- each relation asserted as you, so it lands proposed until the person confirms it -- "
+        "or none. Recorded as decided by your agent, with the reason, and undoable. Refused once your hold has "
+        "lapsed: claim it again.",
         {"type": "object", "required": ["id", "verdict", "reason"],
          "properties": {"id": {"type": "string"},
                         "verdict": {"type": "object", "required": ["decision"],
                                     "properties": {"decision": {"type": "string",
-                                                                "enum": ["bind", "distinct", "none", "human"]},
-                                                   "target": {"type": "string"}}},
+                                                                "enum": ["bind", "distinct", "none", "human",
+                                                                         "relate"]},
+                                                   "target": {"type": "string"},
+                                                   "relations": {"type": "array", "items": {
+                                                       "type": "object", "required": ["target", "predicate"],
+                                                       "properties": {"target": {"type": "string"},
+                                                                      "predicate": {"type": "string"},
+                                                                      "spans": {"type": "object"}}}}}},
                         "reason": {"type": "string", "minLength": 1}}},
         "aiq", "complete_judgement",
         # The tier is the agent's, always: a person decides through the
