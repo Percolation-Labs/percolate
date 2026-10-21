@@ -994,7 +994,7 @@ select aiq.register_lexical_source('my_docs', 'myschema.my_chunks');
 -- semantic: one embedding space per MODEL (not per dimension)
 insert into aiq.embedding_models (name, dim, provider, endpoint, is_default)
 values ('nomic-embed-text', 768, 'ollama',
-        'http://host.docker.internal:11435/api/embeddings', true);
+        'http://host.docker.internal:11434/api/embeddings', true);
 select aiq.register_embedding_space('nomic-embed-text');
 
 -- or a model that runs IN THE WORKER, with no url, no key and no bill. The

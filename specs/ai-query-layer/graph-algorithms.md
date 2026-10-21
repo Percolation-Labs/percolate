@@ -533,7 +533,7 @@ Two consequences bear on how to read the number. Every **authored**
 edge shares one root, so two analyst assertions do not corroborate each other —
 an authored edge is already weight 1.0, so this costs a lift that had nothing
 to add. And an edge asserted by several documents takes the FIRST one, which
-undercounts independence rather than inventing it. On a development database,
+undercounts independence rather than inventing it. On one corpus,
 2,260 of 12,626 edges carry sources at all, 81 of them name more than one
 resource, and the 2,260 rest on 74 documents — about 30 edges each, which is
 the regime the measurement above calls 500 documents.
