@@ -9800,7 +9800,11 @@ create index if not exists task_usage_run on workflow.task_usage (run_id);
 create table if not exists workflow.run_estimates (
     run_id              uuid not null references workflow.runs(id) on delete cascade,
     step_key            text,                -- null: the whole run
-    basis               text not null check (basis in ('history', 'dry_run', 'mixed', 'none')),
+    -- dry_run_bound: a fan-out estimated at the bound its step declares. dry_run_unbounded:
+    -- a fan-out nothing bounds, so the figures are a floor ("at least"), never a count of
+    -- what a minimal stand-in happened to return (REM-1125).
+    basis               text not null check (basis in ('history', 'dry_run', 'dry_run_bound', 'dry_run_unbounded',
+                                                     'mixed', 'none')),
     est_tasks           int,
     est_wall_seconds    numeric,
     est_requests        int,
@@ -9919,6 +9923,8 @@ language sql security definer set search_path = pg_catalog, public as $$
                                         est_input_tokens, est_output_tokens, est_cost_usd, estimator)
     select p_run_id, null,
            case when bool_and(basis = 'none') then 'none'
+                -- Any unbounded step makes the run's totals a floor, and says so.
+                when bool_or(basis = 'dry_run_unbounded') then 'dry_run_unbounded'
                 when bool_and(basis = 'history') then 'history'
                 when bool_and(basis = 'dry_run') then 'dry_run' else 'mixed' end,
            case when bool_or(basis = 'none') then null else sum(est_tasks) end,

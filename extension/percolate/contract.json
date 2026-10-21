@@ -1264,6 +1264,8 @@
       "admits": [
         "history",
         "dry_run",
+        "dry_run_bound",
+        "dry_run_unbounded",
         "mixed",
         "none"
       ],
