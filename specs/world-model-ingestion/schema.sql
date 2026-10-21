@@ -441,6 +441,20 @@ begin
     on conflict (checksum) do update set checksum = excluded.checksum
     returning id into v_file;
 
+    -- A CONFLICT IS NEVER ANOTHER PERSON'S RESOURCE (REM-1117). The upsert
+    -- below keys on (channel, external_id) and runs past row security, so a
+    -- caller who reused someone else's external_id got their resource back
+    -- (and, in register_text, renamed it and repointed its uri). An existing
+    -- row the caller may not write is refused before anything is touched.
+    if p_external_id is not null and exists (
+        select 1 from content.resources r
+         where r.channel_id = v_channel and r.external_id = p_external_id
+           and not rbac.may_write(r.owner_id, r.org_id, r.visibility)) then
+        raise exception 'external_id % is already registered in this channel by someone else', p_external_id
+            using errcode = 'insufficient_privilege',
+                  hint = 'choose another external_id; an existing resource is changed only by whoever may write it';
+    end if;
+
     -- owner_id IS SET HERE OR THE ROW IS UNREADABLE BY ANYONE. This function
     -- is SECURITY DEFINER and bypasses RLS, so it will happily write a row
     -- that its own writer cannot then select -- which is exactly what a
@@ -548,8 +562,16 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs resources:create';
     end if;
-    select id into v_channel from content.channels where name = p_channel;
-    if not found then
+    -- Scoped as register_upload scopes it (REM-1117): a channel the caller
+    -- can read, in the org named or the shared one. By name alone it wrote
+    -- into, and started the ingest workflow of, a channel the caller could not see.
+    select id into v_channel from content.channels
+     where name = p_channel
+       and rbac.may_read(owner_id, org_id, visibility)
+       and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+     order by (org_id = rbac.org_or_shared(p_org_id)) desc
+     limit 1;
+    if v_channel is null then
         raise exception 'no channel named %', p_channel;
     end if;
     if jsonb_typeof(p_chunks) is distinct from 'array' or jsonb_array_length(p_chunks) = 0 then
@@ -564,6 +586,20 @@ begin
     select md5(string_agg(c->>'content', E'\n' order by ord))
       into v_hash
       from jsonb_array_elements(p_chunks) with ordinality e(c, ord);
+
+    -- A CONFLICT IS NEVER ANOTHER PERSON'S RESOURCE (REM-1117). The upsert
+    -- below keys on (channel, external_id) and runs past row security, so a
+    -- caller who reused someone else's external_id got their resource back
+    -- (and, in register_text, renamed it and repointed its uri). An existing
+    -- row the caller may not write is refused before anything is touched.
+    if p_external_id is not null and exists (
+        select 1 from content.resources r
+         where r.channel_id = v_channel and r.external_id = p_external_id
+           and not rbac.may_write(r.owner_id, r.org_id, r.visibility)) then
+        raise exception 'external_id % is already registered in this channel by someone else', p_external_id
+            using errcode = 'insufficient_privilege',
+                  hint = 'choose another external_id; an existing resource is changed only by whoever may write it';
+    end if;
 
     insert into content.resources (channel_id, uri, title, org_id, owner_id, visibility,
                                    metadata, external_id, status)
