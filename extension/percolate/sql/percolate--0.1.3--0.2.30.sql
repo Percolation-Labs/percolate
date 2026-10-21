@@ -10747,7 +10747,8 @@ $$ language sql stable parallel safe set search_path = pg_catalog, public;
 
 create or replace function rbac.scope_write_predicate() returns text as $fn$
     select $q$((select rbac.is_operator())
-       or ((owner_id is null or owner_id = (select rbac.current_user_id()))
+       or ((owner_id = (select rbac.current_user_id())
+            or (owner_id is null and org_id <> rbac.shared_org_id()))
            and (org_id = rbac.shared_org_id()
                 or org_id in (select rbac.current_org_ids()))
            and (visibility <> 'org' or org_id <> rbac.shared_org_id())))$q$;
@@ -10790,11 +10791,25 @@ create or replace function rbac.may_read(
             and p_org_id in (select rbac.current_org_ids()));
 $$ language sql stable parallel safe;
 
+-- AN OWNERLESS ROW IN THE SHARED ORG IS AN OPERATOR'S (REM-1116). The null
+-- owner arm used to hold everywhere, and in the shared org every signed-in
+-- caller "reaches" the org, so anyone could write a row nobody owns: a
+-- scheduled pull's resource, a seed, a workflow artifact. Through the
+-- policies nothing reached it (no request role holds UPDATE or DELETE on a
+-- scoped table), but record_chunks asks this function past row security, and
+-- any signed-in caller replaced those resources' chunks. Inside a real org an
+-- ownerless row stays the members' to write, which is what it means there.
+-- scope_write_predicate above says the same, and rbac/11 holds them equal.
 create or replace function rbac.may_write(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
     select rbac.is_operator()
-        or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
+        -- `is not distinct from` and a non-null owner, not `=`: with no owner
+        -- `=` is NULL, NULL or false is NULL, and `if not may_write(...)`
+        -- does not raise on NULL. The first draft of this fix did exactly
+        -- that and content/21 caught it.
+        or (((p_owner_id is not null and p_owner_id is not distinct from rbac.current_user_id())
+             or (p_owner_id is null and not rbac.is_shared_org(p_org_id)))
             and (rbac.is_shared_org(p_org_id)
                  or p_org_id in (select rbac.current_org_ids()))
             and (p_visibility <> 'org' or not rbac.is_shared_org(p_org_id)));
