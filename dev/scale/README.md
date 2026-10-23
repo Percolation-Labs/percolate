@@ -11,6 +11,9 @@ falling rather than as a support ticket.
 DSN="postgres://…" ./run.sh   # against something other than the compose stack
 ```
 
+The defaults, container `p8-dev-db` and database `p8experiment`, are this
+repository's dev stack. Against your own, set `CONTAINER` or `DSN`.
+
 ## What it measures, and why these three
 
 The three are the engine's hot paths, and they were chosen because each one is
