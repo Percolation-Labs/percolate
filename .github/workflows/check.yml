@@ -54,6 +54,10 @@ name: check
 # `tree` still runs `dev/check.sh --tree`, so the gate list stays in one place.
 on:
   pull_request:
+  # THE MERGE QUEUE (21 Oct): two PRs each green on its own merge ref can still break main together. On
+  # 21 Oct #234 and #240 each moved specs/budget.toml's function count from 525 to 526, git merged the identical
+  # lines as one, and main went red. The queue tests each PR on top of the ones ahead of it.
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -128,7 +132,7 @@ jobs:
       - id: diff
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
+          BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref || 'main') }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
             green=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?branch=main&event=push&status=success&per_page=1" \
