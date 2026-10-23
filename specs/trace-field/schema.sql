@@ -364,7 +364,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- Requires: alter the tasks kind constraint to admit 'gradient', and teach the
 -- compiler a `gradient:` action key. Both are one line; neither is written.
--- workflow-engine/roadmap.md §5 carries the trigger.
+-- The workflow engine has committed to neither.
 
 -- ------------------------------------------------------------
 -- 7. Anchoring, and elicitation.
@@ -442,7 +442,7 @@ grant execute on function workflow.anchor(jsonb) to authenticated;
 -- honest rather than deferred: this function is called BY a registered
 -- function, so a forager that ignores its budget simply does not call it. Only
 -- a step kind can enforce a budget the step itself cannot skip, and that is
--- the real argument for `forager:` -- workflow-engine/roadmap.md §5.
+-- the real argument for a `forager:` step kind, which nobody has committed to.
 create or replace function workflow.elicit(
     p_locus_kind text, p_locus text, p_question text,
     p_task_id uuid default null, p_org_id uuid default null)
@@ -566,8 +566,7 @@ grant select on workflow.v_gradient, workflow.v_field, workflow.v_attention
 --     -- a scheduled `matrix:` over a registered function already is one. A
 --     third place to describe one is a third place for them to disagree.
 --   * NO elicitation budget table. §7 is honest that this function cannot
---     enforce one; the step kind that could is roadmap.md §5, and its trigger
---     is sequence.md phase 5.
+--     enforce one; only a step kind could, and none is committed to.
 --   * NO replacement for `signal:`. Blocking is right for a named approver on
 --     one run. brief.md §3.4 objects to it being the ONLY spelling.
 -- ------------------------------------------------------------

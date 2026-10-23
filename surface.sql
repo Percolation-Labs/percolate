@@ -489,7 +489,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.lint_spec','jsonb','§25: a p8ql string that cannot parse is refused at authoring time, not at 3am'),
 ('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
 -- A step may write its own SQL, and the allow-list is a policy rather than the
--- only door. Every one of these is a promise made in YAML.md and roadmap.md §6.
+-- only door. Every one of these is a promise made in workflow-engine/YAML.md.
 ('workflow-engine','function','workflow.run_sql','text,boolean,integer,jsonb','a step carries its own statement, read-only unless it declares otherwise'),
 ('workflow-engine','function','workflow.sql_policy','','open or registered -- the lockdown is a setting, not a rebuild'),
 ('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','the escaping form: a {{template}} becomes a quoted literal. Kept for the row-source statement'),
