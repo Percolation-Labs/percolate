@@ -1,14 +1,15 @@
 -- Dream reconciles what knit landed, by construction only (REM-961).
 --
 -- aiq.dream() supersedes edges of relations declared single-valued and
--- promotes soft nodes whose key is exactly one typed node's, then records the
--- run. It makes no judgement about meaning. The checks:
+-- promotes soft nodes whose key is exactly one typed node's. It makes no
+-- judgement about meaning. The checks:
 --   1. a single-valued relation keeps one current value per subject, and the
 --      older edge ends where the newer begins, still readable as of before;
 --   2. a relation nobody declared keeps every value (prefers is many-valued);
 --   3. a soft node whose exact typed target appears later is promoted at tier
 --      'registry'; an alias with no exact match is left for a judge;
---   4. a second run does nothing, and each run is recorded with its window.
+--   4. a second run does nothing, and a dream run of the `dream` workflow
+--      starts where the last one ended (REM-1163: the engine keeps the window).
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -82,10 +83,19 @@ select aiq.dream() as second \gset
 \echo :second
 select pg_temp.check((:'second'::jsonb->>'superseded')::int = 0 and (:'second'::jsonb->>'promoted_exact')::int = 0,
     '4. a second run changed something: ' || :'second');
-select pg_temp.check((select count(*) from aiq.dream_runs) >= 2
-                 and (select since from aiq.dream_runs order by until desc limit 1)
-                   = (select until from aiq.dream_runs order by until desc offset 1 limit 1),
-    '4. the second run did not start where the first ended');
+-- Two scheduled-style runs, through the engine: the second starts where the
+-- first ended. Defined disabled, so nothing ticks it.
+select aiq.schedule_dream('0 0 1 1 *', false);
+select workflow.start_workflow('dream', '{}') as run_a \gset
+select workflow.start_workflow('dream', '{}') as run_b \gset
+create temp view q18_runs as
+select t.run_id, t.status, t.output->'result' as receipt
+  from workflow.tasks t where t.run_id in (:'run_a', :'run_b') and t.step_key = 'reconcile';
+select pg_temp.check((select count(*) from q18_runs where status = 'succeeded') = 2,
+    '4. the dream workflow did not run its step: ' || (select string_agg(status, ', ') from q18_runs));
+select pg_temp.check((select receipt->>'since' from q18_runs where run_id = :'run_b')
+                   = (select receipt->>'until' from q18_runs where run_id = :'run_a'),
+    '4. the second dream run did not start where the first ended');
 
 do $$ begin raise notice 'query/18: dream supersedes a declared single-valued relation, keeps a many-valued one, promotes only an exact match, and a second run does nothing'; end $$;
 rollback;

@@ -83,9 +83,6 @@ ALLOWED = {
     ("world-model-ingestion", "aiq.graph_accepted_relations"):
         "a read over aiq.graph_vocabulary, which is allowed above; a view "
         "changes no table's meaning and this one has no reader in aiq.",
-    ("world-model-ingestion", "aiq.dream_runs"):
-        "dream reconciles the graph this file lands, on a schedule, and this is "
-        "the log of its runs; written only by dream, here (REM-961).",
     ("world-model-ingestion", "aiq.judgements"):
         "what dream cannot decide waits here for a judge, with the verdict "
         "recorded; its shape belongs with dream. claims/schema.sql adds "

@@ -142,6 +142,23 @@ begin
     end if;
 end $$;
 
+-- REM-1163. aiq.dream_runs held each aiq.dream() pass (window, decider, receipt). A dream is now a workflow run of
+-- `dream`, whose step output is the receipt and whose newest `until` is the watermark (graph.sql). Every row here is
+-- a direct call's: aiq.schedule_dream could not be installed before 0.2.31 (it registered the step with no argument
+-- types), so no scheduled dream ever ran. A direct call's receipt was returned to its caller and has no run to
+-- belong to, so it goes with the table. The one thing it carried that a later pass reads, the
+-- watermark, costs a dream that has never been scheduled one wider window, which an idempotent pass makes only slower.
+drop table if exists aiq.dream_runs;
+-- Its kind row too: the replay re-declares only tables that exist, so on an upgraded database this row would outlive
+-- the table and the declarations would differ from a fresh install's (dev/upgrade-converges.sh). A database from
+-- before percolate.table_kinds existed (0.1.6 upgrades straight here) has no row to delete.
+do $$
+begin
+    if to_regclass('percolate.table_kinds') is not null then
+        delete from percolate.table_kinds where schema_name = 'aiq' and table_name = 'dream_runs';
+    end if;
+end $$;
+
 -- REM-1162. claims.settling held (judgement, transaction) while a challenge was being settled, and was empty at rest;
 -- that is now aiq.judgements.settling_xact, which the replay adds. Nothing to move: a row outlives only the
 -- transaction that wrote it, and its transaction id never comes round again. The table and its declaration go.
@@ -31017,26 +31034,17 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- declared. The receipt carries counts only, never another owner's names.
 --
 -- Idempotent: a second run finds nothing to supersede and nothing to promote.
--- Each run is recorded in aiq.dream_runs, whose `until` is the next run's
--- `since`; supersession looks only at subjects with an edge written since then,
--- and promotion at every soft node still unresolved, because an exact target
--- can appear long after the soft node did.
-create table if not exists aiq.dream_runs (
-    id          uuid primary key default uuidv7(),
-    since       timestamptz not null,
-    until       timestamptz not null,
-    decided_by  text not null,
-    receipt     jsonb not null,
-    ran_at      timestamptz not null default now()
-);
-comment on table aiq.dream_runs is
-    'Each aiq.dream() run: the window it reconciled (since, until] and what it did. The newest until is the next run''s watermark.';
-create index if not exists idx_dream_runs_until on aiq.dream_runs (until desc);
--- The engine's record, not a user's: the aiq schema's default grants give every
--- web role SELECT, and a table they can read needs a policy and a declared
--- surface. Nobody but the owner and an operator reads this, so the grants go.
-revoke all on aiq.dream_runs from public, authenticated, api_viewer;
-
+-- A DREAM IS A WORKFLOW RUN (REM-1163). aiq.schedule_dream installs the
+-- `dream` workflow, whose one step calls this function, so the engine keeps
+-- each scheduled run's receipt as that step's output, and the newest receipt's
+-- `until` is the next run's `since`. Supersession looks only at subjects with an
+-- edge written since then, and promotion at every soft node still unresolved,
+-- because an exact target can appear long after the soft node did. A direct
+-- call is a one-off: its receipt is its return value, and it moves no
+-- watermark. There was a table of runs, aiq.dream_runs, which repeated what the
+-- engine already kept for every scheduled run; the 0.2.31 migration drops it.
+-- With no run yet the window starts at -infinity, which is only slower, since a
+-- dream is idempotent.
 create or replace function aiq.dream(p_since timestamptz default null,
                                      p_decided_by text default 'dream')
 returns jsonb as $$
@@ -31060,7 +31068,15 @@ begin
     if coalesce(btrim(p_decided_by), '') = '' then
         raise exception 'aiq.dream needs p_decided_by: who or what decided, for the resolution rows it writes';
     end if;
-    v_since := coalesce(p_since, (select max(until) from aiq.dream_runs), '-infinity'::timestamptz);
+    -- The newest finished dream run's window end. The step running now is not
+    -- finished, so it never reads itself.
+    v_since := coalesce(p_since,
+        (select max((wt.output->'result'->>'until')::timestamptz)
+           from workflow.tasks wt
+           join workflow.runs wr on wr.id = wt.run_id
+           join workflow.definitions wd on wd.id = wr.workflow_def_id
+          where wd.name = 'dream' and wt.step_key = 'reconcile' and wt.status = 'succeeded'),
+        '-infinity'::timestamptz);
 
     -- 1. Supersession. One UPDATE: within each (subject, relation, org) of a
     --    single-valued relation, an edge with a later current one after it ends
@@ -31146,8 +31162,6 @@ begin
                         'select aiq.register_graph_vocabulary() widens the catalogue to it, then run dream again');
         end if;
     end if;
-    insert into aiq.dream_runs (since, until, decided_by, receipt)
-    values (v_since, v_until, p_decided_by, v_receipt);
     return v_receipt;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -31905,13 +31919,19 @@ create or replace function aiq.schedule_dream(p_cron text default '*/15 * * * *'
 returns jsonb as $$
 declare v_id uuid;
 begin
-    perform workflow.register_step_function('dream', 'aiq.dream', '{}', 300000,
+    -- The function's own signature. Registered with no argument types, which
+    -- step_function_is_runnable refuses for a function that takes two, this
+    -- schedule could not be installed at all (found by REM-1163's test).
+    -- `since` is null, so a run reads its watermark: a caller who wants another
+    -- window calls aiq.dream(since) directly. (A {{run.since}} template that
+    -- resolves to nothing fails the step rather than passing null.)
+    perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
     perform workflow.define_yaml($y$
 name: dream
 steps:
   - id: reconcile
-    sql: {function: dream, args: []}
+    sql: {function: dream, args: [null, dream]}
 $y$);
     select id into v_id from workflow.schedules where name = 'dream';
     if v_id is null then
@@ -42153,10 +42173,6 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
-        -- aiq.dream_runs: the watermark. Lost in a restore, the next dream
-        -- would start from -infinity -- harmless, since it is idempotent, but
-        -- the record of what each run did would be gone.
-        'aiq.dream_runs',
         -- aiq.judgements: every verdict a judge gave, with its reason and
         -- tier, and what it wrote. Lost in a restore, the resolutions stay but
         -- nothing says who decided them or why.
