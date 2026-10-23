@@ -2818,21 +2818,21 @@ scenarios:
   - id: qs-10
     category: query-surface
     title: SEMANTIC finds the passage that shares no words with the question
-    asks: "Anything about liver problems?"
+    asks: "Any sign of a hepatotoxicity concern?"
     mechanism: "USAGE.md § SEMANTIC -- the caller supplies the vector; FROM scopes the corpus"
     catches: [wrong-answer-not-error]
     role: app_owner
     check:
       - name: the nearest chunk is the one with no shared vocabulary
         sql: |
-          select aiq.query('SEMANTIC "a liver problem" FROM pv_chunks USING calder-quad LIMIT 3',
+          select aiq.query('SEMANTIC "a hepatotoxicity concern" FROM pv_chunks USING calder-quad LIMIT 3',
                            '[0,0,0.707,0.707]'::vector)#>>'{rows,0,chunk_id}'
         is: "58000000-0000-0000-0000-000000000002"
         because: "'Liver enzyme elevation' shares not one word with the question -- a corpus where the modes agree cannot show why there are three"
       - name: and TEXT cannot find it
-        sql: "select jsonb_array_length(aiq.query('TEXT \"liver problem\" FROM pv_chunks LIMIT 5')->'rows')"
+        sql: "select jsonb_array_length(aiq.query('TEXT \"hepatotoxicity concern\" FROM pv_chunks LIMIT 5')->'rows')"
         is: "0"
-        because: "the disagreement is the point; if the lexical half found it too, the semantic half would be unproven"
+        because: "the disagreement is the point; if the lexical half found it too, the semantic half would be unproven. The question was 'a liver problem' until TEXT matched any of its words (REM-1145): it shares 'liver' with the passage, and TEXT missed it only because it also demanded 'problem'"
 
   - id: qs-11
     category: query-surface
@@ -2886,16 +2886,16 @@ scenarios:
     check:
       - name: the chunk both rankers like comes first
         sql: |
-          select aiq.query('SEARCH "LOT-4471B hepatic" FROM pv_chunks USING calder-quad LIMIT 3',
+          select aiq.query('SEARCH "LOT-4471B" FROM pv_chunks USING calder-quad LIMIT 3',
                            '[0,0,0.9,0.436]'::vector)#>>'{rows,0,chunk_id}'
         is: "58000000-0000-0000-0000-000000000001"
         because: "RRF rather than score blending, because ts_rank and cosine distance share neither scale nor direction"
       - name: and a lexical miss is reported as null, not as a zero
         sql: |
-          select (aiq.query('SEARCH "LOT-4471B hepatic" FROM pv_chunks USING calder-quad LIMIT 3',
+          select (aiq.query('SEARCH "LOT-4471B" FROM pv_chunks USING calder-quad LIMIT 3',
                             '[0,0,0.9,0.436]'::vector)::text) ~ '"lexical_rank": null'
         is: "true"
-        because: "the documented pipeline once fed a literal `{{run.question}}` to the lexical half: every lexical_rank came back null, the fusion degraded to semantic-only, and it returned rows. A null that reads as null is what makes that visible"
+        because: "the documented pipeline once fed a literal `{{run.question}}` to the lexical half: every lexical_rank came back null, the fusion degraded to semantic-only, and it returned rows. A null that reads as null is what makes that visible. The query was 'LOT-4471B hepatic' until TEXT matched any of its words (REM-1145); then every top-three row shared a word, so it names the batch alone and the liver passage comes in on meaning only"
 
   - id: qs-15
     category: query-surface

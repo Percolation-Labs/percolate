@@ -4050,11 +4050,18 @@ begin
             using errcode = 'feature_not_supported',
                   hint = 'as the caller, its row security reads every row before the text index (REM-519)';
     end if;
+    -- ANY OF THE WORDS, ranked by how many and how densely (REM-1145). plainto_tsquery ANDs every word, so a
+    -- question matched only a chunk holding all of them: on LongMemEval S through Percolate it found every source
+    -- for 3 of 39 held-out questions within 50 reads, and aiq.search's hybrid came back as its semantic half alone.
+    -- The same words ORed, ranked by ts_rank normalised by document length (1 + log length), were chosen on the
+    -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
+    -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
     return query execute format(
-        'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
-         from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
-         order by ts_rank(c.search_tsv, plainto_tsquery(%L, $1)) desc limit $2',
-        s.content_col, s.regconfig, aiq.scoped_source(s.source_table, p_scope), s.regconfig, s.regconfig)
+        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
+         select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
+           from %s c, q where c.search_tsv @@ q.t
+          order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
+        s.regconfig, s.content_col, aiq.scoped_source(s.source_table, p_scope))
         using p_query, p_limit;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
