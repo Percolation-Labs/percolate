@@ -125,6 +125,7 @@ TREE_GATES=(
   "A released version number is not reused::./dev/check-version.sh"
   "Every version and path named for the extension resolves::./dev/references.sh"
   "No line in the tree cites a repository a reader cannot open::$PY dev/no-private-citations.py --check"
+  "core/ changes only by a mirror of a percolate-core release::$PY dev/core-is-a-mirror.py --check"
   "The schema is the size it says it is::$PY dev/the-schema-has-a-budget.py"
   "Two branches that each grow the schema merge in either order and stay counted::./dev/tests/budget-per-change.sh"
   "A spec file shapes only the schema its directory owns::$PY dev/owns-its-schema.py"
