@@ -31306,6 +31306,17 @@ begin
     if new.tier is null then
         raise exception 'a judgement needs a tier: agent, human, llm or decision_model';
     end if;
+    -- THE TIER CANNOT CLAIM MORE THAN THE CALLER IS (REM-1123). It was the caller's word, and decided_by below is
+    -- built from it: an agent could record its decision as the person's, and anyone as the platform's models.
+    -- Only a person decides as human, and only the platform as llm or decision_model. A person may still record
+    -- their decision as agent, under their own id -- the article tours decide that way, and it claims nothing a
+    -- person lacks; settling, which is an agent's alone, asks rbac.current_actor() itself (claims.settle_challenge).
+    if (new.tier = 'human' and rbac.current_actor() <> 'person')
+       or (new.tier in ('llm', 'decision_model') and rbac.current_actor() <> 'platform') then
+        raise insufficient_privilege using
+            message = format('a judgement decided as %s cannot be recorded as %s', rbac.current_actor(), new.tier),
+            hint = 'only a person decides as human, and only the platform as llm or decision_model';
+    end if;
     -- A RELATE IS A RELATION THAT EXISTS. complete_judgement asserts each one
     -- as the judge and writes its id into the verdict; a verdict written
     -- straight onto the row names relations nobody asserted, and is refused
@@ -37130,7 +37141,7 @@ begin
             insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
             values (p_revision, p_claim_key, cur.claim_id, cur.method, cur.status, 'retract', t);
             for answer in select * from (
-                select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+                select distinct on (a.question_id) a.* from claims.answered a
                  where a.evidence=p_revision and a.claim_key=p_claim_key
                  order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
                 where x.op='assert' and x.claim_id=cur.claim_id loop
@@ -37160,7 +37171,7 @@ begin
     -- The frame was projected while this occurrence still proposed the old identity. Move each active
     -- question assertion to the writer's new identity with two append-only rows, preserving the old reading.
     for answer in select * from (
-        select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+        select distinct on (a.question_id) a.* from claims.answered a
          where a.evidence=p_revision and a.claim_key=p_claim_key
          order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
         where x.op='assert' and x.claim_id=cur.claim_id loop

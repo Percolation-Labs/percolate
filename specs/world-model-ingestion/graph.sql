@@ -2183,6 +2183,17 @@ begin
     if new.tier is null then
         raise exception 'a judgement needs a tier: agent, human, llm or decision_model';
     end if;
+    -- THE TIER CANNOT CLAIM MORE THAN THE CALLER IS (REM-1123). It was the caller's word, and decided_by below is
+    -- built from it: an agent could record its decision as the person's, and anyone as the platform's models.
+    -- Only a person decides as human, and only the platform as llm or decision_model. A person may still record
+    -- their decision as agent, under their own id -- the article tours decide that way, and it claims nothing a
+    -- person lacks; settling, which is an agent's alone, asks rbac.current_actor() itself (claims.settle_challenge).
+    if (new.tier = 'human' and rbac.current_actor() <> 'person')
+       or (new.tier in ('llm', 'decision_model') and rbac.current_actor() <> 'platform') then
+        raise insufficient_privilege using
+            message = format('a judgement decided as %s cannot be recorded as %s', rbac.current_actor(), new.tier),
+            hint = 'only a person decides as human, and only the platform as llm or decision_model';
+    end if;
     -- A RELATE IS A RELATION THAT EXISTS. complete_judgement asserts each one
     -- as the judge and writes its id into the verdict; a verdict written
     -- straight onto the row names relations nobody asserted, and is refused
