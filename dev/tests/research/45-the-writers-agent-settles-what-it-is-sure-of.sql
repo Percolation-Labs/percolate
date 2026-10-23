@@ -359,7 +359,9 @@ do $$
 declare
     v_rep jsonb := claims.challenge_report('chal-test-3d');
 begin
-    assert not exists (select 1 from claims.settling), 'each settling ended with the call that settled it';
+    assert not exists (select 1 from aiq.judgements where settling_xact is not null),
+        'each settling ended with the call that settled it';
+    assert to_regclass('claims.settling') is null, 'the mark is a column of the judgement, not a table (REM-1162)';
     -- B1's judgement has a row per place it is stated, two since the second place above, and each says the same.
     assert (select array_agg(distinct resolved_by) from claims.challenge_outcomes
              where judgement_id = (select v::uuid from ids where k = 'jb'))

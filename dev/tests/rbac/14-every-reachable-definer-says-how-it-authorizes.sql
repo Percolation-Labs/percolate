@@ -273,7 +273,7 @@ insert into t14_declared (fn, mechanism, why) values
 ('claims.settle_challenge(uuid,jsonb)', 'rbac.current_user_id',
  'the challenge''s addressee holding a live claim on it (REM-1123); it settles only for rbac.current_actor() = agent, and assert_relation asks each condition again before writing settled'),
 ('claims.settle_challenge_done()', 'none',
- 'clears claims.settling, the marker settle_challenge set for this transaction; clearing it grants nothing (REM-1123)'),
+ 'clears aiq.judgements.settling_xact, the mark settle_challenge set for this transaction; clearing it grants nothing (REM-1123, REM-1162)'),
 ('claims.assert_relation(text,text,text,uuid,uuid,text,jsonb,text)', 'rbac.require',
  'research:insert, from a revision of the caller''s own work; a second revision must be readable to them (REM-474)'),
 ('claims.restate_relation(bigint,text,boolean,text)', 'rbac.require',
