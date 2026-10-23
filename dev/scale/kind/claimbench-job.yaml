@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata: {name: claimbench, namespace: p8}
+spec:
+  parallelism: 2
+  completions: 2
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+      containers:
+        - name: bench
+          image: percolationlabs/percolate-postgres:19
+          imagePullPolicy: Never
+          env: [{name: PGPASSWORD, value: workerpass}]
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              cat > /tmp/claim.sql <<'SQL'
+              select workflow.claim_task('scale', 'w' || :client_id);
+              SQL
+              # BOUNDED by transaction count, not by time. A time-boxed run
+              # against a queue that drains mid-run measures the empty-queue
+              # no-op path for the remainder and reports it as throughput.
+              pgbench -h pg -U worker -d p8experiment -n -f /tmp/claim.sql \
+                -c 4 -j 2 -t 5000 2>&1 | grep -E 'tps|latency average|processed'
