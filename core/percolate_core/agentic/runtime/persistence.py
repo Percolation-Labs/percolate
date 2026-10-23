@@ -304,7 +304,7 @@ class PersistenceAdapter:
         return rows
 
     async def persist_turn(self, rows: list[Message]) -> list[Message]:
-        """One RPC, one transaction (``sequence.md`` Gate 2)."""
+        """One RPC, one transaction (phase gate 2, ``phases.py``)."""
         return await self.repo.append_messages(rows)
 
     # -- quota -------------------------------------------------------------

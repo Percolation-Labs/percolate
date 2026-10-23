@@ -132,8 +132,7 @@ async def open_pool(dsn: str | None = None, **kwargs: Any) -> asyncpg.Pool:
     database, and a second DSN in one process would mean two identities' worth
     of RLS in one connection pool.
 
-    ``meta/module-composition.md`` requires a module to own nothing at import
-    time so a host can compose it. A host that mounts several of these services
+    A module owns nothing at import time, so a host can compose it. A host that mounts several of these services
     opens the pool once in its own lifespan and closes it there; ``pool()``
     below is the convenience for a process that *is* the service.
     """
@@ -218,8 +217,8 @@ async def as_caller(claims: Mapping[str, Any] | None, role: str = ROLE):
     role is the schema owner — or worse, a superuser — bypasses RLS entirely
     before any policy is consulted, and then the claims decide nothing.
     Depending on the DSN's user being the right one makes this seam's safety a
-    property of somebody's connection string. ``specs/README.md`` calls that
-    exact configuration out as the way RLS silently does nothing.
+    property of somebody's connection string, and that exact configuration is
+    the way RLS silently does nothing.
 
     **Claims first, then the role**, and the order is the point. ``set_config``
     is not executable by ``authenticated``, ``web_anon`` or ``api_viewer``
@@ -281,8 +280,7 @@ async def verify_can_open_a_session(role: str = ROLE) -> None:
     that produced it is about a pair this cannot catch. A check that ships in
     0.1.9 does not run in 0.1.8, so the REM-135 pairing -- published 0.1.8
     against a 0.2.0 database -- is not detected by this and never will be. The
-    only cure for an already-published runtime is not to pair it (REM-135's
-    `PACKAGING.md` row). What this buys is the NEXT one: from here on, a
+    only cure for an already-published runtime is not to pair it (REM-135). What this buys is the NEXT one: from here on, a
     runtime that cannot serve the database it is pointed at says so at startup,
     in one sentence, instead of once per turn inside a 200.
 

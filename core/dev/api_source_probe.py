@@ -1,5 +1,5 @@
 """Exercise the real source API, workflow queue and checkpointed ingestion worker.
-Run against the explicit local fixture from p8-subsystems/dev/tests/content/api_fixture.py.
+Run against the explicit local fixture from percolate's dev/tests/content/api_fixture.py.
 """
 import json,sys,time,uuid,urllib.request,urllib.error
 from pathlib import Path

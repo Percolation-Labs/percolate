@@ -39,7 +39,7 @@ __all__ = ["embed_local", "assert_offline", "DEFAULT_LOCAL_BATCH"]
 # second: at 1,800-character chunks on two threads, batch 8 ran 10.6 chunks/s at
 # 482MB, batch 16 ran 10.0 at 917MB and batch 32 ran 9.8 at 1,599MB. The ingest
 # pod's limit is 2GiB. The hosted default (96) exists to save round trips, and
-# there are none here. research-notes/fastembed-local-embedding-2026-09-20.md.
+# there are none here (measured 20 September 2026).
 DEFAULT_LOCAL_BATCH = 8
 
 _lock = threading.Lock()

@@ -1,7 +1,7 @@
 """The annotations the rendered manifests carry, keyed by path.
 
-These were the prose in `k8s/examples/`, and they live here now because that
-directory is *output*: the generator owns what it emits, and a comment that
+These were the prose in the checked-in example manifests, and they live here
+now because those are *output*: the generator owns what it emits, and a comment that
 only exists in the checked-in copy is a comment the next render silently drops.
 `pools.md` §12 Gate 1 — render reproduces the examples byte for byte — is what
 keeps the two honest, and it is the reason these strings are wrapped exactly as
@@ -86,7 +86,7 @@ SCALEDOBJECT_NOTES = {
         "nobody checks when it is wrong.",
     ("spec", "triggers", 0, "authenticationRef", "kind"):
         "Cluster-scoped, so the credential never has to be copied into a\n"
-        "tenant namespace. k8s/base/keda-trigger-auth.yaml.",
+        "tenant namespace.",
 }
 
 SCALEDOBJECT_FLOW: set = set()

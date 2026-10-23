@@ -2,10 +2,9 @@
 
     python build.py --entries <path to entries.jsonl>
 
-`entries.jsonl` is the iterative-query spike's segmentation of Gutenberg #345
-(p8-subsystems meta/spikes/2026-10-17-iterative-query/segment.py): 241 dated
-entries, each with its document and narrator. The text is not committed here,
-as it is not there. This splits each entry into passages of about 200 words at
+`entries.jsonl` is a segmentation of Gutenberg #345 made by an earlier
+iterative-query spike in the private tree: 241 dated entries, each with its
+document and narrator. The text is not committed here. This splits each entry into passages of about 200 words at
 paragraph breaks, embeds them with bge-small-en-v1.5 (fastembed, local), and
 writes store/passages.jsonl and store/vectors.npy.
 

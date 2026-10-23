@@ -89,7 +89,7 @@ ChainedActionKind = Literal["pg_function", "webhook"]
 class ChainedAction(BaseModel):
     """What fires automatically when structured output matches the schema.
 
-    ``brief.md`` §2/§4: p8k8's "chained tool call" reframed as *data* rather
+    ``brief.md`` §2/§4: a "chained tool call" reframed as *data* rather
     than a Python callable lookup. §9 leaves the reference shape open between a
     Postgres function (same-DB, fastest) and a PostgREST/webhook URL (works for
     external side effects) — "probably both, distinguished by a ``kind``

@@ -46,7 +46,7 @@ jobs:
       # The browser-module tests run under node. The self-hosted runners (p8-ci
       # on p8-arm) have none, and a hosted image's node is not a version anyone
       # chose, so the job installs its own -- the same pin as
-      # percolate-application's release.yml. Missing node failed "Screens and
+      # application's release workflow. Missing node failed "Screens and
       # their audit" on every main run from 8e85f80 (REM-568).
       - uses: actions/setup-node@v7
         with: {node-version: "24"}
@@ -148,7 +148,7 @@ jobs:
 
       # The half of the lake's boundary that needs no database or bucket: what
       # authored SQL may say, and what a sealed DuckDB connection may touch.
-      # The end-to-end run is p8-subsystems/dev/tests/content/e2e-lake.py.
+      # The end-to-end run is percolate's dev/tests/content/e2e-lake.py.
       - name: Lake SQL is one SELECT, inside a seal it cannot undo
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_lake_guard.py
@@ -191,7 +191,7 @@ jobs:
       # are the pure-logic half: that the loop beats at all while a handler runs,
       # that it paces itself from the queue rather than from a constant here, and
       # that it stops before the terminal transition. The live proof needs a
-      # database and is p8-subsystems/dev/tests/workflow/19-*.sql.
+      # database and is percolate's dev/tests/workflow/19-a-long-task-finishes-once.sql.
       - name: A long task is heartbeated, so it finishes once
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_worker_heartbeat.py
@@ -399,7 +399,7 @@ jobs:
       # pooled. When it is ALREADY released, terminate() raises and used to
       # replace the exception the handler exists to re-raise -- so the reason a
       # turn failed was gone and only the cleanup's own failure was logged.
-      # Found by the tour (p8-subsystems scenarios/tour).
+      # Found by a scripted tour of the product.
       - name: A failed connection reset keeps its cause
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_reset_failure_keeps_its_cause.py
@@ -436,6 +436,16 @@ jobs:
       - name: An agent's declared output is enforced at the turn
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_a_declared_output_is_enforced.py
+
+      # A workflow's dry run answers on a free stand-in with no tools, and counts what it spent (REM-1125).
+      - name: A dry-run turn runs on a stand-in model
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_dry_run_turn_runs_on_a_stand_in.py
+
+      # Only a worker that declares 'dry_run' is handed a dry run's task, and the shipped one does (REM-1125).
+      - name: The worker declares it can run a dry run's task
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_worker_declares_it_can_run_a_dry_run.py
 
       # A refused tool call reached the model as a successful result, so the
       # model called it again 54 times until request_limit stopped the run,
@@ -490,7 +500,7 @@ jobs:
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 
-      # not run here: test_pool_render.py -- it compares the render against k8s/examples in p8-subsystems, a private repository this job cannot check out; it passes locally against p8-subsystems origin/main 6491ffc with P8_K8S_EXAMPLES set, and no workflow in either repository runs it
+      # not run here: test_pool_render.py -- it compares the render against checked-in examples kept in the private tree, which this job cannot check out; it runs locally with P8_K8S_EXAMPLES set
 
       # A scheduled turn that fails, fails its workflow task, with the verdict
       # its cause carries: provider_errors for the model, the worker's permanent

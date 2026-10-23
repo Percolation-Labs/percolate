@@ -2,7 +2,7 @@
 
 Why this exists as its own module rather than as one long ``run()`` method: the
 order *is* the spec. ``brief.md`` assigns each step to a named component and says
-what it must and must not do, and ``sequence.md`` gates them in a specific order
+what it must and must not do, and the phase gates (``phases.py``) take them in a specific order
 for stated reasons ("schema and RLS before anything streams", "fast path proven
 before slow path", "chained action before streaming"). A sequencer whose steps
 are individually named, individually documented, and individually recorded makes
@@ -97,6 +97,23 @@ class TurnResult:
     """What failed the turn, when one did after it started. The run records
     the sentence; this keeps the exception, so the HTTP boundary can tell a
     refusal by the database from a failure of the thing the turn called."""
+
+
+def dry_run_overrides(request: ChatRequest, dry_run: bool) -> tuple[ChatRequest, Any]:
+    """What a dry run changes about a turn, and nothing else (REM-1125).
+
+    The model is pydantic-ai's TestModel, which costs nothing and returns minimal
+    schema-valid output, with every tool call off; and the turn is narrowed with
+    tool_choice 'none', so no tool binding and no chained action runs either. The
+    agent row, its prompt and its output schema are unchanged, so what the turn
+    spent is the shape of the real one at no price. A turn that is not a dry run
+    is returned untouched, with no model override.
+    """
+    if not dry_run:
+        return request, None
+    from pydantic_ai.models.test import TestModel
+
+    return request.model_copy(update={"tool_choice": "none", "dry_run": True}), TestModel(call_tools=[])
 
 
 class TurnSequencer:

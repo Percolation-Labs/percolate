@@ -229,7 +229,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.reusable_run','text','spec.md §4: an external_id matches only among the runs its caller may see'),
 ('workflow-engine','function','workflow.may_start','workflow.definitions','spec.md §17(a): whether this caller may use this definition. Callable by `authenticated` because current_definition() -- which asks it -- is SECURITY INVOKER, and a USING-clause-style predicate has no definer indirection to hide behind. Reading it tells a caller only about a row they already hold'),
 ('workflow-engine','function','workflow.may_access_run','uuid,text','integration-rbac.sql (e): the run row rule as a boolean, shared by assert_run_access and reusable_run'),
-('workflow-engine','function','workflow.claim_task','text,text','spec.md: SKIP LOCKED claiming'),
+('workflow-engine','function','workflow.claim_task','text,text,text[]','spec.md: SKIP LOCKED claiming'),
 ('workflow-engine','function','workflow.get_task_context','uuid,text','§16: a worker must see its run input'),
 ('workflow-engine','function','workflow.complete_task','uuid,jsonb,text','spec.md §4'),
 ('workflow-engine','function','workflow.lease_violation','uuid,text,text','§23: the lease fence'),

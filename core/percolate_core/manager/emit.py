@@ -1,9 +1,9 @@
 """YAML out, for `render` — the reviewable half.
 
 Enough YAML for these two manifests and no more, hand-rolled for two reasons.
-The first is the one `k8s/kind/manager.py` gives: JSON piped through
-`kubectl apply` would be correct and unreadable, and `k8s/examples/` exists so
-that a change to the generator is a diff in a pull request. The second is that
+The first is the one the kind harness gives: JSON piped through
+`kubectl apply` would be correct and unreadable, and the checked-in examples
+exist so that a change to the generator is a diff in a pull request. The second is that
 the checked-in examples are *annotated*, and a generic serialiser cannot emit a
 comment — so `render` would produce the right bytes and lose every reason a
 reader would look at them.

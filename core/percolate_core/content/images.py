@@ -2,7 +2,7 @@
 
 The uploader's `Content-Type` is a claim; the first bytes are the fact. An
 article image is PNG, JPEG or WebP, at most 2 MB and at least 600 x 400
-(percolate-application artifacts-and-thumbnails.md §4). SVG is refused because
+(the application's rule for article images). SVG is refused because
 it can carry script, and so is anything this module cannot size: a picture we
 cannot measure is not one we can promise renders.
 

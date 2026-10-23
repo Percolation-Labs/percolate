@@ -1,12 +1,12 @@
 """The CLI — the operator surface, and the way this gets exercised by hand.
 
-CLI first, FastAPI later, deliberately (``meta/skills/spec-driven-development``
-§2: build it, then *use it like a user would*, before writing tests). Everything
+CLI first, FastAPI later, deliberately: build it, then *use it like a user
+would*, before writing tests. Everything
 here calls the same ``TurnSequencer`` the HTTP surface will call; the eventual
 FastAPI app adds the SSE bridge and nothing else, so anything that only works
 over HTTP would be a design smell rather than a missing feature.
 
-    percolate agent gates            # sequence.md's gates and where they stand
+    percolate agent gates            # the phase gates and where they stand
     percolate agent steps            # the canonical order of one turn, with spec refs
     percolate agent demo             # dummy end-to-end: fake model, fake tools, memory repo
     percolate agent show NAME  # read an agent row back as its schema document
@@ -50,7 +50,7 @@ console = Console()
 
 @app.command()
 def gates() -> None:
-    """Print ``sequence.md``'s phase gates and their honest status."""
+    """Print the phase gates (``phases.GATES``) and their honest status."""
     table = Table("Gate", "Phase", "Status", "Criterion", "Blocker", box=None)
     for gate in phases.GATES:
         table.add_row(str(gate.number), gate.phase, gate.status, gate.criterion, gate.blocker)

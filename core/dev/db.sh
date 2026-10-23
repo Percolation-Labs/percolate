@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # A Postgres cluster of this experiment's own, on :5500.
 #
-# Why not just use experiments/pg19-stack's: cluster-level ROLES are shared by
-# every database in a cluster, and pg19-stack's `load-specs.sh --fresh` drops
-# and recreates them. Anything else running against that cluster gets
+# Why not share another stack's cluster: cluster-level ROLES are shared by
+# every database in a cluster, and a fresh load there drops and recreates
+# them. Anything else running against that cluster gets
 # `role "authenticated" does not exist` mid-flight -- observed, not theoretical.
 # A separate container is a separate cluster, so the two stop interfering; it
 # reuses the same image, so it is still PG19 beta3.

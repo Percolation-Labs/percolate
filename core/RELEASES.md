@@ -56,6 +56,7 @@ silently.
 | 0.2.7 | `v0.2.7` | `428d597` | yes |
 | 0.2.8 | `v0.2.8` | `9e5b791` | yes |
 | 0.2.9 | `v0.2.9` | `f823c4f` | yes |
+| 0.2.10 | `v0.2.10` | `437fd21` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
@@ -104,9 +105,8 @@ running the command. Nothing about a channel names an edge. Running
 `percolate sample load --as-email … --skip-documents`, which is `ci/coldstart.sh`'s
 own invocation, against the published `percolate-postgres:19-0.2.0` found the
 second in one pass and established there was no third; `cold-start` is green on
-get-percolate's `main` from 0.1.11. The class is in `p8-subsystems`'
-`meta/postmortems/README.md` as *"A fix proved by a probe, and a release cut on
-it"*.
+get-percolate's `main` from 0.1.11. The class has a name: a fix proved by a
+probe, and a release cut on it, before the command it was for had been run.
 
 `v0.1.11` names `4d583e8`, whose `pyproject.toml` says `0.1.11`. Both releases were
 dispatched `publish: false` first, so the retry-vs-bump decision was read off the

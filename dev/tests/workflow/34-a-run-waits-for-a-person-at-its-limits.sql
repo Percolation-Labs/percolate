@@ -18,6 +18,9 @@
 --  11  an unbounded fan-out's estimate is a floor, so it waits for approval even under every limit
 --  12  a sub-workflow's child run is not held: its parent's run was the one decided, and the parent finishes
 --  13  a dry run its SQL marks is not held, but a run whose input merely claims to be one is
+--  14  a run with no model step is estimated whole from its shape at start, so it is decided then and never waits
+--      for a dry run that will not come: its time is unknown, so a time limit sends it to a person, and with none
+--      it starts
 --
 -- The estimate and the spend are REM-1125's (workflow/32): its run_estimates row decides the run through
 -- trg_run_estimates_decide, and each attempt's record_task_usage checks the cap through trg_task_usage_budget.
@@ -49,28 +52,28 @@ create function pg_temp.estimate(p_run uuid, p_cost numeric, p_tokens bigint, p_
     select hold from workflow.runs where id = p_run;
 $$ language sql;
 
-select workflow.define_yaml($y$
-name: wf33_spends
-steps:
-  - id: think
-    queue: wf33
-    work: true
-  - id: write
-    needs: [think]
-    queue: wf33
-    work: true
-  - id: note
-    sql: "select 1 as n"
-$y$);
+-- Its worker steps are model steps, so REM-1125 cannot estimate them from their shape: the run waits for its dry
+-- run, which pg_temp.estimate stands in for. The dry run's own tasks land on wf33 too, and claim_task gives them
+-- only to a worker that declares 'dry_run', which 'w1' does not.
+insert into workflow.definitions (name, spec) values ('wf33_spends', $j${"steps":[
+  {"key":"think","kind":"http_call","queue":"wf33",
+   "input":{"url":"{{env.P8_AGENT_URL}}/v1/chat/completions","method":"POST","body":{"model":"reader","messages":[]}}},
+  {"key":"write","kind":"http_call","queue":"wf33","depends_on":["think"],
+   "input":{"url":"{{env.P8_AGENT_URL}}/v1/chat/completions","method":"POST","body":{"model":"reader","messages":[]}}},
+  {"key":"note","kind":"sql","queue":"none","input":{"statement":"select 1 as n"}}]}$j$);
 
 -- No run of this one ever finishes here, so it has no history and its estimate stays incomplete until told.
 select workflow.define_yaml($y$
-name: wf33_fresh
+name: wf33_plain
 steps:
-  - id: plan
-    queue: wf33
+  - id: chore
+    queue: wf33-plain
     work: true
 $y$);
+
+insert into workflow.definitions (name, spec) values ('wf33_fresh', $j${"steps":[
+  {"key":"plan","kind":"http_call","queue":"wf33",
+   "input":{"url":"{{env.P8_AGENT_URL}}/v1/chat/completions","method":"POST","body":{"model":"reader","messages":[]}}}]}$j$);
 
 select workflow.define_yaml($y$
 name: wf33_child
@@ -109,6 +112,8 @@ begin
     perform pg_temp.check(pg_temp.hold(r) = 'awaiting_estimate', '2 held awaiting its estimate: ' || pg_temp.hold(r));
     perform pg_temp.check((select basis from workflow.run_estimates where run_id = r and step_key is null) = 'none',
                           '2 no history, so REM-1125''s estimate at start is incomplete');
+    perform pg_temp.check(exists (select 1 from workflow.dry_runs where of_run_id = r),
+                          '2 and its dry run has started');
     perform pg_temp.check((select status from workflow.runs where id = r) = 'running', '2 and still running');
     perform pg_temp.check((select budget from workflow.runs where id = r) = '{"cost_limit": 2.00}'::jsonb,
                           '2 with the policy''s default budget');
@@ -213,6 +218,17 @@ begin
     r := workflow.start_workflow('wf33_spends', '{}'::jsonb);
     perform set_config('workflow.starting_dry_run', '', true);
     perform pg_temp.check(pg_temp.hold(r) = 'none', '13 a dry run its SQL marks is not held: ' || pg_temp.hold(r));
+
+    -- 14: u is under the deployment's policy, which limits time; v's own policy limits only cost
+    r := workflow.start_workflow('wf33_plain', '{}'::jsonb);
+    perform pg_temp.check((select (basis, est_wall_seconds is null) from workflow.run_estimates
+                            where run_id = r and step_key is null) = ('dry_run'::text, true),
+                          '14 estimated whole from its shape, its time unknown');
+    perform pg_temp.check(pg_temp.hold(r) = 'awaiting_approval', '14 an unknown time under a time limit waits for a person: '
+                          || pg_temp.hold(r));
+    execute format('set local request.jwt.claims = %L', json_build_object('sub', v)::text);
+    r := workflow.start_workflow('wf33_plain', '{}'::jsonb);
+    perform pg_temp.check(pg_temp.hold(r) = 'none', '14 with no time limit it starts at once: ' || pg_temp.hold(r));
 end $$;
 
 rollback;

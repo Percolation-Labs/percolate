@@ -1,13 +1,13 @@
 # source dev/env.sh -- everything the CLI and scripts need, in one place.
 #
-# Order matters: the neighbouring project's .env is read FIRST (it is where the
-# LLM key lives on this machine, and a key belongs in exactly one file), then
-# this experiment's own values are set, so ours win. p8k8 names its key
-# P8_OPENAI_API_KEY; pydantic-ai reads OPENAI_API_KEY.
+# Order matters: P8_ENV_FILE, if set, is read FIRST (where the LLM key lives on
+# this machine, since a key belongs in exactly one file), then this
+# experiment's own values are set, so ours win. A key named P8_OPENAI_API_KEY
+# is copied to OPENAI_API_KEY, which pydantic-ai reads.
 _here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
-if [ -f "$_here/../../p8k8/.env" ]; then
-  set -a; . "$_here/../../p8k8/.env"; set +a
+if [ -n "${P8_ENV_FILE:-}" ] && [ -f "$P8_ENV_FILE" ]; then
+  set -a; . "$P8_ENV_FILE"; set +a
 fi
 [ -n "${P8_OPENAI_API_KEY:-}" ] && export OPENAI_API_KEY="$P8_OPENAI_API_KEY"
 
