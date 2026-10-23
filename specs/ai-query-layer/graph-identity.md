@@ -31,7 +31,7 @@ One global node identity and one authored edge store, kept in sync at write time
 | **D5** | Only included entity types become nodes. Machine-generated data-plane rows are not nodes. |
 | **D6** | Node projection is **same-transaction** and **set-based** (statement triggers + transition tables). Bulk load disables those triggers and rebuilds once. |
 | **D7** | A scheduled two-way `EXCEPT` is the drift detector. Rebuild is the repair. Drift is a bug in a writer, not a routine merge. |
-| **D8** | SQL/PGQ is a **read-only graph definition** over the registry, the edge table, and the hard-link junctions. No extra sync. |
+| **D8** | SQL/PGQ, where a server has it, is a **read-only graph definition** over the registry, the edge table, and the hard-link junctions. No extra sync. |
 | **D9** | A unified `nodes` table exists so **polymorphic** authored edges have one vertex parent. It is not a copy of attributes. Hard-memory vertices in PGQ stay the typed tables. |
 | **D10** | Graph-index maintenance (this doc) and semantic-index maintenance (the ingestion layer's embedding pipeline) are **one architectural concern, not two**: a derived index kept current off a primary-table write. Default mechanism is `workflow-engine`'s existing queue, reused, not re-invented per index type. The one exception is the live `nodes`/`node_keys` projection itself (D6) — synchronous and trigger-based *specifically because* invariant 4 requires same-transaction `LOOKUP` visibility, an actual requirement an async queue can't satisfy. Everything else in this doc that isn't that one write path — the bulk-load rebuild, the drift-repair job — has no such requirement and is a `workflow-engine` task like any other scheduled/background work in this collection. |
 | **D11** | Resolution is a **record, not an index behaviour**. Merging two nodes writes a `node_resolutions` row and deletes neither constituent. Unresolve is a supported operation, not a repair. |
@@ -228,7 +228,7 @@ edges
 
 Indexes: `btree(src_id)` forward, `btree(dst_id)` reverse. Reverse questions ("what points at this site?") are first-class. Do not store the inverse edge. Inverse *labels* come from a relation catalogue at read time — and a label the read path shows must be accepted back as a filter, or a result cannot be fed into the next query, which is what the lazy-then-load discipline is made of.
 
-**Temporal validity is read, on every surface, through one rule.** `aiq.edge_is_current(valid_from, valid_to, at)` is that rule — `valid_from <= at` and `valid_to` null or after it — and everything that answers "what holds" goes through it: the `aiq.edges_current` view, the `aiq.knowledge_graph` property graph (declared *over that view*, so a bare `GRAPH_TABLE` match filters), `graph_neighbors`, `graph_walk`, the catalogue refresh, source reliability, edge standing, and the compiled traversals, whose `as_of` now defaults to the statement's `now()` instead of to no filter at all.
+**Temporal validity is read, on every surface, through one rule.** `aiq.edge_is_current(valid_from, valid_to, at)` is that rule — `valid_from <= at` and `valid_to` null or after it — and everything that answers "what holds" goes through it: the `aiq.edges_current` view, `graph_neighbors`, `graph_walk`, the catalogue refresh, source reliability, edge standing, and the compiled traversals, whose `as_of` now defaults to the statement's `now()` instead of to no filter at all.
 
 It did not, and this paragraph recorded the gap: `valid_from` / `valid_to` were stored and no read path filtered on them, so an edge retracted a year ago was still traversed, while the one view anybody read hid it. Four spellings of "current" and three surfaces applying none is the shape of wrong answer this surface fails by, and REM-51 closed it. `dev/tests/query/05` §14 — which asked to be inverted rather than deleted on the day the filter landed — now asserts the filter; `dev/tests/query/15` asserts it on every other path.
 
@@ -488,9 +488,12 @@ Parallel query is not the LOOKUP strategy. Parallel Append of a global union is 
 ## Property graphs (when the server has SQL/PGQ)
 
 **None is declared.** `aiq.knowledge_graph` existed while the target was a PG19
-beta; SQL/PGQ was withdrawn from PostgreSQL 19 before GA, and the extension now
-runs on 18 with depth 1 as a plain join (`schema.sql` §5). The rules below are
-what a property graph would have to obey if a server gains SQL/PGQ again.
+beta; SQL/PGQ was withdrawn from PostgreSQL 19 before GA, so `schema.sql` §5
+drops it and depth 1 reads `aiq.edges_current` as a plain join
+(`dev/tests/query/05-graph-traversal.sql` asserts no property graph is left in
+`aiq`). The supported server is still PostgreSQL 19, and nothing in the SQL
+needs more than 18 (`specs/postgres-versions.md`). The rules below are what a
+property graph would have to obey if a server gains SQL/PGQ again.
 
 `CREATE PROPERTY GRAPH` is catalog metadata, processed like a view. Declare:
 
@@ -550,7 +553,7 @@ A design is correct if all of these hold:
 - Delete an included entity; keys go; incident soft edges go; hard junctions follow their own FK rules.
 - Bulk insert with triggers off + rebuild matches live trigger projection (`EXCEPT` empty).
 - `EXPLAIN` of LOOKUP is an index probe on `node_keys` plus a PK fetch. It is not an Append of typed-table scans.
-- A PGQ `MATCH` on the authored relation and a CTE walk on `edges` return the same id pairs for a fixture.
+- A depth-1 read of the authored relation (`graph_neighbors`) and the edge table return the same id pairs for a fixture.
 - Merge two nodes, then unresolve: both canonical keys resolve again, edges written against either endpoint while merged are still traversable, and the `node_resolutions` row survives with `undone_at` set (invariants 8, 9).
 
 **These are executed, not asserted, and executing them is what produced most of
@@ -560,7 +563,8 @@ describes was in production use; `dev/tests/query/04-graph-identity.sql`,
 against a live PG19 instance over the committed fixture in
 `dev/init/04-graph-sample.sql`, and each assertion carries the criterion or
 invariant it holds up. Two of the eight passed unchanged (the PGQ/CTE
-agreement, and delete cascade); the rest either failed outright or passed for
+agreement, which became depth-1/edge-table agreement when the property graph
+went, and delete cascade); the rest either failed outright or passed for
 the wrong reason.
 
 Two of them needed restating rather than just running:
@@ -587,7 +591,7 @@ assertion above can see, because every one of them starts from a node id.
 
 Two schools describe graphs over relational data. This spec uses both, in different places.
 
-**View school (SQL/PGQ).** ISO/IEC 9075-16:2023 defines a property graph as a read-only view: `VERTEX TABLES` and `EDGE TABLES` map existing tables via keys and foreign keys. PostgreSQL 19 implements that as a rewriter onto ordinary joins. Direct mapping (entity table → vertex, FK → edge, junction → edge not vertex) is the same rule. A foreign key is never also a stored graph row.
+**View school (SQL/PGQ).** ISO/IEC 9075-16:2023 defines a property graph as a read-only view: `VERTEX TABLES` and `EDGE TABLES` map existing tables via keys and foreign keys. PostgreSQL 19's betas implemented that as a rewriter onto ordinary joins, and it was withdrawn before GA. Direct mapping (entity table → vertex, FK → edge, junction → edge not vertex) is the same rule. A foreign key is never also a stored graph row.
 
 **Materialized-identity school.** Global untyped lookup, aliases, and links that are not foreign keys do not exist in a relational schema. Identity-graph practice materializes `identifier → canonical id` at write time. SQL Server `AS NODE` / `AS EDGE` is the same idea with a stored `$node_id`. SQL/PGQ deliberately dropped that extra identifier as an implementation tactic; it still cannot answer "find any node by this key."
 
@@ -641,7 +645,7 @@ need not be.** `nodes` never stored payload — it stores `entity_type` +
 nothing above requires that owning table to *be* a Postgres table. A row in a
 Parquet dataset (`world-model-ingestion`'s `content.datasets`, read by DuckDB)
 is hydrated by a different fetch and is otherwise an ordinary vertex: same
-`nodes` row, same `node_keys` btree, same `edges`, same property graph, no
+`nodes` row, same `node_keys` btree, same `edges`, no
 union. The graph-index design calls the three possibilities *residences* — `pg`,
 `lake`, `soft` — and keeps residence in a column rather than in the key, so a
 dataset promoted into a table does not invalidate every name that refers to it.
