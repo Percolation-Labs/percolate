@@ -125,7 +125,7 @@ app.add_typer(
 app.add_typer(
     _subcommands("resolve", "percolate_core.resolve.cli", "Resolver"),
     name="resolve",
-    help="Resolver: decide extracted names against registered nodes with Jev",
+    help="Resolver: decide extracted names against registered nodes with a decision model",
 )
 app.add_typer(
     _subcommands("lake", "percolate_core.lake.cli", "Lake worker"),

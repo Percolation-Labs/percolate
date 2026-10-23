@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The two processes the runtime binds to in this experiment, alongside the
-# pg19 stack (experiments/pg19-stack/docker-compose.yml, started separately).
+# PG19 stack, started separately.
 #
 #   1. PostgREST over the `agentic` schema, on :3001 -- the OpenAPI tool
 #      server. It is deliberately a *separate* instance from pg19-stack's own

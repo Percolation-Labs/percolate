@@ -2,7 +2,7 @@
 
 The mechanism is already in the schema: ``agents`` rows plus ``parent_run_id``.
 This module is the part the spec asks to be "a *tested* reference
-implementation, not only a schema" — ``sequence.md``'s Gate 3 exists to prove a
+implementation, not only a schema" — phase gate 3 (``phases.py``) exists to prove a
 multi-level delegation tree round-trips before anything builds on top of it.
 
 Three invariants worth checking at review time:

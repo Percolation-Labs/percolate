@@ -348,6 +348,7 @@ class WorkerRetryTest(unittest.IsolatedAsyncioTestCase):
     async def outcome(self, error: BaseException) -> bool:
         conn = AsyncMock()
         conn.fetchval.side_effect = [
+            True,  # claim_task takes capabilities
             "1e0f2b8a-0000-4000-8000-000000000001",
             json.dumps({"kind": "work", "step_key": "land", "task_input": {}}),
         ]

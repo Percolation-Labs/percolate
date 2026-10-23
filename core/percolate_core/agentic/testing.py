@@ -1,13 +1,11 @@
 """Test support — exercising the runtime without Postgres, an LLM, or a tool server.
 
 Named ``testing`` rather than ``fakes`` and shipped with the package
-deliberately: anything that mounts this runtime (`meta/module-composition.md`)
-needs the same in-memory repository and scripted model to test *its* code, and
+deliberately: anything that mounts this runtime as a module of its own needs the same in-memory repository and scripted model to test *its* code, and
 a test double that only exists in one repo's dev directory cannot be reused by
 the host that imports the package.
 
-``meta/skills/spec-driven-development`` §2 says to build the thing and then *use
-it like a user would* before writing tests. For a runtime whose three
+Build the thing and then *use it like a user would* before writing tests. For a runtime whose three
 dependencies are a database, a model provider, and a fleet of microservices,
 "use it" needs a substitute for all three for the fast inner loop; ``dev/`` has
 the real thing for the slow one.
@@ -18,7 +16,7 @@ What the fakes are allowed to be:
   not for Postgres. It deliberately does not simulate RLS, transactions, or
   triggers: pretending to would let a design that only works without them look
   like it works. Anything that depends on those is proven against the real
-  stack (``experiments/pg19-stack``) or not at all.
+  stack or not at all.
 - ``FakeToolServer`` providers — canned tool lists and canned results, so tool
   binding, citation derivation, and error classification can be exercised
   end-to-end before a real MCP or OpenAPI service exists.

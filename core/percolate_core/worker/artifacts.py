@@ -14,7 +14,7 @@ nests its payload under `result` -- so a ref inside `result` is invisible to
 the check and a ref at the top breaks every {{steps.<id>.result}} that reads
 it. As a sibling there is nothing to reconcile, `output_schema` never sees the
 engine's key, and {{steps.<id>.$artifact}} resolves with no change to the
-template resolver. See p8-subsystems specs/workflow-engine/outputs.md.
+template resolver. See specs/workflow-engine/outputs.md.
 
 AND NO `result` AT ALL when we offload. A value too large to carry is not a
 value; the ref is. Leaving a summary behind under `result` would make

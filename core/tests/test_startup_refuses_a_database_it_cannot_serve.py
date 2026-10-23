@@ -12,8 +12,7 @@ so no turn opens a session at all.
 WHAT THIS CANNOT DO, stated here as well as in the docstring because a test
 file is where somebody checks what is covered: a check that ships in 0.1.9 does
 not run in 0.1.8, so the REM-135 pairing itself is not caught by this and never
-will be. The cure for an already-published runtime is not to pair it, which is
-REM-135's `PACKAGING.md` row. What is under test here is that the NEXT such
+will be. The cure for an already-published runtime is not to pair it (REM-135). What is under test here is that the NEXT such
 pairing is loud.
 
 No database: the pool is a double, which is `test_caller_identity.py`'s idiom

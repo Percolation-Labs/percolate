@@ -1,7 +1,7 @@
 """The one seam between this runtime and Postgres.
 
 Every read and write the runtime does goes through this protocol — which is what
-makes ``sequence.md``'s Gate 7 discipline enforceable in code rather than by
+makes phase gate 7's discipline (``phases.py``) enforceable in code rather than by
 convention: "the agent runtime is ... deliberately tested only through the
 contract — if it needs something the REST/streaming contract doesn't expose,
 that's a spec gap to fix, not a reason to let it reach around the contract into
@@ -335,8 +335,8 @@ class PgRepository:
         """One hop, deliberately.
 
         The recursive walk of a whole delegation tree belongs to
-        ``ai-query-layer``'s GRAPH mode (``brief.md`` §4), and ``sequence.md``'s
-        Gate 3 tests it that way. A recursive CTE here would be this runtime
+        ``ai-query-layer``'s GRAPH mode (``brief.md`` §4), and phase gate 3
+        (``phases.py``) tests it that way. A recursive CTE here would be this runtime
         growing a second graph-query mechanism.
         """
         async with self.client.as_user(self.claims) as conn:
@@ -347,7 +347,7 @@ class PgRepository:
         return [_run(r) for r in rows]
 
     async def append_messages(self, messages: list[Message]) -> list[Message]:
-        """One RPC, one transaction (``sequence.md`` Gate 2).
+        """One RPC, one transaction (phase gate 2, ``phases.py``).
 
         Both granularities come through this one call (``brief.md`` §2): two rows
         for the fast path, the full ``user → tool_call → tool_response → …``
@@ -462,7 +462,7 @@ class PgRepository:
     # --- neighbouring systems --------------------------------------------
 
     async def has_quota_remaining(self, user_id: UUID | None, resource_kind: str) -> bool:
-        """``rbac.has_quota_remaining()`` -- p8-subsystems ``specs/research-platform`` §3 (REM-174).
+        """``rbac.has_quota_remaining()`` -- ``specs/research-platform`` §3 (REM-174).
 
         Core decides: unset, unlimited or finite, shared by a person and their
         agents. This asks the catalogue, not a version number, which is how
@@ -521,17 +521,28 @@ class PgRepository:
             return
         # Probe as the caller first: an older extension must not require new worker credentials.
         async with self.client.as_user(self.claims) as conn:
-            if not await conn.fetchval(
-                "select to_regprocedure('claims.record_execution_result(uuid,text,integer,uuid,text,text,text,jsonb,uuid)') is not null"
-            ):
-                return
-        async with identity.as_task_worker() as conn:
-            await conn.execute(
-                "select claims.record_execution_result($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)",
-                UUID(str(task)), self.claims.get("workflow_worker_id"), self.claims.get("workflow_attempt"),
-                run_id, receipt["method_version"], receipt.get("model"), receipt.get("model_version"),
-                receipt["usage"], receipt.get("evaluation_resource"),
+            receipts, usage = await conn.fetchrow(
+                "select to_regprocedure('claims.record_execution_result(uuid,text,integer,uuid,text,text,text,jsonb,uuid)') is not null,"
+                " to_regprocedure('workflow.record_task_usage(uuid,integer,jsonb,text)') is not null"
             )
+        if not (receipts or usage):
+            return
+        task_id, worker, attempt = UUID(str(task)), self.claims.get("workflow_worker_id"), self.claims.get("workflow_attempt")
+        async with identity.as_task_worker() as conn:
+            if receipts:
+                await conn.execute(
+                    "select claims.record_execution_result($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)",
+                    task_id, worker, attempt,
+                    run_id, receipt["method_version"], receipt.get("model"), receipt.get("model_version"),
+                    receipt["usage"], receipt.get("evaluation_resource"),
+                )
+            # What every workflow-driven run spent, not only claim assertions (REM-1125): the per-attempt
+            # spend a run's estimate is checked against and its budget cap reads (REM-1126).
+            if usage and attempt is not None:
+                await conn.execute(
+                    "select workflow.record_task_usage($1, $2, $3::jsonb, $4)",
+                    task_id, int(attempt), {**receipt["usage"], "model": receipt.get("model")}, worker,
+                )
 
     async def complete_task(self, task_id: UUID, output: dict[str, Any],
                             worker_id: str | None = None) -> None:

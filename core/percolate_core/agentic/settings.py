@@ -1,7 +1,7 @@
 """Runtime configuration — environment only, no config files.
 
 Spec intent: the runtime is deployed Postgres-adjacent exactly like PostgREST
-(``specs/README.md`` deployment shape, ``brief.md`` §5), so its configuration
+(``brief.md`` §5), so its configuration
 surface is the same shape as PostgREST's: a connection string, a couple of
 credentials, and nothing that encodes a use case. Anything use-case-specific is
 a row in Postgres, never a setting here (``brief.md`` §5.2).

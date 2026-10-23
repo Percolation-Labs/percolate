@@ -2,7 +2,7 @@
 
     percolate query mcp --port 8090 --postgrest http://postgrest:3000
 
-Ported from p8-subsystems ``specs/agentic/reference/query_mcp.py``, which the
+Ported from ``specs/agentic/reference/query_mcp.py`` in percolate, which the
 collection's dev stack ran from a mounted file. A get-percolate install had no
 such file and no such process, so the sample's ``harbourmaster`` bound nothing
 and answered "I don't have access to live databases" about the sample it ships

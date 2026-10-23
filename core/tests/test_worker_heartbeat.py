@@ -9,7 +9,7 @@ to `max_attempts` times: duplicate provider spend and duplicate writes.
 
 The live proof is a fixture task that sleeps past the timeout, and it needs a
 database, a worker and a minute of wall clock -- it lives in
-`p8-subsystems/dev/tests/workflow/`. What runs here is the part that made that
+percolate's `dev/tests/workflow/19-a-long-task-finishes-once.sql`. What runs here is the part that made that
 failure possible and is pure logic: whether the loop beats at all while a
 handler is running, whether it paces itself from the queue rather than from a
 constant, and whether it stops before the terminal transition.

@@ -6,7 +6,7 @@ This module is both ends of that, and there is deliberately only one shape.
 
 An agent **is** the flat schema document ``model_json_schema()`` produces, with
 agent config beside the schema fields where ``json_schema_extra`` hoists it. The
-convention is ``../p8k8``'s (``p8/agentic/agent_schema.py``) and it is worth
+convention comes from an earlier private agent framework, and it is worth
 keeping precisely for what it rules out: there is **no ``prompt`` key**. The
 system prompt is the schema's ``description`` — the *docstring of the model
 class* — and the structured output is its ``properties``. So authoring in Python
@@ -35,7 +35,7 @@ top-level key was ``prompt``, which is the one thing this convention says does
 not exist, and a reading form that contradicts the deployed form teaches the
 wrong shape. YAML with block scalars reads fine.
 
-One deliberate divergence from p8k8, noted rather than silently inherited: it
+One deliberate divergence from that framework, noted rather than silently inherited: it
 distinguishes ``structured_output: true`` (properties are the output contract)
 from ``false`` (properties are "thinking aides" that shape the model's reasoning
 without being returned). This runtime has one meaning for ``properties`` — the

@@ -1,8 +1,8 @@
 """A small asyncpg client — connection, JSONB codecs, per-request identity, LISTEN.
 
-Scope discipline (``meta/skills/spec-driven-development`` §5): a client, not an
-ORM. ``../p8k8``'s ``p8/services/database/pool.py`` is the prior art for the
-shape (pool + fetch/execute + a JSONB codec); two things here it does not have,
+Scope discipline: a client, not an
+ORM. An earlier private service's database pool is the prior art for the
+shape (pool + fetch/execute + a JSONB codec); two things here it did not have,
 both structural to this collection rather than stylistic:
 
 - ``as_user()`` — every statement runs inside a transaction that has assumed the

@@ -1,8 +1,7 @@
 """End to end: an oversized step output becomes a registered artifact.
 
-Output class 4, asserted rather than described. Run against the p8-subsystems
-dev stack (`p8-subsystems/dev/stacks.sh up dev`), which brings up PG19 on :5610
-and MinIO on :5614:
+Output class 4, asserted rather than described. Run against a dev stack with
+PG19 on :5610 and MinIO on :5614:
 
     P8_OFFLOAD_DSN=postgres://p8:p8@localhost:5610/p8dev \
     uv run --with asyncpg --with boto3 python dev/offload.py
@@ -19,8 +18,8 @@ THE LAST THREE ARE REGRESSIONS, and all were defects this file could not have
 found in the shape it had. Its one fixture was `{"status": 200, "result": ...}`
 -- a payload nested under `result`, whose JSON text and jsonb sizes happen to
 agree closely -- which is the one shape in which none of them can occur. That
-is `meta/postmortems/README.md`'s "verified in a world where the defect could
-not appear", arriving inside the harness that exists to assert this module.
+is a check verified in a world where the defect could not appear, arriving
+inside the harness that exists to assert this module.
 """
 import asyncio, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

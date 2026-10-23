@@ -292,6 +292,8 @@ async def accept_run(
         prompt=run_input.get("prompt", ""),
         for_agent=run_input.get("for_agent"),
         headers=headers,
+        # A workflow's dry run flags the call at the top of the body or in its input (REM-1125).
+        dry_run=bool(body.get("dry_run") or run_input.get("dry_run")),
     ))
     _in_flight.add(task)
     task.add_done_callback(_in_flight.discard)
@@ -357,6 +359,7 @@ async def run_scheduled(
     headers: dict[str, str],
     for_agent: str | None = None,
     worker_id: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Execute one scheduled run: same agent config, same rows, no live client.
 
@@ -370,7 +373,7 @@ async def run_scheduled(
     agent, because it is the *window that fell out* — data the summarizer agent
     row cannot know and should not have to.
     """
-    from .sequencer import TurnSequencer
+    from .sequencer import TurnSequencer, dry_run_overrides
 
     context = RequestContext.from_headers(headers)
     claims = caller_claims(headers)
@@ -386,14 +389,15 @@ async def run_scheduled(
         sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
         sequencer.workflow_task_id = task_id
         sequencer.workflow_worker_id = worker_id
-        result = await sequencer.run_turn(
+        request, stand_in = dry_run_overrides(
             ChatRequest(
                 model=agent_name,
                 messages=[InboundMessage(role="user", content=prompt)],
                 session_id=session_id,
             ),
-            context,
+            dry_run,
         )
+        result = await sequencer.run_turn(request, context, model=stand_in)
         return {"run_id": str(result.run.id), "status": result.run.status}
 
 

@@ -8,7 +8,7 @@ got `Unknown tool name: 'agent__story'`. One stored list also cannot be right
 for two callers who may read different agents.
 
 The repository here plays the database's row security: each instance answers
-`list_agents` as one caller would be answered. The p8-subsystems test
+`list_agents` as one caller would be answered. percolate's test
 `dev/tests/rbac/22-a-router-reaches-what-its-caller-may.sql` is the other half:
 that `agentic.agents_api` really answers alice and bob differently.
 
