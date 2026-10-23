@@ -132,6 +132,9 @@ claims.search_leads(
                 document_rank int, tag_rank int, question_rank int, path jsonb)
 ```
 
+A link with no `p` (a person's, or a rule's) counts as certain. The documents arm ranks
+at most the 5,000 nearest chunks, which bounds an unscoped search, not a memory's.
+
 Primary-store-only search is the same call with `p_layers => '{documents}'`. That
 makes the comparison in §3 one function with two arguments, not two code paths.
 
@@ -197,7 +200,9 @@ tags link to resources canonically. Brews and long-form pieces use the same patt
 | `claims.tag_questions` | a tag's dual questions in `claims.questions`, each with a `weight`, an `origin` (seed, trained, person) and a `retired_at`. Training moves these rows and never the tags. |
 | `claims.resource_links` | a resource linked to exactly one tag, question or claim (each a real foreign key, one per row), with the decider's `p` and the decider's name |
 
-Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
+Tags are a semantic source, and the source workflow (`embed_sources`) embeds tags
+beside claims and questions. `claims.put_taxonomy` queues it, and it refuses a parent
+chain that forms a cycle. Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
 seeded duals; it is operator-only, since a taxonomy is shared vocabulary.
 `claims.train_dual` moves one dual. `claims.link_resources` writes a decider's links
 from resources the caller may write.

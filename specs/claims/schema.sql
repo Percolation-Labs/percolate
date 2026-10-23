@@ -3651,7 +3651,4 @@ end $$;
 -- them. THE BACKFILL is one call, as an operator: `select aiq.queue_source_embedding('backfill')`, which starts a
 -- run that embeds every claim and question the default model's space lacks (up to 20,000 of each per run), and
 -- `select * from aiq.source_embedding_status()` says what is left.
-do $$
-begin
-    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions']);
-end $$;
+-- Installed in claims/tags.sql, once the tags source it also embeds is registered (REM-1144).

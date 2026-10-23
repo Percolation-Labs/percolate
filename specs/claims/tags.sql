@@ -59,6 +59,7 @@ create table if not exists claims.resource_links (
     tag_id      uuid references claims.tags(id) on delete cascade,
     question_id uuid references claims.questions(id),
     claim_id    uuid references claims.claims(id),
+    -- NULL: the decider asserted the link without a probability (a person, a rule), which a search reads as certain.
     p           real check (p between 0 and 1),
     decider     text not null check (length(decider) between 1 and 200),
     tx          bigint not null references claims.tx(id),
@@ -100,6 +101,14 @@ begin
                content_col  = excluded.content_col,
                shipped = excluded.shipped or semantic_sources.shipped;
     end if;
+end $$;
+
+-- The workflow that gives claims, questions and tags their vectors (REM-662), installed with the extension and on
+-- every upgrade. claims/schema.sql describes it; it is installed here because the tags source it also embeds is
+-- registered just above, and an install refuses a source that is not.
+do $$
+begin
+    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions', 'tags']);
 end $$;
 
 -- ------------------------------------------------------------
@@ -150,6 +159,17 @@ begin
       join claims.tags p on p.source = p_source and p.source_version = p_version and p.key = x->>'parent'
      where c.source = p_source and c.source_version = p_version and c.key = x->>'key'
        and x->>'parent' is not null and c.parent_id is distinct from p.id;
+    -- A hierarchy is a tree: a parent chain that returns to its start is refused, with the whole call.
+    if exists (
+        with recursive up(start, id, depth) as (
+            select c.id, c.parent_id, 1 from claims.tags c
+             where c.source = p_source and c.source_version = p_version and c.parent_id is not null
+            union all
+            select u.start, p.parent_id, u.depth + 1 from up u join claims.tags p on p.id = u.id
+             where p.parent_id is not null and u.id <> u.start and u.depth < 1000)
+        select 1 from up where id = start) then
+        raise check_violation using message = 'a taxonomy''s parents form a cycle; a hierarchy is a tree';
+    end if;
     if exists (select 1 from jsonb_array_elements(p_tags) x
                 where x->>'parent' is not null
                   and not exists (select 1 from claims.tags p where p.source = p_source
@@ -180,8 +200,9 @@ begin
             if found then v_pairs := v_pairs + 1; end if;
         end loop;
     end loop;
-    if v_qs > 0 and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
-        perform aiq.queue_source_embedding('a taxonomy''s seeded questions');
+    -- New tags and new questions both wait for vectors; one run of the source workflow embeds both.
+    if (v_tags > 0 or v_qs > 0) and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
+        perform aiq.queue_source_embedding('a taxonomy''s tags and seeded questions');
     end if;
     return jsonb_build_object('tags', v_tags, 'questions_minted', v_qs, 'duals', v_pairs,
                               'phrasings_skipped', v_skip, 'tx', t);
@@ -329,18 +350,18 @@ begin
          where p_scope is null or r.metadata @> p_scope
     ),
     via_tags as (
-        select distinct on (l.resource_id) l.resource_id, h.w * l.p as s,
+        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
                jsonb_build_array(jsonb_build_object('via', 'tag', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from tag_hits h join claims.resource_links l on l.tag_id = h.id and l.p >= p_min_p
+          from tag_hits h join claims.resource_links l on l.tag_id = h.id and coalesce(l.p, 1) >= p_min_p
           join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * l.p desc
+         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
     ),
     via_questions as (
-        select distinct on (l.resource_id) l.resource_id, h.w * l.p as s,
+        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
                jsonb_build_array(jsonb_build_object('via', 'question', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from question_hits h join claims.resource_links l on l.question_id = h.id and l.p >= p_min_p
+          from question_hits h join claims.resource_links l on l.question_id = h.id and coalesce(l.p, 1) >= p_min_p
           join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * l.p desc
+         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
     ),
     tags_ranked as (
         select v.resource_id, v.path, row_number() over (order by v.s desc, v.resource_id)::int as r from via_tags v

@@ -623,7 +623,7 @@ grant execute on function aiq.texts_to_embed(text, text, int) to worker;
 -- before the step names it, because a rate_key with no row is never claimed
 -- by anyone (see the graph branch of install_ingest_workflow below).
 create or replace function aiq.install_source_embed_workflow(
-    p_sources     text[]  default array['claims', 'questions'],
+    p_sources     text[]  default array['claims', 'questions', 'tags'],
     p_name        text    default 'embed_sources',
     p_queue       text    default 'ingest',
     p_rate_key    text    default null,
