@@ -960,12 +960,20 @@ alter table claims.questions enable row level security;
 drop policy if exists questions_readable on claims.questions;
 -- A policy on claims.questions cannot read claims.questions under its own policy, so the refinement walk is a
 -- definer that applies the one rule itself: a readable revision answers the question or one that refines it.
+-- Also readable (REM-1144, claims/tags.sql): a tag's live dual, which is shared vocabulary like the tag, and a
+-- question a resource the caller may read links to. plpgsql, because those two tables are created after this file
+-- and a `language sql` body is resolved when it is created; rbac.may_read asks for the caller, since this is definer.
 create or replace function claims.question_readable(p_question uuid) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select exists (select 1 from claims.answered a
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+begin
+    return exists (select 1 from claims.answered a
                     where a.question_id in (select p_question union all
                                             select r.id from claims.questions r where r.refines = p_question)
-                      and research.revision_readable(a.evidence));
+                      and research.revision_readable(a.evidence))
+        or exists (select 1 from claims.tag_questions t where t.question_id = p_question and t.retired_at is null)
+        or exists (select 1 from claims.resource_links l join content.resources r on r.id = l.resource_id
+                    where l.question_id = p_question and rbac.may_read(r.owner_id, r.org_id, r.visibility));
+end;
 $$;
 create policy questions_readable on claims.questions for select using (claims.question_readable(id));
 -- A policy runs as the caller, so the caller executes it; identity/closing.sql takes PUBLIC's EXECUTE away.

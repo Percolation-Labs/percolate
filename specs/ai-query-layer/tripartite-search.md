@@ -1,7 +1,7 @@
 # Tripartite search: one search over any store, through shared tags, claims and questions (REM-1144)
 
-**Status: specified, not built.** Two decisions in §4 belong to Sirsh. Nothing in
-this document adds a table until he answers them.
+**Status: built for the resources store** (`specs/claims/tags.sql`). Sirsh decided §4 on
+23 Oct 2026. Brews and long-form pieces take the same links next.
 
 Sirsh's rule (board, 23 Oct 2026, M-20261023-065931-9b72, M-20261023-070116-3647):
 
@@ -112,32 +112,35 @@ it moves into Percolate (§5).
 
 ## 2. The search
 
-One function, `aiq.tripartite_search` (name provisional), invoker-rights like
-`aiq.search`, so every arm sees only what the caller may read
-(`research.revision_readable`, `rbac.may_read`).
+`claims.search_leads` (`specs/claims/tags.sql`) is invoker-rights like `aiq.search`,
+so every arm reads only what the caller may read.
 
 ```
-aiq.tripartite_search(
-    p_query    text,
-    p_vector   vector,              -- the query embedded once, by the caller's model
-    p_stores   text[] default null, -- 'resources', 'brews', 'long_form'; null = all
-    p_budget   int    default 20,   -- leads returned
-    p_subqueries text[] default null
-) returns table(
-    lead_kind   text,   -- 'resource' | 'brew' | 'long_form'
-    lead_id     text,   -- chunk id, revision id or ld- id
-    score       real,
-    path        jsonb   -- how it was reached: [] for a direct hit, else
-                        -- [{"via":"question","id":...,"sim":...},{"link":...,"p":...}]
-)
+claims.search_leads(
+    p_query text, p_vector vector, p_model text,
+    p_scope       jsonb  default null,    -- a memory's agent and run, as aiq.search narrows
+    p_layers      text[] default '{documents,tags,questions}',
+    p_documents   text   default 'semantic',   -- or 'lexical', 'hybrid'
+    p_budget      int    default 20,
+    p_k_tags      int    default 3,       -- nearest tags by vector, when the caller chose none
+    p_k_questions int    default 5,
+    p_min_p       real   default 0.5,     -- a link counts at this probability or above
+    p_tags        jsonb  default null,    -- [{"id","w"}]: tags the caller chose (a decision model, a person)
+    p_questions   jsonb  default null,    -- the same for questions
+    p_stores      text[] default '{resources}'
+) returns table(resource_id uuid, score real, rank int,
+                document_rank int, tag_rank int, question_rank int, path jsonb)
 ```
+
+Primary-store-only search is the same call with `p_layers => '{documents}'`. That
+makes the comparison in §3 one function with two arguments, not two code paths.
 
 ### Steps
 
 1. **Fan out in parallel**, for the query and each subquery:
    - **D, documents:** `aiq.search` over each selected store's registered source;
    - **C, claims and tags:** semantic and lexical search over the claim layer and
-     the tag layer (§4.1);
+     the tag layer (§4);
    - **G, questions:** `claims.find_question`.
 2. **Expand one hop.** Each C or G hit becomes the documents linked to it, kept
    only when they are in the selected stores and readable. Each lead is scored by
@@ -182,37 +185,26 @@ the tag hop uses tags chosen by Jev's scores, not by wording.
 
 ---
 
-## 4. Decisions for Sirsh
+## 4. The schema (decided by Sirsh, 23 Oct 2026)
 
-### 4.1 Where tags live
+Sirsh: one new `claims.tags` table, with different sources and hierarchies, and with
+optional dual questions that are updated and trained over time. Claims, questions and
+tags link to resources canonically. Brews and long-form pieces use the same pattern.
 
-No tags table exists, and the rule says exactly one. Options:
+| Table | What it holds |
+|---|---|
+| `claims.tags` | a taxonomy node: `source` (iab, schema.org, a person's own), `source_version`, `key`, `label`, `path`, `parent_id`. The parent is in the same source and version, enforced by a composite foreign key. A tag is found by its `search_text` (path and description), a registered semantic source. |
+| `claims.tag_questions` | a tag's dual questions in `claims.questions`, each with a `weight`, an `origin` (seed, trained, person) and a `retired_at`. Training moves these rows and never the tags. |
+| `claims.resource_links` | a resource linked to exactly one tag, question or claim (each a real foreign key, one per row), with the decider's `p` and the decider's name |
 
-- **(a) A new `claims.tags` table** (path, label, taxonomy version) **plus one
-  link table** (document ↔ tag, with P). This is two new tables, so it needs
-  Sirsh's yes.
-- **(b) Tags as typed nodes in `aiq.nodes`, linked by `aiq.edges`.** No new
-  table. But `aiq.edges` is the remembered-facts graph, so a tag would share it
-  with facts, and the question side still needs a link (4.2).
-- **(c) Tags as `claims.questions` rows of a "topic" kind.** No new table, but a
-  topic is not a question, and it blurs the dual.
+Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
+seeded duals; it is operator-only, since a taxonomy is shared vocabulary.
+`claims.train_dual` moves one dual. `claims.link_resources` writes a decider's links
+from resources the caller may write.
 
-**Recommendation: (a).** A tag has its own identity and taxonomy version, and the
-rule names a tags table. It is the only option that adds tables, which is why it
-is Sirsh's call.
-
-### 4.2 How a generic resource links to a question or a claim
-
-`claims.answered` links a claim to a question with evidence in a brew revision.
-No table links a resource to a question or a claim. Options:
-
-- **(a) Widen the evidence of `claims.answered`** to allow a resource as well as a
-  revision. That is a column change, not a table.
-- **(b) A link table** (resource ↔ question, with P), the questions dual of
-  4.1(a)'s tag link.
-
-**Recommendation:** (b) if 4.1 is (a), so both links have one shape; otherwise
-(a).
+Reading: tags and duals are readable by anyone signed in. A link is readable when its
+resource is. `claims.question_readable` now also admits a tag's live dual, and a question
+that a resource the caller may read links to.
 
 ### 4.3 The duplicates
 
@@ -225,7 +217,7 @@ are on record.
 
 ## 5. LongMemEval through it
 
-Once 4.1 and 4.2 are answered:
+Loaded by the experiment's `in_percolate/run.py` (REM-1076):
 
 - sessions go into `content.resources` and `content.resource_chunks` through the
   normal ingest (`content.register_text`);
@@ -233,15 +225,15 @@ Once 4.1 and 4.2 are answered:
 - Jev question links go into the questions layer;
 - the seeded questions go into `claims.questions`.
 
-The experiment then calls `aiq.tripartite_search` instead of its own files. The
+The experiment then calls `claims.search_leads` instead of its own files. The
 first run must reproduce the S numbers in §3 before any M result counts.
 
 ## 6. Done when
 
 - [ ] The table names above are confirmed (this document) and the duplicates are
       on record (§4.3).
-- [ ] Sirsh has answered 4.1 and 4.2.
-- [ ] `aiq.tripartite_search` works over each store and over all of them, with a
+- [x] Sirsh has decided the schema (§4).
+- [ ] `claims.search_leads` works over each store and over all of them, with a
       test that a private revision's claims cannot reach a lead.
 - [ ] LongMemEval is ingested through it and reproduces the S Phase A numbers.
 - [ ] Tripartite search is measured against primary-store-only search on held-out
