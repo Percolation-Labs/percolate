@@ -166,27 +166,47 @@ fans each one out.
 
 ---
 
-## 3. Measurement before build-out
+## 3. Measurement (run 23 Oct 2026, REM-1144)
 
-Sirsh: "Don't build on it until this is measured." This is the first acceptance
-test, and Phase A's frozen protocol (REM-1076) is its template.
+LongMemEval-M pooled into one corpus: 49,018 distinct sessions behind 500 questions,
+loaded through `content.register_text`, with stored Jev topic scores as tag links.
+Each corpus size is a fresh database, searched with `claims.search_leads`. The test set
+is 428 questions outside the development pilot. Recall is the share of a question's
+evidence sessions in the first 10 leads:
 
-- **Questions:** LongMemEval held-out questions (never used to set anything),
-  first on M (about 500 sessions per question). On S (about 50 sessions),
-  measured 23 Oct, every arm collects every source in three to four reads, so S
-  cannot separate the arms.
-- **Arms:** primary store only (documents: BM25, embeddings, and their fusion)
-  against tripartite (documents plus expanded tags and questions).
-- **Metrics:** recall at the read budget; **reads to full evidence**, which is the
-  rank of the last labelled session (Sirsh's Phase B metric and its baseline);
-  latency per query; and cost per query and per ingested document.
+| corpus | documents (embeddings) | documents (hybrid) | low-overlap, embeddings |
+|---|---|---|---|
+| 1,859 | 0.710 | 0.735 | 0.337 |
+| 5,859 | 0.556 | 0.625 | 0.161 |
+| 20,859 | 0.396 | 0.456 | 0.057 |
+| 49,018 | 0.297 | 0.360 | 0.024 |
 
-The S result already constrains the design: tags picked by embedding similarity
-to a topic name **hurt** (3.67 reads against 3.23 for embeddings alone, worse on
-13 of 39 held-out questions), while the question layer was neutral (3.10). On M,
-the tag hop uses tags chosen by Jev's scores, not by wording.
+The low-overlap slice is 53 questions whose evidence shares the fewest words and the
+least vector similarity with the question.
 
----
+**Direct search degrades with corpus size,** which is the case the graph exists for.
+
+**At 20,859 sessions the graph does not yet beat it:**
+
+| tag and question arm | recall@10 |
+|---|---|
+| tags chosen by the query's words | 0.29 (on 214 tagged questions) |
+| tags chosen by Jev | 0.27 |
+| question links from a query-time Jev check of the candidates | 0.23 to 0.28 |
+
+Why:
+- **Tags give reach, not precision.** The Jev-tag hop finds evidence that documents'
+  top 20 miss for 11 of the 53 low-overlap questions. But a tag links tens to hundreds
+  of sessions, and fusing it as its own RRF list displaces good document hits.
+- **Generic seeded duals cannot rank within a topic.** Even used only to re-rank
+  candidates holding 53% of the evidence, they place it below plain embeddings.
+
+The design consequences for this function:
+1. **Hybrid is the documents arm to beat.**
+2. **Tags belong in candidate generation.** They do not belong as an equal-weight list
+   in the fusion.
+3. **The question layer needs duals specific enough to discriminate.** That is
+   dreaming's job, and reads to full evidence against these curves is its metric.
 
 ## 4. The schema (decided by Sirsh, 23 Oct 2026)
 
