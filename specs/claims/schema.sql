@@ -247,7 +247,7 @@ begin
             insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
             values (p_revision, p_claim_key, cur.claim_id, cur.method, cur.status, 'retract', t);
             for answer in select * from (
-                select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+                select distinct on (a.question_id) a.* from claims.answered a
                  where a.evidence=p_revision and a.claim_key=p_claim_key
                  order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
                 where x.op='assert' and x.claim_id=cur.claim_id loop
@@ -277,7 +277,7 @@ begin
     -- The frame was projected while this occurrence still proposed the old identity. Move each active
     -- question assertion to the writer's new identity with two append-only rows, preserving the old reading.
     for answer in select * from (
-        select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+        select distinct on (a.question_id) a.* from claims.answered a
          where a.evidence=p_revision and a.claim_key=p_claim_key
          order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
         where x.op='assert' and x.claim_id=cur.claim_id loop
