@@ -388,4 +388,45 @@ begin
     assert (v_rep->>'challenges')::int = 1 and (v_rep->>'occurrences')::int = 1, 'a fixture''s are not counted: ' || v_rep::text;
 end $$;
 
+-- Nor is a fixture's claim put to a writer as a candidate, even listed (REM-659). A is a writer again; C, still a
+-- fixture, lists G1, and B then states B5 near both A1 and G1. B5 is challenged with A1, and G1 is not offered.
+-- Ten candidates rather than three, so G1 is within reach on distance alone: A1, B1 and N1 tie with it at 0.
+update rbac.users set fixture = false where id = '00000000-0000-4000-8000-0000000659a1';
+select claims.set_challenge_floor('chal-test-3d', 0.05, 10);
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000659c1"}';
+set local role authenticated;
+do $$
+begin
+    insert into ids values ('rg', research.submit_package('{"schema_version": "0.1", "title": "Chal G", "visibility": "listed", "edges": [],
+        "claims": [{"id": "G1", "kind": "Inference", "text": "Agent memory should record when each fact became true.", "source_ids": ["S1"]}],
+        "sources": [{"id": "S1", "title": "S", "url": "https://example.com/cg", "origin": "CG"}]}', null, 'rp-chal-g')->>'revision_id');
+end $$;
+reset role;
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000659b1"}';
+set local role authenticated;
+do $$
+begin
+    insert into ids values ('r5', research.submit_package('{"schema_version": "0.1", "title": "Chal B5", "visibility": "listed", "edges": [],
+        "claims": [{"id": "B5", "kind": "Inference", "text": "Agent memory needs to record when every fact became true.", "source_ids": ["S1"]}],
+        "sources": [{"id": "S1", "title": "S", "url": "https://example.com/c5", "origin": "C5"}]}', null, 'rp-chal-b5')->>'revision_id');
+end $$;
+reset role;
+reset request.jwt.claims;
+set local role worker;
+select pg_temp.drain('t_chal_659');
+reset role;
+do $$
+declare
+    v_cands jsonb := (select j.evidence->'candidates' from aiq.judgements j
+                       where j.kind = 'challenge' and j.subject_node_id = (
+                             select e.claim_id from claims.expresses e
+                              where e.revision_id = (select v::uuid from ids where k = 'r5') and e.claim_key = 'B5'
+                              order by e.id desc limit 1));
+begin
+    assert v_cands @> jsonb_build_array(jsonb_build_object('claim_key', 'A1')),
+        'B5 is challenged, with A1: ' || coalesce(v_cands::text, 'no challenge');
+    assert not (v_cands @> jsonb_build_array(jsonb_build_object('revision_id', (select v from ids where k = 'rg')))),
+        'and the fixture''s listed G1 is not offered: ' || v_cands::text;
+end $$;
+
 rollback;

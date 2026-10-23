@@ -39993,7 +39993,12 @@ begin
         select coalesce(jsonb_agg(k.v order by k.n), '[]'::jsonb) into v_cands
           from (select t.value as v, t.ordinality as n
                   from jsonb_array_elements(v_cands) with ordinality t
-                 where not exists (select 1 from aiq.judgements j
+                 -- A fixture account's claim is never put to a writer either, even listed (REM-659).
+                 where not exists (select 1 from research.revisions v2
+                                     join research.works w2 on w2.id = v2.work_id
+                                     join rbac.users u2 on u2.id = w2.owner_id
+                                    where v2.id = (t.value->>'revision_id')::uuid and u2.fixture)
+                   and not exists (select 1 from aiq.judgements j
                                     where j.kind = 'challenge'
                                       and ((j.subject_node_id = c.claim_id
                                             and j.evidence->'candidates' @> jsonb_build_array(
