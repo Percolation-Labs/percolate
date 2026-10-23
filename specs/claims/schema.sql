@@ -2775,19 +2775,23 @@ comment on view claims.challenge_outcomes is
 revoke all on claims.challenge_outcomes from public;
 
 -- What the backfill reports (REM-1123): how many challenges the agent settled, how many reached the person, how
--- many are still open, and how many settled ones a person overturned, per model or for all.
+-- many are still open, and how many settled ones a person overturned, per model or for all. A challenge is a
+-- judgement: one claim stated in several places is challenged once (claims.challenge_embedded joins its candidates
+-- onto the open judgement) and has a claims.challenged row per place, so every count is of distinct judgements and
+-- 'occurrences' says how many places they cover. Counting rows reported 403 challenges for 312 judgements.
 create or replace function claims.challenge_report(p_model text default null) returns jsonb
 language sql stable security definer set search_path = pg_catalog, public as $$
     select jsonb_build_object(
         'model', p_model,
         'settle_at', (select settle_at from claims.challenge_floors where model = p_model),
-        'challenges', count(*),
-        'settled_by_agent', count(*) filter (where settled),
-        'decided_by_agent', count(*) filter (where status = 'decided' and tier = 'agent' and not settled),
-        'reached_the_person', count(*) filter (where status = 'to_human' or tier = 'human'),
-        'decided_by_person', count(*) filter (where tier = 'human'),
-        'still_waiting', count(*) filter (where status in ('open', 'claimed', 'to_human')),
-        'overturned', count(*) filter (where overturned_at is not null))
+        'challenges', count(distinct judgement_id),
+        'occurrences', count(*),
+        'settled_by_agent', count(distinct judgement_id) filter (where settled),
+        'decided_by_agent', count(distinct judgement_id) filter (where status = 'decided' and tier = 'agent' and not settled),
+        'reached_the_person', count(distinct judgement_id) filter (where status = 'to_human' or tier = 'human'),
+        'decided_by_person', count(distinct judgement_id) filter (where tier = 'human'),
+        'still_waiting', count(distinct judgement_id) filter (where status in ('open', 'claimed', 'to_human')),
+        'overturned', count(distinct judgement_id) filter (where overturned_at is not null))
       from claims.challenge_outcomes where p_model is null or model = p_model;
 $$;
 revoke all on function claims.challenge_report(text) from public;
