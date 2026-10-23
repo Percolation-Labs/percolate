@@ -170,7 +170,8 @@ def save(s: dict) -> None:
 def jev_key() -> str:
     if os.environ.get("JEV_API_KEY"):
         return os.environ["JEV_API_KEY"]
-    for line in (Path.home() / "code/p8-subsystems/.env").read_text().splitlines():
+    env = Path(os.environ.get("JEV_ENV_FILE", ".env"))
+    for line in (env.read_text().splitlines() if env.exists() else []):
         if line.startswith("JEV_API_KEY="):
             return line.split("=", 1)[1].strip().strip('"')
     raise SystemExit("no JEV_API_KEY")

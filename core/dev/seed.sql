@@ -23,7 +23,7 @@ insert into rbac.role_permissions (role, resource, action) values
 on conflict do nothing;
 
 -- A second user, owning nothing, for checking that a conversation is not
--- visible across tenants (sequence.md Gate 1).
+-- visible across tenants (the tenant-isolation gate in percolate_core/agentic/phases.py).
 insert into rbac.users (id, email) values
   ('bbbbbbbb-0000-0000-0000-000000000002', 'other@test.local')
 on conflict (email) do nothing;

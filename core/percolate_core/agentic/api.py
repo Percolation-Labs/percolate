@@ -46,7 +46,7 @@ from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
 from .gateway import accept_run, caller_claims, user_id_of
 from .runtime import EventSink, channel, relay
-from .sequencer import AgentNotFound, TurnSequencer
+from .sequencer import AgentNotFound, TurnSequencer, dry_run_overrides
 from .task_outcome import provider_failure
 from .settings import Settings
 from . import telemetry
@@ -531,9 +531,8 @@ async def _completion(
     strange" for as long as it did.
     """
     sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
-    result = await sequencer.run_turn(
-        body.model_copy(update={"session_id": session.id}), context
-    )
+    request, stand_in = dry_run_overrides(body.model_copy(update={"session_id": session.id}), body.dry_run)
+    result = await sequencer.run_turn(request, context, model=stand_in)
 
     status = getattr(result.run, "status", None)
     # A REFUSAL AFTER THE TURN STARTED is still a refusal. The sequencer turns

@@ -1,6 +1,6 @@
 """The lake's two refusals that need no database: what authored SQL may say,
 and what a sealed connection may touch. The end-to-end run is
-p8-subsystems/dev/tests/content/e2e-lake.py; these are the parts of it that
+percolate's dev/tests/content/e2e-lake.py; these are the parts of it that
 hold on any machine with duckdb installed, so CI runs them."""
 
 import os

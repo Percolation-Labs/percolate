@@ -211,6 +211,10 @@ async def _hold_until_released(task_id: str, worker_id: str, period: float,
             return
 
 
+CAPABILITIES: tuple[str, ...] = ("dry_run",)
+"""What this worker tells claim_task it can run safely. See run_once."""
+
+
 def handler(kind: str) -> Callable[[Handler], Handler]:
     """Register a handler for a step kind. This is the whole extension API."""
     def deco(fn: Handler) -> Handler:
@@ -222,8 +226,17 @@ def handler(kind: str) -> Callable[[Handler], Handler]:
 async def run_once(queue: str, worker_id: str) -> bool:
     """Claim one task and run it. True if work was done."""
     async with as_service() as conn:
-        row = await conn.fetchval(
-            "select (workflow.claim_task($1, $2)).id", queue, worker_id)
+        # A DRY RUN'S TASK GOES ONLY TO A WORKER THAT DECLARES IT (REM-1125). Its agent call is flagged `dry_run`,
+        # and a runtime that predates the flag would make the real call, so claim_task hands it out only to a caller
+        # that lists 'dry_run'. This worker may list it because the runtime it calls ships in the same image and
+        # answers that flag on a stand-in model with no tools (sequencer.dry_run_overrides). A database from before
+        # the capabilities argument has no dry runs to hand out, and is asked the two-argument form.
+        if await conn.fetchval("select to_regprocedure('workflow.claim_task(text,text,text[])') is not null"):
+            row = await conn.fetchval(
+                "select (workflow.claim_task($1, $2, $3::text[])).id", queue, worker_id, list(CAPABILITIES))
+        else:
+            row = await conn.fetchval(
+                "select (workflow.claim_task($1, $2)).id", queue, worker_id)
     if not row:
         return False
     task_id = str(row)

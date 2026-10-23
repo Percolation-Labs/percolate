@@ -1,6 +1,6 @@
 """Structured output → automatic follow-on action (``brief.md`` §2, §4, §9).
 
-p8k8's "chained tool call" reframed as **data, not a Python callable lookup**:
+A "chained tool call" reframed as **data, not a Python callable lookup**:
 the agent row names a target, the runtime calls it, and both the call and its
 result are persisted as message rows — with no second LLM round-trip.
 

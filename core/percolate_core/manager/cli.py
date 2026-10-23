@@ -83,7 +83,7 @@ def _not_yet(what: str) -> int:
     typer.secho(
         f"`p8 pool {what}` is not implemented yet.\n"
         "  The loop it will implement is pools.md §4.2, and a working reference\n"
-        "  exists at k8s/kind/manager.py — 21 of 21 of §12's gates pass against\n"
+        "  exists in the private tree's kind harness — 21 of 21 of §12's gates pass against\n"
         "  kind. What is missing here is that loop against kubernetes-asyncio\n"
         "  rather than kubectl, with the LISTEN half §4.2 describes.\n"
         f"  `p8 pool render` is implemented and is Gate 1.",

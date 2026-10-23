@@ -23,7 +23,7 @@ for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
 
 - **`percolate package apply` installs a package, as the user who will own it**
   (REM-1105). The UI's help and both package exports told a reader to run
-  `packages/apply.py`, a script only the private tree had. The command reads
+  a script only the private tree had. The command reads
   the UI's export as written (a file, or a directory holding `manifest.yaml`),
   inlines the files a manifest points at, applies its storage with
   `percolate.check_package_schema()` in the same transaction, and calls
@@ -84,7 +84,7 @@ for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
   refused image answers 422 with `saved: false` and the reason, and stores nothing. It registers through
   `content.register_research_image`: `research:insert` and the `evidence_bytes` budget, as `/evidence`.
 - **`GET /research-images/{snapshot_id}` serves it to anybody who may read some revision that shows it**, signed out included, through `research.resolve_image`. Inline, `nosniff`, a sandboxing CSP, and the bytes
-  are identified again before they leave. Needs p8-subsystems 0.2.11 with both functions.
+  are identified again before they leave. Needs extension 0.2.11 with both functions.
 
 ## 0.1.13
 
@@ -94,7 +94,7 @@ for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
   (REM-239). It makes one GET with the probe's hop-by-hop egress checks and no credentials, and refuses a page over
   10 MB rather than truncating it. It stores the bytes content-addressed, then registers them through
   `content.register_evidence` as the caller.
-- **Who may, and how much, is the database's decision.** It needs p8-subsystems with `register_evidence`:
+- **Who may, and how much, is the database's decision.** It needs an extension with `register_evidence`:
   `research:insert` and the `evidence_bytes` budget (REM-242). The budget is asked before storing. A page that is
   not kept answers 422 with `saved: false` and the reason; a spent allowance answers 403.
 - `probe._fetch` takes a byte `limit`. The probe keeps its 2 MB.
@@ -145,7 +145,7 @@ on `percolate-postgres:19-0.2.0`, as the role 0.1.12 uses, and answered:
 function stale_timeout_default`), so a worker holding an async step heartbeats
 every 40 seconds whatever its queue configures, and a queue whose
 `stale_timeout` is under about 80 seconds has held tasks reaped. Extension
-0.2.1 makes that function `security definer` (p8-subsystems `d888a57`); it is
+0.2.1 makes that function `security definer`; it is
 not published. The live checks for #41, #46, #48, #49, #53 and #55 ran on
 0.2.0. Those for #51, #52, #54, #56 and #57, and get-percolate's rehearsal of
 #54, ran on 0.2.0 upgraded in place to 0.2.1, so a task completed on
@@ -173,7 +173,7 @@ group is first because an operator has to change a deployment for it.
     policy
   - **`rbac.plan_limits` exists without the function:** the call ends
     `quota_exceeded`, and an error names the missing function
-  Pairs with 0.2.0 unchanged. `tests/test_quota_gate.py`; p8-subsystems REM-174.
+  Pairs with 0.2.0 unchanged. `tests/test_quota_gate.py`; REM-174.
 
 ### The agent service serves scheduled runs and delegation
 
@@ -574,7 +574,7 @@ it is why the release exists.
 
 ### Contracts, configuration and screens
 
-- **One translation from an agent document to a row.** `packages/apply.py`,
+- **One translation from an agent document to a row.** The private tree's package installer,
   `core/samples.py` and `percolate agent push` each knew one dialect, so an
   agent written the documented way installed through the wrong loader with an
   empty prompt and no output contract, reporting success. `agent push` was the

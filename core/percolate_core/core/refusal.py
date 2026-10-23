@@ -22,7 +22,7 @@ an error Postgres raises that nobody wrote a message for.
 The extension's older authorization raises carried no errcode at all, which is
 why the rule could not be written before: they are P0001, indistinguishable
 from a validation message. Those raises now say `using errcode =
-'insufficient_privilege'` (p8-subsystems, REM-67), which is where the fact
+'insufficient_privilege'` (REM-67), which is where the fact
 belongs -- the database is the only layer that knows a refusal is a refusal.
 
 `message` and `hint` are carried through to the caller deliberately. A refusal

@@ -9,7 +9,7 @@ have to be written while the connection is still its login role.
 No database: the pool is a recorder of the statements a transaction runs,
 installed with `identity.set_pool`. What these prove is what reaches the
 connection; that RLS then narrows on `orgs` is the database's half and is
-tested there (p8-subsystems dev/tests).
+tested there (percolate's dev/tests).
 """
 import base64
 import json

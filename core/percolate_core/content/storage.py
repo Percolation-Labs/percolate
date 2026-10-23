@@ -104,7 +104,7 @@ def ensure_bucket() -> str:
     `docker compose up` is supposed to be the whole install, and it was not:
     a clean MinIO volume has no buckets, nothing in the stack created one, and
     the first upload failed with `NoSuchBucket` from botocore -- a 500 from the
-    Content Server, at the first line of RELEASE-0.1.md's acceptance narrative.
+    Content Server, on the first step of the 0.1 release's acceptance run.
 
     Done at STARTUP rather than lazily on first write, so a deployment whose
     credentials cannot create a bucket finds out when it boots rather than when

@@ -1,7 +1,6 @@
 """Not a test suite — the harness for exercising the shell by hand.
 
-``meta/skills/spec-driven-development`` §2/§4 is explicit that a large test suite
-written before the thing has been used is backwards, and that the ~10% worth
+A large test suite written before the thing has been used is backwards, and that the ~10% worth
 keeping later are the ones protecting a *stated guarantee* against quiet
 regression. So this file is small on purpose, and each check corresponds to a
 sentence in the brief rather than to a function in the code.
@@ -80,7 +79,7 @@ def check_the_document_round_trips() -> None:
 
 
 def check_a_code_authored_agent_is_the_same_document() -> None:
-    """brief §6 / p8k8's convention: the prompt is the docstring, not a key.
+    """brief §6: the prompt is the docstring, not a key.
 
     This is the claim that makes the format worth having — a pydantic model and
     a YAML file are the same artifact, so "authored in code, deployed as data"
@@ -259,7 +258,7 @@ async def check_the_loader_sends_the_document_and_translates_nothing() -> None:
     # `authoring.from_json_schema` is kept for what needs no database at all
     # (`from_model_class`, the in-memory twin), so the two must not disagree
     # about the two keys that carry meaning. The database's half is asserted in
-    # `p8-subsystems/dev/tests/agentic/05-agent-document.sql` against the same
+    # percolate's `dev/tests/agentic/05-agent-document.sql` against the same
     # document shape; these are the mappings, not the copies.
     spec = authoring.from_json_schema(doc)
     assert spec.system_prompt == doc["description"], spec.system_prompt
@@ -336,7 +335,7 @@ def check_our_vocabularies_match_the_published_contract() -> None:
     safe rather than authoritative. When it fails, the schema is right and this
     package is behind; the fix is here, never there.
 
-    Refresh the artifact from a live database with, in the p8-subsystems tree:
+    Refresh the artifact from a live database with, in a percolate checkout:
 
         dev/contract-export.py --psql '<psql cmd>'
         cp extension/percolate/contract.json <here>/percolate_core/contract.json
@@ -350,7 +349,7 @@ def check_our_vocabularies_match_the_published_contract() -> None:
     if not path.exists():
         raise AssertionError(
             f"{path.name} is missing — this package cannot check itself against "
-            "the schema it is a client of. Export it from the p8-subsystems tree."
+            "the schema it is a client of. Export it from a percolate checkout."
         )
     contract = json.loads(path.read_text())
 

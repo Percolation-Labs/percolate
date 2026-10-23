@@ -15,7 +15,7 @@ cannot be compared with a later one. The default here is the exact version, and
 every Result carries the version the service says answered it.
 
 A THRESHOLD BELONGS TO ITS QUESTION, as much as to the version. Measured on
-2,747 company-name pairs (p8-subsystems meta/spikes/2026-09-30-jev-decisions):
+2,747 company-name pairs (a spike on 30 September 2026):
 one rewording of the same question moved 114 accept decisions at P >= 0.8 while
 the ranking (AUC 0.9994 vs 0.9997) did not move. Wording shifts the
 calibration, not the judgement, so re-measure the threshold whenever the

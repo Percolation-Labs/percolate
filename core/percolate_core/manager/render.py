@@ -1,13 +1,14 @@
 """Pool rows in, Kubernetes manifests out. No cluster, no database, no I/O.
 
 This is the half of the manager that can be reviewed without running anything,
-which is why it is its own module: `k8s/examples/` holds a checked-in render, and
+which is why it is its own module: a checked-in render is kept beside the cluster
+manifests, and
 `pools.md` §12 Gate 1 is that this reproduces it byte for byte. A change to the
 generator then shows up as a diff in a pull request rather than as a surprise in
 a cluster.
 
 **Why the emitter carries comments.** The obvious implementation renders a dict
-and serialises it, and that is what `k8s/kind/manager.py` does — but the checked-in
+and serialises it, and that is what the kind harness does — but the checked-in
 examples are annotated, and their annotations are the review value. A render
 without them reproduces the bytes Kubernetes needs and loses the reason anybody
 would look. So the manifest stays one dict (the same object the apply path sends,
@@ -206,7 +207,7 @@ def render_pool(pool: dict, cfg: type[Config] = Config) -> tuple[str, str]:
     gate that gets skipped on the machine where it matters.
 
     Returns (deployment, scaledobject) separately because that is what
-    `k8s/examples/` is: two files, two reviews.
+    the checked-in examples are: two files, two reviews.
     """
     src = f"workflow.pools where name = '{pool['name']}'"
     dep = deployment(pool, namespace=cfg.namespace, service_account=cfg.service_account,

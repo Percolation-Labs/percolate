@@ -1,6 +1,6 @@
 """The query tool server keeps the three properties it was ported for.
 
-`percolate query mcp` is p8-subsystems' `specs/agentic/reference/query_mcp.py`
+`percolate query mcp` is percolate's `specs/agentic/reference/query_mcp.py`
 made a command, so a get-percolate install can run it. What it must keep:
 
 1. no tool logic -- the call's query reaches `aiq.query` unchanged, and what

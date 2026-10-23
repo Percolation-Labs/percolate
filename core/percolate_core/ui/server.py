@@ -1,6 +1,6 @@
 """Serve the UI — a router, a config document, and the static files.
 
-`meta/module-composition.md`: a subpackage exposes its HTTP surface as a
+A subpackage exposes its HTTP surface as a
 `router()` the host includes under a prefix *it* chooses, and its standalone
 mode is a caller of that router rather than a second implementation. This one
 needs no `lifespan()` — it opens no connection and holds no state, because the
