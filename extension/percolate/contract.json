@@ -752,6 +752,19 @@
     },
     {
       "admits": [
+        "seed",
+        "trained",
+        "person"
+      ],
+      "column": "origin",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "claims",
+      "table": "tag_questions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "person",
         "agent",
         "platform"
