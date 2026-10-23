@@ -3,6 +3,7 @@
 
     python3 dev/the-schema-has-a-budget.py            # the gate
     python3 dev/the-schema-has-a-budget.py --fold     # move every declaration into budget.toml's totals
+    python3 dev/the-schema-has-a-budget.py --fold --at v0.2.31   # only those a release shipped (the train's fold)
 
 specs/budget.toml holds the settled totals, and each change declares its own additions BY NAME in a file of
 its own, specs/budget.d/<branch>.toml. This refuses a tree whose specs disagree with the totals plus every
@@ -135,9 +136,13 @@ def merge_base(root: pathlib.Path, base: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def fold(root: pathlib.Path) -> int:
+def fold(root: pathlib.Path, at: str | None) -> int:
     tree, errors = Tree(root), []
     decls = {p: parse_declaration(p, t, errors) for p, t in tree.declarations().items()}
+    if at is not None:
+        # The train folds what the release shipped: a declaration merged after the tag stays for the next one.
+        shipped = Tree(root, at).declarations()
+        decls = {p: d for p, d in decls.items() if p in shipped}
     if errors:
         print("\n".join(errors))
         return 1
@@ -163,10 +168,11 @@ def main() -> int:
     ap.add_argument("--base", default=os.environ.get("CHANGED_BASE") or "origin/main",
                     help="what the branch is compared against ($CHANGED_BASE, else origin/main)")
     ap.add_argument("--fold", action="store_true", help="move every declaration into budget.toml and delete it")
+    ap.add_argument("--at", help="with --fold: only the declarations present at this git revision (a release tag)")
     a = ap.parse_args()
     root = pathlib.Path(a.root).resolve()
     if a.fold:
-        return fold(root)
+        return fold(root, a.at)
 
     tree, errors = Tree(root), []
     totals = tree.totals()

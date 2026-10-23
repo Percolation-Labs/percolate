@@ -78,8 +78,18 @@ grep -q "only --fold moves the totals" <<<"$out" || { echo "$out"; fail "the ref
 g checkout -q main
 echo "ok   a hand-raised total in specs/budget.toml is refused"
 
-# 4. The fold.
+# 4. The fold, first at a tag: a release that shipped only branch one folds only one's declaration.
+g checkout -q -b fold-at main-one-two
+g tag shipped-one main-one-two^1   # main after merging one, before two: what that release shipped
+python3 "$GATE" --root "$T" --fold --at shipped-one > /dev/null
+grep -q '^functions = 3$' "$T/specs/budget.toml" || fail "--fold --at should raise functions to 3, folding only one"
+[ "$(ls "$T/specs/budget.d")" = "two.toml" ] || fail "--fold --at should leave two's declaration for the next train"
+g add -A && g commit -q -m fold-at
+out=$(gate main-one-two) || { echo "$out"; fail "the tree folded at a tag does not pass"; }
 g checkout -q main-one-two
+echo "ok   --fold --at folds only what the tag shipped, leaves the rest, and passes"
+
+# 5. The fold of everything.
 before=$(g rev-parse HEAD)
 python3 "$GATE" --root "$T" --fold > /dev/null
 grep -q '^functions = 4$' "$T/specs/budget.toml" || fail "the fold did not raise functions to 4"
