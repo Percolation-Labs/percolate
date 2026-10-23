@@ -122,7 +122,7 @@ claims.search_leads(
     p_layers      text[] default '{documents,tags,questions}',
     p_documents   text   default 'semantic',   -- or 'lexical', 'hybrid'
     p_budget      int    default 20,
-    p_k_tags      int    default 3,       -- nearest tags by vector, when the caller chose none
+    p_k_tags      int    default 3,       -- tags whose label words the query uses, when the caller chose none
     p_k_questions int    default 5,
     p_min_p       real   default 0.5,     -- a link counts at this probability or above
     p_tags        jsonb  default null,    -- [{"id","w"}]: tags the caller chose (a decision model, a person)
@@ -196,13 +196,13 @@ tags link to resources canonically. Brews and long-form pieces use the same patt
 
 | Table | What it holds |
 |---|---|
-| `claims.tags` | a taxonomy node: `source` (iab, schema.org, a person's own), `source_version`, `key`, `label`, `path`, `parent_id`. The parent is in the same source and version, enforced by a composite foreign key. A tag is found by its `search_text` (path and description), a registered semantic source. |
+| `claims.tags` | a taxonomy node: `source` (iab, schema.org, a person's own), `source_version`, `key`, `label`, `path`, `parent_id`. The parent is in the same source and version, enforced by a composite foreign key. A tag is a word, not a sentence, so it is never embedded: it is a lexical source over its label (not its path, whose parent words would match every child). |
 | `claims.tag_questions` | a tag's dual questions in `claims.questions`, each with a `weight`, an `origin` (seed, trained, person) and a `retired_at`. Training moves these rows and never the tags. |
 | `claims.resource_links` | a resource linked to exactly one tag, question or claim (each a real foreign key, one per row), with the decider's `p` and the decider's name |
 
-Tags are a semantic source, and the source workflow (`embed_sources`) embeds tags
-beside claims and questions. `claims.put_taxonomy` queues it, and it refuses a parent
-chain that forms a cycle. Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
+Claims and questions are sentences and carry vectors (the `embed_sources` workflow);
+tags carry none. `claims.put_taxonomy` queues embedding for the seeded questions it
+mints, and it refuses a parent chain that forms a cycle. Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
 seeded duals; it is operator-only, since a taxonomy is shared vocabulary.
 `claims.train_dual` moves one dual. `claims.link_resources` writes a decider's links
 from resources the caller may write.

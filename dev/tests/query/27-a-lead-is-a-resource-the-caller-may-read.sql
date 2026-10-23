@@ -28,8 +28,8 @@ begin
     end if;
     select id into v_tag from claims.tags where source = 'test-tenancy' and key = 'memo';
     select question_id into v_q from claims.tag_questions where tag_id = v_tag;
+    -- The question is a sentence and gets a vector; the tag is a word and is found by it ("memo" in the query).
     perform aiq.record_embeddings('demo-quad-a', jsonb_build_array(
-        jsonb_build_object('chunk_id', v_tag, 'embedding', '[1,0,0,0]'::jsonb),
         jsonb_build_object('chunk_id', v_q, 'embedding', '[1,0,0,0]'::jsonb)));
     perform claims.link_resources('test', jsonb_build_array(
         jsonb_build_object('resource_id', '22220000-0000-0000-0000-000000000004', 'tag_id', v_tag, 'p', 0.9),

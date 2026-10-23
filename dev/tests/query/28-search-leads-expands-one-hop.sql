@@ -5,7 +5,8 @@
 -- vectors in demo-quad-a make every rank decidable by hand.
 --
 --   memory r1: R1 [1,0,0,0]  R2 [0,1,0,0]  R3 [0,0,1,0]      memory r2: R4 [1,0,0,0]
---   tags:      A (root) [0,0,1,0], B (child of A) [0,0,0,1]; B's dual "Where does the user work today?" [0,0,0,1]
+--   tags:      A "Careers" (root), B "Remote Work" (child of A), found by their words, never embedded;
+--              B's dual "Where does the user work today?" [0,0,0,1]
 --   links:     R3 -> A p 0.9   R4 -> A p 0.9   R2 -> B p 0.4   R2 -> the dual p 0.8   R1 -> B p NULL
 
 \set ON_ERROR_STOP on
@@ -40,9 +41,9 @@ begin
     perform aiq.record_embeddings('demo-quad-a', vecs);
 
     v := claims.put_taxonomy('test-leads', '1', '[
-        {"key": "b", "label": "B", "path": "A > B", "parent": "a",
+        {"key": "b", "label": "Remote Work", "path": "Careers > Remote Work", "parent": "a",
          "questions": ["Where does the user work today?"]},
-        {"key": "a", "label": "A", "path": "A", "questions": ["What did the user eat for lunch?"]}]'::jsonb);
+        {"key": "a", "label": "Careers", "path": "Careers", "questions": ["What did the user eat for lunch?"]}]'::jsonb);
     if (v->>'tags')::int <> 2 then
         raise exception 'put_taxonomy installed % tags, not 2 (a child listed before its parent)', v->>'tags';
     end if;
@@ -55,18 +56,18 @@ begin
         raise exception 'B''s parent is not A';
     end if;
 
-    -- A new taxonomy waits for its vectors through the source workflow, tags as well as questions.
-    if jsonb_array_length(aiq.texts_to_embed('tags', 'demo-quad-a')) < 2 then
-        raise exception 'the tags source does not offer the new tags to embed';
+    -- A tag is a word, so it is found by its words and never embedded (Sirsh, 23 Oct); its dual questions are
+    -- sentences and are.
+    if exists (select 1 from aiq.semantic_sources where name = 'tags')
+       or exists (select 1 from workflow.current_definition('embed_sources') d,
+                         jsonb_array_elements(d.spec->'steps') s where s->'input'->>'source' = 'tags') then
+        raise exception 'tags are a semantic source or embedded by the source workflow; a tag is found by its words';
     end if;
-    if not exists (select 1 from workflow.current_definition('embed_sources') d,
-                          jsonb_array_elements(d.spec->'steps') s where s->'input'->>'source' = 'tags') then
-        raise exception 'the source embedding workflow does not embed tags';
+    if not exists (select 1 from aiq.lexical_sources where name = 'tags') then
+        raise exception 'tags are not a lexical source, so nothing can find one by its words';
     end if;
 
     perform aiq.record_embeddings('demo-quad-a', jsonb_build_array(
-        jsonb_build_object('chunk_id', pg_temp.id('A'), 'embedding', '[0,0,1,0]'::jsonb),
-        jsonb_build_object('chunk_id', pg_temp.id('B'), 'embedding', '[0,0,0,1]'::jsonb),
         jsonb_build_object('chunk_id', pg_temp.id('Qwork'), 'embedding', '[0,0,0,1]'::jsonb),
         jsonb_build_object('chunk_id', pg_temp.id('Qlunch'), 'embedding', '[0,1,0,0]'::jsonb)));
     perform claims.link_resources('test', jsonb_build_array(
@@ -124,9 +125,15 @@ begin
         raise exception 'a question lead does not say it came through a question';
     end if;
 
-    -- Without chosen tags, the nearest tag by vector is the hit: [0,0,1,0] is tag A, which leads to R3.
-    got := pg_temp.leads('[0,0,1,0]', '{tags}');
-    if got not like 'R3%' then raise exception 'the nearest tag to [0,0,1,0] led to "%", not R3 first', got; end if;
+    -- Without chosen tags, a tag is a hit when the query uses its word: "careers" is tag A, which leads to R3.
+    select coalesce(string_agg(i.name, ' ' order by l.rank), '') into got
+      from claims.search_leads('any careers advice?', '[1,0,0,0]', 'demo-quad-a', '{"agent": "test-leads", "run": "r1"}',
+                               p_layers => '{tags}') l join ids i on i.id = l.resource_id;
+    if got is distinct from 'R3' then raise exception 'the query''s word "careers" led to "%", not R3', got; end if;
+    select coalesce(string_agg(i.name, ' ' order by l.rank), '') into got
+      from claims.search_leads('a question about lunch', '[0,0,1,0]', 'demo-quad-a', '{"agent": "test-leads", "run": "r1"}',
+                               p_layers => '{tags}') l join ids i on i.id = l.resource_id;
+    if got is distinct from '' then raise exception 'a query sharing no tag word reached "%" through tags (by vector?)', got; end if;
 
     -- Fused: a direct hit's path is empty, a hop's names its hop, and every layer's resource is in the list.
     want := (select string_agg(x, ' ' order by x) from unnest(string_to_array(
@@ -157,8 +164,8 @@ do $$
 declare v jsonb; before uuid;
 begin
     before := pg_temp.id('B');
-    v := claims.put_taxonomy('test-leads', '1', '[{"key": "b", "label": "B", "path": "A > B", "parent": "a"},
-                                                   {"key": "a", "label": "A", "path": "A"}]'::jsonb);
+    v := claims.put_taxonomy('test-leads', '1', '[{"key": "b", "label": "Remote Work", "path": "Careers > Remote Work", "parent": "a"},
+                                                   {"key": "a", "label": "Careers", "path": "Careers"}]'::jsonb);
     if (select id from claims.tags where source = 'test-leads' and key = 'b') is distinct from before then
         raise exception 'putting a taxonomy again gave a tag a new id';
     end if;

@@ -36,10 +36,6 @@ comment on table claims.tags is
     'A taxonomy node, shared by every store: its source and version, its key there, its path, and its parent in the same taxonomy.';
 create index if not exists tags_parent on claims.tags (parent_id) where parent_id is not null;
 
--- What a tag is found by: its path, and its description when it has one. A semantic source, as claims.questions is.
-alter table claims.tags add column if not exists search_text text
-    generated always as (path || coalesce(': ' || description, '')) stored;
-
 create table if not exists claims.tag_questions (
     tag_id      uuid not null references claims.tags(id) on delete cascade,
     question_id uuid not null references claims.questions(id),
@@ -91,24 +87,12 @@ grant select on claims.tags, claims.tag_questions, claims.resource_links to auth
 
 -- claims.question_readable (claims/schema.sql) admits a tag's live dual and a question a readable resource links to.
 
+-- A tag is a word or two, not a sentence, so it is found by its words and never embedded (Sirsh, 23 Oct): a
+-- lexical source over its label. Not the path, whose parent words would match every child. Claims and questions,
+-- which are sentences, keep their vectors (claims/schema.sql installs the workflow that embeds them).
 do $$
 begin
-    if to_regclass('aiq.semantic_sources') is not null then
-        insert into aiq.semantic_sources (name, source_table, content_col)
-        values ('tags', 'claims.tags', 'search_text')
-        on conflict (name) do update
-           set source_table = excluded.source_table,
-               content_col  = excluded.content_col,
-               shipped = excluded.shipped or semantic_sources.shipped;
-    end if;
-end $$;
-
--- The workflow that gives claims, questions and tags their vectors (REM-662), installed with the extension and on
--- every upgrade. claims/schema.sql describes it; it is installed here because the tags source it also embeds is
--- registered just above, and an install refuses a source that is not.
-do $$
-begin
-    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions', 'tags']);
+    perform aiq.register_lexical_source('tags', 'claims.tags', 'label', 'english');
 end $$;
 
 -- ------------------------------------------------------------
@@ -200,9 +184,9 @@ begin
             if found then v_pairs := v_pairs + 1; end if;
         end loop;
     end loop;
-    -- New tags and new questions both wait for vectors; one run of the source workflow embeds both.
-    if (v_tags > 0 or v_qs > 0) and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
-        perform aiq.queue_source_embedding('a taxonomy''s tags and seeded questions');
+    -- New seeded questions wait for vectors; tags are found by their words and need none.
+    if v_qs > 0 and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
+        perform aiq.queue_source_embedding('a taxonomy''s seeded questions');
     end if;
     return jsonb_build_object('tags', v_tags, 'questions_minted', v_qs, 'duals', v_pairs,
                               'phrasings_skipped', v_skip, 'tx', t);
@@ -272,8 +256,9 @@ $$;
 -- Invoker, so every arm reads as the caller and a resource the caller cannot read never takes a rank.
 -- p_scope narrows the resources as aiq.search does (a memory's agent and run). p_layers chooses the arms, so the
 -- primary-store-only search is the same function with p_layers => '{documents}'. A caller that has chosen its own
--- tags or questions (a decision model, a person) passes them in p_tags / p_questions as [{"id", "w"}] in place of
--- the nearest by vector. Only the resources store is linked today; brews and long-form refuse until they are.
+-- tags or questions (a decision model, a person) passes them in p_tags / p_questions as [{"id", "w"}]; otherwise
+-- tags are the ones whose label words the query uses, and questions the nearest by vector. Only the resources store
+-- is linked today; brews and long-form refuse until they are.
 -- ------------------------------------------------------------
 create or replace function claims.search_leads(
     p_query       text,
@@ -332,8 +317,9 @@ begin
           from jsonb_array_elements(coalesce(p_tags, '[]')) x
          where 'tags' = any(p_layers) and p_tags is not null
         union all
-        select s.chunk_id, (1 - s.distance)::real
-          from aiq.semantic_in('tags', p_vector, p_model, p_k_tags) s
+        -- Without chosen tags, the tags whose label words the query uses, the best match weighted 1.
+        select l.chunk_id, (l.score / nullif(max(l.score) over (), 0))::real
+          from aiq.lexical('tags', p_query, p_k_tags) l
          where 'tags' = any(p_layers) and p_tags is null
     ),
     question_hits as (
