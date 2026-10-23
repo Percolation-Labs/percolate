@@ -263,3 +263,30 @@ first run must reproduce the S numbers in §3 before any M result counts.
 - [ ] LongMemEval is ingested through it and reproduces the S Phase A numbers.
 - [ ] Tripartite search is measured against primary-store-only search on held-out
       M questions: recall at budget, reads to full evidence, latency and cost.
+
+## 7. Cluster tags (spike, 23 Oct 2026; design for stability, not built)
+
+**The spike** (REM-1144) stored density clusters as `claims.tags` rows: source
+`cluster`, one version per clustering run. Members are `claims.resource_links` rows
+with p = membership strength, and each resource's metadata holds
+`clusters: [{key, size, strength}]`. No table was added. On 20,859 pooled LongMemEval-M
+sessions the clusters did not improve retrieval (embeddings 0.396 recall@10; a hit's
+clusters pulled in 0.360; clusters picked by label 0.192). 79% of sessions stayed
+unclustered, and a pulled cluster adds about 120 sessions.
+
+**Stability, if clusters are kept:**
+
+- **Day to day:** assign each new resource to the clusters whose centroid it is as close
+  to as the cluster's 25th-percentile member. Rebuild a cluster once its size changes
+  past a threshold, or once its median member cosine falls below its value at creation
+  by a margin. Split or merge then follows the density run on that neighbourhood alone.
+- **Periodically:** re-cluster everything as a new version. A new cluster keeps an old
+  cluster's key when their member sets overlap with a Jaccard of 0.5 or more and they
+  are each other's best match. Otherwise it gets a new key.
+- **Lineage:** a new cluster drawn from more than one old cluster records `merged from`,
+  and one of several drawn from one old cluster records `split from`. Links to an old
+  cluster tag must still resolve, so a retired cluster tag stays, with its successor
+  recorded.
+- **Open decision:** `claims.tags` has no place for successors today. The lineage needs
+  either a nullable successor column on `claims.tags`, or a relation between tags in an
+  existing table. Either is Sirsh's call, since it changes a table.
