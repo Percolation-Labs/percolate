@@ -621,9 +621,7 @@ declare
         -- Empty at rest: the challenge a transaction is settling (REM-1123). Registered so no table of the
         -- extension is outside the dump, at the cost of nothing.
         'claims.settling',
-        -- A deployment's taxonomies, their trained duals and its resources' links (REM-1144).
-        'claims.resource_links',
-        'claims.tag_questions',
+        -- A deployment's taxonomies (REM-1144); their duals and its resources' links are aiq.edges rows.
         'claims.tags',
         'workflow.definitions',
         'workflow.dry_runs',

@@ -221,6 +221,9 @@ def check_raise_format(path, text):
 # cannot see is DML inside a DO block or a function a top-level SELECT calls;
 # those are named in the reason where they exist.
 REPLAYED_DML = {
+    ("claims/tags.sql", "insert aiq.relation_types"):
+        (1, "the three shipped relations a resource's tag and question links and a tag's duals are edges under "
+            "(REM-1144); do update on conflict, so a corrected description reaches every deployment"),
     ("claims/schema.sql", "insert claims.deciders"):
         (1, "the shipped Jev decider row (REM-996), do nothing on conflict, so a deployment's own endpoint "
             "or credential name is never overwritten"),

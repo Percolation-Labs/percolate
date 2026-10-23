@@ -1,19 +1,23 @@
 -- ============================================================
--- Tags, their dual questions, and the canonical links from a resource to a tag, a question or a claim
--- (REM-1144; ai-query-layer/tripartite-search.md).
+-- Tags, their dual questions, and a resource's links to tags and questions (REM-1144;
+-- ai-query-layer/tripartite-search.md).
 --
--- Sirsh's rule: ONE tags table, ONE claims layer and ONE questions table, shared by every store, so any store
--- gets its tag, claim and question relationships by writing links. This file adds the tags table, the tag's dual
--- questions and the link from a generic resource; brews and long-form pieces take the same pattern later.
+-- Sirsh's rule: ONE tags table, ONE claims layer and ONE questions table, shared by every store, and the fewest
+-- tables that represent the thing (M-20261023-152402-6909). So this file adds one table, claims.tags, and no link
+-- table: a link is an edge in aiq.edges, the graph's one table of typed, weighted, provenanced, retractable links
+-- between two nodes. Tags and questions become node types through aiq.register_entity_table (a registry row, not
+-- a table), as content.resources already is ('document'), and the links are three relations in the catalogue:
 --
---   claims.tags           a taxonomy node: its source (iab, schema.org, a person's own), the source's version,
---                         its key there, its path, and its parent in the same source and version
---   claims.tag_questions  a tag's dual questions in claims.questions, with a weight that training moves and a
---                         retirement, so the question space is updated over time without touching the tags
---   claims.resource_links a resource linked to exactly one tag, question or claim, with the decider's probability
+--   document  tagged  tag        a resource carries a tag; weight is the decider's probability
+--   document  answers question   a resource holds an answer to a question; weight likewise
+--   tag       dual    question   a tag's dual question; weight is what training moves, retirement sets valid_to
 --
--- AFTER claims/schema.sql, whose claims.tx, claims.questions and claims.claims these reference, and after the
--- content plane, whose content.resources they link.
+-- A later dreaming edge (a split node refining its parent, a provisional tag) is another catalogue row on the
+-- same table. provenance carries who decided ('decider') and how a dual came to be ('origin': seed, trained or
+-- person), with the claims.tx of the write.
+--
+-- AFTER claims/schema.sql, whose claims.tx and claims.questions these use, and after the content plane, whose
+-- resources are already projected as 'document' nodes.
 -- ============================================================
 
 create table if not exists claims.tags (
@@ -36,54 +40,15 @@ comment on table claims.tags is
     'A taxonomy node, shared by every store: its source and version, its key there, its path, and its parent in the same taxonomy.';
 create index if not exists tags_parent on claims.tags (parent_id) where parent_id is not null;
 
-create table if not exists claims.tag_questions (
-    tag_id      uuid not null references claims.tags(id) on delete cascade,
-    question_id uuid not null references claims.questions(id),
-    weight      real not null default 1 check (weight between 0 and 1),
-    origin      text not null check (origin in ('seed', 'trained', 'person')),
-    retired_at  timestamptz,
-    tx          bigint not null references claims.tx(id),
-    primary key (tag_id, question_id)
-);
-comment on table claims.tag_questions is
-    'A tag''s dual questions: seeded with the taxonomy, then re-weighted, added or retired by training, each change with its tx.';
-create index if not exists tag_questions_question on claims.tag_questions (question_id);
-
-create table if not exists claims.resource_links (
-    id          bigint generated always as identity primary key,
-    resource_id uuid not null references content.resources(id) on delete cascade,
-    tag_id      uuid references claims.tags(id) on delete cascade,
-    question_id uuid references claims.questions(id),
-    claim_id    uuid references claims.claims(id),
-    -- NULL: the decider asserted the link without a probability (a person, a rule), which a search reads as certain.
-    p           real check (p between 0 and 1),
-    decider     text not null check (length(decider) between 1 and 200),
-    tx          bigint not null references claims.tx(id),
-    check (num_nonnulls(tag_id, question_id, claim_id) = 1),
-    unique nulls not distinct (resource_id, tag_id, question_id, claim_id)
-);
-comment on table claims.resource_links is
-    'A resource linked to exactly one tag, question or claim, with the probability the decider gave and who decided: the canonical link a search expands along.';
-create index if not exists resource_links_tag on claims.resource_links (tag_id, p desc) where tag_id is not null;
-create index if not exists resource_links_question on claims.resource_links (question_id, p desc) where question_id is not null;
-create index if not exists resource_links_claim on claims.resource_links (claim_id) where claim_id is not null;
-create index if not exists resource_links_resource on claims.resource_links (resource_id);
-
 -- ------------------------------------------------------------
--- Reading. A taxonomy is shared vocabulary, so its tags and their dual questions are readable by anyone signed in.
--- A link is readable when its resource is, through the resource's own policy.
+-- Reading. A taxonomy is shared vocabulary, so its tags are readable by anyone signed in. A link is an edge, read
+-- through aiq.edges' own policy: visible when both its nodes are, so a resource's link is visible exactly when the
+-- resource is.
 -- ------------------------------------------------------------
 alter table claims.tags enable row level security;
-alter table claims.tag_questions enable row level security;
-alter table claims.resource_links enable row level security;
 drop policy if exists tags_readable on claims.tags;
 create policy tags_readable on claims.tags for select using (true);
-drop policy if exists tag_questions_readable on claims.tag_questions;
-create policy tag_questions_readable on claims.tag_questions for select using (true);
-drop policy if exists resource_links_via_resource on claims.resource_links;
-create policy resource_links_via_resource on claims.resource_links for select
-    using (exists (select 1 from content.resources r where r.id = resource_links.resource_id));
-grant select on claims.tags, claims.tag_questions, claims.resource_links to authenticated;
+grant select on claims.tags to authenticated;
 
 -- claims.question_readable (claims/schema.sql) admits a tag's live dual and a question a readable resource links to.
 
@@ -94,6 +59,39 @@ do $$
 begin
     perform aiq.register_lexical_source('tags', 'claims.tags', 'label', 'english');
 end $$;
+
+-- ------------------------------------------------------------
+-- The nodes and the relations. A tag's and a question's node is public with no summary: a node says only that the
+-- thing exists, and its words are read from its own table under that table's policy. The canonical keys carry a
+-- kind prefix so that resolving a mention ('fitness') never lands on a tag.
+-- ------------------------------------------------------------
+select aiq.register_entity_table(
+    p_entity_type     => 'tag',
+    p_source_table    => 'claims.tags',
+    p_key_expr        => $$'tag:' || n.source || '/' || n.source_version || '/' || n.key$$,
+    p_summary_expr    => 'null',
+    p_org_expr        => 'null',
+    p_visibility_expr => $$'public'$$);
+select aiq.register_entity_table(
+    p_entity_type     => 'question',
+    p_source_table    => 'claims.questions',
+    p_key_expr        => $$'question:' || n.id$$,
+    p_summary_expr    => 'null',
+    p_org_expr        => 'null',
+    p_visibility_expr => $$'public'$$);
+-- Questions minted before this registration have no node until it is rebuilt.
+select aiq.rebuild_entity_type('question');
+-- Every registered type takes the shipped vocabulary's triples (world-model-ingestion/graph.sql), and an upgrade
+-- replays graph.sql after these registrations exist; asking here gives a fresh install the same catalogue, as
+-- ai-query-layer/catalogue.sql does for db_object.
+select aiq.register_graph_vocabulary();
+
+insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description, is_symmetric) values
+    ('document', 'tagged',  'tag',      'tags',        'a resource carries the tag; weight is the decider''s probability (REM-1144)', false),
+    ('document', 'answers', 'question', 'answered_by', 'a resource holds an answer to the question, or part of one; weight is the decider''s probability (REM-1144)', false),
+    ('tag',      'dual',    'question', 'dual_of',     'the question a tag stands for; weight is what training moves, and a retired dual is retracted (REM-1144)', false)
+on conflict (src_type, relation, dst_type) do update
+    set inverse_label = excluded.inverse_label, description = excluded.description, is_symmetric = excluded.is_symmetric;
 
 -- ------------------------------------------------------------
 -- Writing. Every write is a function with its tx, as every claims write is.
@@ -178,9 +176,12 @@ begin
             else
                 v_qs := v_qs + 1;
             end if;
-            insert into claims.tag_questions (tag_id, question_id, origin, tx)
-            values (v_tag, v_q, 'seed', t)
-            on conflict (tag_id, question_id) do nothing;
+            insert into aiq.edges (src_id, dst_id, relation, weight, provenance)
+            select nt.id, nq.id, 'dual', 1, jsonb_build_object('origin', 'seed', 'tx', t)
+              from aiq.nodes nt, aiq.nodes nq
+             where nt.entity_type = 'tag' and nt.entity_id = v_tag
+               and nq.entity_type = 'question' and nq.entity_id = v_q
+            on conflict (src_id, dst_id, relation) do nothing;
             if found then v_pairs := v_pairs + 1; end if;
         end loop;
     end loop;
@@ -193,28 +194,42 @@ begin
 end;
 $$;
 
--- Training moves a dual: a new weight, a new dual, or a retirement. One row per call, with its tx and reason.
+-- Training moves a dual: a new weight, a new dual, or a retirement (the edge's valid_to). One write per call, with
+-- its tx and reason in the edge's provenance.
 create or replace function claims.train_dual(p_tag uuid, p_question uuid, p_weight real, p_retire boolean default false,
                                              p_reason text default null) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
-    t bigint;
+    t      bigint;
+    v_src  uuid;
+    v_dst  uuid;
 begin
     if not rbac.is_operator() then
         raise insufficient_privilege using message = 'A dual is shared vocabulary: only an operator or its trainer moves one';
     end if;
+    if p_weight is null or p_weight not between 0 and 1 then
+        raise check_violation using message = 'a dual''s weight is between 0 and 1';
+    end if;
+    select id into v_src from aiq.nodes where entity_type = 'tag' and entity_id = p_tag;
+    select id into v_dst from aiq.nodes where entity_type = 'question' and entity_id = p_question;
+    if v_src is null or v_dst is null then
+        raise foreign_key_violation using message = 'train_dual names a tag or a question that does not exist';
+    end if;
     insert into claims.tx (actor_kind, reason) values ('platform', coalesce(nullif(p_reason, ''), 'dual trained'))
     returning id into t;
-    insert into claims.tag_questions (tag_id, question_id, weight, origin, retired_at, tx)
-    values (p_tag, p_question, p_weight, 'trained', case when p_retire then now() end, t)
-    on conflict (tag_id, question_id) do update
-        set weight = excluded.weight, retired_at = excluded.retired_at, tx = excluded.tx;
+    insert into aiq.edges (src_id, dst_id, relation, weight, provenance, valid_to)
+    values (v_src, v_dst, 'dual', p_weight, jsonb_build_object('origin', 'trained', 'tx', t),
+            case when p_retire then now() end)
+    on conflict (src_id, dst_id, relation) do update
+        set weight = excluded.weight, provenance = excluded.provenance, valid_to = excluded.valid_to;
 end;
 $$;
 
--- A decider's links from resources the caller may write, each to exactly one tag, question or claim:
---   [{"resource_id", "tag_id" | "question_id" | "claim_id", "p"}]
--- A repeated link takes the newer probability. A resource the caller may not write refuses the whole call.
+-- A decider's links from resources the caller may write, each to exactly one tag or question:
+--   [{"resource_id", "tag_id" | "question_id", "p"}]
+-- p is the edge's weight; a link with no p is asserted as certain (a person, a rule) and weighs 1. A repeated link
+-- takes the newer probability and is current again if it had been retracted. A resource the caller may not write,
+-- or one that is not ready and so has no node, refuses the whole call.
 create or replace function claims.link_resources(p_decider text, p_links jsonb, p_reason text default null)
 returns int
 language plpgsql security definer set search_path = pg_catalog, public as $$
@@ -226,24 +241,39 @@ begin
         raise check_violation using message = 'link_resources needs an array of links';
     end if;
     if exists (select 1 from jsonb_array_elements(p_links) x
+                where num_nonnulls(x->>'tag_id', x->>'question_id') <> 1
+                   or ((x->>'p') is not null and (x->>'p')::real not between 0 and 1)) then
+        raise check_violation using message = 'a link names exactly one tag_id or question_id, and a p between 0 and 1';
+    end if;
+    if exists (select 1 from jsonb_array_elements(p_links) x
                 left join content.resources r on r.id = (x->>'resource_id')::uuid
                 where r.id is null or not (rbac.is_operator() or rbac.may_write(r.owner_id, r.org_id, r.visibility))) then
         raise insufficient_privilege using message = 'a link names a resource the caller may not write';
+    end if;
+    if exists (select 1 from jsonb_array_elements(p_links) x
+                where not exists (select 1 from aiq.nodes n where n.entity_type = 'document'
+                                     and n.entity_id = (x->>'resource_id')::uuid)) then
+        raise check_violation using message = 'a link names a resource that is not ready, so it is not in the graph yet';
     end if;
     insert into claims.tx (actor_id, actor_kind, credential_id, reason)
     values (rbac.current_user_id(), case when rbac.current_user_id() is null then 'platform' else rbac.current_actor() end,
             rbac.current_credential_id(), coalesce(nullif(p_reason, ''), 'links from ' || p_decider))
     returning id into t;
     -- One call can name a link twice (two seeded keys sharing one phrasing mint one question): the higher p stands.
-    insert into claims.resource_links (resource_id, tag_id, question_id, claim_id, p, decider, tx)
-    select distinct on (y.resource_id, y.tag_id, y.question_id, y.claim_id)
-           y.resource_id, y.tag_id, y.question_id, y.claim_id, y.p, p_decider, t
-      from (select (x->>'resource_id')::uuid as resource_id, (x->>'tag_id')::uuid as tag_id,
-                   (x->>'question_id')::uuid as question_id, (x->>'claim_id')::uuid as claim_id, (x->>'p')::real as p
+    insert into aiq.edges (src_id, dst_id, relation, weight, provenance)
+    select distinct on (nr.id, nd.id, y.relation)
+           nr.id, nd.id, y.relation, coalesce(y.p, 1), jsonb_build_object('decider', p_decider, 'tx', t)
+      from (select (x->>'resource_id')::uuid as resource_id,
+                   case when x ? 'tag_id' and x->>'tag_id' is not null then 'tag' else 'question' end as dst_type,
+                   coalesce(x->>'tag_id', x->>'question_id')::uuid as dst,
+                   case when x ? 'tag_id' and x->>'tag_id' is not null then 'tagged' else 'answers' end as relation,
+                   (x->>'p')::real as p
               from jsonb_array_elements(p_links) x) y
-     order by y.resource_id, y.tag_id, y.question_id, y.claim_id, y.p desc nulls last
-    on conflict (resource_id, tag_id, question_id, claim_id) do update
-        set p = excluded.p, decider = excluded.decider, tx = excluded.tx;
+      join aiq.nodes nr on nr.entity_type = 'document' and nr.entity_id = y.resource_id
+      join aiq.nodes nd on nd.entity_type = y.dst_type and nd.entity_id = y.dst
+     order by nr.id, nd.id, y.relation, y.p desc nulls first
+    on conflict (src_id, dst_id, relation) do update
+        set weight = excluded.weight, provenance = excluded.provenance, valid_to = null;
     get diagnostics v_n = row_count;
     return v_n;
 end;
@@ -251,7 +281,7 @@ $$;
 
 -- ------------------------------------------------------------
 -- The search (tripartite-search.md §2). Documents, tags and questions are searched at once; a tag or question hit
--- expands one hop along claims.resource_links to the resources it links; the lists fuse by reciprocal rank.
+-- expands one hop along its current edges (aiq.edges_current) to the resources it links; the lists fuse by reciprocal rank.
 --
 -- Invoker, so every arm reads as the caller and a resource the caller cannot read never takes a rank.
 -- p_scope narrows the resources as aiq.search does (a memory's agent and run). p_layers chooses the arms, so the
@@ -335,19 +365,36 @@ begin
         select r.id from content.resources r
          where p_scope is null or r.metadata @> p_scope
     ),
+    -- One hop: the hit's node, its current incoming edges of the layer's relation, and the document at the other
+    -- end. Read as the caller, so an edge whose resource the caller cannot read is not there.
+    links as (
+        select 'tag'::text as via, h.id, h.w, n.entity_id as resource_id, e.weight as p
+          from tag_hits h
+          join aiq.nodes t on t.entity_type = 'tag' and t.entity_id = h.id
+          join aiq.edges_current e on e.dst_id = t.id and e.relation = 'tagged' and e.weight >= p_min_p
+          join aiq.nodes n on n.id = e.src_id and n.entity_type = 'document'
+        union all
+        select 'question', h.id, h.w, n.entity_id, e.weight
+          from question_hits h
+          join aiq.nodes q on q.entity_type = 'question' and q.entity_id = h.id
+          join aiq.edges_current e on e.dst_id = q.id and e.relation = 'answers' and e.weight >= p_min_p
+          join aiq.nodes n on n.id = e.src_id and n.entity_type = 'document'
+    ),
     via_tags as (
-        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
-               jsonb_build_array(jsonb_build_object('via', 'tag', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from tag_hits h join claims.resource_links l on l.tag_id = h.id and coalesce(l.p, 1) >= p_min_p
-          join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
+        select distinct on (l.resource_id) l.resource_id, h_s.s,
+               jsonb_build_array(jsonb_build_object('via', 'tag', 'id', l.id, 'sim', l.w, 'p', l.p)) as path
+          from links l join in_scope i on i.id = l.resource_id
+          cross join lateral (select l.w * l.p as s) h_s
+         where l.via = 'tag'
+         order by l.resource_id, h_s.s desc, l.id
     ),
     via_questions as (
-        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
-               jsonb_build_array(jsonb_build_object('via', 'question', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from question_hits h join claims.resource_links l on l.question_id = h.id and coalesce(l.p, 1) >= p_min_p
-          join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
+        select distinct on (l.resource_id) l.resource_id, h_s.s,
+               jsonb_build_array(jsonb_build_object('via', 'question', 'id', l.id, 'sim', l.w, 'p', l.p)) as path
+          from links l join in_scope i on i.id = l.resource_id
+          cross join lateral (select l.w * l.p as s) h_s
+         where l.via = 'question'
+         order by l.resource_id, h_s.s desc, l.id
     ),
     tags_ranked as (
         select v.resource_id, v.path, row_number() over (order by v.s desc, v.resource_id)::int as r from via_tags v

@@ -49,8 +49,10 @@ begin
     end if;
     insert into ids select 'A', id from claims.tags where source = 'test-leads' and key = 'a';
     insert into ids select 'B', id from claims.tags where source = 'test-leads' and key = 'b';
-    insert into ids select 'Qwork', question_id from claims.tag_questions where tag_id = pg_temp.id('B');
-    insert into ids select 'Qlunch', question_id from claims.tag_questions where tag_id = pg_temp.id('A');
+    insert into ids select 'Qwork', q.entity_id from aiq.edges e join aiq.nodes tn on tn.id = e.src_id
+      join aiq.nodes q on q.id = e.dst_id where e.relation = 'dual' and tn.entity_type = 'tag' and tn.entity_id = pg_temp.id('B');
+    insert into ids select 'Qlunch', q.entity_id from aiq.edges e join aiq.nodes tn on tn.id = e.src_id
+      join aiq.nodes q on q.id = e.dst_id where e.relation = 'dual' and tn.entity_type = 'tag' and tn.entity_id = pg_temp.id('A');
     if (select parent_id from claims.tags where id = pg_temp.id('B'))
        is distinct from pg_temp.id('A') then
         raise exception 'B''s parent is not A';

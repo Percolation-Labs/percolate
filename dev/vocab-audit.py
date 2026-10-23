@@ -460,9 +460,6 @@ DISTINCT: list[tuple[str, str, str]] = [
     ("claims.relations.status", "claims.consensus.status",
      "a relation can be settled by the writer's agent (REM-1123) and a consensus reading can be reopened; each "
      "review flow has a state the other cannot reach, over the three they share"),
-    ("percolate.null_means.schema_name", "percolate.table_kinds.schema_name",
-     "each lists the schemas its own declarations happen to cover, not a closed set of schemas; they overlap "
-     "wherever a schema has both a kind and a nullable key column (claims, since REM-1144)"),
 ]
 
 

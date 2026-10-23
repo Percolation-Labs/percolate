@@ -1,6 +1,6 @@
 -- A LEAD IS A RESOURCE THE CALLER MAY READ (REM-1144, ai-query-layer/tripartite-search.md).
 --
--- claims.search_leads expands a tag or question hit one hop along claims.resource_links. A tag and its dual
+-- claims.search_leads expands a tag or question hit one hop along its edges in aiq.edges. A tag and its dual
 -- questions are shared vocabulary, readable by anyone, so the hop is where another tenant's resource could leak: a
 -- tag every tenant can match, linked to a memo only org A may read. This holds that the hop reads the links as the
 -- caller, that the private memo never becomes org B's lead, that org B's own resource does, and that the writers
@@ -27,7 +27,8 @@ begin
         raise exception 'put_taxonomy installed % rather than one tag with one dual', v;
     end if;
     select id into v_tag from claims.tags where source = 'test-tenancy' and key = 'memo';
-    select question_id into v_q from claims.tag_questions where tag_id = v_tag;
+    select q.entity_id into v_q from aiq.edges e join aiq.nodes t on t.id = e.src_id join aiq.nodes q on q.id = e.dst_id
+     where e.relation = 'dual' and t.entity_type = 'tag' and t.entity_id = v_tag;
     -- The question is a sentence and gets a vector; the tag is a word and is found by it ("memo" in the query).
     perform aiq.record_embeddings('demo-quad-a', jsonb_build_array(
         jsonb_build_object('chunk_id', v_q, 'embedding', '[1,0,0,0]'::jsonb)));
@@ -38,8 +39,9 @@ begin
         jsonb_build_object('resource_id', '22220000-0000-0000-0000-000000000005', 'question_id', v_q, 'p', 0.9),
         -- a repeated link in one call is one row, at the higher p
         jsonb_build_object('resource_id', '22220000-0000-0000-0000-000000000005', 'question_id', v_q, 'p', 0.95)));
-    if (select p from claims.resource_links where question_id = v_q
-          and resource_id = '22220000-0000-0000-0000-000000000005') is distinct from 0.95::real then
+    if (select e.weight from aiq.edges e join aiq.nodes r on r.id = e.src_id join aiq.nodes q on q.id = e.dst_id
+         where e.relation = 'answers' and q.entity_type = 'question' and q.entity_id = v_q
+           and r.entity_type = 'document' and r.entity_id = '22220000-0000-0000-0000-000000000005') is distinct from 0.95::real then
         raise exception 'a link named twice in one call did not keep the higher p';
     end if;
     raise notice 'query/27: a tag and its dual link org A''s memo and org B''s resource';
@@ -55,12 +57,15 @@ begin
     if not exists (select 1 from claims.tags where source = 'test-tenancy') then
         raise exception 'org B cannot read a shared tag';
     end if;
-    if not exists (select 1 from claims.questions q join claims.tag_questions t on t.question_id = q.id
-                    join claims.tags g on g.id = t.tag_id where g.source = 'test-tenancy') then
+    if not exists (select 1 from claims.questions q join aiq.nodes qn on qn.entity_type = 'question' and qn.entity_id = q.id
+                    join aiq.edges e on e.dst_id = qn.id and e.relation = 'dual'
+                    join aiq.nodes tn on tn.id = e.src_id join claims.tags g on g.id = tn.entity_id
+                   where g.source = 'test-tenancy') then
         raise exception 'org B cannot read a tag''s dual question';
     end if;
-    select count(*) into v_seen from claims.resource_links l join claims.tags g on g.id = l.tag_id
-     where g.source = 'test-tenancy';
+    select count(*) into v_seen from aiq.edges e join aiq.nodes tn on tn.id = e.dst_id and tn.entity_type = 'tag'
+      join claims.tags g on g.id = tn.entity_id
+     where e.relation = 'tagged' and g.source = 'test-tenancy';
     if v_seen <> 1 then
         raise exception 'org B reads % tag links; it may read one, to its own resource', v_seen;
     end if;

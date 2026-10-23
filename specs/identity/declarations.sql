@@ -68,13 +68,7 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
 -- private candidate carries its owner and takes a slot of its own.
  ('aiq','soft_nodes','owner_scope','value','one candidate for its org or public scope; a private candidate carries its owner'),
  ('aiq','lake_nodes','owner_scope','value','one reference for its org or public scope; a private one carries its owner'),
- ('aiq','node_keys','owner_scope','value','the key of a node that is not private; a private node''s key carries its owner'),
-
--- A resource link names exactly one of a tag, a question or a claim (REM-1144); the other two are NULL by
--- construction, and the key reads them NULLS NOT DISTINCT so one resource links one target once.
- ('claims','resource_links','tag_id','value','the link is to a question or a claim, not a tag'),
- ('claims','resource_links','question_id','value','the link is to a tag or a claim, not a question'),
- ('claims','resource_links','claim_id','value','the link is to a tag or a question, not a claim')
+ ('aiq','node_keys','owner_scope','value','the key of a node that is not private; a private node''s key carries its owner')
 on conflict (schema_name, table_name, column_name) do update
   set means = excluded.means, why = excluded.why;
 

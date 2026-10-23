@@ -208,28 +208,52 @@ The design consequences for this function:
 3. **The question layer needs duals specific enough to discriminate.** That is
    dreaming's job, and reads to full evidence against these curves is its metric.
 
-## 4. The schema (decided by Sirsh, 23 Oct 2026)
+## 4. The schema (decided by Sirsh, 23 Oct 2026; links revised the same day)
 
 Sirsh: one new `claims.tags` table, with different sources and hierarchies, and with
 optional dual questions that are updated and trained over time. Claims, questions and
 tags link to resources canonically. Brews and long-form pieces use the same pattern.
+Then (M-20261023-152402-6909): the fewest tables that represent the thing, so reuse a
+table where one exists, with ONE generic links table carrying every edge, later
+dreaming edges included.
 
-| Table | What it holds |
+That links table already exists. `aiq.edges` is a directed edge between two nodes in
+`aiq.nodes`, with a `relation` checked against the `aiq.relation_types` catalogue, a
+`weight`, a `provenance` document and `created_at`. It also has `valid_from` and
+`valid_to`, so retraction never deletes, and recall counters, which dreaming reads.
+Its row policy shows an edge only when the caller can read both nodes. `aiq.nodes`
+already projects every ready `content.resources` row as a `document` node. So this
+change adds one table and no link table:
+
+| Object | What it holds |
 |---|---|
-| `claims.tags` | a taxonomy node: `source` (iab, schema.org, a person's own), `source_version`, `key`, `label`, `path`, `parent_id`. The parent is in the same source and version, enforced by a composite foreign key. A tag is a word, not a sentence, so it is never embedded: it is a lexical source over its label (not its path, whose parent words would match every child). |
-| `claims.tag_questions` | a tag's dual questions in `claims.questions`, each with a `weight`, an `origin` (seed, trained, person) and a `retired_at`. Training moves these rows and never the tags. |
-| `claims.resource_links` | a resource linked to exactly one tag, question or claim (each a real foreign key, one per row), with the decider's `p` and the decider's name |
+| `claims.tags` (table) | a taxonomy node: `source` (iab, schema.org, a person's own), `source_version`, `key`, `label`, `path`, `parent_id`. The parent is in the same source and version, enforced by a composite foreign key. A tag is a word, not a sentence, so it is never embedded: it is a lexical source over its label (not its path, whose parent words would match every child). |
+| `tag` and `question` node types | `aiq.register_entity_table` rows for `claims.tags` and `claims.questions` (a registry insert, not a table). Both nodes are public with no summary. A node says only that the thing exists; its words are read from its own table under that table's policy. Keys carry a `tag:` or `question:` prefix, so resolving a mention never lands on one. |
+| `document tagged tag` (edge) | a resource carries a tag; `weight` is the decider's probability |
+| `document answers question` (edge) | a resource holds an answer to a question, or part of one; `weight` likewise |
+| `tag dual question` (edge) | a tag's dual question. `weight` is what training moves; retiring a dual sets `valid_to` |
+
+`provenance` records the decider (`decider`), how a dual came to be (`origin`: seed,
+trained or person) and the write's `claims.tx`. A later dreaming edge, such as a split
+node refining its parent or a provisional tag, is one more catalogue row on the same
+table.
 
 Claims and questions are sentences and carry vectors (the `embed_sources` workflow);
 tags carry none. `claims.put_taxonomy` queues embedding for the seeded questions it
-mints, and it refuses a parent chain that forms a cycle. Every write carries a `claims.tx`. `claims.put_taxonomy` installs a taxonomy with its
-seeded duals; it is operator-only, since a taxonomy is shared vocabulary.
-`claims.train_dual` moves one dual. `claims.link_resources` writes a decider's links
-from resources the caller may write.
+mints, and it refuses a parent chain that forms a cycle. Every write carries a
+`claims.tx`. `claims.put_taxonomy` installs a taxonomy with its seeded duals; it is
+operator-only, since a taxonomy is shared vocabulary. `claims.train_dual` moves one
+dual. `claims.link_resources` writes a decider's links from ready resources the caller
+may write. A resource that is not ready has no node yet, and the call refuses it.
 
-Reading: tags and duals are readable by anyone signed in. A link is readable when its
-resource is. `claims.question_readable` now also admits a tag's live dual, and a question
-that a resource the caller may read links to.
+Reading: tags are readable by anyone signed in. A link is read through `aiq.edges`'
+own policy, so it is visible exactly when its resource is. `claims.question_readable`
+also admits a question with a current dual edge from a tag, and a question with a
+current `answers` edge from a resource the caller may read. `claims.search_leads`
+walks `aiq.edges_current` as the caller.
+
+A resource-to-claim link is not built. No writer needs one yet; when one does, it is
+one more catalogue row.
 
 ### 4.3 The duplicates
 
@@ -267,8 +291,8 @@ first run must reproduce the S numbers in §3 before any M result counts.
 ## 7. Cluster tags (spike, 23 Oct 2026; design for stability, not built)
 
 **The spike** (REM-1144) stored density clusters as `claims.tags` rows: source
-`cluster`, one version per clustering run. Members are `claims.resource_links` rows
-with p = membership strength, and each resource's metadata holds
+`cluster`, one version per clustering run. Members were link rows
+with p = membership strength (now `document tagged tag` edges, §4), and each resource's metadata holds
 `clusters: [{key, size, strength}]`. No table was added. On 20,859 pooled LongMemEval-M
 sessions the clusters did not improve retrieval (embeddings 0.396 recall@10; a hit's
 clusters pulled in 0.360; clusters picked by label 0.192). 79% of sessions stayed
