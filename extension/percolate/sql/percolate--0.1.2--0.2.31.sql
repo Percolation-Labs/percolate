@@ -39990,8 +39990,11 @@ begin
             false,
             jsonb_build_object('revision', c.revision_id, 'key', c.claim_key, 'floor', f.max_distance,
                                'k', f.top_k * 2, 'model', p_model));
+        -- Each candidate claim once, at its nearest occurrence: claims.candidates returns a row per revision a claim
+        -- is stated in, and the writer is asked about the claim, not each place it appears. Then the nearest top_k.
         select coalesce(jsonb_agg(k.v order by k.n), '[]'::jsonb) into v_cands
-          from (select t.value as v, t.ordinality as n
+          from (select u.v, u.n from (
+                select distinct on (t.value->>'claim_id') t.value as v, t.ordinality as n
                   from jsonb_array_elements(v_cands) with ordinality t
                  -- A fixture account's claim is never put to a writer either, even listed (REM-659).
                  where not exists (select 1 from research.revisions v2
@@ -40006,7 +40009,8 @@ begin
                                         or (j.subject_node_id = (t.value->>'claim_id')::uuid
                                             and j.evidence->'candidates' @> jsonb_build_array(
                                                     jsonb_build_object('claim_id', c.claim_id)))))
-                 order by t.ordinality limit f.top_k) k;
+                 order by t.value->>'claim_id', t.ordinality) u
+                 order by u.n limit f.top_k) k;
         v_jid := null;
         if jsonb_array_length(v_cands) > 0 then
             -- One live challenge per claim. A later occurrence of a claim already waiting adds its candidates to

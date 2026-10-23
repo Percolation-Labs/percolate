@@ -402,6 +402,17 @@ begin
         "sources": [{"id": "S1", "title": "S", "url": "https://example.com/cg", "origin": "CG"}]}', null, 'rp-chal-g')->>'revision_id');
 end $$;
 reset role;
+-- A revises its package with A1 unchanged: one claim, stated in two revisions. B5 is asked about it once.
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000659a1"}';
+set local role authenticated;
+do $$
+begin
+    insert into ids values ('ra2', research.revise_package('rp-chal-a', '{"schema_version": "0.1", "title": "Chal A, revised", "visibility": "listed", "edges": [],
+        "claims": [{"id": "A1", "kind": "Inference", "text": "Agent memory has to record when each fact became true.", "source_ids": ["S1"]}],
+        "sources": [{"id": "S1", "title": "S", "url": "https://example.com/ca", "origin": "CA"}]}',
+        (select label from research.revisions where id = (select v::uuid from ids where k = 'ra')))->>'revision_id');
+end $$;
+reset role;
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000659b1"}';
 set local role authenticated;
 do $$
@@ -427,6 +438,11 @@ begin
         'B5 is challenged, with A1: ' || coalesce(v_cands::text, 'no challenge');
     assert not (v_cands @> jsonb_build_array(jsonb_build_object('revision_id', (select v from ids where k = 'rg')))),
         'and the fixture''s listed G1 is not offered: ' || v_cands::text;
+    assert (select count(*) from claims.expresses e
+             where e.claim_id = (select v::uuid from ids where k = 'a1') and e.part = 1 and e.op = 'assert') >= 2,
+        'A1 is stated in two revisions, or this proves nothing';
+    assert (select count(*) from jsonb_array_elements(v_cands) x where x->>'claim_key' = 'A1') = 1,
+        'and A1 is offered once, not once per revision: ' || v_cands::text;
 end $$;
 
 rollback;
