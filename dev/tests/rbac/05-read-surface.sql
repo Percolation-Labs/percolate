@@ -280,7 +280,10 @@ declare
         -- identity/schema.sql's guess at each table's kind, for whoever is
         -- writing percolate.table_kinds rows: a tool for the schema's author,
         -- not a read surface. Unseen here until this file read `percolate`.
-        'percolate.table_kind_proposal'
+        'percolate.table_kind_proposal',
+        -- Every writer's challenges and who resolved them (REM-1123): the backfill's measurement, read by the
+        -- operator through claims.challenge_report, not any one writer's data.
+        'claims.challenge_outcomes'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, ', ' order by 1)
