@@ -170,7 +170,7 @@ conversation with a person is not a structured suggestion.
 
 ## Review status — 2026-09-09
 
-Sections 1–7 are tracked, based on live frontend and three-repo inspection.
+Sections 1–7 are tracked, based on live frontend inspection.
 §7 was added on 2026-09-10 after three assistants had shipped, each carrying
 its own copy of the contract in a prompt string; it is written once here so a
 fourth does not word it a fourth way.

@@ -26847,7 +26847,7 @@ end;
 $$;
 
 -- One RPC, one transaction: a half-written turn is not a state this database
--- can be left in (sequence.md Gate 2). Takes both granularities -- the caller
+-- can be left in (Gate 2 in core's agentic/phases.py). Takes both granularities -- the caller
 -- decides fast or slow path, the function does not care.
 create or replace function agentic.persist_turn(p_rows jsonb)
 returns setof agentic.messages

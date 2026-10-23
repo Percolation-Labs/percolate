@@ -88,7 +88,7 @@ What's not carried forward:
 - **The in-process Python tool registry** (tool modules mapped by name in a
   dict). Tools are rows referencing MCP/OpenAPI endpoints, resolved and called via
   REST — consistent with `ai-query-layer` treating query execution the same way.
-- **REM's specific persistence functions** (`rem_persist_turn`, `rem_build_moment`)
+- **The earlier system's specific persistence functions** (`rem_persist_turn`, `rem_build_moment`)
   as implementations — but not the *idea* behind them. the earlier system's "dreaming" (background
   consolidation of raw content into higher-order insight, run periodically rather
   than per-turn) is explicitly **in scope for this system**, not deferred — see §3.
@@ -1208,7 +1208,7 @@ declares its own group and the parent mounts it (`core/percolate_core/cli.py`):
 `percolate agent push harbourmaster.yaml`, `percolate agent list`, `percolate
 agent tools register`, `percolate agent chat`, and the long-running services
 `percolate agent serve`, `percolate agent gateway`, `percolate content serve`,
-`percolate worker`, `percolate pool`. Hand-forwarding a subset was tried instead
+`percolate worker`, `percolate pool run`. Hand-forwarding a subset was tried instead
 and is exactly as durable as it sounds: the forwarded `serve` imported an
 application object that did not exist, and the whole operator surface behind it
 was unreachable from the installed script.
