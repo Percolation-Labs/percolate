@@ -6,10 +6,22 @@
 # how it dropped none: adding was free and nobody had to decide anything.
 #
 # So the totals live here, and `dev/the-schema-has-a-budget.py` refuses a tree
-# whose specs disagree with them. Adding a table means editing a number in this
-# file, in the same commit, where a reviewer sees it. Removing one means editing
-# it downward -- the check is two-sided on purpose, so the budget cannot hoard
-# headroom for a later addition nobody argued for.
+# whose specs disagree with them plus every declaration in specs/budget.d/.
+#
+# A CHANGE DOES NOT EDIT THESE NUMBERS (REM-1142). It declares its own additions
+# and removals, by name, in a file only it writes -- specs/budget.d/<branch>.toml:
+#
+#     why = "what it adds, and what it replaces or why nothing does"
+#     [added]
+#     functions = ["claims.settle"]
+#
+# Two PRs that each raised a line here from the same base to the same value
+# merged as one edit and lost an increment, three times in two days; two files
+# cannot. The gate also names any table, view or function a branch adds or
+# removes without declaring it, and refuses a hand edit to these totals. Only
+# `dev/the-schema-has-a-budget.py --fold` moves them, folding every declaration
+# in at once. Two-sided on purpose: a removal is declared too, so the budget
+# cannot hoard headroom for a later addition nobody argued for.
 #
 # THIS IS NOT A LIMIT. Nothing here says 117 is the right number and no gate
 # will stop you raising it. It says the number moved because somebody moved it,

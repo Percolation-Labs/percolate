@@ -20,7 +20,7 @@
 --      B1's identity set), and A relates N1 same_as A1 after the agent said none.
 --   7. claims.challenge_outcomes says who resolved each and what was overturned, in one query, and
 --      claims.challenge_report gives the backfill's shares: 3 challenges, 2 settled by the agent, 1 reached the
---      person, 2 overturned.
+--      person, 2 overturned; a claim's second place adds an occurrence, not a challenge.
 --
 -- The worker and the stub model are research/41's. One transaction, rolled back.
 
@@ -316,24 +316,33 @@ end $$;
 reset role;
 reset request.jwt.claims;
 
--- 7. Who resolved each, and the backfill's shares.
+-- 7. Who resolved each, and the backfill's shares. A claim stated in a second place joins its open judgement rather
+-- than opening another, so it adds a claims.challenged row and no judgement: here, the row challenge_embedded writes for
+-- that second place, against B1's judgement. The report counts judgements, and the places apart.
+insert into research.claims (id, revision_id, claim_key, kind, text)
+values ('00000000-0000-4000-8000-00000065900b', (select v::uuid from ids where k = 'rn'), 'B1-again', 'Inference',
+        'A memory store must keep the time a fact held.');
+insert into claims.challenged (claim_row, model, candidates, judgement_id)
+values ('00000000-0000-4000-8000-00000065900b', 'chal-test-3d', 1, (select v::uuid from ids where k = 'jb'));
 do $$
 declare
     v_rep jsonb := claims.challenge_report('chal-test-3d');
 begin
     assert not exists (select 1 from claims.settling), 'each settling ended with the call that settled it';
-    assert (select resolved_by from claims.challenge_outcomes where judgement_id = (select v::uuid from ids where k = 'jb'))
-           = 'agent:00000000-0000-4000-8000-0000000659b1', 'B1: the agent';
-    assert (select settled and overturned_by = 'user:00000000-0000-4000-8000-0000000659b1'
+    -- B1's judgement has a row per place it is stated, two since the second place above, and each says the same.
+    assert (select array_agg(distinct resolved_by) from claims.challenge_outcomes
+             where judgement_id = (select v::uuid from ids where k = 'jb'))
+           = array['agent:00000000-0000-4000-8000-0000000659b1'], 'B1: the agent';
+    assert (select count(*) = 2 and bool_and(settled and overturned_by = 'user:00000000-0000-4000-8000-0000000659b1')
               from claims.challenge_outcomes where judgement_id = (select v::uuid from ids where k = 'jb')),
-        'B1: settled, overturned by B';
+        'B1: settled, overturned by B, in both places';
     assert (select resolved_by = 'user:00000000-0000-4000-8000-0000000659a1' and suggested_by_agent and not settled
               from claims.challenge_outcomes where judgement_id = (select v::uuid from ids where k = 'jp')),
         'P1: the person, on the agent''s suggestion';
     assert (select settled and decision = 'none' and overturned_by = 'user:00000000-0000-4000-8000-0000000659a1'
               from claims.challenge_outcomes where judgement_id = (select v::uuid from ids where k = 'jn')),
         'N1: settled none, overturned by A''s relate';
-    assert (v_rep->>'challenges')::int = 3 and (v_rep->>'settled_by_agent')::int = 2
+    assert (v_rep->>'challenges')::int = 3 and (v_rep->>'occurrences')::int = 4 and (v_rep->>'settled_by_agent')::int = 2
        and (v_rep->>'reached_the_person')::int = 1 and (v_rep->>'overturned')::int = 2
        and (v_rep->>'still_waiting')::int = 0, 'the report: ' || v_rep::text;
 end $$;
