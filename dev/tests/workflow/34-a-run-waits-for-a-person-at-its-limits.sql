@@ -112,7 +112,7 @@ begin
     perform pg_temp.check(pg_temp.hold(r) = 'awaiting_estimate', '2 held awaiting its estimate: ' || pg_temp.hold(r));
     perform pg_temp.check((select basis from workflow.run_estimates where run_id = r and step_key is null) = 'none',
                           '2 no history, so REM-1125''s estimate at start is incomplete');
-    perform pg_temp.check(exists (select 1 from workflow.dry_runs where of_run_id = r),
+    perform pg_temp.check(exists (select 1 from workflow.runs where dry_run_of = r),
                           '2 and its dry run has started');
     perform pg_temp.check((select status from workflow.runs where id = r) = 'running', '2 and still running');
     perform pg_temp.check((select budget from workflow.runs where id = r) = '{"cost_limit": 2.00}'::jsonb,

@@ -120,6 +120,23 @@ select r.name, k.resource, k.action
  where r.description is distinct from 'granted by an application'
 on conflict do nothing;
 
+-- from specs/migrations/0.2.30--0.2.31.sql: the part of the 0.2.30 -> 0.2.31 hop
+-- that a replay cannot express.
+-- 0.2.30 -> 0.2.31: what a replay cannot express. Everything else is the schema re-applied.
+
+-- REM-1160. workflow.dry_runs held only (shadow run, the run it estimates, start time); the pair is now
+-- workflow.runs.dry_run_of on the shadow run. The column is added here as well as in the schema because this
+-- runs before the replay, and the rows move before the table goes.
+alter table workflow.runs add column if not exists dry_run_of uuid references workflow.runs(id) on delete cascade;
+do $$
+begin
+    if to_regclass('workflow.dry_runs') is not null then
+        update workflow.runs r set dry_run_of = d.of_run_id
+          from workflow.dry_runs d where d.shadow_run_id = r.id;
+        drop table workflow.dry_runs;
+    end if;
+end $$;
+
 -- ============================================================
 -- percolate 0.2.31 -- the whole schema, as one extension script.
 --
@@ -2029,7 +2046,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- flag would make the real call: a real model, real tools, real spend, which is
 -- the thing the estimate exists to prevent. The risk sits at the claim, so the
 -- refusal does too: a worker passes the capabilities it has, and a task of a
--- run in `workflow.dry_runs` is skipped unless 'dry_run' is among them. The
+-- run with `workflow.runs.dry_run_of` set is skipped unless 'dry_run' is among them. The
 -- default is none, so every worker written before this argument existed is
 -- refused those tasks rather than trusted with them. The worker vouches for
 -- its runtime because the shipped worker and runtime are one image.
@@ -2053,7 +2070,7 @@ begin
         where queue = p_queue and status = 'ready' and run_after <= now()
           and not workflow.run_is_held(run_id)
           and ('dry_run' = any(p_capabilities)
-               or not exists (select 1 from workflow.dry_runs d where d.shadow_run_id = run_id))
+               or not exists (select 1 from workflow.runs s where s.id = run_id and s.dry_run_of is not null))
         order by priority desc, created_at
         for update skip locked
         limit v_lookahead
@@ -2113,7 +2130,7 @@ begin
         where queue = p_queue and status = 'ready' and run_after <= now()
           and not workflow.run_is_held(run_id)
           and ('dry_run' = any(p_capabilities)
-               or not exists (select 1 from workflow.dry_runs d where d.shadow_run_id = run_id))
+               or not exists (select 1 from workflow.runs s where s.id = run_id and s.dry_run_of is not null))
         order by priority desc, created_at
         for update skip locked
         limit p_batch_size + v_lookahead
@@ -10009,18 +10026,16 @@ language sql immutable set search_path = pg_catalog, public as $$
     select p_step->>'kind' = 'http_call' and workflow.agent_name_path(p_step->'input'->>'url') is not null;
 $$;
 
--- Which run a shadow run estimates. Written only by estimate_unknown_steps, as the
--- definer: the run's input names the original too, for a reader, but input is the
--- caller's, so a run that wrote dry_run_of there must neither skip approval nor
--- write its spend into somebody else's estimate.
-create table if not exists workflow.dry_runs (
-    shadow_run_id uuid primary key references workflow.runs(id) on delete cascade,
-    of_run_id     uuid not null references workflow.runs(id) on delete cascade,
-    started_at    timestamptz not null default now()
-);
-comment on table workflow.dry_runs is
-    'A dry run''s shadow run and the run it estimates, recorded by the definer that started it (REM-1125).';
-create index if not exists dry_runs_of on workflow.dry_runs (of_run_id);
+-- Which run a shadow run estimates: a column of the shadow run itself (REM-1160; it was a table of its own,
+-- workflow.dry_runs, holding nothing but this pair and a start time the run already has). Written only by
+-- estimate_unknown_steps, as the definer: nobody else writes workflow.runs (callers read runs_api and start
+-- runs through start_workflow). The run's input names the original too, for a reader, but input is the
+-- caller's, so a run that wrote dry_run_of there must neither skip approval nor write its spend into somebody
+-- else's estimate; the column is the record, the input is not.
+alter table workflow.runs add column if not exists dry_run_of uuid references workflow.runs(id) on delete cascade;
+comment on column workflow.runs.dry_run_of is
+    'For a dry run, the run it estimates; set by the definer that started it (REM-1125, REM-1160).';
+create index if not exists runs_dry_run_of on workflow.runs (dry_run_of) where dry_run_of is not null;
 
 create or replace function workflow.estimate_unknown_steps(p_run_id uuid) returns void as $$
 declare
@@ -10095,7 +10110,7 @@ begin
             raise;
         end;
         perform set_config('workflow.starting_dry_run', '', true);
-        insert into workflow.dry_runs (shadow_run_id, of_run_id) values (v_shadow_run, p_run_id);
+        update workflow.runs set dry_run_of = p_run_id where id = v_shadow_run;
         -- The same budget the real run will see, where budgets exist (REM-1126).
         if exists (select 1 from pg_attribute where attrelid = 'workflow.runs'::regclass
                      and attname = 'budget' and not attisdropped) then
@@ -10126,7 +10141,7 @@ $$;
 create or replace function workflow.record_dry_run(p_shadow_run uuid) returns void as $$
 declare v_of uuid;
 begin
-    select of_run_id into v_of from workflow.dry_runs where shadow_run_id = p_shadow_run;
+    select dry_run_of into v_of from workflow.runs where id = p_shadow_run;
     if v_of is null then
         return;
     end if;
@@ -10157,7 +10172,7 @@ create or replace function workflow.trg_runs_actuals() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
 begin
     if workflow.is_terminal(new.status) and not workflow.is_terminal(old.status) then
-        if exists (select 1 from workflow.dry_runs where shadow_run_id = new.id) then
+        if new.dry_run_of is not null then
             perform workflow.record_dry_run(new.id);
         else
             perform workflow.record_run_actuals(new.id);
@@ -42204,7 +42219,6 @@ declare
         -- A deployment's taxonomies (REM-1144); their duals and its resources' links are aiq.edges rows.
         'claims.tags',
         'workflow.definitions',
-        'workflow.dry_runs',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',
@@ -42763,7 +42777,6 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
- ('workflow','dry_runs','natural','a sidecar keyed by workflow.runs(id): the run a shadow dry run estimates (REM-1125)'),
  ('workflow','run_estimates','natural','a sidecar keyed by workflow.runs(id) and a step key, one row per step and one for the run (REM-1125)'),
  ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
  ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),

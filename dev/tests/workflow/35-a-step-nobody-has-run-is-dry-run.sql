@@ -70,7 +70,7 @@ begin
     end if;
 
     -- 3. The shadow run: only the model steps, flagged, with placeholders, and not estimated itself.
-    select shadow_run_id into v_shadow from workflow.dry_runs where of_run_id = v_run;
+    select id into v_shadow from workflow.runs where dry_run_of = v_run;
     if v_shadow is null then raise exception 'no shadow run was started for the model steps'; end if;
     insert into dry_ids values ('shadow', v_shadow);
     select d.spec into spec from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
@@ -167,7 +167,7 @@ begin
     if not exists (select 1 from workflow.run_estimates where run_id = v_forged and step_key is null) then
         raise exception 'a run whose input claims dry_run_of skipped its own estimate';
     end if;
-    if exists (select 1 from workflow.dry_runs where shadow_run_id = v_forged) then
+    if (select dry_run_of from workflow.runs where id = v_forged) is not null then
         raise exception 'a forged dry_run_of was recorded as a shadow run';
     end if;
     perform workflow.record_dry_run(v_forged);
