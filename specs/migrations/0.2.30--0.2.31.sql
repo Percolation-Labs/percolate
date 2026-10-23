@@ -17,3 +17,20 @@ begin
         delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
     end if;
 end $$;
+
+-- REM-1163. aiq.dream_runs held each aiq.dream() pass (window, decider, receipt). A dream is now a workflow run of
+-- `dream`, whose step output is the receipt and whose newest `until` is the watermark (graph.sql). Every row here is
+-- a direct call's: aiq.schedule_dream could not be installed before 0.2.31 (it registered the step with no argument
+-- types), so no scheduled dream ever ran. A direct call's receipt was returned to its caller and has no run to
+-- belong to, so it goes with the table. The one thing it carried that a later pass reads, the
+-- watermark, costs a dream that has never been scheduled one wider window, which an idempotent pass makes only slower.
+drop table if exists aiq.dream_runs;
+-- Its kind row too: the replay re-declares only tables that exist, so on an upgraded database this row would outlive
+-- the table and the declarations would differ from a fresh install's (dev/upgrade-converges.sh). A database from
+-- before percolate.table_kinds existed (0.1.6 upgrades straight here) has no row to delete.
+do $$
+begin
+    if to_regclass('percolate.table_kinds') is not null then
+        delete from percolate.table_kinds where schema_name = 'aiq' and table_name = 'dream_runs';
+    end if;
+end $$;
