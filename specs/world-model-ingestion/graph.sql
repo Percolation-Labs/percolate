@@ -2629,13 +2629,18 @@ create or replace function aiq.schedule_dream(p_cron text default '*/15 * * * *'
 returns jsonb as $$
 declare v_id uuid;
 begin
-    perform workflow.register_step_function('dream', 'aiq.dream', '{}', 300000,
+    -- The function's own signature. Registered with no argument types, which
+    -- step_function_is_runnable refuses for a function that takes two, this
+    -- schedule could not be installed at all (found by REM-1163's test).
+    -- `since` comes from the run's input when given; a scheduled run gives none,
+    -- so dream reads its watermark.
+    perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
     perform workflow.define_yaml($y$
 name: dream
 steps:
   - id: reconcile
-    sql: {function: dream, args: []}
+    sql: {function: dream, args: ["{{run.since}}", dream]}
 $y$);
     select id into v_id from workflow.schedules where name = 'dream';
     if v_id is null then
