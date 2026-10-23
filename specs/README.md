@@ -763,8 +763,8 @@ reopening.
   truth for *bytes*. This shows up concretely in `world-model-ingestion`'s content
   upload path (see its brief) but is a standing rule for any system that stores files.
 - **Planned, not built: ephemeral staging environments, in-cluster.** On merge to main, a temporary
-  staging environment — same Postgres/KEDA/S3 shape as prod, at smaller scale — spins
-  up inside the existing Kubernetes cluster, not a rented/hosted ephemeral-environment
+  staging environment — the same Postgres/KEDA/S3 shape as production, at smaller
+  scale — spins up inside the deployment's own Kubernetes cluster, not a rented/hosted ephemeral-environment
   product. Kubernetes-first: git CI flows authenticate to the cluster via a dedicated,
   narrowly-scoped service account to create it, run checks against it, and tear it
   down — not through a separate automation platform.
