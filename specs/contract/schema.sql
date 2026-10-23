@@ -618,9 +618,6 @@ declare
         -- name. Every workflow anybody authored with define_yaml was absent
         -- from every backup. Found by the sibling sweep this file's own header
         -- asks for, not by anybody noticing a restore.
-        -- Empty at rest: the challenge a transaction is settling (REM-1123). Registered so no table of the
-        -- extension is outside the dump, at the cost of nothing.
-        'claims.settling',
         -- A deployment's taxonomies (REM-1144); their duals and its resources' links are aiq.edges rows.
         'claims.tags',
         'workflow.definitions',

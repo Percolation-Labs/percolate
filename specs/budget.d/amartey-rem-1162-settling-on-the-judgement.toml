@@ -1,0 +1,7 @@
+why = """REM-1162 (Sirsh, M-20261023-164249-a2f2): the challenge a transaction is settling is state of that challenge's
+aiq.judgements row, so claims.settling (judgement, transaction; empty at rest) becomes the column
+aiq.judgements.settling_xact. claims.challenged stays: it records each claim occurrence asked under each model, most
+of them with no judgement at all (asked and nothing near), so it is the backfill's ledger, not a judgement's state."""
+
+[removed]
+tables = ["claims.settling"]

@@ -17,3 +17,14 @@ begin
         delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
     end if;
 end $$;
+
+-- REM-1162. claims.settling held (judgement, transaction) while a challenge was being settled, and was empty at rest;
+-- that is now aiq.judgements.settling_xact, which the replay adds. Nothing to move: a row outlives only the
+-- transaction that wrote it, and its transaction id never comes round again. The table and its declaration go.
+do $$
+begin
+    drop table if exists claims.settling;
+    if to_regclass('percolate.table_kinds') is not null then
+        delete from percolate.table_kinds where schema_name = 'claims' and table_name = 'settling';
+    end if;
+end $$;

@@ -1974,6 +1974,15 @@ create index if not exists idx_judgements_queue on aiq.judgements (status, queue
 alter table aiq.judgements add column if not exists addressee uuid;
 comment on column aiq.judgements.addressee is
     'For a challenge, the writer it is put to: the only person who sees it. Null for every other kind.';
+-- The transaction settling this challenge (REM-1123, REM-1162): claims.settle_challenge sets it to the current
+-- transaction, claims.settle_challenge_done clears it, and claims.assert_relation lands a 'settled' relation only
+-- while it names the asking transaction. A column of the row, not a table: what it records is the state of this
+-- one judgement. Transaction ids never repeat, so a value left by a transaction that ended without clearing it
+-- authorizes nothing.
+alter table aiq.judgements add column if not exists settling_xact xid8;
+comment on column aiq.judgements.settling_xact is
+    'For a challenge being settled, the transaction settling it; null otherwise. Set and cleared only by claims.settle_challenge and settle_challenge_done.';
+create index if not exists idx_judgements_settling on aiq.judgements (settling_xact) where settling_xact is not null;
 alter table aiq.judgements drop constraint if exists judgements_kind_check;
 alter table aiq.judgements add constraint judgements_kind_check
     check (kind in ('bind','merge','withdraw','challenge'));

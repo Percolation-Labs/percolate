@@ -31083,6 +31083,15 @@ create index if not exists idx_judgements_queue on aiq.judgements (status, queue
 alter table aiq.judgements add column if not exists addressee uuid;
 comment on column aiq.judgements.addressee is
     'For a challenge, the writer it is put to: the only person who sees it. Null for every other kind.';
+-- The transaction settling this challenge (REM-1123, REM-1162): claims.settle_challenge sets it to the current
+-- transaction, claims.settle_challenge_done clears it, and claims.assert_relation lands a 'settled' relation only
+-- while it names the asking transaction. A column of the row, not a table: what it records is the state of this
+-- one judgement. Transaction ids never repeat, so a value left by a transaction that ended without clearing it
+-- authorizes nothing.
+alter table aiq.judgements add column if not exists settling_xact xid8;
+comment on column aiq.judgements.settling_xact is
+    'For a challenge being settled, the transaction settling it; null otherwise. Set and cleared only by claims.settle_challenge and settle_challenge_done.';
+create index if not exists idx_judgements_settling on aiq.judgements (settling_xact) where settling_xact is not null;
 alter table aiq.judgements drop constraint if exists judgements_kind_check;
 alter table aiq.judgements add constraint judgements_kind_check
     check (kind in ('bind','merge','withdraw','challenge'));
@@ -37589,13 +37598,13 @@ begin
         raise insufficient_privilege using message = 'Only the owner of both claims says one supersedes the other',
             hint = 'no_grant';
     end if;
-    -- Settled only while a challenge is being settled in this transaction (claims.settle_challenge records it in
-    -- claims.settling, which only it writes), and only between that challenge's claim and one of its candidates, by
-    -- the agent holding it. Each condition is asked here again, so the row alone authorizes nothing else. Asked
-    -- here, once both claims are resolved.
+    -- Settled only while a challenge is being settled in this transaction (claims.settle_challenge marks it in
+    -- aiq.judgements.settling_xact, which only it writes), and only between that challenge's claim and one of its
+    -- candidates, by the agent holding it. Each condition is asked here again, so the mark alone authorizes nothing
+    -- else. Asked here, once both claims are resolved.
     if v_status = 'settled' and not exists (
-            select 1 from claims.settling g join aiq.judgements j on j.id = g.judgement_id
-             where g.xact = pg_current_xact_id()::text
+            select 1 from aiq.judgements j
+             where j.settling_xact = pg_current_xact_id()
                and j.kind = 'challenge' and j.status = 'claimed' and j.claimed_by = v_user
                and j.lease_until > clock_timestamp() and v_actor = 'agent'
                and j.subject_node_id = v_src
@@ -39609,22 +39618,13 @@ end;
 $$;
 revoke all on function claims.set_challenge_settle(text, float8) from public;
 
--- The challenge being settled in a transaction. Not a setting: a function with a SET clause, as every definer here
--- has, takes its set_config back when it returns. Written and cleared only by the two functions below; empty at rest.
-create table if not exists claims.settling (
-    judgement_id uuid not null,
-    xact         text not null,
-    primary key (judgement_id, xact)
-);
-comment on table claims.settling is
-    'The challenge a transaction is settling, between claims.settle_challenge and claims.settle_challenge_done; empty at rest.';
-alter table claims.settling enable row level security;
-revoke all on claims.settling from public;
+-- The challenge being settled in a transaction is a column of its row, aiq.judgements.settling_xact (REM-1162). It was
+-- a table, claims.settling, keyed by judgement and transaction and empty at rest; specs/migrations drops it.
 
 -- How the writer's agent's answer to a challenge is to be recorded, asked by aiq.complete_judgement, which runs as
 -- the caller and may not read the setting. 'as_before' when no settle_at is set or a person answers; 'to_human'
 -- with the agent's answer as the suggestion when its confidence is missing or below settle_at; 'settle' at or above
--- it, and then, for a relate, a claims.settling row names the judgement for assert_relation. Refuses what the caller does
+-- it, and then, for a relate, aiq.judgements.settling_xact names this transaction for assert_relation. Refuses what the caller does
 -- not hold: only the challenge's addressee, holding a live claim, is answered.
 create or replace function claims.settle_challenge(p_judgement uuid, p_verdict jsonb) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public as $$
@@ -39657,8 +39657,7 @@ begin
                                   'verdict', jsonb_build_object('suggested', p_verdict, 'suggested_by', 'agent:' || v_uid));
     end if;
     if p_verdict->>'decision' = 'relate' then
-        insert into claims.settling (judgement_id, xact) values (p_judgement, pg_current_xact_id()::text)
-        on conflict do nothing;
+        update aiq.judgements set settling_xact = pg_current_xact_id() where id = p_judgement;
     end if;
     return jsonb_build_object('mode', 'settle', 'settle_at', v_at);
 end;
@@ -39669,7 +39668,7 @@ grant execute on function claims.settle_challenge(uuid, jsonb) to authenticated;
 -- Settling ends with the call that settled it.
 create or replace function claims.settle_challenge_done() returns void
 language sql security definer set search_path = pg_catalog, public as $$
-    delete from claims.settling where xact = pg_current_xact_id()::text;
+    update aiq.judgements set settling_xact = null where settling_xact = pg_current_xact_id();
 $$;
 revoke all on function claims.settle_challenge_done() from public;
 grant execute on function claims.settle_challenge_done() to authenticated;
@@ -42074,9 +42073,6 @@ declare
         -- name. Every workflow anybody authored with define_yaml was absent
         -- from every backup. Found by the sibling sweep this file's own header
         -- asks for, not by anybody noticing a restore.
-        -- Empty at rest: the challenge a transaction is settling (REM-1123). Registered so no table of the
-        -- extension is outside the dump, at the cost of nothing.
-        'claims.settling',
         -- A deployment's taxonomies (REM-1144); their duals and its resources' links are aiq.edges rows.
         'claims.tags',
         'workflow.definitions',
