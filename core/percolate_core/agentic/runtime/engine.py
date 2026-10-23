@@ -133,7 +133,7 @@ class AgentEngine:
 
         ``model`` overrides the row — that is what makes the fake-model test
         path (``fakes.scripted_model``) possible without a special code path in
-        the runtime, per ``sequence.md``'s "tested only through the contract."
+        the runtime, per phase gate 7: tested only through the contract.
         """
         from pydantic_ai import Agent
 
@@ -273,8 +273,8 @@ class AgentEngine:
         # `ExecutionResult.usage` declared and never written -- and left
         # `rbac.has_quota_remaining(user, 'llm_tokens')` gating every call on a
         # counter that nothing in this runtime increments. Capturing it does not
-        # by itself close that loop (the SQL function is still owed, per
-        # `sequence.md`), but it is the half that has to exist first.
+        # by itself close that loop (the SQL function is still owed), but it is
+        # the half that has to exist first.
         return ExecutionResult(
             text=as_text(result.output),
             output=result.output,

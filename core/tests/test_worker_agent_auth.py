@@ -77,11 +77,37 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
             @asynccontextmanager
             async def as_user(self, claims):
                 conn = AsyncMock()
-                conn.fetchval.return_value = False
+                conn.fetchrow.return_value = (False, False)
                 yield conn
         repo = PgRepository(Client(), {"sub": ALICE, "workflow_task_id": str(uuid4())})
         with patch("percolate_core.core.identity.as_task_worker", side_effect=AssertionError("worker connection on old extension")):
             await repo.record_execution_receipt(uuid4(), {"method_version": "test", "usage": {}})
+
+    async def test_every_workflow_driven_run_reports_its_usage_per_attempt(self):
+        # REM-1125: not only claim assertions. An extension with workflow.record_task_usage gets the run's
+        # RunUsage for the task attempt the worker signed, with the model beside it, on the worker connection.
+        from percolate_core.agentic.db.repository import PgRepository
+        task = uuid4()
+        class Client:
+            @asynccontextmanager
+            async def as_user(self, claims):
+                conn = AsyncMock()
+                conn.fetchrow.return_value = (False, True)
+                yield conn
+        worker = AsyncMock()
+        @asynccontextmanager
+        async def as_task_worker():
+            yield worker
+        repo = PgRepository(Client(), {"sub": ALICE, "workflow_task_id": str(task),
+                                        "workflow_worker_id": "worker-1", "workflow_attempt": 2})
+        with patch("percolate_core.core.identity.as_task_worker", as_task_worker):
+            await repo.record_execution_receipt(uuid4(), {
+                "method_version": "test", "model": "openai:gpt-4o-mini",
+                "usage": {"requests": 2, "input_tokens": 1200, "output_tokens": 300, "cost": 0.0042}})
+        worker.execute.assert_awaited_once_with(
+            "select workflow.record_task_usage($1, $2, $3::jsonb, $4)", task, 2,
+            {"requests": 2, "input_tokens": 1200, "output_tokens": 300, "cost": 0.0042, "model": "openai:gpt-4o-mini"},
+            "worker-1")
 
     def test_missing_verified_owner_cannot_fall_back_to_input(self):
         for owner in (None, "", "forged"):
@@ -131,7 +157,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         context = {"kind":"http_call", "attempt":1, "step_key":"brief", "task_input":self.spec(),
                    "run_input":{"question":"Prepare a brief", "owner_id":BOB, "_agent_caller":BOB}}
         conn = AsyncMock()
-        conn.fetchval.side_effect = [task, json.dumps(context), False, ALICE]
+        conn.fetchval.side_effect = [True, task, json.dumps(context), False, ALICE]
         @asynccontextmanager
         async def service():
             yield conn
@@ -151,7 +177,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         for error in (asyncpg.InsufficientPrivilegeError("agent execution requires a run owner"), asyncpg.UndefinedFunctionError("missing task_owner")):
             task = uuid4()
             conn = AsyncMock()
-            conn.fetchval.side_effect = [task, json.dumps({"kind":"http_call", "task_input":self.spec()}), False, error]
+            conn.fetchval.side_effect = [True, task, json.dumps({"kind":"http_call", "task_input":self.spec()}), False, error]
             @asynccontextmanager
             async def service():
                 yield conn
@@ -168,7 +194,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         task, key = uuid4(), uuid4()
         context = {"kind":"http_call", "attempt":1, "step_key":"brief", "task_input":self.spec(), "run_input":{"question":"Q"}}
         conn = AsyncMock()
-        conn.fetchval.side_effect = [task, json.dumps(context), True]
+        conn.fetchval.side_effect = [True, task, json.dumps(context), True]
         conn.fetchrow.return_value = {"owner_id": ALICE, "started_actor": "agent", "started_credential_id": key}
         seen = {}
         @asynccontextmanager

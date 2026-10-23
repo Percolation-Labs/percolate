@@ -2,7 +2,7 @@
 
 Run: python -m unittest discover -s tests -p test_agent_cors.py
 No database or paid model. The live browser/persistence check is recorded in
-p8-subsystems/specs/agentic/browser-ui.md. Candidate regressions also include
+specs/agentic/browser-ui.md. Candidate regressions also include
 request field drift, SSE parsing, provider mismatch, port collision, stale
 processes and UI secret leakage; this small test targets the security boundary.
 """

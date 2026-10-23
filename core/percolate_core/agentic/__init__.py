@@ -18,7 +18,7 @@ Layout, mapped onto ``specs/agentic/brief.md``:
 - ``runtime``    — the four components of brief §5.1, one module each, plus the
   chained action (§4) and citation (§5.3) mechanisms.
 - ``sequencer``  — the ordered steps of one agent turn, and the mapping from
-  ``specs/agentic/sequence.md``'s phase gates onto demos that prove them.
+  the phase gates (``phases``) onto demos that prove them.
 - ``fakes``      — pydantic-ai fake models and an in-memory repository, so the
   whole path above runs with no Postgres and no LLM credentials.
 - ``cli``        — the operator surface. FastAPI wraps this later (brief §4:

@@ -26,7 +26,7 @@ def declared():
     types = {t["name"]: t["schema"] for t in contract["types"]}
     assert "content.api_source" in types, (
         "contract.json has no content.api_source: export it from a database at "
-        "p8-subsystems >= the commit that declared it (dev/contract-export.py)")
+        "an extension at or after the commit that declared it (percolate's dev/contract-export.py)")
     return types["content.api_source"]["properties"]
 
 

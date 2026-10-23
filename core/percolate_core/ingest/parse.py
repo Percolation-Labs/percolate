@@ -25,8 +25,8 @@ THE LIBRARY CHOICES, and why each is the light one:
     html   stdlib        -- HTMLParser. A dependency to strip tags is not one
                            worth having.
     audio  a remote      -- transcription is a model call, and a model call
-                           belongs to the worker (specs/README.md's rule about
-                           what the database may not do applies here too:
+                           belongs to the worker (the rule about what the
+                           database may not do applies here too:
                            whoever holds the socket holds the latency). Any
                            OpenAI-shaped /audio/transcriptions endpoint works,
                            including a local one.

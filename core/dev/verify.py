@@ -391,7 +391,7 @@ async def main() -> None:
           len(replayed) == 4, f"{len(replayed)} model messages")
 
     # --- F. tenant isolation ---------------------------------------------
-    print("\n-- F. tenant isolation (sequence.md Gate 1)")
+    print("\n-- F. tenant isolation (phases.py gate 1)")
     # Read as the real `authenticated` role with another user's claims, exactly
     # as PostgREST does per request. An ad-hoc role or a superuser would prove
     # nothing: both bypass the policies this is checking.
@@ -480,9 +480,8 @@ async def main() -> None:
     # workflow.tasks' CHECK admits pending / ready / running / waiting_external
     # / succeeded / failed / cancelled, and 'done' is in neither vocabulary. So
     # this check could not pass, `failures` was never empty, and the harness
-    # exited 1 whatever the runtime did -- while specs/agentic/sequence.md,
-    # RELEASE-0.1.md §6 and meta/module-composition.md all cite it as the thing
-    # that closes a gate. A check that cannot pass stops being run, and the
+    # exited 1 whatever the runtime did -- while the phase gates and the release
+    # notes cited it as the thing that closes a gate. A check that cannot pass stops being run, and the
     # claims resting on it keep getting written.
     check("the runtime completed its own triggering task", task_status == "succeeded",
           f"task status={task_status}")

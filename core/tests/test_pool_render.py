@@ -1,4 +1,4 @@
-"""Gate 1 of pools.md §12: `p8 pool render` reproduces k8s/examples byte for byte.
+"""Gate 1 of specs/workflow-engine/pools.md §12: `p8 pool render` reproduces the checked-in examples byte for byte.
 
 Run: python3 tests/test_pool_render.py     (no pytest, no cluster, no database)
 
@@ -6,7 +6,7 @@ The gate is worth having in this shape because the examples are the only place
 the render is reviewable: a change to the generator has to show up as a diff in
 a pull request, and this is what turns "has to" into "does".
 
-The pool row below is the one k8s/examples/README.md documents as the source.
+The pool row below is the one the examples' README documents as the source.
 Keeping it here and there is a duplication with a purpose -- if somebody edits
 the README's row without editing the manifests, this fails.
 """
@@ -22,25 +22,22 @@ from percolate_core.manager.render import RenderError, render_pool  # noqa: E402
 def _examples() -> pathlib.Path:
     """Where the checked-in render lives.
 
-    It is in the p8-subsystems repo (`k8s/examples/`) and this package is its
-    own checkout, so there is no fixed relative path between them -- in the
-    working tree percolate-core is a symlink into the other repo, and in CI
-    they are two clones. Look in the places it plausibly is, and say what to
-    set rather than failing on a path nobody can read.
+    It is kept with the cluster manifests in the private tree, not in this
+    package, so there is no fixed path to it: P8_K8S_EXAMPLES names the
+    directory, and a monorepo layout is tried after it. Say what to set rather
+    than failing on a path nobody can read.
     """
     here = pathlib.Path(__file__).resolve().parent
     env = os.environ.get("P8_K8S_EXAMPLES")
     candidates = ([pathlib.Path(env)] if env else []) + [
         here.parents[0] / "k8s" / "examples",                        # a monorepo layout
-        here.parents[1] / "p8-subsystems" / "k8s" / "examples",      # sibling checkouts
-        here.parents[2] / "p8-subsystems" / "k8s" / "examples",
     ]
     for c in candidates:
         if (c / "pool-deployment.yaml").exists():
             return c
     raise SystemExit(
-        "cannot find k8s/examples/. Set P8_K8S_EXAMPLES to the p8-subsystems "
-        "checkout's k8s/examples directory.\n  looked in: "
+        "cannot find the checked-in examples. Set P8_K8S_EXAMPLES to the directory "
+        "holding pool-deployment.yaml.\n  looked in: "
         + ", ".join(str(c) for c in candidates))
 
 
@@ -69,7 +66,7 @@ def _check(got: str, name: str) -> bool:
 
 def main() -> int:
     ok = True
-    print("gate 1 -- render matches k8s/examples")
+    print("gate 1 -- render matches the checked-in examples")
     dep, so = render_pool(POOL)
     ok &= _check(dep, "pool-deployment.yaml")
     ok &= _check(so, "pool-scaledobject.yaml")

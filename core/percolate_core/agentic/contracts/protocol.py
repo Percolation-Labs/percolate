@@ -112,6 +112,17 @@ class ChatRequest(BaseModel):
             "still cannot widen an agent's capabilities."
         ),
     )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Answer on a free stand-in model with no tools, to measure what the "
+            "turn would cost (REM-1125): the agent's prompt and output schema "
+            "are used, its model and tools are not. A workflow's dry run sends "
+            "it; what the turn spent is recorded like any other, so the run "
+            "that asked can be estimated from it. Nothing the agent's tools "
+            "would do is done."
+        ),
+    )
     response_format: dict[str, Any] | None = Field(
         default=None,
         description=(

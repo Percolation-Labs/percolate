@@ -3,8 +3,8 @@
 No framework, no build step, no `node_modules` — the page is six files and its
 whole data layer is `fetch` against PostgREST. That constraint is the design:
 the browser talks to the database's own API under RLS, so this module can serve
-the files and own no read path of its own. See `applications/percolate-ui/` in
-p8-subsystems for the design notes and the SQL views the screens read.
+the files and own no read path of its own. The SQL views the screens read are
+the extension's ``*_api`` views.
 
     p8 ui serve      # standalone
     ui.router()      # mounted into a host app, under whatever prefix it likes

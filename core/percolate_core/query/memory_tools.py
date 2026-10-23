@@ -77,11 +77,9 @@ TOOLS: dict[str, _Spec] = {
         "{\"decision\":\"bind\",\"target\":\"<candidate node id>\"}, {\"decision\":\"distinct\"}, "
         "{\"decision\":\"none\"}, or {\"decision\":\"human\"} to hand it to a person. A challenge is decided "
         "{\"decision\":\"relate\",\"relations\":[{\"target\":\"<candidate claim id>\",\"predicate\":\"same_as\","
-        "\"spans\":{...}}]} -- each relation asserted as you -- or none. Give a challenge a confidence, 0 to 1: "
-        "where the deployment lets the writer's agent settle what it is sure of, an answer at or above its setting "
-        "settles the challenge and the person is not asked, and one below it goes to the person with your answer "
-        "as the suggestion; otherwise a relation lands proposed until the person confirms it. Recorded as decided "
-        "by your agent, with the reason, and undoable. Refused once your hold has lapsed: claim it again.",
+        "\"spans\":{...}}]} -- each relation asserted as you, so it lands proposed until the person confirms it -- "
+        "or none. Recorded as decided by your agent, with the reason, and undoable. Refused once your hold has "
+        "lapsed: claim it again.",
         {"type": "object", "required": ["id", "verdict", "reason"],
          "properties": {"id": {"type": "string"},
                         "verdict": {"type": "object", "required": ["decision"],
@@ -89,7 +87,6 @@ TOOLS: dict[str, _Spec] = {
                                                                 "enum": ["bind", "distinct", "none", "human",
                                                                          "relate"]},
                                                    "target": {"type": "string"},
-                                                   "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                                                    "relations": {"type": "array", "items": {
                                                        "type": "object", "required": ["target", "predicate"],
                                                        "properties": {"target": {"type": "string"},

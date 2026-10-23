@@ -1,7 +1,7 @@
 """Worker pools: rows in Postgres, Deployments and KEDA ScaledObjects out.
 
-The fifth subpackage, alongside `core`, `worker`, `content` and `agentic`
-(`meta/module-composition.md`). pools.md §4.1: the subpackage is `manager`, the
+The fifth subpackage, alongside `core`, `worker`, `content` and `agentic`.
+`specs/workflow-engine/pools.md` §4.1: the subpackage is `manager`, the
 command group is `pool` — a command names the thing being operated on, not the
 process that implements it.
 

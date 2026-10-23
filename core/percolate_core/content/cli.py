@@ -1,7 +1,7 @@
 """The Content Server's own commands, mounted by the root CLI as `percolate content`.
 
-A subpackage owns its command group the same way it owns its router
-(`meta/module-composition.md`): the root CLI mounts it, and does not re-declare
+A subpackage owns its command group the same way it owns its router: the root
+CLI mounts it, and does not re-declare
 its commands — a hand-forwarded subset is a subset that goes stale.
 """
 
