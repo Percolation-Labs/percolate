@@ -10,7 +10,8 @@
 --      read and B cannot. A's private claim is challenged for A. A claim with nothing within the floor is not
 --      challenged, and is recorded as asked. A pair is asked once, not of both sides.
 --   2. Each writer sees only their own challenge; a stranger sees none.
---   3. B's agent claims it and decides same_as: the relation lands proposed, from B's claim to A's, recorded as
+--   3. B's agent claims it and decides same_as at confidence 0.7, which is kept with no settle_at (REM-1123): the
+--      relation lands proposed, from B's claim to A's, recorded as
 --      the agent's; the judgement holds its id. A relate to a claim that is not a candidate is refused, and so is a
 --      verdict written onto the row with no relation asserted.
 --   4. B saves the next revision with the claim unchanged: it is re-embedded and not challenged again.
@@ -241,12 +242,14 @@ begin
         if sqlerrm not like '%relate or none%' then raise; end if;
     end;
     v_out := aiq.complete_judgement(v_id, jsonb_build_object('decision', 'relate', 'target', v_a1, 'predicate', 'same_as',
-                                    'spans', (select v from sp where k = 'same')),
+                                    'spans', (select v from sp where k = 'same'), 'confidence', 0.7),
                                     'B1 "A memory store must keep the time a fact held" says what A1 "Agent memory has to record when each fact became true" says');
     assert v_out->>'status' = 'decided' and v_out->>'tier' = 'agent'
        and v_out->>'decided_by' = 'agent:00000000-0000-4000-8000-0000000659b1', 'decided by B''s agent: ' || v_out::text;
     select * into r from claims.relations where id = (v_out->'relation_ids'->>0)::bigint;
     assert r.predicate = 'same_as' and r.status = 'proposed', 'the relation landed proposed: ' || coalesce(r.status, 'none');
+    assert (v_out->'verdict'->>'confidence')::numeric = 0.7,
+        'with no settle_at the confidence is still kept, for choosing one (REM-1123): ' || (v_out->'verdict')::text;
     assert r.src = (select v::uuid from ids where k = 'b1') and r.dst = v_a1::uuid, 'from B''s claim to A''s';
     assert (select actor_kind from claims.tx where id = r.tx) = 'agent', 'asserted as the agent';
     assert (aiq.complete_judgement(v_id, jsonb_build_object('decision', 'relate', 'target', v_a1, 'predicate', 'same_as',
