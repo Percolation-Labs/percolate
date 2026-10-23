@@ -678,7 +678,7 @@ shared-memory snapshot from a roadmap item into a requirement (§2.3).
 | I1 | CSR adjacency snapshot | **SAFE**, ships | linear, 57 B and ~1 µs per edge; but 225 MB *per backend* (§2.3) |
 | I2 | Reach sketches (HyperANF) | **SAFE**, ships | 2.9 s and 12 MB at 3.94M edges; median 6% error, p95 ~22% |
 | I3 | Community partition | **PARKED** | recovers 43 of 195 planted blocks; shatters 76% of the graph into fragments of ≤3 |
-| I4 | Pruned landmark labels | **PARKED** (effectively dropped) | does not finish at 394k edges; 200 labels/node with 89% of roots unprocessed |
+| I4 | Pruned landmark labels | **PARKED** (effectively dropped) | does not finish at 394k edges; 200 labels/node with 90% of roots unprocessed |
 | I5 | Fused vector+graph index | **RESEARCH**, not built | no measurement; §4.5 says what would produce one |
 | Q1 | Personalised PageRank | **SAFE**, ships | 93.3 / 115.0 ms, 0 over budget |
 | Q2 | Top-k shortest paths | **SAFE**, ships | 8.0 ms for the best path, 0 over budget; alternates are anytime |
@@ -828,8 +828,9 @@ Those are different lists, and the difference is the whole design.
 | "How big is this before I walk it?" | `aiq.graph_frontier`, **not a mode** | a planner's question, not a caller's. It belongs in whatever decides *whether* to run a query, not in the language for writing one |
 | "What is transitively linked at all?" | `aiq.graph_components` / `graph_induced`, **not modes** | bulk primitives called in a loop by code with ids from a previous call. A dialect is for questions written in words |
 
-**Nine modes, six modifiers.** `brief.md` §2 set the budget at seven and six,
-and it has been spent twice — on `RELEVANCE` and `PATH` — with no new modifiers
+**Nine modes, six modifiers, when these two landed.** `brief.md` §1.1 set the
+budget at seven and six (`LAKE` has since made the modes ten, and §1.1 keeps
+that count), and it was spent twice here — on `RELEVANCE` and `PATH` — with no new modifiers
 either time, because `DEPTH`, `TYPE` and `LIMIT` already meant here what they
 mean on `GRAPH`. The test for spending it again is the one in the table: a
 question asked constantly, that generated SQL gets wrong quietly. Not "we have
@@ -848,7 +849,8 @@ it is what makes the refusals teachable rather than arbitrary:
 
 `RELEVANCE "x" DEPTH 2` is refused, and the error is the mode's argument in one
 line: *it ranks by how much score reaches a node, not by how many hops away it
-is.* `PATH "x"` is refused too — one name is neither a route nor a connecting
+is* — and it names `GRAPH "x" DEPTH n` as the bounded walk the caller was
+reaching for (`extension/percolate_parser/src/lib.rs`). `PATH "x"` is refused too — one name is neither a route nor a connecting
 subgraph, and whoever wrote it wanted `GRAPH` or `RELEVANCE`.
 
 ## 9b. What ships, and how it is called
@@ -886,9 +888,8 @@ one — §9 is the covering argument and the test it applies. The modes go from
 seven to nine; **the modifiers stay at six**, because `DEPTH`, `TYPE` and
 `LIMIT` already mean here exactly what they mean on `GRAPH`.
 
-`DEPTH` is refused, and the refusal is the mode's whole argument in one error
-message: *it ranks by how much score reaches a node, not by how many hops away
-it is.* A caller who writes it is reaching for `GRAPH`, and the error says so.
+`DEPTH` on `RELEVANCE` is refused; §9 gives the refusal and why it is the
+mode's argument.
 
 Three things the dispatch does that the SQL wrapper does not, all of them
 because the dialect's envelope is a contract:
@@ -912,13 +913,14 @@ one costs, because every one of them crosses the extension boundary.
 
 ## 10. Promoting a parked proposal
 
-The three parked items are parked on a number, and the rule is the same as
+The two parked items (I3, I4) are parked on a number, and the research item
+(I5) is held to the number that would settle it. The rule is the same as
 `brief.md` §3.5's core-versus-extension discipline: **a proposal moves when it beats its
 number and something needs it, never because it is interesting.**
 
 | Parked | Beats its number when |
 |---|---|
-| Community partition (I3) | ≥80% of planted blocks recovered at ≥0.4 modularity on `generate_blocks`, cost linear to 4M edges — i.e. Leiden, or LPA with a size constraint and consolidation |
+| Community partition (I3) | beats connected components plus a local repair pass on the consumer's paired fixtures (F1 0.895, §4.3) — the bar that replaced ≥80% of planted blocks at ≥0.4 modularity — with cost linear to 4M edges |
 | Landmark labels (I4) | specified as a *bounded* index answering an upper bound from a few hundred hub landmarks, with the bound labelled — a different contract, not this one tuned |
 | Fused vector+graph (I5) | fused-search recall beats RRF over the two separate indexes on a query set with known answers, and one incremental insert at 1M nodes is affordable |
 
@@ -1060,17 +1062,16 @@ When something on this side needs the notion, that paragraph is why it will be a
 declared boolean rather than a computed score.
 
 **The resolution ledger, with a run id and a canonical projection.** Three of
-the eleven asks were additions to `node_resolutions`. The finding that matters
-more than any of them: **`node_resolutions` is specified in `graph-identity.md`
-and is not built** — four mentions in prose, zero in SQL. D11 is a design
-commitment with no implementation behind it, which is worth knowing before
-anyone plans around it.
-
-That turns the asks from additions into "build the ledger, with these two
-properties from the start", which is better scoped and should be done once:
+the eleven asks were additions to `node_resolutions`. When the request was
+triaged the ledger was specified in `graph-identity.md` and not yet in SQL; it
+is built now (`aiq.node_resolutions`, `aiq.resolve_nodes`,
+`aiq.unresolve_node` and `aiq.node_current`, `schema.sql` §6b, asserted by
+`dev/tests/query/04-graph-identity.sql` — `graph-identity.md`, "Resolution
+ledger"). Neither of these two properties is in it:
 
 - **`run_id`** on each resolution, identifying the pass that produced it.
-  `decided_by` already records the resolver *version*; `run_id` distinguishes
+  There is no such column; `evidence` jsonb can carry a run, unindexed and
+  unenforced. `decided_by` already records the resolver *version*; `run_id` distinguishes
   two passes by the same version at different thresholds, which is what makes a
   pass revertible as a unit and "what changed between run N and N+1" a query
   rather than a reconstructive diff.
@@ -1078,11 +1079,13 @@ properties from the start", which is better scoped and should be done once:
   path compression per query. `node_resolutions` is a forest and every read path
   needs its closure; each consumer writing its own recursive CTE is how a second
   source of truth starts. Same argument D6 makes for projecting nodes at write
-  time, one level up.
+  time, one level up. `aiq.node_current` is one shared closure, so consumers no
+  longer each write their own, but it is a recursive view computed on every
+  read, not a maintained projection.
 
-It stays on the roadmap because the identity ledger is not a table to design
+Both stay on the roadmap because the identity ledger is not a table to design
 against a single consumer, and this request is currently the only thing asking
-for it. Resolution stays with the consumer meanwhile — which their own numbers
+for them. Resolution stays with the consumer meanwhile — which their own numbers
 say is nearly free: on their fixtures, not merging at all scores 0.605 and a
 tuned merge heuristic scores 0.608, while over-merging drives it to 0.021. The
 asymmetry is the whole argument for D11 and it is worth having in this document:

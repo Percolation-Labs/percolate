@@ -14,8 +14,13 @@
 > somebody watching it once. Both fixtures now ship
 > (`dev/init/04-graph-sample.sql`, `dev/init/05-corpus-sample.sql` — the
 > latter with literal vectors, so the retrieval modes need no embedding
-> server to be reproducible), and all eight modes plus the SQL escape hatch
-> are executed by `dev/tests/query/02`–`09` against them.
+> server to be reproducible), and the modes and the SQL escape hatch are
+> executed by `dev/tests/query/` against them.
+>
+> **The server these updates name has changed.** Both were written while the
+> target was a PostgreSQL 19 beta with SQL/PGQ. SQL/PGQ left 19 before GA, the
+> extension no longer declares a property graph, and it is supported on
+> PostgreSQL 19, the only major the gate runs (§3, `specs/postgres-versions.md`).
 >
 > Running the whole surface rather than the happy path changed this
 > document in several places, each marked where it applies. The two worth
@@ -82,17 +87,19 @@ database.
 **Three properties follow, and they are requirements rather than nice-to-haves:**
 
 - **The dialect must stay small enough to fit in a prompt.** Seven modes and
-  six modifiers was the budget, and it has now been spent twice: `RELEVANCE`
-  and then `PATH` (§3.7, and `graph-algorithms.md` §9) make it **nine**, still
-  with six modifiers, because both reuse `TYPE`, `DEPTH` and `LIMIT` rather
-  than inventing anything.
+  six modifiers was the budget, and it has now been spent three times:
+  `RELEVANCE` and then `PATH` (§3.7, and `graph-algorithms.md` §9), which
+  reuse `TYPE`, `DEPTH` and `LIMIT` rather than inventing anything, and then
+  `LAKE` (`world-model-ingestion/lake.md`) make it **ten**.
 
-  **The count is nine, and `p8_query_grammar()` is what settles it** — this
-  document had said seven, eight and nine in three places within a day of the
-  two landing. Nine is every entry the grammar returns, `SQL` included; the
-  phrase "eight modes plus the SQL escape hatch" elsewhere in this file is the
-  same nine counted with `SQL` set aside, which is the only other convention
-  worth using and never worth mixing with this one in the same sentence. A mode
+  **The count is ten, and `p8_query_grammar()` is what settles it** — this
+  document had said seven, eight, nine and ten as the modes landed. Ten is
+  every entry the grammar returns, `SQL` included, and it is the ten `when`
+  branches of `aiq.query`'s dispatch (`schema.sql` §9); counted with `SQL` set
+  aside it is nine, the parser's `MODES` list
+  (`extension/percolate_parser/src/lib.rs`), which is the only other
+  convention worth using and never worth mixing with this one in the same
+  sentence. A mode
   is affordable when it is a question asked constantly that generated SQL gets
   wrong quietly; that is the test, not the count. This is the real argument against growing a mode
   per use case, and it is a different argument from §3.5's core-versus-extension
@@ -166,7 +173,7 @@ What's being replaced, deliberately:
 - **No REST layer** — REM is called from a CLI/Python/MCP process, not exposed as
   REST. This spec makes PostgREST the interface.
 
-## 3. Plain relational SQL, on PostgreSQL 18
+## 3. Plain relational SQL, nothing newer than PostgreSQL 18
 
 This section was "the PG19-native direction". Postgres 19's betas shipped
 **SQL/PGQ** (`CREATE PROPERTY GRAPH` + `GRAPH_TABLE`), a graph pattern-matching
@@ -175,7 +182,8 @@ depth 1 compiled to it. SQL/PGQ was withdrawn from PostgreSQL 19 before GA
 (October 2026). Because the property graph was only ever a view over tables
 modelled relationally from day one, removing it cost one query: depth 1 is now
 the same join the reverse direction already used (`schema.sql` §5). Nothing in
-the extension needs a server newer than 18.
+the extension needs a server newer than 18; the supported server is still 19,
+the only major the gate runs (`specs/postgres-versions.md`).
 
 So the modes compile to:
 
@@ -185,19 +193,19 @@ So the modes compile to:
 | `FUZZY LOOKUP "text"` | `pg_trgm` trigram similarity on the same index (subsumes REM's `FUZZY` mode) |
 | `GRAPH "key" DEPTH 1 [TYPE relation]` | One indexed join over `aiq.edges_current` in each direction (`idx_edges_src`, `idx_edges_dst`). The seed key is resolved **exactly** (canonical, then short, then alias) and the answer reports the node it walked in a `seed` object; an unresolvable key comes back with `did_you_mean` and an ambiguous one with `candidates`, rather than either being guessed. `DEPTH` is bounded at 5 in the dialect — "unbounded traversal" is a stated non-goal that nothing was enforcing. |
 | `GRAPH "key" DEPTH n>1 [TYPE relation]` | `WITH RECURSIVE` over the same edges, depth- and degree-capped. This was the plan even with SQL/PGQ, whose PG19 implementation rejected quantified path patterns (`-[e]->{1,n}`); depth 1 and the recursion are asserted to agree (`dev/tests/evals/scenarios.yaml` iter-01). |
-| `SEMANTIC "text" FROM <src>` | `pgvector` similarity search against the registered model's space (§10), **joined to the corpus named in `FROM`** — the join is what scopes the search to one corpus and what puts the consumer's row policies in the path, since the mode is `SECURITY INVOKER`. Without it the mode read every registered corpus out of a space that carries no policy of its own, and returned chunk ids and distances for content the caller could not read. |
+| `SEMANTIC "text" FROM <src>` | `pgvector` similarity search against the registered model's space (`schema.sql` §10), **joined to the corpus named in `FROM`** — the join is what scopes the search to one corpus and what puts the consumer's row policies in the path, since the mode is `SECURITY INVOKER`. Without it the mode read every registered corpus out of a space that carries no policy of its own, and returned chunk ids and distances for content the caller could not read. |
 | `RELEVANCE "key" [, "key" ...] [TYPE relation]` | **Compiled, and the one mode that is not a walk.** Personalised PageRank by local push in the `pgrx` extension, over the cached adjacency snapshot — so it returns an *order* rather than a frontier, which is the thing `DEPTH` cannot express. Takes a list because relatedness to a set of seeds is the question an agent holding several entities has. Ships switched off (`graph-algorithms.md` §11) and carries `exhausted` on its envelope, because it is the only budgeted mode. §3.7 is what calling it costs at the extension boundary. |
 | `SQL ...` | Passthrough RPC, `SECURITY INVOKER` + read-only — see below; escape hatch, same as REM. The correction below is executed by `dev/tests/query/07-sql-passthrough.sql`, which attempts nine write shapes (four of them past the leading-keyword check that the function's own comment calls "a courtesy, NOT the security boundary") and asserts the refusal. |
 
 **Ten modes now exist** behind a single
 `aiq.query(text, vector)` dispatch RPC (`schema.sql` §9), so a client posts one
 request shape to one endpoint — the count §1.1 settles, `SQL` included. For
-`LAKE` (the object-storage lake reader), the tenth, `aiq.query` returns a
+`LAKE` (the object-storage lake reader), `aiq.query` returns a
 plan and a lake worker runs it, because Postgres cannot reach object storage.
 Of the other nine: the five
-above; `SCHEMA` (§1.1, §14), which is the one answerable before you know
+above; `SCHEMA` (§1.1, `schema.sql` §13), which is the one answerable before you know
 anything; `PATH` (§3.7), which arrived with `RELEVANCE`; and two added after
-running the "R7" case (§11) — the dialect could not find a rare exact token that
+running the "R7" case (`schema.sql` §11) — the dialect could not find a rare exact token that
 appears verbatim in a chunk, because every existing mode searched keys or
 vectors, never document text:
 
@@ -206,7 +214,7 @@ vectors, never document text:
 | `TEXT "..." FROM <src>` | native `tsvector`/`ts_rank` over a generated column + GIN index. Lexical relevance — **not BM25**; `ts_rank` has its own length normalisation and no k1/b saturation. Chosen over `pg_search` because it is permissive-licensed and in-core; `pg_search` is BLOCKED on PG19 anyway. |
 | `SEARCH "..." FROM <src> [USING <model>]` | reciprocal rank fusion of `TEXT` + `SEMANTIC`. RRF rather than score blending, because `ts_rank` and cosine distance share neither scale nor direction, and no fixed normalisation survives a change of model or corpus. |
 
-`USING <model>` names the embedding space (§10) and is rejected on modes where
+`USING <model>` names the embedding space (`schema.sql` §10) and is rejected on modes where
 no vector is involved — silently dropping a modifier the caller wrote is how a
 query quietly means something else.
 
