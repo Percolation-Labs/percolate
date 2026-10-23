@@ -2557,7 +2557,12 @@ begin
     end if;
     if v_mode->>'mode' = 'settle' then
         perform claims.settle_challenge_done();
-        v_verdict := v_verdict || jsonb_build_object('settled', true, 'confidence', p_verdict->'confidence');
+        v_verdict := v_verdict || jsonb_build_object('settled', true);
+    end if;
+    -- The confidence is kept whenever one is given, settled or not: settle_at is chosen from the confidences
+    -- agents gave before it was set (claims.challenge_outcomes), and a relate's verdict is rebuilt above.
+    if j.kind = 'challenge' and p_verdict ? 'confidence' then
+        v_verdict := v_verdict || jsonb_build_object('confidence', p_verdict->'confidence');
     end if;
     -- A person deciding what the agent passed them keeps the agent's suggestion in the record.
     if j.kind = 'challenge' and j.verdict ? 'suggested' then
