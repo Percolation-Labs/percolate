@@ -588,7 +588,7 @@ found that two of these did something else.
   `/api/embeddings` takes one prompt, so `batch_request_template` is null for
   it and the worker loops — same receipt, same retry, same code path, N
   requests. Correct, and no faster than the fan-out it replaced.
-- **Nothing resolves a soft node.** Extraction lands *names*
+- **Soft nodes wait for the resolver.** Extraction lands *names*
   (`aiq.soft_nodes`); deciding that `Ravensworth` and `Ravensworth Precision`
   are one entity is `aiq.promote_soft_node`, called by the resolver (`percolate_core.resolve`)
   for proposals above its acceptance threshold. Until it has run over a corpus, the graph answers "what did documents name,

@@ -938,8 +938,8 @@ Three shapes, one land function. They differ only in what produces the graphs.
 
 | shape | fan-out | when |
 |---|---|---|
-| §6.1 one upload | **none** — a single `agent:` step | the ordinary ingest pipeline |
-| §6.2 one large document | `matrix` over windows | the document exceeds the model's context |
+| §6.1 one upload | **none** — a single `agent:` step | the design for an ordinary upload (not what shipped) |
+| §6.2 one document's chunks | `matrix` over `windows_to_index` | what the shipped ingest pipeline installs |
 | §6.3 a collection | `matrix` over documents | the bulk indexer |
 
 ### 6.1 In the ingest pipeline — one step, off by default
@@ -1165,16 +1165,14 @@ Recorded here rather than left to be discovered, in the order they will bite.
   Dana Reyes different roles is not a merge problem, it is a **disagreement**,
   and recording it as one belongs with `tradecraft.md`'s grading rather than in
   an upserter. Today the later document wins and the disagreement is lost.
-- **Cross-window relations are not recovered** (§1). This applies only to
-  documents large enough to window; at the default document granularity there is
-  no boundary to lose an edge across, which is the main reason §1 chose it.
-  Identity stitches endpoints; it does not infer an edge no window stated.
+- **Cross-window relations are not recovered** (§1). The shipped branch
+  extracts per chunk (§6.2), so every document with more than one chunk has
+  boundaries to lose an edge across — the loss §1 chose document granularity to
+  avoid. Identity stitches endpoints; it does not infer an edge no window stated.
 - **Nothing chooses between §6.1 and §6.2 automatically.** Whether a resource
   fits the model's context is a property of the resource, and
-  `install_ingest_workflow` installs one shape for the whole channel. Always
-  installing the windowing shape is the safe default — `windows_to_index`
-  returns a single row for a document that fits — and the cost is one extra
-  task per upload.
+  `install_ingest_workflow` installs one shape for the whole channel: today the
+  §6.2 matrix over chunks, whatever the document's size.
 - **A lake reference is not verified at write** (§4.3b). The dataset must exist;
   the `row_key` is taken on trust, because checking it means a DuckDB read from
   inside a Postgres function. A `mode = 'replace'` load is the case that

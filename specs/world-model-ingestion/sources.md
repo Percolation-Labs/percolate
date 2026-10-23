@@ -458,7 +458,7 @@ create table content.parsers (
     arg_types   text[] not null default '{}',
     media_types text[] not null default '{}',
     timeout_ms  int not null default 30000,
-    provided_by text,                   -- 'percolate' | 'percolate_coherence' | …
+    provided_by text,                   -- '<extension>' | …
     description text
 );
 ```
@@ -1227,12 +1227,12 @@ late:
 - §16.2's raw tier is exactly `content.files` with a different spelling —
   content-addressed bytes with a checksum. Keeping it on a filesystem forfeits
   dedup, RLS, and the `resources` join that `SEARCH`/`SEMANTIC` need.
-- **It blocks the consumer.** The claims consumer's first build gate is *every
-  claim reproduces its `span_text` from its `span_locator`*, and a claim
-  references `resources(id)`. Nothing pulled can be cited until fetched bytes
-  land as a resource. Separately, the consumer's `source_links` independence graph
-  is keyed on `channels(id)` — the emptier table — while the registrant, licence
-  and URL evidence that would populate it lives on `connectors`.
+- **It blocks the consumer.** A claims consumer needs every claim to reproduce
+  its quoted text from the stored source, and a claim references
+  `resources(id)`. Nothing pulled can be cited until fetched bytes land as a
+  resource. Separately, any independence graph keyed on `channels(id)` reads
+  the emptier table, while the registrant, licence and URL evidence that would
+  populate it lives on `connectors`.
 
 **The recommendation, not yet applied.** `connectors` is the declaration and
 `channels` is the lineage anchor: add `channels.connector_id → connectors(id)`,
@@ -1522,8 +1522,7 @@ off the code rather than assumed, because the assumption was wrong.
 ### 21.1 Today a scheduled fetch carries nobody's authority
 
 **It is an operator, not a person.** The caller it was gated for is an
-application's registered step function, `selfmodel.ingest_prose`, registered
-with `workflow.register_step_function('sm_prose', …)` and dispatched
+application's registered step function, dispatched
 through `workflow.call_step_function`. That path sets `workflow.current_run_id`
 and nothing else: it never sets `request.jwt.claims`. So the call reaches this
 schema with **no claims**, on the `worker` login, inside a definer context owned

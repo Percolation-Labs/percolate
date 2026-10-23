@@ -101,12 +101,12 @@ And the typed slots are things the generic tier cannot produce at all, because
 it does not know what the strings mean:
 
 ```
-court_ref   CR-2026-LDS-000000
+court_ref   CR-2026-XXX-000000
 company     EXAMPLE TRADING LIMITED
 company_no  00000000
-sic         46900- Non-specialised wholesale trade
-presented   21 July 2026
-petitioner  EXAMPLE FOODS LIMITED
+sic         00000- Example industry classification
+presented   1 January 2026
+petitioner  EXAMPLE CREDITOR LIMITED
 ```
 
 ### The unit is (source × document type), not source
@@ -245,8 +245,7 @@ create table extract.templates (
 template that stops filling is the same signal as a schema fingerprint change**,
 and it is the cheapest possible detector for a source quietly changing format.
 
-`authored_by` matters for the same reason `evidence_source` does in the axis
-corpus: a model-authored template that nobody checked is a different object from
+`authored_by` matters because a model-authored template that nobody checked is a different object from
 one a person wrote, and the difference should survive in the row.
 
 ---

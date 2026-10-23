@@ -4,7 +4,7 @@
 in `build-sql.py`'s `ORDER`, so `CREATE EXTENSION percolate` installs it.
 `core/percolate_core/lake/` is the worker, `lake.sql` and four `content.datasets` columns in `schema.sql` are
 the database half, a `LAKE` mode in the p8ql parser is how it is asked (§6a),
-and `dev/tests/content/e2e-lake.py` runs it end to end — 45 of 45 checks at the time, against PG19, MinIO and a Lakekeeper Iceberg
+and `dev/tests/content/e2e-lake.py` runs it end to end — every check passing at the time, against PG19, MinIO and a Lakekeeper Iceberg
 catalog, with a real `percolate lake serve` claiming real workflow steps. No
 compose file, chart or published image carries a lake worker or a catalog yet
 (§8).
@@ -332,7 +332,7 @@ docker run --rm --network p8lake -e LAKEKEEPER__PG_DATABASE_URL_{READ,WRITE}=…
   quay.io/lakekeeper/catalog:latest-main migrate        # then `serve` on :19181,
                                                         # bootstrap, one S3 warehouse "lake"
 PATH=core/.venv/bin:$PATH dev/reload.sh scratch_lake
-core/.venv/bin/python dev/tests/content/e2e-lake.py      # 40/40 at the time
+core/.venv/bin/python dev/tests/content/e2e-lake.py      # every check passed at the time
 ```
 
 Also run against the same tree: every `dev/tests` suite on `scratch_lake`

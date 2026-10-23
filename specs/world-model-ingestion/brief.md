@@ -555,7 +555,7 @@ well known, and not news. The analogue of the query is **concern**, so:
 > **attention = structural importance × reasons to worry**
 
 with importance damped, because attention must not be a popularity contest.
-Measured on the self-model, `ln(degree) × concerns` puts the 77-connection hub
+Measured on one project's graph, `ln(degree) × concerns` puts the 77-connection hub
 twelfth, behind objects with a quarter of its connections and three times the
 concerns.
 
