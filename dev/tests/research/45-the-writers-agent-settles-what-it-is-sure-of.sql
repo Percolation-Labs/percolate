@@ -18,6 +18,7 @@
 --   5. A's agent decides N1's challenge none at 0.9: settled, no relation.
 --   6. Overturns append: B disputes the settled same_as (both rows stay, the dispute is the reading, and A1 leaves
 --      B1's identity set), and A relates N1 same_as A1 after the agent said none.
+--   (Before 1: a fixture account's claim is not challenged, by the save's pass or the backfill.)
 --   7. claims.challenge_outcomes says who resolved each and what was overturned, in one query, and
 --      claims.challenge_report gives the backfill's shares: 3 challenges, 2 settled by the agent, 1 reached the
 --      person, 2 overturned; a claim's second place adds an occurrence, not a challenge.
@@ -161,6 +162,36 @@ reset role;
 insert into sp values ('same_n', '{"src": "Memory systems must note when each fact held", "dst": "Agent memory has to record when each fact became true",
     "slots": {"src": {"subject": "agent memory", "predicate": "records", "object": "when a fact held", "scope": "agents", "polarity": "positive", "modality": "normative"},
               "dst": {"subject": "agent memory", "predicate": "records", "object": "when a fact held", "scope": "agents", "polarity": "positive", "modality": "normative"}}}');
+
+-- A fixture account's work is never challenged (REM-659): C is flagged as one, and its private F1 is near A1, which
+-- C may read, so C would be asked about it. Neither the save's own pass nor the backfill asks, and the backfill does
+-- not keep offering it either.
+update rbac.users set fixture = true where id = '00000000-0000-4000-8000-0000000659c1';
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000659c1"}';
+set local role authenticated;
+do $$
+begin
+    insert into ids values ('rf', research.submit_package('{"schema_version": "0.1", "title": "Chal F", "visibility": "private", "edges": [],
+        "claims": [{"id": "F1", "kind": "Inference", "text": "Agent memory must record when each fact became true.", "source_ids": ["S1"]}],
+        "sources": [{"id": "S1", "title": "S", "url": "https://example.com/cf", "origin": "CF"}]}', null, 'rp-chal-f')->>'revision_id');
+end $$;
+reset role;
+reset request.jwt.claims;
+set local role worker;
+select pg_temp.drain('t_chal_659');
+reset role;
+do $$
+declare
+    v_wait jsonb := claims.challenge_waiting('chal-test-3d');
+begin
+    assert not exists (select 1 from aiq.judgements where addressee = '00000000-0000-4000-8000-0000000659c1'),
+        'a fixture account is asked nothing: ' || coalesce((select string_agg(evidence::text, '; ') from aiq.judgements
+                                                             where addressee = '00000000-0000-4000-8000-0000000659c1'), '');
+    assert not exists (select 1 from claims.challenged d join research.claims rc on rc.id = d.claim_row
+                        where rc.revision_id = (select v::uuid from ids where k = 'rf')), 'F1 is not recorded as asked';
+    assert (v_wait->>'asked')::int = 0 and coalesce((v_wait->>'waiting')::int, 0) = 0,
+        'and the backfill neither asks nor keeps offering it: ' || v_wait::text;
+end $$;
 
 -- The deployment lets the writer's agent settle at 0.8.
 select claims.set_challenge_settle('chal-test-3d', 0.8);
@@ -345,6 +376,16 @@ begin
     assert (v_rep->>'challenges')::int = 3 and (v_rep->>'occurrences')::int = 4 and (v_rep->>'settled_by_agent')::int = 2
        and (v_rep->>'reached_the_person')::int = 1 and (v_rep->>'overturned')::int = 2
        and (v_rep->>'still_waiting')::int = 0, 'the report: ' || v_rep::text;
+end $$;
+
+-- A fixture's challenges leave the report even when they were asked before it was flagged (REM-659): with A
+-- flagged, P1, N1 and B1's second place (all A's) go, and only B1 in B's own work is left.
+update rbac.users set fixture = true where id = '00000000-0000-4000-8000-0000000659a1';
+do $$
+declare
+    v_rep jsonb := claims.challenge_report('chal-test-3d');
+begin
+    assert (v_rep->>'challenges')::int = 1 and (v_rep->>'occurrences')::int = 1, 'a fixture''s are not counted: ' || v_rep::text;
 end $$;
 
 rollback;
