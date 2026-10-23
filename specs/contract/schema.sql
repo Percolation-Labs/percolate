@@ -624,7 +624,6 @@ declare
         -- A deployment's taxonomies (REM-1144); their duals and its resources' links are aiq.edges rows.
         'claims.tags',
         'workflow.definitions',
-        'workflow.dry_runs',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',

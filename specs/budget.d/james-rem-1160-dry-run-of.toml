@@ -1,0 +1,6 @@
+why = """REM-1160 (Sirsh, M-20261023-164249-a2f2: the fewest tables that represent the thing). workflow.dry_runs held
+only a shadow run, the run it estimates and a start time the run already has. A dry run is a workflow run, so the
+pair is workflow.runs.dry_run_of, written by the same definer; specs/migrations/0.2.30--0.2.31.sql moves the rows."""
+
+[removed]
+tables = ["workflow.dry_runs"]

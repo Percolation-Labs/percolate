@@ -126,7 +126,6 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('research','endorsement_withdrawals','natural',
   'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
- ('workflow','dry_runs','natural','a sidecar keyed by workflow.runs(id): the run a shadow dry run estimates (REM-1125)'),
  ('workflow','run_estimates','natural','a sidecar keyed by workflow.runs(id) and a step key, one row per step and one for the run (REM-1125)'),
  ('claims','execution_receipts','natural','one immutable sidecar per assertion transaction; run and task ids are detached for retention (REM-590)'),
  ('claims','execution_inputs','natural','one captured hash per transaction and revision, retaining an unavailable-input marker after erasure (REM-590)'),
