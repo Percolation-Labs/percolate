@@ -32019,15 +32019,16 @@ begin
     -- The function's own signature. Registered with no argument types, which
     -- step_function_is_runnable refuses for a function that takes two, this
     -- schedule could not be installed at all (found by REM-1163's test).
-    -- `since` comes from the run's input when given; a scheduled run gives none,
-    -- so dream reads its watermark.
+    -- `since` is null, so a run reads its watermark: a caller who wants another
+    -- window calls aiq.dream(since) directly. (A {{run.since}} template that
+    -- resolves to nothing fails the step rather than passing null.)
     perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
     perform workflow.define_yaml($y$
 name: dream
 steps:
   - id: reconcile
-    sql: {function: dream, args: ["{{run.since}}", dream]}
+    sql: {function: dream, args: [null, dream]}
 $y$);
     select id into v_id from workflow.schedules where name = 'dream';
     if v_id is null then
