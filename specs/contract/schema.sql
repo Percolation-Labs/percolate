@@ -622,6 +622,7 @@ declare
         -- extension is outside the dump, at the cost of nothing.
         'claims.settling',
         'workflow.definitions',
+        'workflow.dry_runs',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',

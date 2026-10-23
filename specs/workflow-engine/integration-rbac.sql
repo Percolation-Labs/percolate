@@ -1820,13 +1820,16 @@ revoke execute on function workflow.decide_run(uuid, numeric, bigint, numeric, b
 -- REM-1125 writes the run's estimate when the run is created (from history) and rewrites it after the dry run
 -- (sum_run_estimate); each time, the run row decides. Its totals are NULL while any step has no basis, which is
 -- an incomplete estimate; 'dry_run_unbounded' totals are a floor ("at least"), which no limit can pass.
+-- Complete means every step has a basis, not every total a number: a worker step estimated from its shape has no
+-- known time, and nothing will ever supply one, so waiting for it held such a run awaiting_estimate for good. An
+-- unknown time is judged as an unpriced cost is -- over a limit that sets it, so a person decides.
 create or replace function workflow.decide_run_on_estimate() returns trigger as $$
 begin
     if new.step_key is null then
         perform workflow.decide_run(new.run_id, new.est_cost_usd,
                                     new.est_input_tokens + new.est_output_tokens, new.est_wall_seconds,
                                     new.basis <> 'none' and new.est_input_tokens is not null
-                                    and new.est_output_tokens is not null and new.est_wall_seconds is not null,
+                                    and new.est_output_tokens is not null,
                                     new.basis <> 'dry_run_unbounded');
     end if;
     return null;
