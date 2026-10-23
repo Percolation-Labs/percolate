@@ -1,7 +1,7 @@
 # Scale — measured, and the two things it found
 
 **Every number in this file was produced by running it**, and every one is
-reproducible with the scale harness (not yet published in this repository). That is the
+reproducible with [`dev/scale/run.sh`](../../dev/scale/README.md). That is the
 rule for this document specifically: a scaling claim with no measurement behind
 it does not belong here, because the failure class this file exists to catch is
 *designs that are correct in reasoning and wrong under load*.
@@ -45,7 +45,7 @@ matches `status = 'ready'`, so the index offers no selectivity, and the planner
 correctly abandons it for a sequential scan plus a sort of the entire ready set —
 in order to return twenty rows.
 
-Two runs of the scale harness against a freshly created database, changing
+Two runs of `dev/scale/run.sh` against a freshly created database, changing
 nothing but the index:
 
 ```
@@ -93,7 +93,7 @@ this is the same gap seen from the other side, and it is no longer cheap.
 
 **No test in this repo had ever made a queue deep.** The `dev/tests/` fixtures
 are tens of rows, which is right for asserting behaviour and exactly wrong for
-finding this. That is what the scale harness is for, and why it holds that a probe
+finding this. That is what `dev/scale/` is for, and why its README says a probe
 that passes on a hundred rows will pass on the day it should have failed.
 
 ## Finding 2 — the autoscaler's probe has no index of its own
@@ -159,7 +159,7 @@ against them.
 
 **1. The claim path must not sort.** The index and the `ORDER BY` are one
 decision, and changing either without the other is a two-order-of-magnitude
-regression that no functional test will catch. The harness's claim probe asserts
+regression that no functional test will catch. `dev/scale/02-claim.sql` asserts
 the *plan*, not the time: a `Seq Scan on tasks` or an `external merge Disk` in
 that output is the failure.
 
@@ -171,7 +171,7 @@ table is not.** The task table only grows, so every index the hot paths depend o
 is partial on a live status. That is also what keeps them small: the claim index
 is 1.3 MB for 200k ready tasks against a 66 MB table, and 6.4 MB at 1M.
 
-**4. Depth is the test condition.** A probe added to the scale harness defaults to a
+**4. Depth is the test condition.** A probe added to `dev/scale/` defaults to a
 deep queue. Both defects above are invisible at fixture scale, and a shallow
 probe would have reported health.
 
@@ -223,8 +223,8 @@ notification, and that is a failure this design currently cannot have.
 
 Everything above is single-node compose, so the same probes were run on a
 three-node `kind` cluster — database pinned to the control plane, claimers barred
-from it by node affinity, so **every claim crosses a node boundary**, using the
-scale harness's kind variant (not yet published).
+from it by node affinity, so **every claim crosses a node boundary**. The harness is
+[`dev/scale/kind/`](../../dev/scale/kind/README.md).
 
 Same bounded methodology on both sides, 200,000 ready tasks, 2 pods × 4
 connections:
