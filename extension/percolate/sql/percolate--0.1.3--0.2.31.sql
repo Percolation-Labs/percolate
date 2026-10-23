@@ -253,7 +253,10 @@ begin
         drop table workflow.dry_runs;
     end if;
     -- Its declaration goes with it: identity/declarations.sql no longer lists it, and a fresh install has no row.
-    delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
+    -- An upgrade from before table_kinds existed (0.1.6, say) runs this hop before the replay creates it.
+    if to_regclass('percolate.table_kinds') is not null then
+        delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
+    end if;
 end $$;
 
 -- ============================================================
