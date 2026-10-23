@@ -19666,6 +19666,30 @@ $$ language plpgsql stable;
 
 drop function if exists aiq.semantic_in(vector, text, int);
 drop function if exists aiq.semantic_in(text, vector, text, int);
+-- EXACT OR THROUGH THE INDEX (REM-1146). One model space holds every source's vectors, so a small source is a
+-- minority of the graph an HNSW scan walks, and at pgvector's default ef_search (40) the index returns an
+-- approximation of its nearest rows. Measured on LongMemEval S in Percolate (about 37k vectors in one space): the
+-- 4,128 questions came back with a top 5 different from the exact top 5 for 25 of 90 queries (0 of 90 ranked
+-- exactly), and ranking them exactly cost 2.8 ms p50 against 3.0 through the index. Over 32k unscoped chunks exact cost 19.8 ms against 1.2,
+-- so a large corpus keeps the index. The decision counts what the CALLER can read of the (scoped) source, bounded
+-- at the threshold so the count never costs more than the exact ranking it decides on, and it is a count rather
+-- than pg_class.reltuples so the same rows always get the same answer.
+-- It takes the source's registered NAME, never a table: the table comes from aiq.semantic_sources.
+create or replace function aiq.semantic_ranks_exactly(p_source text, p_scope jsonb default null,
+                                                      p_threshold int default 20000)
+returns boolean as $$
+declare n int; v_table text;
+begin
+    select source_table into v_table from aiq.semantic_sources where name = p_source;
+    if v_table is null then
+        raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source;
+    end if;
+    execute format('select count(*) from (select 1 from %s c limit $1) x', aiq.scoped_source(v_table, p_scope))
+       into n using greatest(p_threshold, 0) + 1;
+    return n <= p_threshold;
+end;
+$$ language plpgsql stable security invoker;   -- counts what the caller may read
+
 create or replace function aiq.semantic_in(
     p_source text, p_query vector, p_model text default null, p_limit int default 10,
     p_scope jsonb default null
@@ -19769,6 +19793,19 @@ begin
     -- vector_dims() above has loaded the module, so current_setting() answers
     -- and an end-user role may set it -- through aiq.set_scan_order, since the
     -- caller no longer holds set_config itself.
+    -- A small or scoped corpus is ranked exactly (aiq.semantic_ranks_exactly above): `+ 0` keeps the planner off
+    -- the HNSW index, and the chunk id breaks a tie the same way every time.
+    if aiq.semantic_ranks_exactly(src.name, p_scope) then
+        return query execute format(
+            'select e.chunk_id, (e.embedding <=> $1)::float8, %L
+             from aiq.%I e
+             join %s c on c.id = e.chunk_id
+             order by (e.embedding <=> $1) + 0, e.chunk_id limit $2', m.name, v_tbl,
+             aiq.scoped_source(src.source_table, p_scope))
+            using p_query, p_limit;
+        return;
+    end if;
+
     v_iter := current_setting('hnsw.iterative_scan', true);
     if v_iter is not null and v_iter <> 'strict_order' then
         perform aiq.set_scan_order('strict_order');
@@ -19911,11 +19948,18 @@ begin
             using errcode = 'feature_not_supported',
                   hint = 'as the caller, its row security reads every row before the text index (REM-519)';
     end if;
+    -- ANY OF THE WORDS, ranked by how many and how densely (REM-1145). plainto_tsquery ANDs every word, so a
+    -- question matched only a chunk holding all of them: on LongMemEval S through Percolate it found every source
+    -- for 3 of 39 held-out questions within 50 reads, and aiq.search's hybrid came back as its semantic half alone.
+    -- The same words ORed, ranked by ts_rank normalised by document length (1 + log length), were chosen on the
+    -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
+    -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
     return query execute format(
-        'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
-         from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
-         order by ts_rank(c.search_tsv, plainto_tsquery(%L, $1)) desc limit $2',
-        s.content_col, s.regconfig, aiq.scoped_source(s.source_table, p_scope), s.regconfig, s.regconfig)
+        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
+         select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
+           from %s c, q where c.search_tsv @@ q.t
+          order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
+        s.regconfig, s.content_col, aiq.scoped_source(s.source_table, p_scope))
         using p_query, p_limit;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -21489,6 +21533,7 @@ grant execute on function aiq.graph_walk(uuid, int, text, int, timestamptz) to a
 grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
     to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int, jsonb) to authenticated;
+grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authenticated;
 -- semantic_in's one setting, set as the owner because its caller holds no
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
@@ -33071,7 +33116,7 @@ grant execute on function aiq.texts_to_embed(text, text, int) to worker;
 -- before the step names it, because a rate_key with no row is never claimed
 -- by anyone (see the graph branch of install_ingest_workflow below).
 create or replace function aiq.install_source_embed_workflow(
-    p_sources     text[]  default array['claims', 'questions'],
+    p_sources     text[]  default array['claims', 'questions', 'tags'],
     p_name        text    default 'embed_sources',
     p_queue       text    default 'ingest',
     p_rate_key    text    default null,
@@ -40756,10 +40801,7 @@ end $$;
 -- them. THE BACKFILL is one call, as an operator: `select aiq.queue_source_embedding('backfill')`, which starts a
 -- run that embeds every claim and question the default model's space lacks (up to 20,000 of each per run), and
 -- `select * from aiq.source_embedding_status()` says what is left.
-do $$
-begin
-    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions']);
-end $$;
+-- Installed in claims/tags.sql, once the tags source it also embeds is registered (REM-1144).
 
 
 -- ============================================================
@@ -40828,6 +40870,7 @@ create table if not exists claims.resource_links (
     tag_id      uuid references claims.tags(id) on delete cascade,
     question_id uuid references claims.questions(id),
     claim_id    uuid references claims.claims(id),
+    -- NULL: the decider asserted the link without a probability (a person, a rule), which a search reads as certain.
     p           real check (p between 0 and 1),
     decider     text not null check (length(decider) between 1 and 200),
     tx          bigint not null references claims.tx(id),
@@ -40869,6 +40912,14 @@ begin
                content_col  = excluded.content_col,
                shipped = excluded.shipped or semantic_sources.shipped;
     end if;
+end $$;
+
+-- The workflow that gives claims, questions and tags their vectors (REM-662), installed with the extension and on
+-- every upgrade. claims/schema.sql describes it; it is installed here because the tags source it also embeds is
+-- registered just above, and an install refuses a source that is not.
+do $$
+begin
+    raise notice '%', aiq.install_source_embed_workflow(array['claims', 'questions', 'tags']);
 end $$;
 
 -- ------------------------------------------------------------
@@ -40919,6 +40970,17 @@ begin
       join claims.tags p on p.source = p_source and p.source_version = p_version and p.key = x->>'parent'
      where c.source = p_source and c.source_version = p_version and c.key = x->>'key'
        and x->>'parent' is not null and c.parent_id is distinct from p.id;
+    -- A hierarchy is a tree: a parent chain that returns to its start is refused, with the whole call.
+    if exists (
+        with recursive up(start, id, depth) as (
+            select c.id, c.parent_id, 1 from claims.tags c
+             where c.source = p_source and c.source_version = p_version and c.parent_id is not null
+            union all
+            select u.start, p.parent_id, u.depth + 1 from up u join claims.tags p on p.id = u.id
+             where p.parent_id is not null and u.id <> u.start and u.depth < 1000)
+        select 1 from up where id = start) then
+        raise check_violation using message = 'a taxonomy''s parents form a cycle; a hierarchy is a tree';
+    end if;
     if exists (select 1 from jsonb_array_elements(p_tags) x
                 where x->>'parent' is not null
                   and not exists (select 1 from claims.tags p where p.source = p_source
@@ -40949,8 +41011,9 @@ begin
             if found then v_pairs := v_pairs + 1; end if;
         end loop;
     end loop;
-    if v_qs > 0 and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
-        perform aiq.queue_source_embedding('a taxonomy''s seeded questions');
+    -- New tags and new questions both wait for vectors; one run of the source workflow embeds both.
+    if (v_tags > 0 or v_qs > 0) and to_regprocedure('aiq.queue_source_embedding(text,text)') is not null then
+        perform aiq.queue_source_embedding('a taxonomy''s tags and seeded questions');
     end if;
     return jsonb_build_object('tags', v_tags, 'questions_minted', v_qs, 'duals', v_pairs,
                               'phrasings_skipped', v_skip, 'tx', t);
@@ -41098,18 +41161,18 @@ begin
          where p_scope is null or r.metadata @> p_scope
     ),
     via_tags as (
-        select distinct on (l.resource_id) l.resource_id, h.w * l.p as s,
+        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
                jsonb_build_array(jsonb_build_object('via', 'tag', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from tag_hits h join claims.resource_links l on l.tag_id = h.id and l.p >= p_min_p
+          from tag_hits h join claims.resource_links l on l.tag_id = h.id and coalesce(l.p, 1) >= p_min_p
           join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * l.p desc
+         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
     ),
     via_questions as (
-        select distinct on (l.resource_id) l.resource_id, h.w * l.p as s,
+        select distinct on (l.resource_id) l.resource_id, h.w * coalesce(l.p, 1) as s,
                jsonb_build_array(jsonb_build_object('via', 'question', 'id', h.id, 'sim', h.w, 'p', l.p)) as path
-          from question_hits h join claims.resource_links l on l.question_id = h.id and l.p >= p_min_p
+          from question_hits h join claims.resource_links l on l.question_id = h.id and coalesce(l.p, 1) >= p_min_p
           join in_scope i on i.id = l.resource_id
-         order by l.resource_id, h.w * l.p desc
+         order by l.resource_id, h.w * coalesce(l.p, 1) desc, h.id
     ),
     tags_ranked as (
         select v.resource_id, v.path, row_number() over (order by v.s desc, v.resource_id)::int as r from via_tags v
@@ -43035,6 +43098,9 @@ declare
         'aiq.schema_workflow(text)',
         'aiq.search(text,text,vector,text,integer,integer,jsonb)',
         'aiq.semantic_in(text,vector,text,integer,jsonb)',
+        -- The table it counts comes from aiq.semantic_sources by the source's name, and the scope goes through
+        -- aiq.scoped_source, which checks its keys and passes the value as %L; the limit is bound (REM-1146).
+        'aiq.semantic_ranks_exactly(text,jsonb,integer)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         -- One identifier, and it is never a caller's. claims.candidates reads

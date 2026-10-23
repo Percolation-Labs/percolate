@@ -360,6 +360,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.graph_reach_build','integer,integer','graph-algorithms.md §4.2: the sketch build, a scheduled task not a query'),
 ('ai-query-layer','function','aiq.enable_graph_algorithms','name,boolean','graph-algorithms.md §11: shipped experimental means present, inert, and openable in one call'),
 ('ai-query-layer','function','aiq.semantic_in','text,vector,text,integer,jsonb','§10: SEMANTIC, model-scoped -- source-qualified, per schema.sql'),
+('ai-query-layer','function','aiq.semantic_ranks_exactly','text,jsonb,integer','whether SEMANTIC ranks a registered source exactly or through the index: the caller''s readable (scoped) rows, counted to a threshold (REM-1146)'),
 ('ai-query-layer','function','aiq.set_scan_order','text','§10: the one setting semantic_in changes (hnsw.iterative_scan), set as the owner because a caller no longer holds set_config -- user-rbac/roles.sql §6'),
 ('ai-query-layer','function','aiq.lexical','text,text,integer,jsonb','§11: TEXT'),
 ('ai-query-layer','function','aiq.search','text,text,vector,text,integer,integer,jsonb','§11: SEARCH / RRF'),

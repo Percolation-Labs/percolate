@@ -3805,6 +3805,30 @@ $$ language plpgsql stable;
 
 drop function if exists aiq.semantic_in(vector, text, int);
 drop function if exists aiq.semantic_in(text, vector, text, int);
+-- EXACT OR THROUGH THE INDEX (REM-1146). One model space holds every source's vectors, so a small source is a
+-- minority of the graph an HNSW scan walks, and at pgvector's default ef_search (40) the index returns an
+-- approximation of its nearest rows. Measured on LongMemEval S in Percolate (about 37k vectors in one space): the
+-- 4,128 questions came back with a top 5 different from the exact top 5 for 25 of 90 queries (0 of 90 ranked
+-- exactly), and ranking them exactly cost 2.8 ms p50 against 3.0 through the index. Over 32k unscoped chunks exact cost 19.8 ms against 1.2,
+-- so a large corpus keeps the index. The decision counts what the CALLER can read of the (scoped) source, bounded
+-- at the threshold so the count never costs more than the exact ranking it decides on, and it is a count rather
+-- than pg_class.reltuples so the same rows always get the same answer.
+-- It takes the source's registered NAME, never a table: the table comes from aiq.semantic_sources.
+create or replace function aiq.semantic_ranks_exactly(p_source text, p_scope jsonb default null,
+                                                      p_threshold int default 20000)
+returns boolean as $$
+declare n int; v_table text;
+begin
+    select source_table into v_table from aiq.semantic_sources where name = p_source;
+    if v_table is null then
+        raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source;
+    end if;
+    execute format('select count(*) from (select 1 from %s c limit $1) x', aiq.scoped_source(v_table, p_scope))
+       into n using greatest(p_threshold, 0) + 1;
+    return n <= p_threshold;
+end;
+$$ language plpgsql stable security invoker;   -- counts what the caller may read
+
 create or replace function aiq.semantic_in(
     p_source text, p_query vector, p_model text default null, p_limit int default 10,
     p_scope jsonb default null
@@ -3908,6 +3932,19 @@ begin
     -- vector_dims() above has loaded the module, so current_setting() answers
     -- and an end-user role may set it -- through aiq.set_scan_order, since the
     -- caller no longer holds set_config itself.
+    -- A small or scoped corpus is ranked exactly (aiq.semantic_ranks_exactly above): `+ 0` keeps the planner off
+    -- the HNSW index, and the chunk id breaks a tie the same way every time.
+    if aiq.semantic_ranks_exactly(src.name, p_scope) then
+        return query execute format(
+            'select e.chunk_id, (e.embedding <=> $1)::float8, %L
+             from aiq.%I e
+             join %s c on c.id = e.chunk_id
+             order by (e.embedding <=> $1) + 0, e.chunk_id limit $2', m.name, v_tbl,
+             aiq.scoped_source(src.source_table, p_scope))
+            using p_query, p_limit;
+        return;
+    end if;
+
     v_iter := current_setting('hnsw.iterative_scan', true);
     if v_iter is not null and v_iter <> 'strict_order' then
         perform aiq.set_scan_order('strict_order');
