@@ -622,6 +622,8 @@ declare
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.run_estimates',
+        -- A deployment's run policies (REM-1126) are its own decisions, like its queue config.
+        'workflow.run_policies',
         'workflow.runs',
         'workflow.schedules',
         'workflow.task_dependencies',

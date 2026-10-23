@@ -489,7 +489,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.lint_spec','jsonb','§25: a p8ql string that cannot parse is refused at authoring time, not at 3am'),
 ('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
 -- A step may write its own SQL, and the allow-list is a policy rather than the
--- only door. Every one of these is a promise made in YAML.md and roadmap.md §6.
+-- only door. Every one of these is a promise made in workflow-engine/YAML.md.
 ('workflow-engine','function','workflow.run_sql','text,boolean,integer,jsonb','a step carries its own statement, read-only unless it declares otherwise'),
 ('workflow-engine','function','workflow.sql_policy','','open or registered -- the lockdown is a setting, not a rebuild'),
 ('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','the escaping form: a {{template}} becomes a quoted literal. Kept for the row-source statement'),
@@ -871,6 +871,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','function','rbac.revoke_all_sessions','','spec.md §4.3: sign out everywhere, the control that matters after a leak'),
 ('workflow-engine','function','workflow.cancel_run','uuid','spec.md §4: a caller stops their own run'),
 ('workflow-engine','function','workflow.signal_task','uuid,text,jsonb','§16: the human-in-the-loop path -- a task waits for a signal from outside'),
+('workflow-engine','function','workflow.approve_run','uuid','REM-1126: a person lets a run over its policy''s limits start, as signal_task answers a waiting step'),
+('workflow-engine','function','workflow.raise_budget','uuid,jsonb','REM-1126: a person raises the cap a run paused at, and it resumes'),
+('workflow-engine','function','workflow.run_cost','uuid','REM-1126: one status line per run -- spent, estimated, cap'),
 ('workflow-engine','function','workflow.drain_sql_steps','uuid,integer','the in-database executor, so a pure-SQL workflow needs no worker at all'),
 ('workflow-engine','function','workflow.p8ql','text','USAGE.md: the query entry point'),
 ('workflow-engine','function','workflow.p8ql','text,jsonb','the same entry point with a caller-supplied embedding'),
