@@ -1140,6 +1140,7 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 ('workflow.runs_api', 'cancel_requested', 'internal', 'engine flag; cancellation is an action, not a field to poll'),
 -- The key a run or schedule was started with (REM-171). execute_for narrows every step by it; the owner reads
 -- started_actor and created_actor, and an org member reading a shared run has no use for the owner's key id.
+('workflow.runs_api', 'dry_run_of',       'internal', 'engine linkage of a dry run to the run it estimates (REM-1160); what it found is that run''s run_estimates'),
 ('workflow.runs_api',      'started_credential_id', 'internal', 'the credential the run was started with; execute_for narrows each step by it, and a reader of a shared run has no use for the owner''s key id'),
 ('workflow.schedules_api', 'created_credential_id', 'internal', 'the credential the schedule was created with, which tick hands to each run; the same argument as runs_api.started_credential_id'),
 
