@@ -31330,8 +31330,13 @@ begin
             using hint = 'aiq.claim_judgement(p_id => ...) first; a lapsed lease must be claimed again';
     end if;
 
-    if new.status in ('open','to_human') and new.verdict is null then
-        -- Release, or pass to a person: the claim ends and nothing is decided.
+    if new.status in ('open','to_human')
+       and (new.verdict is null or new.verdict is not distinct from old.verdict
+            or (old.kind = 'challenge' and new.status = 'to_human' and new.verdict ? 'suggested'
+                and new.verdict - 'suggested' - 'suggested_by' = '{}'::jsonb
+                and new.verdict->>'suggested_by' = 'agent:' || v_uid)) then
+        -- Release, or pass to a person: the claim ends and nothing is decided. A challenge passed to the person
+        -- carries the agent's answer as its suggestion (REM-1123), which decides nothing either.
         if new.claimed_by is not null or new.lease_until is not null or new.decided_at is not null then
             raise exception 'a release ends the claim and records nothing';
         end if;
@@ -31355,6 +31360,17 @@ begin
     end if;
     if new.tier is null then
         raise exception 'a judgement needs a tier: agent, human, llm or decision_model';
+    end if;
+    -- THE TIER CANNOT CLAIM MORE THAN THE CALLER IS (REM-1123). It was the caller's word, and decided_by below is
+    -- built from it: an agent could record its decision as the person's, and anyone as the platform's models.
+    -- Only a person decides as human, and only the platform as llm or decision_model. A person may still record
+    -- their decision as agent, under their own id -- the article tours decide that way, and it claims nothing a
+    -- person lacks; settling, which is an agent's alone, asks rbac.current_actor() itself (claims.settle_challenge).
+    if (new.tier = 'human' and rbac.current_actor() <> 'person')
+       or (new.tier in ('llm', 'decision_model') and rbac.current_actor() <> 'platform') then
+        raise insufficient_privilege using
+            message = format('a judgement decided as %s cannot be recorded as %s', rbac.current_actor(), new.tier),
+            hint = 'only a person decides as human, and only the platform as llm or decision_model';
     end if;
     -- A RELATE IS A RELATION THAT EXISTS. complete_judgement asserts each one
     -- as the judge and writes its id into the verdict; a verdict written
@@ -31533,7 +31549,10 @@ begin
                 '{"decision":"relate","relations":[{"target":"<candidate claim_id>","predicate":"<relation>","spans":{...}}]}, '
                 'where predicate is the first that holds of same_as (substitutable: spans.src and spans.dst quoted from each, and spans.slots.src and .dst each naming subject, predicate, object, scope, polarity and modality), '
                 'qualifies, agrees, contradicts or different_scope (comparative: spans.src, spans.dst and spans.frame_match, each slot same, overlaps, differs, unknown, or unstated when neither claim states it), '
-                'and each is asserted as you, so it lands proposed until the person confirms it; '
+                'and each is asserted as you; '
+                'add "confidence": a number from 0 to 1 saying how sure you are. Where the deployment lets the writer''s agent settle what it is sure of (REM-1123), '
+                'an answer at or above its setting settles the challenge and the person is not asked, and one below it, or with no confidence, '
+                'goes to the person with your answer as the suggestion; otherwise a relation you assert lands proposed until the person confirms it; '
                 '{"decision":"none"} if no candidate bears on the claim (recorded, so these candidates are not put to you again); '
                 '{"decision":"human"} to pass it to a person. '
                 'Not sure: release_judgement (aiq.release_judgement(%L)) gives it back with nothing recorded. Your claim ends at %s.',
@@ -31630,7 +31649,10 @@ $$;
 create or replace function aiq.complete_judgement(p_id uuid, p_verdict jsonb, p_reason text,
                                                   p_tier text default 'agent')
 returns jsonb language plpgsql set search_path = pg_catalog, public as $$
-declare j aiq.judgements; v_verdict jsonb := p_verdict; v_rels jsonb;
+declare
+    j aiq.judgements; v_verdict jsonb := p_verdict; v_rels jsonb; v_mode jsonb;
+    -- judgements_guard refuses a tier that claims more than the caller is (REM-1123).
+    v_tier text := coalesce(p_tier, 'agent');
 begin
     select * into j from aiq.judgements where id = p_id;
     if not found then
@@ -31653,8 +31675,8 @@ begin
         raise exception 'judgement % was already decided (%), by %', p_id, j.verdict, j.decided_by
             using hint = 'undo what it wrote (result: resolution_ids, distinction_ids) and queue it again';
     end if;
-    if p_tier is null or p_tier not in ('agent','human','llm','decision_model') then
-        raise exception 'p_tier must be agent, human, llm or decision_model, not %', coalesce(p_tier, 'missing');
+    if v_tier not in ('agent','human','llm','decision_model') then
+        raise exception 'p_tier must be agent, human, llm or decision_model, not %', v_tier;
     end if;
     -- A CHALLENGE'S RELATE IS CARRIED OUT HERE, AS THE JUDGE. Each relation is
     -- claims.assert_relation from the challenged claim to the candidate, so the
@@ -31678,17 +31700,45 @@ begin
                 (select string_agg(coalesce(r->>'target', 'a missing target'), ', ') from jsonb_array_elements(v_rels) r)
                 using hint = 'claim_judgement lists them in evidence.candidates; if none bears on the claim, decide none';
         end if;
+        -- WHAT THE WRITER'S AGENT MAY SETTLE (REM-1123): claims.settle_challenge says whether this answer settles
+        -- the challenge, goes to the person as a suggestion, or is recorded as before.
+        if v_tier = 'agent' then
+            v_mode := claims.settle_challenge(p_id, p_verdict);
+        end if;
+    end if;
+    if j.kind = 'challenge' and p_verdict->>'decision' = 'none' and v_tier = 'agent' then
+        v_mode := claims.settle_challenge(p_id, p_verdict);
+    end if;
+    if v_mode->>'mode' = 'to_human' then
+        update aiq.judgements
+           set status = 'to_human', verdict = v_mode->'verdict', claimed_by = null, claimed_from = null,
+               lease_until = null
+         where id = p_id;
+        return jsonb_build_object('id', p_id, 'status', 'to_human', 'suggested', p_verdict,
+                                  'settle_at', v_mode->'settle_at');
+    end if;
+    if j.kind = 'challenge' and p_verdict->>'decision' = 'relate' then
         v_verdict := jsonb_build_object('decision', 'relate', 'relations', (
             select jsonb_agg(r.value || jsonb_build_object('relation_id', claims.assert_relation(
                        j.evidence->>'claim_key', r.value->>'predicate', c.value->>'claim_key',
-                       (j.evidence->>'revision_id')::uuid, (c.value->>'revision_id')::uuid, null, r.value->'spans',
+                       (j.evidence->>'revision_id')::uuid, (c.value->>'revision_id')::uuid,
+                       case when v_mode->>'mode' = 'settle' then 'settled' end, r.value->'spans',
                        p_reason)) order by r.ordinality)
               from jsonb_array_elements(v_rels) with ordinality r
               cross join lateral (select e.value from jsonb_array_elements(j.evidence->'candidates') e
                                    where e.value->>'claim_id' = r.value->>'target' limit 1) c));
     end if;
+    if v_mode->>'mode' = 'settle' then
+        perform claims.settle_challenge_done();
+        v_verdict := v_verdict || jsonb_build_object('settled', true, 'confidence', p_verdict->'confidence');
+    end if;
+    -- A person deciding what the agent passed them keeps the agent's suggestion in the record.
+    if j.kind = 'challenge' and j.verdict ? 'suggested' then
+        v_verdict := v_verdict || jsonb_build_object('suggested', j.verdict->'suggested',
+                                                     'suggested_by', j.verdict->'suggested_by');
+    end if;
     if p_verdict->>'decision' = 'human' then
-        if p_tier = 'human' then
+        if v_tier = 'human' then
             raise exception 'a person deciding uses bind, distinct or none';
         end if;
         update aiq.judgements
@@ -31703,7 +31753,7 @@ begin
               where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
     end if;
     update aiq.judgements
-       set status = 'decided', verdict = v_verdict, reason = p_reason, tier = p_tier
+       set status = 'decided', verdict = v_verdict, reason = p_reason, tier = v_tier
      where id = p_id;
     select * into j from aiq.judgements where id = p_id;
     return jsonb_build_object('id', j.id, 'status', j.status, 'verdict', j.verdict,
@@ -37180,7 +37230,7 @@ begin
             insert into claims.expresses (revision_id, claim_key, claim_id, method, status, op, tx)
             values (p_revision, p_claim_key, cur.claim_id, cur.method, cur.status, 'retract', t);
             for answer in select * from (
-                select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+                select distinct on (a.question_id) a.* from claims.answered a
                  where a.evidence=p_revision and a.claim_key=p_claim_key
                  order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
                 where x.op='assert' and x.claim_id=cur.claim_id loop
@@ -37210,7 +37260,7 @@ begin
     -- The frame was projected while this occurrence still proposed the old identity. Move each active
     -- question assertion to the writer's new identity with two append-only rows, preserving the old reading.
     for answer in select * from (
-        select distinct on (a.question_id) a.* from claims.answered a join claims.tx t on t.id = a.tx
+        select distinct on (a.question_id) a.* from claims.answered a
          where a.evidence=p_revision and a.claim_key=p_claim_key
          order by a.question_id, claims.authoritative(a.tx, a.evidence, null) desc, a.id desc) x
         where x.op='assert' and x.claim_id=cur.claim_id loop
@@ -37363,7 +37413,7 @@ create table if not exists claims.relations (
     src         uuid not null references claims.claims(id),
     predicate   text not null references claims.predicates(name),
     dst         uuid not null references claims.claims(id),
-    status      text not null check (status in ('proposed', 'confirmed', 'disputed')),
+    status      text not null check (status in ('proposed', 'confirmed', 'disputed', 'settled')),
     op          text not null default 'assert' check (op in ('assert', 'retract')),
     evidence    uuid not null references research.revisions(id) on delete cascade,
     evidence2   uuid references research.revisions(id) on delete cascade,
@@ -37375,6 +37425,13 @@ create table if not exists claims.relations (
 );
 comment on table claims.relations is
     'A typed assertion between two claims, with its predicate, review status, evidence and the spans it rests on.';
+-- SETTLED (REM-1123): the writer's own agent decided a challenge with a confidence at or above the deployment's
+-- claims.challenge_floors.settle_at, and no person was asked. Not 'confirmed', because only a person confirms a
+-- relation; readings that count a confirmed relation count a settled one, which is the point of settling, and the
+-- person can still dispute or retract it, appending a row. Only claims.settle_challenge's path writes it.
+alter table claims.relations drop constraint if exists relations_status_check;
+alter table claims.relations add constraint relations_status_check
+    check (status in ('proposed', 'confirmed', 'disputed', 'settled'));
 create index if not exists relations_src on claims.relations (src, predicate, dst, id desc);
 create index if not exists relations_dst on claims.relations (dst, predicate);
 create index if not exists relations_evidence on claims.relations (evidence);
@@ -37544,7 +37601,7 @@ begin
                 hint = 'spans.slots.src and spans.slots.dst each name subject, predicate, object, scope, polarity and modality';
         end if;
     end if;
-    if v_status not in ('proposed', 'confirmed', 'disputed') then
+    if v_status not in ('proposed', 'confirmed', 'disputed', 'settled') then
         raise check_violation using message = 'Unknown status', detail = v_status;
     end if;
     if v_status = 'confirmed' and v_actor <> 'person' then
@@ -37590,6 +37647,21 @@ begin
             where x.claim_id = v_dst and w.owner_id = v_user) then
         raise insufficient_privilege using message = 'Only the owner of both claims says one supersedes the other',
             hint = 'no_grant';
+    end if;
+    -- Settled only while a challenge is being settled in this transaction (claims.settle_challenge records it in
+    -- claims.settling, which only it writes), and only between that challenge's claim and one of its candidates, by
+    -- the agent holding it. Each condition is asked here again, so the row alone authorizes nothing else. Asked
+    -- here, once both claims are resolved.
+    if v_status = 'settled' and not exists (
+            select 1 from claims.settling g join aiq.judgements j on j.id = g.judgement_id
+             where g.xact = pg_current_xact_id()::text
+               and j.kind = 'challenge' and j.status = 'claimed' and j.claimed_by = v_user
+               and j.lease_until > clock_timestamp() and v_actor = 'agent'
+               and j.subject_node_id = v_src
+               and exists (select 1 from jsonb_array_elements(j.evidence->'candidates') c
+                            where c->>'claim_id' = v_dst::text)) then
+        raise insufficient_privilege using message = 'A relation is settled only by settling the challenge it answers',
+            hint = 'aiq.complete_judgement with a confidence at or above the deployment''s settle_at';
     end if;
     insert into claims.tx (actor_id, actor_kind, credential_id, revision_id, reason)
     values (v_user, v_actor, rbac.current_credential_id(), p_evidence, coalesce(nullif(p_reason, ''), 'asserted'))
@@ -37646,8 +37718,13 @@ begin
     if cur.op = 'retract' then
         raise check_violation using message = 'This relation was retracted; assert it again instead';
     end if;
-    if coalesce(p_status, cur.status) not in ('proposed', 'confirmed', 'disputed') then
+    if coalesce(p_status, cur.status) not in ('proposed', 'confirmed', 'disputed', 'settled') then
         raise check_violation using message = 'Unknown status', detail = p_status;
+    end if;
+    -- Settling is a challenge's, never a restatement's: restating a settled relation names what it becomes.
+    if not p_retract and coalesce(p_status, cur.status) = 'settled' then
+        raise check_violation using message = 'A restatement of a settled relation says what it becomes',
+            hint = 'confirmed or disputed, or retract it';
     end if;
     if not p_retract and coalesce(p_status, cur.status) = 'confirmed' and v_actor <> 'person' then
         raise insufficient_privilege using message = 'Only a person confirms a relation; an agent proposes it',
@@ -38997,7 +39074,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         select i as claim from claims.identity_set(p_claim, p_at) i
         union
         select case when r.src = p_claim then r.dst else r.src end
-          from claims.relations_at(p_claim, p_at) r where r.predicate = 'agrees' and r.status = 'confirmed')
+          from claims.relations_at(p_claim, p_at) r where r.predicate = 'agrees' and r.status in ('confirmed', 'settled'))
     select coalesce(array_agg(distinct e.study order by e.study), '{}')
       from members m cross join lateral claims.evidence(m.claim, p_at) e;
 $$;
@@ -39105,7 +39182,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
            (select array_agg(r.id order by r.id)
               from claims.identity_set(p_claim, p_at) m
               cross join lateral claims.relations_at(m, p_at) r
-             where c.confirmed_tx is not null and r.predicate = 'contradicts' and r.status = 'confirmed'
+             where c.confirmed_tx is not null and r.predicate = 'contradicts' and r.status in ('confirmed', 'settled')
                -- after the confirmation: transactions are numbered in the order they were made
                and (select x.tx from claims.relations x where x.id = r.id) > c.confirmed_tx
                and exists (select 1 from claims.evidence(case when r.src = m then r.dst else r.src end, p_at) e
@@ -39283,7 +39360,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         select case when r.src = i.claim then r.dst else r.src end,
                i.path || case when r.src = i.claim then r.dst else r.src end
           from ids i cross join lateral claims.relations_at(i.claim, p_at) r
-         where r.predicate = 'same_as' and r.status = 'confirmed'
+         where r.predicate = 'same_as' and r.status in ('confirmed', 'settled')
            and not (case when r.src = i.claim then r.dst else r.src end) = any (i.path)
            and cardinality(i.path) < 64)
     select distinct claim from ids;
@@ -39556,6 +39633,148 @@ end;
 $$;
 revoke all on function claims.set_challenge_floor(text, float8, int) from public;
 
+-- WHAT THE WRITER'S AGENT MAY SETTLE (REM-1123; Sirsh, M-20261021-064032-1c2e). A challenge must not become a chore:
+-- the writer's connected agent settles what it is sure of, and only the uncertain reach the person. settle_at is the
+-- confidence, 0 to 1, at or above which an agent's answer settles the challenge; below it, or with no confidence,
+-- the challenge goes to the person (aiq.judgements 'to_human') with the agent's answer kept as a suggestion. NULL,
+-- the default, is the behaviour before this: an agent's relate lands proposed and its none decides. The setting is
+-- the deployment's, like the floor, and is measured on the backfill (claims.challenge_report), not assumed.
+alter table claims.challenge_floors add column if not exists settle_at float8
+    check (settle_at > 0 and settle_at <= 1);
+
+create or replace function claims.set_challenge_settle(p_model text, p_settle_at float8)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    update claims.challenge_floors set settle_at = p_settle_at, set_at = now() where model = p_model;
+    if not found then
+        raise exception 'no challenge floor for %: set the floor first', p_model
+            using hint = 'claims.set_challenge_floor(model, max_distance)';
+    end if;
+    return jsonb_build_object('model', p_model, 'settle_at', p_settle_at);
+end;
+$$;
+revoke all on function claims.set_challenge_settle(text, float8) from public;
+
+-- The challenge being settled in a transaction. Not a setting: a function with a SET clause, as every definer here
+-- has, takes its set_config back when it returns. Written and cleared only by the two functions below; empty at rest.
+create table if not exists claims.settling (
+    judgement_id uuid not null,
+    xact         text not null,
+    primary key (judgement_id, xact)
+);
+comment on table claims.settling is
+    'The challenge a transaction is settling, between claims.settle_challenge and claims.settle_challenge_done; empty at rest.';
+alter table claims.settling enable row level security;
+revoke all on claims.settling from public;
+
+-- How the writer's agent's answer to a challenge is to be recorded, asked by aiq.complete_judgement, which runs as
+-- the caller and may not read the setting. 'as_before' when no settle_at is set or a person answers; 'to_human'
+-- with the agent's answer as the suggestion when its confidence is missing or below settle_at; 'settle' at or above
+-- it, and then, for a relate, a claims.settling row names the judgement for assert_relation. Refuses what the caller does
+-- not hold: only the challenge's addressee, holding a live claim, is answered.
+create or replace function claims.settle_challenge(p_judgement uuid, p_verdict jsonb) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    j      aiq.judgements;
+    v_uid  uuid := rbac.current_user_id();
+    v_at   float8;
+    v_conf numeric;
+begin
+    select * into j from aiq.judgements where id = p_judgement;
+    if j.id is null or j.kind <> 'challenge' or j.addressee is distinct from v_uid then
+        raise exception 'no challenge % you can answer', p_judgement;
+    end if;
+    if not (j.status = 'claimed' and j.claimed_by = v_uid and j.lease_until > clock_timestamp()) then
+        raise exception 'you do not hold a live claim on judgement %', p_judgement
+            using hint = 'aiq.claim_judgement(p_id => ...) first; a lapsed lease must be claimed again';
+    end if;
+    if p_verdict ? 'confidence' and (jsonb_typeof(p_verdict->'confidence') <> 'number'
+                                      or (p_verdict->>'confidence')::numeric not between 0 and 1) then
+        raise check_violation using message = 'confidence is a number from 0 to 1',
+            detail = p_verdict->>'confidence';
+    end if;
+    select settle_at into v_at from claims.challenge_floors where model = j.evidence->>'model';
+    if v_at is null or rbac.current_actor() <> 'agent' then
+        return jsonb_build_object('mode', 'as_before');
+    end if;
+    v_conf := (p_verdict->>'confidence')::numeric;
+    if v_conf is null or v_conf < v_at then
+        return jsonb_build_object('mode', 'to_human', 'settle_at', v_at,
+                                  'verdict', jsonb_build_object('suggested', p_verdict, 'suggested_by', 'agent:' || v_uid));
+    end if;
+    if p_verdict->>'decision' = 'relate' then
+        insert into claims.settling (judgement_id, xact) values (p_judgement, pg_current_xact_id()::text)
+        on conflict do nothing;
+    end if;
+    return jsonb_build_object('mode', 'settle', 'settle_at', v_at);
+end;
+$$;
+revoke all on function claims.settle_challenge(uuid, jsonb) from public;
+grant execute on function claims.settle_challenge(uuid, jsonb) to authenticated;
+
+-- Settling ends with the call that settled it.
+create or replace function claims.settle_challenge_done() returns void
+language sql security definer set search_path = pg_catalog, public as $$
+    delete from claims.settling where xact = pg_current_xact_id()::text;
+$$;
+revoke all on function claims.settle_challenge_done() from public;
+grant execute on function claims.settle_challenge_done() to authenticated;
+
+-- WHO RESOLVED EACH CHALLENGE, IN ONE QUERY (REM-1123). One row per challenge put to a writer: its state, who
+-- decided it (agent:<user> is the writer's agent, user:<user> the person), whether the agent settled it and with
+-- what confidence, whether the agent's answer was only a suggestion to the person, and whether a person later
+-- overturned a settled answer -- disputing or retracting a settled relation, or relating the pair the agent said
+-- were not the same. An overturn is a later row in claims.relations; nothing here is rewritten. Operator's.
+create or replace view claims.challenge_outcomes as
+select d.claim_row, d.model, d.asked_at, j.id as judgement_id, j.status, j.addressee,
+       j.decided_by as resolved_by, j.tier, j.decided_at as resolved_at,
+       j.verdict->>'decision' as decision,
+       coalesce((j.verdict->>'settled')::boolean, false) as settled,
+       coalesce((j.verdict->>'confidence')::numeric, (j.verdict->'suggested'->>'confidence')::numeric) as confidence,
+       j.verdict ? 'suggested' as suggested_by_agent,
+       o.overturned_at, o.overturned_by
+  from claims.challenged d
+  join aiq.judgements j on j.id = d.judgement_id
+  left join lateral (
+      select t.at as overturned_at, 'user:' || t.actor_id as overturned_by
+        from claims.relations x join claims.tx t on t.id = x.tx
+       where coalesce((j.verdict->>'settled')::boolean, false) and t.actor_kind = 'person'
+         and ((j.verdict->>'decision' = 'relate'
+               and exists (select 1 from jsonb_array_elements(j.verdict->'relations') r
+                            join claims.relations s on s.id = (r->>'relation_id')::bigint
+                           where x.src = s.src and x.predicate = s.predicate and x.dst = s.dst
+                             and x.evidence = s.evidence and x.evidence2 is not distinct from s.evidence2
+                             and x.keys = s.keys and x.id > s.id)
+               and (x.op = 'retract' or x.status = 'disputed'))
+           -- No time test: a pair is challenged only while no relation joins it (claims.challenge_embedded), so a
+           -- person's relation between the claim and a candidate came after the challenge, and answers it.
+           or (j.verdict->>'decision' = 'none' and x.op = 'assert'
+               and x.src = j.subject_node_id
+               and exists (select 1 from jsonb_array_elements(j.evidence->'candidates') c
+                            where c->>'claim_id' = x.dst::text)))
+       order by x.id limit 1) o on true;
+comment on view claims.challenge_outcomes is
+    'Each challenge put to a writer: who resolved it (the writer''s agent or the person), whether the agent settled it, at what confidence, and whether a person overturned it.';
+revoke all on claims.challenge_outcomes from public;
+
+-- What the backfill reports (REM-1123): how many challenges the agent settled, how many reached the person, how
+-- many are still open, and how many settled ones a person overturned, per model or for all.
+create or replace function claims.challenge_report(p_model text default null) returns jsonb
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select jsonb_build_object(
+        'model', p_model,
+        'settle_at', (select settle_at from claims.challenge_floors where model = p_model),
+        'challenges', count(*),
+        'settled_by_agent', count(*) filter (where settled),
+        'decided_by_agent', count(*) filter (where status = 'decided' and tier = 'agent' and not settled),
+        'reached_the_person', count(*) filter (where status = 'to_human' or tier = 'human'),
+        'decided_by_person', count(*) filter (where tier = 'human'),
+        'still_waiting', count(*) filter (where status in ('open', 'claimed', 'to_human')),
+        'overturned', count(*) filter (where overturned_at is not null))
+      from claims.challenge_outcomes where p_model is null or model = p_model;
+$$;
+revoke all on function claims.challenge_report(text) from public;
+
 create or replace function claims.challenge_embedded(p_model text, p_ids uuid[]) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare
@@ -39735,7 +39954,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         union all
         select r.src, s.depth + 1, s.path || r.src, s.relations || r.id
           from rests s cross join lateral claims.relations_at(s.claim, p_at) r
-         where r.dst = s.claim and r.predicate in ('supports', 'motivates') and r.status = 'confirmed'
+         where r.dst = s.claim and r.predicate in ('supports', 'motivates') and r.status in ('confirmed', 'settled')
            and not r.src = any (s.path) and s.depth < 12)
     select claim, depth, path, relations from rests where depth > 0;
 $$;
@@ -39748,7 +39967,7 @@ returns table (rests_on uuid, challenger uuid, predicate text, relation_id bigin
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select s.claim, r.src, r.predicate, r.id, s.path, s.relations
       from claims.rests_on(p_id, p_at) s cross join lateral claims.relations_at(s.claim, p_at) r
-     where r.dst = s.claim and r.predicate in ('challenges', 'contradicts') and r.status = 'confirmed'
+     where r.dst = s.claim and r.predicate in ('challenges', 'contradicts') and r.status in ('confirmed', 'settled')
        and s.claim <> p_id;
 $$;
 
@@ -40063,7 +40282,7 @@ begin
         select p_claim union
         select case when r.src = i.id then r.dst else r.src end
           from ids i cross join lateral claims.relations_at(i.id, cutoff) r
-         where r.predicate = 'same_as' and r.status = 'confirmed'
+         where r.predicate = 'same_as' and r.status in ('confirmed', 'settled')
            and r.evidence = any(selected) and (r.evidence2 is null or r.evidence2 = any(selected))
     ) select array_agg(id order by id) into members from ids;
     select coalesce(jsonb_agg(to_jsonb(r) order by r.id), '[]') into edges
@@ -41447,6 +41666,9 @@ declare
         -- name. Every workflow anybody authored with define_yaml was absent
         -- from every backup. Found by the sibling sweep this file's own header
         -- asks for, not by anybody noticing a restore.
+        -- Empty at rest: the challenge a transaction is settling (REM-1123). Registered so no table of the
+        -- extension is outside the dump, at the cost of nothing.
+        'claims.settling',
         'workflow.definitions',
         'workflow.dry_runs',
         'workflow.queue_config',

@@ -713,7 +713,8 @@
       "admits": [
         "proposed",
         "confirmed",
-        "disputed"
+        "disputed",
+        "settled"
       ],
       "column": "status",
       "enforced_by": "check",

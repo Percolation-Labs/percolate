@@ -457,6 +457,9 @@ DISTINCT: list[tuple[str, str, str]] = [
      "share 'user' and 'system' as ordinary English; unrelated vocabularies"),
     ("agentic.skills.audience", "InboundMessage.role",
      "share 'user' and 'system' as ordinary English; unrelated vocabularies"),
+    ("claims.relations.status", "claims.consensus.status",
+     "a relation can be settled by the writer's agent (REM-1123) and a consensus reading can be reopened; each "
+     "review flow has a state the other cannot reach, over the three they share"),
 ]
 
 

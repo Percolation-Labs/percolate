@@ -2157,8 +2157,13 @@ begin
             using hint = 'aiq.claim_judgement(p_id => ...) first; a lapsed lease must be claimed again';
     end if;
 
-    if new.status in ('open','to_human') and new.verdict is null then
-        -- Release, or pass to a person: the claim ends and nothing is decided.
+    if new.status in ('open','to_human')
+       and (new.verdict is null or new.verdict is not distinct from old.verdict
+            or (old.kind = 'challenge' and new.status = 'to_human' and new.verdict ? 'suggested'
+                and new.verdict - 'suggested' - 'suggested_by' = '{}'::jsonb
+                and new.verdict->>'suggested_by' = 'agent:' || v_uid)) then
+        -- Release, or pass to a person: the claim ends and nothing is decided. A challenge passed to the person
+        -- carries the agent's answer as its suggestion (REM-1123), which decides nothing either.
         if new.claimed_by is not null or new.lease_until is not null or new.decided_at is not null then
             raise exception 'a release ends the claim and records nothing';
         end if;
@@ -2182,6 +2187,17 @@ begin
     end if;
     if new.tier is null then
         raise exception 'a judgement needs a tier: agent, human, llm or decision_model';
+    end if;
+    -- THE TIER CANNOT CLAIM MORE THAN THE CALLER IS (REM-1123). It was the caller's word, and decided_by below is
+    -- built from it: an agent could record its decision as the person's, and anyone as the platform's models.
+    -- Only a person decides as human, and only the platform as llm or decision_model. A person may still record
+    -- their decision as agent, under their own id -- the article tours decide that way, and it claims nothing a
+    -- person lacks; settling, which is an agent's alone, asks rbac.current_actor() itself (claims.settle_challenge).
+    if (new.tier = 'human' and rbac.current_actor() <> 'person')
+       or (new.tier in ('llm', 'decision_model') and rbac.current_actor() <> 'platform') then
+        raise insufficient_privilege using
+            message = format('a judgement decided as %s cannot be recorded as %s', rbac.current_actor(), new.tier),
+            hint = 'only a person decides as human, and only the platform as llm or decision_model';
     end if;
     -- A RELATE IS A RELATION THAT EXISTS. complete_judgement asserts each one
     -- as the judge and writes its id into the verdict; a verdict written
@@ -2360,7 +2376,10 @@ begin
                 '{"decision":"relate","relations":[{"target":"<candidate claim_id>","predicate":"<relation>","spans":{...}}]}, '
                 'where predicate is the first that holds of same_as (substitutable: spans.src and spans.dst quoted from each, and spans.slots.src and .dst each naming subject, predicate, object, scope, polarity and modality), '
                 'qualifies, agrees, contradicts or different_scope (comparative: spans.src, spans.dst and spans.frame_match, each slot same, overlaps, differs, unknown, or unstated when neither claim states it), '
-                'and each is asserted as you, so it lands proposed until the person confirms it; '
+                'and each is asserted as you; '
+                'add "confidence": a number from 0 to 1 saying how sure you are. Where the deployment lets the writer''s agent settle what it is sure of (REM-1123), '
+                'an answer at or above its setting settles the challenge and the person is not asked, and one below it, or with no confidence, '
+                'goes to the person with your answer as the suggestion; otherwise a relation you assert lands proposed until the person confirms it; '
                 '{"decision":"none"} if no candidate bears on the claim (recorded, so these candidates are not put to you again); '
                 '{"decision":"human"} to pass it to a person. '
                 'Not sure: release_judgement (aiq.release_judgement(%L)) gives it back with nothing recorded. Your claim ends at %s.',
@@ -2457,7 +2476,10 @@ $$;
 create or replace function aiq.complete_judgement(p_id uuid, p_verdict jsonb, p_reason text,
                                                   p_tier text default 'agent')
 returns jsonb language plpgsql set search_path = pg_catalog, public as $$
-declare j aiq.judgements; v_verdict jsonb := p_verdict; v_rels jsonb;
+declare
+    j aiq.judgements; v_verdict jsonb := p_verdict; v_rels jsonb; v_mode jsonb;
+    -- judgements_guard refuses a tier that claims more than the caller is (REM-1123).
+    v_tier text := coalesce(p_tier, 'agent');
 begin
     select * into j from aiq.judgements where id = p_id;
     if not found then
@@ -2480,8 +2502,8 @@ begin
         raise exception 'judgement % was already decided (%), by %', p_id, j.verdict, j.decided_by
             using hint = 'undo what it wrote (result: resolution_ids, distinction_ids) and queue it again';
     end if;
-    if p_tier is null or p_tier not in ('agent','human','llm','decision_model') then
-        raise exception 'p_tier must be agent, human, llm or decision_model, not %', coalesce(p_tier, 'missing');
+    if v_tier not in ('agent','human','llm','decision_model') then
+        raise exception 'p_tier must be agent, human, llm or decision_model, not %', v_tier;
     end if;
     -- A CHALLENGE'S RELATE IS CARRIED OUT HERE, AS THE JUDGE. Each relation is
     -- claims.assert_relation from the challenged claim to the candidate, so the
@@ -2505,17 +2527,45 @@ begin
                 (select string_agg(coalesce(r->>'target', 'a missing target'), ', ') from jsonb_array_elements(v_rels) r)
                 using hint = 'claim_judgement lists them in evidence.candidates; if none bears on the claim, decide none';
         end if;
+        -- WHAT THE WRITER'S AGENT MAY SETTLE (REM-1123): claims.settle_challenge says whether this answer settles
+        -- the challenge, goes to the person as a suggestion, or is recorded as before.
+        if v_tier = 'agent' then
+            v_mode := claims.settle_challenge(p_id, p_verdict);
+        end if;
+    end if;
+    if j.kind = 'challenge' and p_verdict->>'decision' = 'none' and v_tier = 'agent' then
+        v_mode := claims.settle_challenge(p_id, p_verdict);
+    end if;
+    if v_mode->>'mode' = 'to_human' then
+        update aiq.judgements
+           set status = 'to_human', verdict = v_mode->'verdict', claimed_by = null, claimed_from = null,
+               lease_until = null
+         where id = p_id;
+        return jsonb_build_object('id', p_id, 'status', 'to_human', 'suggested', p_verdict,
+                                  'settle_at', v_mode->'settle_at');
+    end if;
+    if j.kind = 'challenge' and p_verdict->>'decision' = 'relate' then
         v_verdict := jsonb_build_object('decision', 'relate', 'relations', (
             select jsonb_agg(r.value || jsonb_build_object('relation_id', claims.assert_relation(
                        j.evidence->>'claim_key', r.value->>'predicate', c.value->>'claim_key',
-                       (j.evidence->>'revision_id')::uuid, (c.value->>'revision_id')::uuid, null, r.value->'spans',
+                       (j.evidence->>'revision_id')::uuid, (c.value->>'revision_id')::uuid,
+                       case when v_mode->>'mode' = 'settle' then 'settled' end, r.value->'spans',
                        p_reason)) order by r.ordinality)
               from jsonb_array_elements(v_rels) with ordinality r
               cross join lateral (select e.value from jsonb_array_elements(j.evidence->'candidates') e
                                    where e.value->>'claim_id' = r.value->>'target' limit 1) c));
     end if;
+    if v_mode->>'mode' = 'settle' then
+        perform claims.settle_challenge_done();
+        v_verdict := v_verdict || jsonb_build_object('settled', true, 'confidence', p_verdict->'confidence');
+    end if;
+    -- A person deciding what the agent passed them keeps the agent's suggestion in the record.
+    if j.kind = 'challenge' and j.verdict ? 'suggested' then
+        v_verdict := v_verdict || jsonb_build_object('suggested', j.verdict->'suggested',
+                                                     'suggested_by', j.verdict->'suggested_by');
+    end if;
     if p_verdict->>'decision' = 'human' then
-        if p_tier = 'human' then
+        if v_tier = 'human' then
             raise exception 'a person deciding uses bind, distinct or none';
         end if;
         update aiq.judgements
@@ -2530,7 +2580,7 @@ begin
               where exists (select 1 from aiq.nodes n where n.id::text = c->>'node_id')), '[]'::jsonb));
     end if;
     update aiq.judgements
-       set status = 'decided', verdict = v_verdict, reason = p_reason, tier = p_tier
+       set status = 'decided', verdict = v_verdict, reason = p_reason, tier = v_tier
      where id = p_id;
     select * into j from aiq.judgements where id = p_id;
     return jsonb_build_object('id', j.id, 'status', j.status, 'verdict', j.verdict,
