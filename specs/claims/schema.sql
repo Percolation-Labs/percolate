@@ -960,12 +960,25 @@ alter table claims.questions enable row level security;
 drop policy if exists questions_readable on claims.questions;
 -- A policy on claims.questions cannot read claims.questions under its own policy, so the refinement walk is a
 -- definer that applies the one rule itself: a readable revision answers the question or one that refines it.
+-- Also readable (REM-1144, claims/tags.sql): a tag's live dual, which is shared vocabulary like the tag, and a
+-- question a resource the caller may read links to. Both are current edges in aiq.edges. plpgsql, because the
+-- relations are registered after this file; rbac.may_read asks for the caller, since this is definer.
 create or replace function claims.question_readable(p_question uuid) returns boolean
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select exists (select 1 from claims.answered a
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+begin
+    return exists (select 1 from claims.answered a
                     where a.question_id in (select p_question union all
                                             select r.id from claims.questions r where r.refines = p_question)
-                      and research.revision_readable(a.evidence));
+                      and research.revision_readable(a.evidence))
+        or exists (select 1 from aiq.nodes q
+                     join aiq.edges e on e.dst_id = q.id and e.relation in ('dual', 'answers')
+                                     and aiq.edge_is_current(e.valid_from, e.valid_to, now())
+                     join aiq.nodes s on s.id = e.src_id
+                     left join content.resources r on s.entity_type = 'document' and r.id = s.entity_id
+                    where q.entity_type = 'question' and q.entity_id = p_question
+                      and (s.entity_type = 'tag'
+                           or (r.id is not null and rbac.may_read(r.owner_id, r.org_id, r.visibility))));
+end;
 $$;
 create policy questions_readable on claims.questions for select using (claims.question_readable(id));
 -- A policy runs as the caller, so the caller executes it; identity/closing.sql takes PUBLIC's EXECUTE away.

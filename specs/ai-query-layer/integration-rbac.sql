@@ -255,6 +255,7 @@ grant execute on function aiq.graph_walk(uuid, int, text, int, timestamptz) to a
 grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
     to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int, jsonb) to authenticated;
+grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authenticated;
 -- semantic_in's one setting, set as the owner because its caller holds no
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;

@@ -3669,9 +3669,15 @@ begin
         raise exception 'embedding model % is not registered', p_model;
     end if;
     -- Idempotent, so the space existing is not a precondition the caller has
-    -- to arrange separately.
-    perform aiq.register_embedding_space(m.name);
+    -- to arrange separately. ONLY WHEN IT IS MISSING (REM-1149): registering
+    -- re-runs ALTER TABLE ... OWNER and GRANT on the space, which take an
+    -- ACCESS EXCLUSIVE lock even when nothing changes, so every batch of
+    -- vectors blocked every search of that model's space, and four writers
+    -- loading LongMemEval-M at once deadlocked on it.
     v_tbl := aiq.embedding_space_name(m.name);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        perform aiq.register_embedding_space(m.name);
+    end if;
 
     execute format($q$
         insert into aiq.%1$I (chunk_id, embedding)
@@ -3805,6 +3811,30 @@ $$ language plpgsql stable;
 
 drop function if exists aiq.semantic_in(vector, text, int);
 drop function if exists aiq.semantic_in(text, vector, text, int);
+-- EXACT OR THROUGH THE INDEX (REM-1146). One model space holds every source's vectors, so a small source is a
+-- minority of the graph an HNSW scan walks, and at pgvector's default ef_search (40) the index returns an
+-- approximation of its nearest rows. Measured on LongMemEval S in Percolate (about 37k vectors in one space): the
+-- 4,128 questions came back with a top 5 different from the exact top 5 for 25 of 90 queries (0 of 90 ranked
+-- exactly), and ranking them exactly cost 2.8 ms p50 against 3.0 through the index. Over 32k unscoped chunks exact cost 19.8 ms against 1.2,
+-- so a large corpus keeps the index. The decision counts what the CALLER can read of the (scoped) source, bounded
+-- at the threshold so the count never costs more than the exact ranking it decides on, and it is a count rather
+-- than pg_class.reltuples so the same rows always get the same answer.
+-- It takes the source's registered NAME, never a table: the table comes from aiq.semantic_sources.
+create or replace function aiq.semantic_ranks_exactly(p_source text, p_scope jsonb default null,
+                                                      p_threshold int default 20000)
+returns boolean as $$
+declare n int; v_table text;
+begin
+    select source_table into v_table from aiq.semantic_sources where name = p_source;
+    if v_table is null then
+        raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source;
+    end if;
+    execute format('select count(*) from (select 1 from %s c limit $1) x', aiq.scoped_source(v_table, p_scope))
+       into n using greatest(p_threshold, 0) + 1;
+    return n <= p_threshold;
+end;
+$$ language plpgsql stable security invoker;   -- counts what the caller may read
+
 create or replace function aiq.semantic_in(
     p_source text, p_query vector, p_model text default null, p_limit int default 10,
     p_scope jsonb default null
@@ -3908,6 +3938,19 @@ begin
     -- vector_dims() above has loaded the module, so current_setting() answers
     -- and an end-user role may set it -- through aiq.set_scan_order, since the
     -- caller no longer holds set_config itself.
+    -- A small or scoped corpus is ranked exactly (aiq.semantic_ranks_exactly above): `+ 0` keeps the planner off
+    -- the HNSW index, and the chunk id breaks a tie the same way every time.
+    if aiq.semantic_ranks_exactly(src.name, p_scope) then
+        return query execute format(
+            'select e.chunk_id, (e.embedding <=> $1)::float8, %L
+             from aiq.%I e
+             join %s c on c.id = e.chunk_id
+             order by (e.embedding <=> $1) + 0, e.chunk_id limit $2', m.name, v_tbl,
+             aiq.scoped_source(src.source_table, p_scope))
+            using p_query, p_limit;
+        return;
+    end if;
+
     v_iter := current_setting('hnsw.iterative_scan', true);
     if v_iter is not null and v_iter <> 'strict_order' then
         perform aiq.set_scan_order('strict_order');
@@ -4050,11 +4093,18 @@ begin
             using errcode = 'feature_not_supported',
                   hint = 'as the caller, its row security reads every row before the text index (REM-519)';
     end if;
+    -- ANY OF THE WORDS, ranked by how many and how densely (REM-1145). plainto_tsquery ANDs every word, so a
+    -- question matched only a chunk holding all of them: on LongMemEval S through Percolate it found every source
+    -- for 3 of 39 held-out questions within 50 reads, and aiq.search's hybrid came back as its semantic half alone.
+    -- The same words ORed, ranked by ts_rank normalised by document length (1 + log length), were chosen on the
+    -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
+    -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
     return query execute format(
-        'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
-         from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
-         order by ts_rank(c.search_tsv, plainto_tsquery(%L, $1)) desc limit $2',
-        s.content_col, s.regconfig, aiq.scoped_source(s.source_table, p_scope), s.regconfig, s.regconfig)
+        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
+         select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
+           from %s c, q where c.search_tsv @@ q.t
+          order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
+        s.regconfig, s.content_col, aiq.scoped_source(s.source_table, p_scope))
         using p_query, p_limit;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately

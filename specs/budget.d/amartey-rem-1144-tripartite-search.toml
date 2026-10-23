@@ -1,0 +1,12 @@
+why = """REM-1144: one shared tags table that every store links to, and the search that walks it (tripartite-search.md).
+claims.tags is the only table: nothing existing holds a taxonomy node with a source, a version and a parent. The
+links do NOT get a table. A resource's link to a tag or question and a tag's dual question are aiq.edges rows
+(relations tagged, answers, dual), with tags and questions registered as node types; that replaces the
+claims.tag_questions and claims.resource_links an earlier revision of this branch added (Sirsh,
+M-20261023-152402-6909: the fewest tables that represent the thing). put_taxonomy, train_dual and link_resources
+are the writers, each with its claims.tx; search_leads is the search; aiq.semantic_ranks_exactly decides when a
+small scoped source is ranked exactly instead of through the HNSW index (REM-1146)."""
+
+[added]
+tables = ["claims.tags"]
+functions = ["aiq.semantic_ranks_exactly", "claims.link_resources", "claims.put_taxonomy", "claims.search_leads", "claims.train_dual"]

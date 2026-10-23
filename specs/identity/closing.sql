@@ -180,6 +180,9 @@ declare
         'aiq.schema_workflow(text)',
         'aiq.search(text,text,vector,text,integer,integer,jsonb)',
         'aiq.semantic_in(text,vector,text,integer,jsonb)',
+        -- The table it counts comes from aiq.semantic_sources by the source's name, and the scope goes through
+        -- aiq.scoped_source, which checks its keys and passes the value as %L; the limit is bound (REM-1146).
+        'aiq.semantic_ranks_exactly(text,jsonb,integer)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         -- One identifier, and it is never a caller's. claims.candidates reads
