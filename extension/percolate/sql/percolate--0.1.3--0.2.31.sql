@@ -252,17 +252,26 @@ begin
           from workflow.dry_runs d where d.shadow_run_id = r.id;
         drop table workflow.dry_runs;
     end if;
+    -- Its declaration goes with it: identity/declarations.sql no longer lists it, and a fresh install has no row.
+    delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
 end $$;
 
 -- REM-1163. aiq.dream_runs held each aiq.dream() pass (window, decider, receipt). A dream is now a workflow run of
--- `dream`, whose step output is the receipt and whose newest `until` is the watermark (graph.sql). The rows of a
--- scheduled dream are already there, as that run's step output; a direct call's receipt was returned to its caller
--- and has no run to belong to, so it goes with the table. The one thing it carried that a later pass reads, the
+-- `dream`, whose step output is the receipt and whose newest `until` is the watermark (graph.sql). Every row here is
+-- a direct call's: aiq.schedule_dream could not be installed before 0.2.31 (it registered the step with no argument
+-- types), so no scheduled dream ever ran. A direct call's receipt was returned to its caller and has no run to
+-- belong to, so it goes with the table. The one thing it carried that a later pass reads, the
 -- watermark, costs a dream that has never been scheduled one wider window, which an idempotent pass makes only slower.
 drop table if exists aiq.dream_runs;
 -- Its kind row too: the replay re-declares only tables that exist, so on an upgraded database this row would outlive
--- the table and the declarations would differ from a fresh install's (dev/upgrade-converges.sh).
-delete from percolate.table_kinds where schema_name = 'aiq' and table_name = 'dream_runs';
+-- the table and the declarations would differ from a fresh install's (dev/upgrade-converges.sh). A database from
+-- before percolate.table_kinds existed (0.1.6 upgrades straight here) has no row to delete.
+do $$
+begin
+    if to_regclass('percolate.table_kinds') is not null then
+        delete from percolate.table_kinds where schema_name = 'aiq' and table_name = 'dream_runs';
+    end if;
+end $$;
 
 -- ============================================================
 -- percolate 0.2.31 -- the whole schema, as one extension script.
@@ -32004,13 +32013,18 @@ create or replace function aiq.schedule_dream(p_cron text default '*/15 * * * *'
 returns jsonb as $$
 declare v_id uuid;
 begin
-    perform workflow.register_step_function('dream', 'aiq.dream', '{}', 300000,
+    -- The function's own signature. Registered with no argument types, which
+    -- step_function_is_runnable refuses for a function that takes two, this
+    -- schedule could not be installed at all (found by REM-1163's test).
+    -- `since` comes from the run's input when given; a scheduled run gives none,
+    -- so dream reads its watermark.
+    perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
     perform workflow.define_yaml($y$
 name: dream
 steps:
   - id: reconcile
-    sql: {function: dream, args: []}
+    sql: {function: dream, args: ["{{run.since}}", dream]}
 $y$);
     select id into v_id from workflow.schedules where name = 'dream';
     if v_id is null then
