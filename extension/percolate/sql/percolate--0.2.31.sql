@@ -12692,6 +12692,15 @@ alter table rbac.visibilities enable row level security;
 -- join-once. This is a documented general Postgres RLS performance pattern,
 -- not specific to this schema -- worth applying to every RLS policy written
 -- for any future module, not just these five.
+-- A FIXTURE ACCOUNT (REM-659): an account the system's own checks write as, such as the live journey checks. Its
+-- work is test data, so nothing that measures writers reads it: claims.challenge_waiting and challenge_embedded do
+-- not challenge its claims, and claims.challenge_report does not count them. On 23 Oct the journey checks' account
+-- held 305 of production's 312 open challenges, because they resubmit near-identical brews every run. A flag
+-- rather than an address pattern: provisioned real users have '@users.percolate.invalid' addresses too.
+alter table rbac.users add column if not exists fixture boolean not null default false;
+comment on column rbac.users.fixture is
+    'An account the system''s own checks write as (the journey checks); its work is test data, never challenged or counted as a writer''s.';
+
 drop policy if exists users_self_or_admin on rbac.users;
 create policy users_self_or_admin on rbac.users for select
   using (id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'users', 'select')));
@@ -39618,6 +39627,11 @@ select d.claim_row, d.model, d.asked_at, j.id as judgement_id, j.status, j.addre
        o.overturned_at, o.overturned_by
   from claims.challenged d
   join aiq.judgements j on j.id = d.judgement_id
+  -- Not a fixture account's (rbac.users.fixture, REM-659): those asked before the flag are test data.
+  join research.claims rc on rc.id = d.claim_row
+  join research.revisions v on v.id = rc.revision_id
+  join research.works w on w.id = v.work_id
+  join rbac.users u on u.id = w.owner_id and not u.fixture
   left join lateral (
       select t.at as overturned_at, 'user:' || t.actor_id as overturned_by
         from claims.relations x join claims.tx t on t.id = x.tx
@@ -39690,6 +39704,8 @@ begin
                                order by e.id desc limit 1) x
          where rc.id = any(p_ids)
            and not exists (select 1 from claims.challenged d where d.claim_row = rc.id and d.model = p_model)
+           -- A fixture account's work is test data (rbac.users.fixture, REM-659).
+           and not exists (select 1 from rbac.users u where u.id = w.owner_id and u.fixture)
          order by x.id desc
     loop
         -- As the writer: candidates is security invoker, and execute_for runs it under their identity and row
@@ -39704,7 +39720,12 @@ begin
         select coalesce(jsonb_agg(k.v order by k.n), '[]'::jsonb) into v_cands
           from (select t.value as v, t.ordinality as n
                   from jsonb_array_elements(v_cands) with ordinality t
-                 where not exists (select 1 from aiq.judgements j
+                 -- A fixture account's claim is never put to a writer either, even listed (REM-659).
+                 where not exists (select 1 from research.revisions v2
+                                     join research.works w2 on w2.id = v2.work_id
+                                     join rbac.users u2 on u2.id = w2.owner_id
+                                    where v2.id = (t.value->>'revision_id')::uuid and u2.fixture)
+                   and not exists (select 1 from aiq.judgements j
                                     where j.kind = 'challenge'
                                       and ((j.subject_node_id = c.claim_id
                                             and j.evidence->'candidates' @> jsonb_build_array(
@@ -39766,10 +39787,14 @@ begin
         select array_agg(id) from (
             select rc.id from research.claims rc
               join aiq.%I s on s.chunk_id = rc.id
+              join research.revisions v on v.id = rc.revision_id
+              join research.works w on w.id = v.work_id
               cross join lateral (select e.id from claims.expresses e
                                    where e.revision_id = rc.revision_id and e.claim_key = rc.claim_key
                                      and e.part = 1 and e.op = 'assert' order by e.id desc limit 1) x
              where not exists (select 1 from claims.challenged d where d.claim_row = rc.id and d.model = $1)
+               -- challenge_embedded skips a fixture account's claims, so offering them would leave them waiting.
+               and not exists (select 1 from rbac.users u where u.id = w.owner_id and u.fixture)
              order by x.id limit $2) t$q$, v_tbl)
       into v_ids using v_model, greatest(coalesce(p_limit, 5000), 1);
     if v_ids is null then

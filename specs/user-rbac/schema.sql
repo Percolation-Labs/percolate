@@ -2631,6 +2631,15 @@ alter table rbac.visibilities enable row level security;
 -- join-once. This is a documented general Postgres RLS performance pattern,
 -- not specific to this schema -- worth applying to every RLS policy written
 -- for any future module, not just these five.
+-- A FIXTURE ACCOUNT (REM-659): an account the system's own checks write as, such as the live journey checks. Its
+-- work is test data, so nothing that measures writers reads it: claims.challenge_waiting and challenge_embedded do
+-- not challenge its claims, and claims.challenge_report does not count them. On 23 Oct the journey checks' account
+-- held 305 of production's 312 open challenges, because they resubmit near-identical brews every run. A flag
+-- rather than an address pattern: provisioned real users have '@users.percolate.invalid' addresses too.
+alter table rbac.users add column if not exists fixture boolean not null default false;
+comment on column rbac.users.fixture is
+    'An account the system''s own checks write as (the journey checks); its work is test data, never challenged or counted as a writer''s.';
+
 drop policy if exists users_self_or_admin on rbac.users;
 create policy users_self_or_admin on rbac.users for select
   using (id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'users', 'select')));

@@ -1089,6 +1089,7 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 ('rbac.refresh_tokens_api', 'token_hash',    'secret', 'the stored half of a credential'),
 
 ('rbac.refresh_tokens_api', 'replaced_by', 'internal', 'rotation chain, internal to refresh'),
+('rbac.users_api',          'fixture',     'internal', 'set by the operator on the accounts the system''s own checks write as; read by the challenge backfill, not by callers (REM-659)'),
 ('aiq.edges_api',           'provenance',  'internal', 'authoring metadata, not part of the read contract'),
 -- The usage counters. Excluded deliberately and for two reasons rather than
 -- one. They are consolidation's input, not a fact about the relationship: a
