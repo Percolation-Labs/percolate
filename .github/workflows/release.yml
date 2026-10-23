@@ -87,8 +87,14 @@ jobs:
     permissions:
       contents: write        # commit the bump, push the tag
     steps:
+      # THE BUMP AND THE OPENING PUSH TO MAIN AS THE RELEASE TOKEN (23 Oct). main sits behind a merge queue,
+      # which refuses direct pushes. A repository ruleset cannot let the Actions app bypass it (422), and deploy
+      # keys are disabled for this repository, so the checkout uses P8_RELEASE_TOKEN, a repository admin's token
+      # the ruleset lets bypass. It already pushes this job's tags below. Without the secret, the default token.
       - uses: actions/checkout@v7
-        with: {fetch-depth: 0}
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.P8_RELEASE_TOKEN || github.token }}
 
       - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
