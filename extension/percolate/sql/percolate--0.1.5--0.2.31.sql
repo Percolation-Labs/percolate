@@ -135,6 +135,8 @@ begin
           from workflow.dry_runs d where d.shadow_run_id = r.id;
         drop table workflow.dry_runs;
     end if;
+    -- Its declaration goes with it: identity/declarations.sql no longer lists it, and a fresh install has no row.
+    delete from percolate.table_kinds where schema_name = 'workflow' and table_name = 'dry_runs';
 end $$;
 
 -- ============================================================
