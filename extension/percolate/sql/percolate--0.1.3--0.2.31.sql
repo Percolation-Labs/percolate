@@ -19530,9 +19530,15 @@ begin
         raise exception 'embedding model % is not registered', p_model;
     end if;
     -- Idempotent, so the space existing is not a precondition the caller has
-    -- to arrange separately.
-    perform aiq.register_embedding_space(m.name);
+    -- to arrange separately. ONLY WHEN IT IS MISSING (REM-1149): registering
+    -- re-runs ALTER TABLE ... OWNER and GRANT on the space, which take an
+    -- ACCESS EXCLUSIVE lock even when nothing changes, so every batch of
+    -- vectors blocked every search of that model's space, and four writers
+    -- loading LongMemEval-M at once deadlocked on it.
     v_tbl := aiq.embedding_space_name(m.name);
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        perform aiq.register_embedding_space(m.name);
+    end if;
 
     execute format($q$
         insert into aiq.%1$I (chunk_id, embedding)
