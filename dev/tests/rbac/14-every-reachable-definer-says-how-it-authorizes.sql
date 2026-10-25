@@ -155,7 +155,7 @@ insert into t14_declared (fn, mechanism, why) values
  'as chunks_to_embed'),
 -- ---------- rbac -------------------------------------------------------------
 ('rbac.add_org_member(uuid,uuid,text)', 'rbac.has_permission',
- 'orgs:admin, or an admin membership of that org'),
+ 'orgs:admin, or an admin membership of that org, which only changes the role of somebody already in it (REM-1192)'),
 ('rbac.change_password(text,text)', 'owner',
  'the caller''s own account, and only with its current password'),
 ('rbac.create_org(text,text,uuid)', 'rbac.has_permission',

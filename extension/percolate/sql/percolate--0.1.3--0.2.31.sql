@@ -11761,6 +11761,14 @@ begin
             using errcode = 'insufficient_privilege',
                   hint = 'needs orgs:admin, or the admin role in that org';
     end if;
+    -- An org's own admin changes the role of somebody already in it, and joins nobody (REM-1192): every id names an
+    -- existing account, and joining one without their say hands the org their plan. rbac.create_org_member makes a
+    -- new account; the installation joins an existing one.
+    if not (rbac.is_installer() or rbac.has_permission(rbac.current_user_id(), 'orgs', 'admin'))
+       and not exists (select 1 from rbac.org_members where org_id = p_org_id and user_id = p_user_id) then
+        raise insufficient_privilege using message = 'That account is not in this org; the installation adds it',
+                                           hint = 'existing_account';
+    end if;
     insert into rbac.org_members (org_id, user_id, role)
     values (p_org_id, p_user_id, p_role)
     on conflict (org_id, user_id) do update set role = excluded.role;
