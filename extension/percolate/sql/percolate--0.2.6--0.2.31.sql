@@ -19593,10 +19593,22 @@ $$ language plpgsql volatile security definer set search_path = pg_catalog, publ
 -- rows whose memory's metadata contains the scope, read as the caller like the
 -- table itself. The limit then counts only rows inside the scope. A source
 -- whose rows name no resource has no memory to scope by, and is refused.
+--
+-- WITH NO SCOPE, A SOURCE WHOSE ROWS BELONG TO A MEMORY IS STILL READ FROM THE MEMORIES (REM-1186). The chunk
+-- policy asks whether the chunk's resource is readable, and Postgres plans a policy's subquery as a filter on every
+-- row, never as a join: an owner reading 3,150 of 230,000 chunks on the BEAM load scanned all of them, twice per
+-- search (the count deciding exact ranking, then the ranking), 1.3 s and 2.0 s. Joined from the caller's readable
+-- resources, the planner walks the resource index instead: 28 ms and 175 ms, the same rows. The source's own policy
+-- still applies on top, so this only ever narrows to rows whose memory the caller may read, which for chunks is
+-- what the policy already says.
 create or replace function aiq.scoped_source(p_source_table text, p_scope jsonb)
 returns text as $$
 begin
     if p_scope is null then
+        if exists (select 1 from pg_attribute where attrelid = p_source_table::regclass
+                      and attname = 'resource_id' and not attisdropped) then
+            return format('(select c.* from content.resources r join %s c on c.resource_id = r.id)', p_source_table);
+        end if;
         return p_source_table;
     end if;
     if jsonb_typeof(p_scope) is distinct from 'object'
@@ -19985,15 +19997,24 @@ begin
     -- so taking content from there returns NULL for exactly the results the
     -- semantic side contributed. Found by running it -- the fused output had
     -- blank content for every vector-only hit.
-    select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank
-    from (
+    --
+    -- By id, one index probe per fused row (REM-1186). The planner takes each half for a thousand rows, so a plain
+    -- join walked the source's whole primary key, and under row security an owner's search read every chunk in the
+    -- installation to fetch the content of their own 3,146 (2.3 s on the BEAM load). Each piece of the shape below
+    -- is load-bearing, measured: the fused rows are MATERIALIZED, because an id that comes out of the full join as
+    -- coalesce(...) cannot drive an index and the probe became a scan of every chunk per row; the lookup is LATERAL
+    -- with `limit 1`, at most one row by the primary key, so the planner cannot flatten it back into that join. It
+    -- is still an inner join: a row the caller cannot read drops out as before.
+    , fused as materialized (
         select coalesce(lex.chunk_id, sem.chunk_id) as chunk_id,
                (coalesce(1.0 / ($5 + lex.rnk), 0)
                 + coalesce(1.0 / ($5 + sem.rnk), 0))::real as rrf,
                lex.rnk as lexical_rank, sem.rnk as semantic_rank
         from lex full outer join sem on sem.chunk_id = lex.chunk_id
-    ) f
-    join %2$s c on c.id = f.chunk_id
+    )
+    select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank
+    from fused f
+    cross join lateral (select c.%1$I from %2$s c where c.id = f.chunk_id limit 1) c
     order by f.rrf desc
     limit $4
     $q$, src.content_col, src.source_table)
