@@ -13836,6 +13836,84 @@ language sql stable security definer set search_path = pg_catalog, public as $$
     select coalesce((select plan from rbac.plan_assignments where user_id = p_user), 'default');
 $$;
 
+-- AN ORG'S OWN ADMINISTRATOR MANAGES ITS PEOPLE (REM-1166): someone holding users:admin granted in one org, and no
+-- role over the installation, adds people to that org and puts them on a plan. Roles they grant through
+-- grant_with_basis with p_org; these two are what that left out.
+--
+-- A member by address. A new address becomes an active account; an existing one joins as it is, so an org's admin
+-- never reactivates an account the installation disabled. Returns the person's id.
+create or replace function rbac.create_org_member(p_org uuid, p_email text, p_role text default 'member')
+returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_id uuid;
+begin
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person adds a member';
+        end if;
+        perform rbac.require_users_admin_in(p_org);
+    end if;
+    if p_org is null or rbac.is_shared_org(p_org) then
+        raise invalid_parameter_value using message = 'A member joins one org, not the shared one';
+    end if;
+    if coalesce(btrim(p_email), '') !~ '^[^@\s]+@[^@\s]+$' then
+        raise invalid_parameter_value using message = 'A member is added by email address';
+    end if;
+    select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
+    if v_id is null then
+        insert into rbac.users (email, status) values (btrim(p_email), 'active') returning id into v_id;
+    end if;
+    insert into rbac.org_members (org_id, user_id, role) values (p_org, v_id, p_role)
+    on conflict (org_id, user_id) do update set role = excluded.role;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_id, 'org_member_added',
+            jsonb_build_object('org_id', p_org, 'role', p_role, 'by', rbac.current_user_id()));
+    return v_id;
+end;
+$$;
+
+-- A plan, in one org. A person has one plan wherever they are, so an org's admin may set it only for a member of
+-- their org who belongs to no other org they do not administer, and only to a plan with a finite limit on every
+-- required resource and no unlimited one: unlimited spend stays the installation's to hand out. An installation
+-- administrator may assign any plan to anybody.
+create or replace function rbac.assign_plan(p_user uuid, p_plan text, p_org uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_instance boolean := rbac.is_operator() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin');
+begin
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person assigns a plan';
+        end if;
+        perform rbac.require_users_admin_in(p_org);
+    end if;
+    if not exists (select 1 from rbac.plans where name = p_plan) then
+        raise no_data_found using message = format('No plan named %s', p_plan);
+    end if;
+    if not v_instance then
+        if not exists (select 1 from rbac.org_members where org_id = p_org and user_id = p_user) then
+            raise insufficient_privilege using message = 'Not a member of that org', hint = 'not_a_member';
+        end if;
+        if exists (select 1 from rbac.org_members m
+                    where m.user_id = p_user and m.org_id <> p_org and not rbac.is_shared_org(m.org_id)
+                      and not rbac.may_in_org('users', 'admin', m.org_id)) then
+            raise insufficient_privilege using message = 'They also belong to an org you do not administer',
+                                               hint = 'another_org';
+        end if;
+        if exists (select 1 from rbac.plan_limits where plan = p_plan and mode = 'unlimited')
+           or exists (select 1 from rbac.resource_kinds k where k.required and not exists (
+                          select 1 from rbac.plan_limits l where l.plan = p_plan and l.resource_kind = k.name)) then
+            raise insufficient_privilege using message = format('%s is not limited on every resource', p_plan),
+                                               hint = 'plan_not_finite';
+        end if;
+    end if;
+    insert into rbac.plan_assignments (user_id, plan, assigned_by) values (p_user, p_plan, rbac.current_user_id())
+    on conflict (user_id) do update set plan = excluded.plan, assigned_at = now(), assigned_by = excluded.assigned_by;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (p_user, 'plan_assigned',
+            jsonb_build_object('plan', p_plan, 'org_id', p_org, 'by', rbac.current_user_id()));
+end;
+$$;
+grant execute on function rbac.create_org_member(uuid, text, text), rbac.assign_plan(uuid, text, uuid) to authenticated;
+
 create or replace function rbac.limit_state(p_user uuid, p_kind text) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$
 declare k rbac.resource_kinds; l rbac.plan_limits; v_used bigint;
