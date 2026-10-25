@@ -94,6 +94,14 @@ begin
             ('api_viewer',    'nologin',         null,                  null),
             ('web_anon',      'nologin',         null,                  null),
             ('authenticated', 'nologin',         null,                  null),
+            -- The Content Server's role (REM-1118): the one caller that has read
+            -- the bytes it registers, so the one that may say where they are
+            -- stored. NOLOGIN and reached like authenticated, by SET ROLE from
+            -- authenticator; it is authenticated besides, so it acts as the
+            -- person whose claims it carries. PostgREST could switch to it only
+            -- for a token whose role claim names it, and no token this system
+            -- mints for a person does.
+            ('content_server', 'nologin',        null,                  null),
             -- noinherit: authenticator holds web_anon and authenticated but
             -- uses neither except by SET ROLE, which is what makes the
             -- per-request identity switch mean anything.
@@ -139,6 +147,8 @@ commit;
 grant api_viewer    to app_owner;       -- so app_owner can hand it the views
 grant web_anon      to authenticator;
 grant authenticated to authenticator;
+grant authenticated to content_server;
+grant content_server to authenticator;
 -- So a workflow step can read as the person who started its run: it runs as
 -- api_viewer with their claims, and needs their grants to read even that much.
 -- A cluster bootstrapped before 0.2.0 lacks this, and the update refuses
