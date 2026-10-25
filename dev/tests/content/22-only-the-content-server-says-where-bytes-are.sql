@@ -50,6 +50,14 @@ begin
     exception when insufficient_privilege then get stacked diagnostics v_hint = pg_exception_hint; v_hints := v_hints || v_hint; end;
     assert v_hints = array['content_server_only', 'content_server_only', 'content_server_only'],
         format('a person names no storage location, by any of the three; got %s', v_hints);
+
+    -- The check reads the `role` setting, so what keeps it honest is that a person cannot write it.
+    begin
+        perform set_config('role', 'content_server', true);
+        raise exception 'a person wrote the role setting';
+    exception when insufficient_privilege then null;
+    end;
+    assert current_setting('role') = 'authenticated', 'the role setting is still the person''s';
 end $$;
 reset role;
 
