@@ -35002,6 +35002,7 @@ insert into rbac.permission_kinds (resource, action, checked_by, human_only, eve
     ('research',   'list',     'function research.submit_package',       false, false),
     ('research',   'publish',  'function research.expose_for_publication', true, false),
     ('research',   'endorse',  'function research.endorse',              true,  true),
+    ('research',   'supervise', 'function research.revision_readable',   false, false),
     ('engagement', 'select',   'policy saves_self',                      false, true),
     ('engagement', 'insert',   'function engagement.add_comment',        true,  true),
     ('engagement', 'discuss',  'function engagement.discuss',            true,  true),
@@ -35437,8 +35438,11 @@ $$;
 
 -- A revision is readable in full, or when its work is readable and this exact
 -- revision was exposed, or when its owner added this exact revision to a
--- publication (REM-252), which needs no public work. Every nested read --
--- claims, sources, citations, edges, endorsements, comments, votes -- asks
+-- publication (REM-252), which needs no public work, or when the caller holds
+-- research:supervise in an org the work's owner belongs to (REM-1166): a teacher
+-- reads a class's drafts, which org visibility would show every member too.
+-- Every nested read -- claims, sources, citations, edges, endorsements,
+-- comments, votes -- asks
 -- this, so it narrows with it. visible_head and the listing do not: a
 -- publication exposure is reached by its exact revision, never found as a head.
 -- COST 1000, not the default 100: each call reads the revision, its work, the caller's grants and two exposure
@@ -35451,6 +35455,10 @@ language sql stable security definer cost 1000 set search_path = pg_catalog, pub
                                 and exists (select 1 from research.exposures e where e.revision_id = r.id))
                             or ((rbac.current_user_id() is null or rbac.may('research', 'select'))
                                 and exists (select 1 from research.publication_exposures pe where pe.revision_id = r.id))
+                            or (rbac.current_user_id() is not null and exists (
+                                select 1 from research.works w join rbac.org_members m on m.user_id = w.owner_id
+                                 where w.id = r.work_id and not rbac.is_shared_org(m.org_id)
+                                   and rbac.may_in_org('research', 'supervise', m.org_id)))
                        from research.revisions r where r.id = p_revision), false);
 $$;
 
