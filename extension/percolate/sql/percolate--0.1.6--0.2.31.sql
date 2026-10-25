@@ -10755,16 +10755,31 @@ delete from rbac.role_permissions rp
 -- ask the question about somebody else. Narrowing it to self-or-admin belongs
 -- with that work, not here, where it would be a second authorization rule
 -- invented in passing.
+--
+-- ONLY A GRANT HELD IN THE SHARED ORG COUNTS HERE (REM-1166). Every caller asks
+-- about the whole installation -- create_user, create_org, define_role,
+-- grant_role, and each policy's "an administrator reads all of it" arm -- and
+-- user_roles has no org, so reading it alone let a role granted in one org
+-- count across all of them: a school's admin could create orgs and redefine
+-- roles for everybody. A grant in one org counts in that org's decisions
+-- (rbac.decide, rbac.decide_in_org) and nowhere else. plpgsql, not sql,
+-- because rbac.grants is created further down this file and a sql body is
+-- checked against the tables when it is created.
 create or replace function rbac.has_permission(p_user_id uuid, p_resource text, p_action text)
 returns boolean as $$
-    select exists (
+begin
+    return exists (
         select 1 from rbac.user_roles ur
         join rbac.role_permissions rp on rp.role = ur.role
+        join rbac.grants g on g.user_id = ur.user_id and g.role = ur.role
         where ur.user_id = p_user_id
           and rp.resource = p_resource
           and rp.action = p_action
+          and g.revoked_at is null
+          and g.org_id = rbac.shared_org_id()
     );
-$$ language sql stable security definer set search_path = pg_catalog, public;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
 -- Convenience: current user id from the JWT claims PostgREST already
 -- exposes via current_setting -- use this directly inside RLS policies.
@@ -13514,6 +13529,26 @@ begin
 end;
 $$;
 
+-- WHO MAY GRANT OR REVOKE A ROLE IN ONE ORG (REM-1166): an installation's administrator in any org, and an org's own
+-- administrator in that org only. rbac.require counts a grant held in the org the claims name, so asking it alone let
+-- a school's admin write a grant into another school, or into the shared org, where it counts instance-wide. One
+-- copy, because grant_with_basis and revoke_grant both ask it. Internal: nothing else calls it.
+create or replace function rbac.require_users_admin_in(p_org uuid) returns void
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare v jsonb;
+begin
+    if rbac.has_permission(rbac.current_user_id(), 'users', 'admin') then
+        perform rbac.require('users', 'admin');
+        return;
+    end if;
+    v := rbac.decide_in_org('users', 'admin', p_org);
+    if not (v->>'allowed')::boolean then
+        raise insufficient_privilege using message = 'Not allowed: users:admin in that org', hint = v->>'reason';
+    end if;
+end;
+$$;
+revoke execute on function rbac.require_users_admin_in(uuid) from public;
+
 create or replace function rbac.grant_with_basis(
     p_user uuid, p_role text, p_basis text, p_evidence text default null,
     p_application text default 'percolate', p_org uuid default null)
@@ -13524,7 +13559,7 @@ begin
         if rbac.current_actor() <> 'person' then
             raise insufficient_privilege using message = 'Only a person grants a role';
         end if;
-        perform rbac.require('users', 'admin');
+        perform rbac.require_users_admin_in(coalesce(p_org, rbac.shared_org_id()));
     end if;
     insert into rbac.grants (user_id, role, application, org_id, granted_by, basis, evidence_ref)
     values (p_user, p_role, p_application, coalesce(p_org, rbac.shared_org_id()), v_by, p_basis, p_evidence)
@@ -13547,7 +13582,10 @@ begin
         if rbac.current_actor() <> 'person' then
             raise insufficient_privilege using message = 'Only a person revokes a role';
         end if;
-        perform rbac.require('users', 'admin');
+        -- In the org the grant is held in. An id that names no live grant asks for the installation's administrator,
+        -- so a refusal says nothing about which ids exist.
+        perform rbac.require_users_admin_in(coalesce(
+            (select org_id from rbac.grants where id = p_grant and revoked_at is null), rbac.shared_org_id()));
     end if;
     update rbac.grants set revoked_at = now(), revoked_by = v_by, revoke_reason = p_reason
      where id = p_grant and revoked_at is null

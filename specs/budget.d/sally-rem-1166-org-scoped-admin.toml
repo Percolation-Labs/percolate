@@ -1,0 +1,8 @@
+why = """REM-1166 (a school runs its own org). A role granted in one org counted over the whole installation, because
+rbac.has_permission read user_roles, which has no org; and grant_with_basis wrote a grant into any org once the caller
+was users:admin in the org their claims named. has_permission now counts only a grant held in the shared org, and
+rbac.require_users_admin_in is the one copy of "users:admin over the installation, or in this org", asked by
+grant_with_basis and revoke_grant. No table."""
+
+[added]
+functions = ["rbac.require_users_admin_in"]
