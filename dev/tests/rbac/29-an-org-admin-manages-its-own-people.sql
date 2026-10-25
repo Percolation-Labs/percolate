@@ -2,11 +2,12 @@
 --
 -- A school runs its own org: its admin holds users:admin granted in that org and nothing in the shared org.
 --
---   1. they add a member by address, in their org only; an existing account joins as it is, never reactivated;
+--   1. they add a new account by address as a plain member, in their org only; an existing account, whether in no
+--      other org or in another, is refused them: joining somebody without their say would hand the org their plan;
 --   2. they grant that member a role in their org, and not in another;
 --   3. they put a member on a finite plan; an unlimited plan, a non-member, and a member of an org they do not
 --      administer are each refused;
---   4. an installation administrator may assign any plan to anybody;
+--   4. an installation administrator joins an existing account, which stays as it was, and assigns any plan;
 --   5. an agent does none of it.
 --
 -- The claims are set as the superuser between blocks. One transaction, rolled back.
@@ -50,7 +51,7 @@ set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000229b2", 
 
 -- 1 and 2. A member by address, then a role, in school A only.
 do $$
-declare v_pupil uuid; v_refused int := 0;
+declare v_pupil uuid; v_refused int := 0; v_hint text; v_hints text[] := '{}';
 begin
     v_pupil := rbac.create_org_member('00000000-0000-4000-8000-0000000229f1', 'rbac29-pupil@example.test');
     perform set_config('rbac29.pupil', v_pupil::text, true);
@@ -58,8 +59,17 @@ begin
     assert exists (select 1 from rbac.org_members
                     where org_id = '00000000-0000-4000-8000-0000000229f1' and user_id = v_pupil and role = 'member'),
         'and a member of school A';
-    assert rbac.create_org_member('00000000-0000-4000-8000-0000000229f1', 'RBAC29-disabled@example.test')
-           = '00000000-0000-4000-8000-0000000229c3', 'an existing address joins as the account it is';
+    begin perform rbac.create_org_member('00000000-0000-4000-8000-0000000229f1', 'RBAC29-disabled@example.test');
+    exception when insufficient_privilege then
+        get stacked diagnostics v_hint = pg_exception_hint; v_hints := v_hints || v_hint; end;
+    begin perform rbac.create_org_member('00000000-0000-4000-8000-0000000229f1', 'rbac29-other-school@example.test');
+    exception when insufficient_privilege then
+        get stacked diagnostics v_hint = pg_exception_hint; v_hints := v_hints || v_hint; end;
+    assert v_hints = array['existing_account', 'existing_account'],
+        format('an existing account, in no org or in school B, is not school A''s admin''s to join; got %s', v_hints);
+    assert not exists (select 1 from rbac.org_members where org_id = '00000000-0000-4000-8000-0000000229f1'
+                        and user_id in ('00000000-0000-4000-8000-0000000229c3', '00000000-0000-4000-8000-0000000229d4')),
+        'and neither joined';
     perform rbac.grant_with_basis(v_pupil, 'rbac29-student', 'invitation', p_org => '00000000-0000-4000-8000-0000000229f1');
 
     begin perform rbac.create_org_member('00000000-0000-4000-8000-0000000229f2', 'rbac29-intruder@example.test');
@@ -93,16 +103,18 @@ end $$;
 set local request.jwt.claims = '';
 do $$
 begin
-    assert (select status = 'disabled' from rbac.users where id = '00000000-0000-4000-8000-0000000229c3'),
-        'the disabled account was not reactivated by joining';
     assert rbac.plan_of('00000000-0000-4000-8000-0000000229e5') = 'default', 'a refused assignment wrote nothing';
 end $$;
 
 
--- 4. The installation's administrator assigns any plan to anybody.
+-- 4. The installation's administrator joins an existing account and assigns any plan to anybody.
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-0000000229a1"}';
 do $$
 begin
+    assert rbac.create_org_member('00000000-0000-4000-8000-0000000229f1', 'RBAC29-disabled@example.test')
+           = '00000000-0000-4000-8000-0000000229c3', 'the installation joins an existing address as the account it is';
+    assert (select status = 'disabled' from rbac.users where id = '00000000-0000-4000-8000-0000000229c3'),
+        'and joining does not reactivate it';
     perform rbac.assign_plan('00000000-0000-4000-8000-0000000229e5', 'rbac29-open', '00000000-0000-4000-8000-0000000229f2');
     assert rbac.plan_of('00000000-0000-4000-8000-0000000229e5') = 'rbac29-open', 'any plan, from the installation';
 end $$;

@@ -3492,9 +3492,10 @@ $$;
 -- role over the installation, adds people to that org and puts them on a plan. Roles they grant through
 -- grant_with_basis with p_org; these two are what that left out.
 --
--- A member by address. A new address becomes an active account; an existing one joins as it is, so an org's admin
--- never reactivates an account the installation disabled. Returns the person's id.
-create or replace function rbac.create_org_member(p_org uuid, p_email text, p_role text default 'member')
+-- A member by address, always a plain member. A new address becomes an active account. An existing account is the
+-- installation's to join to an org, never an org admin's: joining somebody without their say must not hand an org
+-- their plan, and an admin's role in the org is given by the installation too. Returns the person's id.
+create or replace function rbac.create_org_member(p_org uuid, p_email text)
 returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_id uuid;
 begin
@@ -3513,12 +3514,14 @@ begin
     select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
     if v_id is null then
         insert into rbac.users (email, status) values (btrim(p_email), 'active') returning id into v_id;
+    elsif not (rbac.is_operator() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise insufficient_privilege using message = 'That address already has an account; the installation adds it',
+                                           hint = 'existing_account';
     end if;
-    insert into rbac.org_members (org_id, user_id, role) values (p_org, v_id, p_role)
-    on conflict (org_id, user_id) do update set role = excluded.role;
+    insert into rbac.org_members (org_id, user_id, role) values (p_org, v_id, 'member') on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
     values (v_id, 'org_member_added',
-            jsonb_build_object('org_id', p_org, 'role', p_role, 'by', rbac.current_user_id()));
+            jsonb_build_object('org_id', p_org, 'role', 'member', 'by', rbac.current_user_id()));
     return v_id;
 end;
 $$;
@@ -3564,7 +3567,7 @@ begin
             jsonb_build_object('plan', p_plan, 'org_id', p_org, 'by', rbac.current_user_id()));
 end;
 $$;
-grant execute on function rbac.create_org_member(uuid, text, text), rbac.assign_plan(uuid, text, uuid) to authenticated;
+grant execute on function rbac.create_org_member(uuid, text), rbac.assign_plan(uuid, text, uuid) to authenticated;
 
 create or replace function rbac.limit_state(p_user uuid, p_kind text) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$

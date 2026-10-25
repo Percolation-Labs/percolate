@@ -13723,9 +13723,10 @@ $$;
 -- role over the installation, adds people to that org and puts them on a plan. Roles they grant through
 -- grant_with_basis with p_org; these two are what that left out.
 --
--- A member by address. A new address becomes an active account; an existing one joins as it is, so an org's admin
--- never reactivates an account the installation disabled. Returns the person's id.
-create or replace function rbac.create_org_member(p_org uuid, p_email text, p_role text default 'member')
+-- A member by address, always a plain member. A new address becomes an active account. An existing account is the
+-- installation's to join to an org, never an org admin's: joining somebody without their say must not hand an org
+-- their plan, and an admin's role in the org is given by the installation too. Returns the person's id.
+create or replace function rbac.create_org_member(p_org uuid, p_email text)
 returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_id uuid;
 begin
@@ -13744,12 +13745,14 @@ begin
     select id into v_id from rbac.users where lower(email) = lower(btrim(p_email));
     if v_id is null then
         insert into rbac.users (email, status) values (btrim(p_email), 'active') returning id into v_id;
+    elsif not (rbac.is_operator() or rbac.has_permission(rbac.current_user_id(), 'users', 'admin')) then
+        raise insufficient_privilege using message = 'That address already has an account; the installation adds it',
+                                           hint = 'existing_account';
     end if;
-    insert into rbac.org_members (org_id, user_id, role) values (p_org, v_id, p_role)
-    on conflict (org_id, user_id) do update set role = excluded.role;
+    insert into rbac.org_members (org_id, user_id, role) values (p_org, v_id, 'member') on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
     values (v_id, 'org_member_added',
-            jsonb_build_object('org_id', p_org, 'role', p_role, 'by', rbac.current_user_id()));
+            jsonb_build_object('org_id', p_org, 'role', 'member', 'by', rbac.current_user_id()));
     return v_id;
 end;
 $$;
@@ -13795,7 +13798,7 @@ begin
             jsonb_build_object('plan', p_plan, 'org_id', p_org, 'by', rbac.current_user_id()));
 end;
 $$;
-grant execute on function rbac.create_org_member(uuid, text, text), rbac.assign_plan(uuid, text, uuid) to authenticated;
+grant execute on function rbac.create_org_member(uuid, text), rbac.assign_plan(uuid, text, uuid) to authenticated;
 
 create or replace function rbac.limit_state(p_user uuid, p_kind text) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$
@@ -35322,8 +35325,10 @@ $$;
 -- A revision is readable in full, or when its work is readable and this exact
 -- revision was exposed, or when its owner added this exact revision to a
 -- publication (REM-252), which needs no public work, or when the caller holds
--- research:supervise in an org the work's owner belongs to (REM-1166): a teacher
--- reads a class's drafts, which org visibility would show every member too.
+-- research:supervise in the org the work is placed in and its owner still
+-- belongs to (REM-1166): a teacher reads a class's drafts, which org visibility
+-- would show every member too. Only the owner places a work (research.place_work),
+-- so joining somebody to an org reads none of their work.
 -- Every nested read -- claims, sources, citations, edges, endorsements,
 -- comments, votes -- asks
 -- this, so it narrows with it. visible_head and the listing do not: a
@@ -35339,10 +35344,33 @@ language sql stable security definer cost 1000 set search_path = pg_catalog, pub
                             or ((rbac.current_user_id() is null or rbac.may('research', 'select'))
                                 and exists (select 1 from research.publication_exposures pe where pe.revision_id = r.id))
                             or (rbac.current_user_id() is not null and exists (
-                                select 1 from research.works w join rbac.org_members m on m.user_id = w.owner_id
-                                 where w.id = r.work_id and not rbac.is_shared_org(m.org_id)
-                                   and rbac.may_in_org('research', 'supervise', m.org_id)))
+                                select 1 from research.works w
+                                  join rbac.org_members m on m.user_id = w.owner_id and m.org_id = w.org_id
+                                 where w.id = r.work_id and not rbac.is_shared_org(w.org_id)
+                                   and rbac.may_in_org('research', 'supervise', w.org_id)))
                        from research.revisions r where r.id = p_revision), false);
+$$;
+
+-- THE OWNER PLACES A WORK IN ONE OF THEIR ORGS (REM-1166), or back in the shared org. The org a work is placed in is
+-- the one a supervisor there reads it in, so this is the owner's act alone: membership is given by an org's admin,
+-- and must not by itself open anybody's drafts. It changes no visibility; a private work stays private to everyone
+-- but the owner and that org's supervisors.
+create or replace function research.place_work(p_public_id text, p_org uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_user uuid := rbac.require('research', 'insert');
+begin
+    if p_org is null then
+        raise invalid_parameter_value using message = 'A work is placed in an org, or in the shared org';
+    end if;
+    if not rbac.is_shared_org(p_org) and p_org not in (select rbac.current_org_ids()) then
+        raise insufficient_privilege using message = 'A work is placed only in an org its owner belongs to',
+                                           hint = 'not_a_member';
+    end if;
+    update research.works set org_id = p_org where public_id = p_public_id and owner_id = v_user;
+    if not found then
+        raise no_data_found using message = format('No work %s of yours', p_public_id);
+    end if;
+end;
 $$;
 
 -- The revision a caller is shown for a work: the head to a caller with full
@@ -37027,7 +37055,7 @@ grant execute on function
     rbac.reserve_usage(text, bigint, text, interval), rbac.consume_usage(text, text, bigint),
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text, text),
-    research.revise_working(text, jsonb, text, text), content.capture_snapshot(uuid),
+    research.revise_working(text, jsonb, text, text), research.place_work(text, uuid), content.capture_snapshot(uuid),
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     research.move_publication_exposure(text, text, text, text, uuid),
     content.register_evidence(text, text, text, text, bigint, text, text),

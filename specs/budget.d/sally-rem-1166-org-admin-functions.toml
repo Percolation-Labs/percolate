@@ -1,6 +1,8 @@
 why = """REM-1166 (a school runs its own org). Someone with users:admin in one org could grant roles there but not add a
 person or set a plan: rbac.create_user and plan_assignments were the installation's. rbac.create_org_member adds a
-member by address in that org; rbac.assign_plan puts a member on a finite plan. Nothing held either. No table."""
+member by address in that org; rbac.assign_plan puts a member on a finite plan.
+research.place_work lets an owner put their own work in a class org, the only works a supervisor there reads.
+Nothing held any of these. No table."""
 
 [added]
-functions = ["rbac.create_org_member", "rbac.assign_plan"]
+functions = ["rbac.create_org_member", "rbac.assign_plan", "research.place_work"]
