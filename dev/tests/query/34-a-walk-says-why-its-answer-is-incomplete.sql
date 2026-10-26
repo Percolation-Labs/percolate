@@ -113,7 +113,7 @@ declare
     got text;
     a jsonb;
 begin
-    if exists (select 1 from workflow.runs where id in (eager, noladder, offline) and status <> 'succeeded') then
+    if exists (select 1 from workflow.runs where id in (eager, noladder, offline) and status is distinct from 'succeeded') then
         raise exception 'a fixture walk did not finish in-database';
     end if;
 
@@ -127,8 +127,8 @@ begin
         raise exception 'eager: why is %', got;
     end if;
     a := aiq.walk_audit(eager);
-    if a->>'state' <> 'cold, accepted leads open'
-       or a->'open' <> '[["next:wt/2", 0.7, 1], ["near:wt/2", 0.65, 1], ["term:ladder", 0.6, 2]]' then
+    if a->>'state' is distinct from 'cold, accepted leads open'
+       or a->'open' is distinct from '[["next:wt/2", 0.7, 1], ["near:wt/2", 0.65, 1], ["term:ladder", 0.6, 2]]' then
         raise exception 'eager: the audit is %', a;
     end if;
 
@@ -138,7 +138,7 @@ begin
     if got is distinct from 'wt/5 b term:ladder 0.4; wt/7 b term:ladder 0.4' then
         raise exception 'no-ladder: why is %', got;
     end if;
-    if aiq.walk_audit(noladder)->'near misses' <> '[["term:ladder", 0.4, 2]]' then
+    if aiq.walk_audit(noladder)->'near misses' is distinct from '[["term:ladder", 0.4, 2]]' then
         raise exception 'no-ladder: the near misses are %', aiq.walk_audit(noladder)->'near misses';
     end if;
 
@@ -155,7 +155,7 @@ begin
     if exists (select 1 from aiq.walk_why(offline)) then
         raise exception 'the run''s own answer key was not used';
     end if;
-    if (select count(*) from aiq.walk_why(eager)) <> 2 then
+    if (select count(*) from aiq.walk_why(eager)) is distinct from 2 then
         raise exception 'eager, own key: % unread where wt/5 and wt/7 are', (select count(*) from aiq.walk_why(eager));
     end if;
 
