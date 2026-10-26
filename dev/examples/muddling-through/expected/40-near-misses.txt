@@ -1,0 +1,6 @@
+      arm      | evidence_read_by_1600 | evidence | near_misses_travelled 
+---------------+-----------------------+----------+-----------------------
+ accepted only |                     0 |       12 |                     0
+ near misses   |                     4 |       12 |                   802
+(2 rows)
+
