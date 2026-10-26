@@ -50,6 +50,9 @@ grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'wal
 # Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
 grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
+# Step 5: the budget the graph gives now is the raised one, and as of 00:11:20 the earlier one (REM-1213).
+grep -Eq '^ now +\| .*\$160' $CAP/60-time.txt && grep -Eq '^ 2024-08-12 00:11:20 \| .*\$150' $CAP/60-time.txt \
+  || { echo "step 5 did not answer as the article says"; cat $CAP/60-time.txt; exit 1; }
 # A block with an expected file prints exactly that: the article quotes it.
 for e in "$HERE"/expected/*.txt; do
   [ -e "$e" ] || continue
