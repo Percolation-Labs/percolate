@@ -575,6 +575,17 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 1, 2
 $$;
 
+-- Search's own order for the run's question: what plain search would have
+-- read, rank by rank, for setting a walk beside it read for read.
+create or replace function aiq.walk_search_order(p_run uuid)
+returns table (rank int, doc text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select o.ordinality::int, o.value #>> '{}'
+      from workflow.tasks tk, jsonb_array_elements(tk.output->'result'->0->'state'->'order') with ordinality o
+     where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded'
+     order by 1
+$$;
+
 create or replace function aiq.walk_clues(p_run uuid)
 returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
                travelled_wave int)
@@ -697,7 +708,7 @@ $$;
 
 grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
-                          aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid),
+                          aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
 revoke all on function aiq.install_walk_workflow(text, text, int) from public;

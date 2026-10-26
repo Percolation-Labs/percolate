@@ -4,5 +4,5 @@ everything else is recomputed from them and the by-construction links."""
 
 [added]
 functions = ["aiq.walk_task", "aiq.walk_settings", "aiq.walk_graph", "aiq.walk_snippet", "aiq.walk_state",
-             "aiq.walk_start", "aiq.walk_needs_vector", "aiq.walk_requests", "aiq.walk_read", "aiq.walk_reads", "aiq.walk_clues",
+             "aiq.walk_start", "aiq.walk_needs_vector", "aiq.walk_requests", "aiq.walk_read", "aiq.walk_reads", "aiq.walk_search_order", "aiq.walk_clues",
              "aiq.walk_waves", "aiq.walk_summary", "aiq.walk_verdicts", "aiq.install_walk_workflow"]
