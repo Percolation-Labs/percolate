@@ -392,6 +392,7 @@ ORDER = [
     ("ai-query-layer/catalogue.sql",            "this database's own catalogue as nodes plus exact pg_depend edges, opt-in behind aiq.refresh_catalogue(). After integration-rbac, because it registers an entity type and the projection it builds inherits that authorization"),
     ("ai-query-layer/reliability.sql",          "how often each extractor's edges have been retracted, and the Beta estimator over any two counts. Reads only aiq.edges, which has been recording the corrections since it was written"),
     ("ai-query-layer/edge-standing.sql",        "which edges answer real questions, which weights survive a uniform-partition null, and the depth-one read that records it happened. Reads the recall counters schema.sql already writes"),
+    ("ai-query-layer/walk-why.sql",             "why a walk's answer is incomplete, from the run's own rows (REM-1211). plpgsql over REM-1210's aiq.walk_* functions, so it resolves them at call time and its place in the order does not depend on theirs"),
     ("world-model-ingestion/schema.sql",        "the content plane: channels, files, resources, chunks"),
     ("world-model-ingestion/integration.sql",   "registers the corpus, projects documents into the graph"),
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),
