@@ -752,6 +752,7 @@ declare
     v_file    uuid;
     v_res     uuid;
 begin
+    perform content.assert_content_server('saves evidence');
     if coalesce(p_uri, '') !~* '^https?://[^/[:space:]]+' then
         raise check_violation using message = 'Evidence is saved from an http or https address';
     end if;
@@ -820,6 +821,7 @@ declare
     v_file    uuid;
     v_res     uuid;
 begin
+    perform content.assert_content_server('keeps article images');
     if p_content_type is null or p_content_type not in ('image/png', 'image/jpeg', 'image/webp') then
         raise check_violation using message = 'An article image is a PNG, JPEG or WebP file';
     end if;

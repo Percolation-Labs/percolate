@@ -370,6 +370,29 @@ $$;
 
 grant execute on function content.may_upload(uuid) to authenticated, worker;
 
+-- WHO SAYS WHERE STORED BYTES ARE (REM-1118). content.files is keyed on checksum and keeps the first registrant's
+-- bucket and key, so whoever may name a location for a checksum may redirect every later upload of those bytes. Over
+-- PostgREST a person could: they registered a checksum at a location of their choosing, and the next upload of the
+-- same bytes was served from it (reproduced on main bf7da6fd). Only the Content Server has read the bytes it registers,
+-- so only it says where they are (Sirsh, M-20261023-052904-d854). It logs in as authenticator and SETs ROLE
+-- content_server; a person never issues SET ROLE (dev/tests/rbac/31), and no token minted for a person names that
+-- role. The `role` setting is read rather than current_user, because every caller of this is SECURITY DEFINER and
+-- current_user there is the owner. A superuser session (an installer, a fixture) may too. The worker binds its own
+-- artifacts through workflow.register_artifact, which only `worker` may execute.
+create or replace function content.assert_content_server(p_what text) returns void
+language plpgsql stable set search_path = pg_catalog, public as $$
+begin
+    if current_setting('role') = 'content_server'
+       or coalesce((select rolsuper from pg_roles where rolname = session_user), false) then
+        return;
+    end if;
+    raise insufficient_privilege
+        using message = format('Only the Content Server %s: it has the bytes, so it says where they are stored', p_what),
+              hint = 'content_server_only';
+end;
+$$;
+revoke execute on function content.assert_content_server(text) from public;
+
 create or replace function content.register_upload(
     p_channel     text,
     p_checksum    text,
@@ -401,6 +424,7 @@ declare
     v_run      uuid;
     v_vis      text := coalesce(p_visibility, rbac.default_visibility(p_org_id));
 begin
+    perform content.assert_content_server('registers uploaded bytes');
     perform content.assert_org_write(p_org_id, 'register content');
 
     -- Both halves, and assert_org_write is only the first. A caller may belong
