@@ -102,7 +102,7 @@ begin
         'question',        coalesce(v_summary -> 'question', '"missing"'),
         'reads',           coalesce(v_summary -> 'reads', '"missing"'),
         'waves',           (select coalesce(jsonb_agg(w.reads order by w.wave), '"missing"') from aiq.walk_waves(p_run) w),
-        'stop',            coalesce(v_summary -> 'stop', '"missing"'),
+        'stop',            coalesce(nullif(v_summary -> 'stop', 'null'), '"missing"'),  -- a JSON null is missing too
         'gate',            coalesce(to_jsonb(v_gate), '"missing"'),
         'state',           v_state,
         'last wave fresh', case when v_last.wave is null then '"missing"' else to_jsonb(v_last.fresh) end,
