@@ -80,11 +80,12 @@ declare
     reads text[];
     got text;
 begin
-    if (select status from workflow.runs where id = r) <> 'succeeded' then
+    if (select status from workflow.runs where id = r) is distinct from 'succeeded' then
         raise exception 'the walk did not finish in-database: %', (select string_agg(step_key || ' ' || status || ' '
             || coalesce(error::text, ''), '; ') from workflow.tasks where run_id = r and status not in ('succeeded', 'skipped'));
     end if;
-    if (select status from workflow.tasks where run_id = r and step_key = 'q') <> 'skipped' then
+    -- a database whose default model has no provider installs no q step at all, which is as good
+    if exists (select 1 from workflow.tasks where run_id = r and step_key = 'q' and status <> 'skipped') then
         raise exception 'a graph walk given its order embedded the question anyway';
     end if;
     select array_agg(doc order by wave, ord) into reads from aiq.walk_reads(r);
@@ -103,10 +104,10 @@ begin
        or not exists (select 1 from aiq.walk_clues(r) where decision = 'unjudged') then
         raise exception 'a clue the replay lacks is not unjudged, or none was';
     end if;
-    if (select travelled_wave from aiq.walk_clues(r) where key = 'term:ladder') <> 2 then
+    if (select travelled_wave from aiq.walk_clues(r) where key = 'term:ladder') is distinct from 2 then
         raise exception 'ladder was not travelled in wave 2';
     end if;
-    if (aiq.walk_verdicts(r)->'verdicts'->'q1'->>'term:ladder')::real <> 0.9::real then
+    if (aiq.walk_verdicts(r)->'verdicts'->'q1'->>'term:ladder')::real is distinct from 0.9::real then
         raise exception 'the verdicts a later run replays lack ladder: %', aiq.walk_verdicts(r);
     end if;
     if (select open_leads from aiq.walk_waves(r) order by wave desc limit 1)
@@ -121,7 +122,7 @@ begin
     end if;
     -- A step's error fails the step and the run, with the reason on the task.
     r := workflow.start_workflow('walk_fixture_run', inp || '{"replay": "walk-fixture:other-wording"}');
-    if (select status from workflow.runs where id = r) <> 'failed'
+    if (select status from workflow.runs where id = r) is distinct from 'failed'
        or not exists (select 1 from workflow.tasks where run_id = r and status = 'failed'
                                                     and error::text like '%another task wording%') then
         raise exception 'a replay judged under another wording was accepted';
