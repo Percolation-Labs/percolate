@@ -355,6 +355,14 @@ begin
 end;
 $$;
 
+-- Whether the question needs embedding: only a channel walk with no stored
+-- order searches by meaning. A graph walk, or one given its order, skips the
+-- embed step, so a walk over a graph runs with no worker at all.
+create or replace function aiq.walk_needs_vector(p_run uuid) returns boolean
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select coalesce((select input ? 'channel' and not input ? 'search' from workflow.runs where id = p_run), false)
+$$;
+
 -- The start step: search's order, and its first `seeds` reads as wave 0.
 create or replace function aiq.walk_start(p_run uuid, p_vector vector default null)
 returns jsonb
@@ -371,6 +379,11 @@ begin
     inp := r.input;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
+    -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
+    -- matrix expansion: walk_state raises if it is missing or was judged under another wording.
+    if inp ? 'replay' then
+        perform aiq.walk_state(p_run);
+    end if;
     if inp ? 'search' then
         ord := inp->'search';
     elsif p_vector is not null and inp ? 'channel' then
@@ -652,6 +665,7 @@ begin
 name: %1$s
 steps:
   - id: q
+    when: "aiq.walk_needs_vector({{run.$id}}::uuid)"
     embed: '{{run.question.text}}'
   - id: start
     needs: [q]
@@ -681,7 +695,7 @@ $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider));
 end;
 $$;
 
-grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_graph(jsonb, timestamptz),
+grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
