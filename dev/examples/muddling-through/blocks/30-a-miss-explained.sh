@@ -24,4 +24,16 @@ select wave, total_reads as reads, accepted, fresh, open_leads from aiq.walk_wav
 
 -- Why the answer is incomplete, from the run's own rows: each piece of evidence it did not read, and why.
 select * from aiq.walk_why(:'run');
+
+-- The near misses beside them: leads to the unread evidence that Jev rejected just under the gate (0.5).
+with unread as (
+  select g.doc
+    from jsonb_array_elements_text(aiq.walk_summary(:'run')->'question'->'gold') g(doc)
+   where not exists (select 1 from aiq.walk_reads(:'run') r where r.doc = g.doc)
+)
+select u.doc as evidence, c.key as lead, round(c.p::numeric, 2) as p
+  from unread u
+  join aiq.walk_clues(:'run') c on u.doc = any(c.targets)
+ where c.decision = 'rejected' and c.p >= 0.4
+ order by u.doc, c.p desc;
 SQL
