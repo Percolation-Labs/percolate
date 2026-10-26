@@ -37,6 +37,9 @@
 --   warm      at least 0.05 of that wave's expanded reads raised a newly
 --             accepted lead (sally's calibration, REM-1194)
 --   cold      under 0.05; with no accepted lead open it is the certificate
+-- A clue nobody judged (an offline run) could not have been accepted: with no
+-- clue judged the state is unknown, and while unjudged clues still point at
+-- unread documents a walk earns no certificate.
 -- Both functions run as the caller and read only through REM-1210's functions,
 -- which read the caller's own run.
 -- ============================================================
@@ -49,6 +52,8 @@ declare
     v_last    record;
     v_open    jsonb;
     v_near    jsonb;
+    v_blind   int;     -- unjudged clues that still point at unread documents
+    v_ending  text;
     v_state   text;
     v_counts  record;
 begin
@@ -58,12 +63,13 @@ begin
     with r as (select distinct doc from aiq.walk_reads(p_run)),
          c as (select c.*, (select count(*) from unnest(c.targets) t where t not in (select doc from r)) as unread
                  from aiq.walk_clues(p_run) c)
-    select coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
+    select count(*) filter (where p is null and unread > 0),
+           coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         filter (where state = 'open' and unread > 0), '[]'),
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         -- 0.35 as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
                         filter (where decision = 'rejected' and p >= 0.35::real and p < v_gate and unread > 0), '[]')
-      into v_open, v_near
+      into v_blind, v_open, v_near
       from c;
 
     select count(*) filter (where p is not null) as judged,
@@ -72,19 +78,24 @@ begin
       into v_counts
       from aiq.walk_clues(p_run);
 
+    -- The certificate says no lead the walk could have followed is left. A clue nobody judged could not be
+    -- accepted, so while one still points at unread documents there is no certificate, only the count.
+    v_ending := case when jsonb_array_length(v_open) > 0 then 'accepted leads open'
+                     when v_blind > 0 then format('no accepted lead open, but %s unjudged leads still point at '
+                                                  'unread documents (no certificate)', v_blind)
+                     else 'no accepted lead open (certificate)' end;
     v_state := case
         when v_last.wave is null
             then 'missing: the run holds no wave that read'
+        when v_counts.judged = 0 and v_counts.unjudged > 0
+            then 'unknown: no clue was judged (an offline run), so no lead could be accepted'
         when v_last.fresh is null
             then 'unknown: the last wave expanded no read, so its temperature says nothing'
         when v_summary #>> '{stop,reason}' = 'dry'
-            then format('ran dry after wave %s; %s', v_last.wave,
-                        case when jsonb_array_length(v_open) > 0 then 'accepted leads open'
-                             else 'no accepted lead open (certificate)' end)
+            then format('ran dry after wave %s; %s', v_last.wave, v_ending)
         when v_last.fresh >= 0.05
             then 'warm: still finding new accepted leads'
-        else 'cold, ' || case when jsonb_array_length(v_open) > 0 then 'accepted leads open'
-                              else 'no accepted lead open (certificate)' end
+        else 'cold, ' || v_ending
     end;
 
     return jsonb_build_object(
