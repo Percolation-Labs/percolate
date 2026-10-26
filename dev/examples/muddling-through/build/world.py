@@ -11,6 +11,7 @@ construction (REM-1199):
   walk_tagged   world_item -> world_tag    the item carries the tag; provenance {n}, the tag's members
   walk_next     world_item -> world_item   the next item in the sitting; provenance {sitting, pos}
   walk_nearest  world_item -> world_item   one of the item's 3 nearest in meaning; provenance {rank}
+  walk_seed     world_question -> world_item  search's order for the question, the first 1,600; provenance {rank}
 
 A tag is a node here and not a pair of items, as it is on a source's documents (`percolate walk index`), because
 walk-0's tags are wide: its 2,407 tags have 45,156 members, which as item pairs would be 26.9 million edges. The tags
@@ -19,11 +20,10 @@ are public sample data in the sample's own table, so a tag node publishes nothin
 It writes:
 
   world.sql        the tables, their rows, the node registrations and the edges, for the sample's sql step
-  questions.jsonl  every question: its phrasing, its evidence and what it names as node keys, and `search`, the first
-                   1,600 items in the order the world's search ranks them (the world's vectors stay in the study)
-  verdicts.json    every P the world's decider gave on the study's walks, as a `percolate walk` verdict file, so each
-                   step replays at $0. The decider is the world's own (reach.decide), not Jev: the world has no words
-                   for a model to read.
+  questions.jsonl  every question: its phrasing, and its evidence and the tags it names, as node keys. Search's order
+                   is in world.sql as walk_seed edges (the world's vectors stay in the study).
+
+The replay documents, a P for every clue on the step questions, come from build/world_replay.py.
 """
 import json
 import sys
@@ -73,26 +73,26 @@ def main(spike, dst):
     sql.append(insert("tagged", ["item", "tag"], tagged))
     sql.append(insert("next", ["a", "b", "sitting", "pos"], nxt))
     sql.append(insert("nearest", ["a", "b", "rank"], near))
+    # Search's order per question, stored: a run's input is capped at 64 KB and an order is 1,600 keys.
+    qrows, seeds = [], []
+    for q in map(json.loads, open(world / "questions.jsonl")):
+        qrows.append((uid("question", q["qid"]), key(q["qid"]), q["phrasing"]))
+        seeds += [(uid("question", q["qid"]), uid("item", i), r) for r, i in enumerate(store.nearest(q["vector"], SEARCH))]
+    sql.append(insert("questions", ["id", "key", "phrasing"], qrows))
+    sql.append(insert("seeds", ["question", "item", "rank"], seeds))
     sql.append(Path(__file__).with_name("world_edges.sql").read_text())
     (dst / "world.sql").write_text("".join(sql))
 
     qs = []
     for q in map(json.loads, open(world / "questions.jsonl")):
-        order = store.nearest(q["vector"], SEARCH)
         qs.append({"qid": f"{name}/{q['qid']}", "phrasing": q["phrasing"], "gold": [key(i) for i in q["gold"]],
-                   "named": [key(t) for t in q["named"]], "search": [key(i) for i in order]})
+                   "named": [key(t) for t in q["named"]]})
     with (dst / "questions.jsonl").open("w") as f:
         for q in qs:
             f.write(json.dumps(q) + "\n")
 
-    verdicts = {}
-    for r in map(json.loads, open(world / "decisions.jsonl")):
-        verdicts.setdefault(f"{name}/{r['qid']}", {})[f"{r['kind']}:{key(r['x'])}"] = round(r["p"], 6)
-    (dst / "verdicts.json").write_text(json.dumps(
-        {"model": "reach-synthetic (the world's own decider, REM-1191)", "task": task, "verdicts": verdicts},
-        sort_keys=True, separators=(",", ":")) + "\n")
     print(f"{len(items)} items, {len(tags)} tags, {len(tagged)} tagged, {len(nxt)} next, {len(near)} nearest, "
-          f"{len(qs)} questions, {sum(map(len, verdicts.values()))} verdicts", file=sys.stderr)
+          f"{len(qs)} questions, {len(seeds)} seeds", file=sys.stderr)
 
 
 if __name__ == "__main__":

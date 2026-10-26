@@ -1,0 +1,10 @@
+# Replay documents: each step question's verdicts, which a run reads back by uri. Stored, never embedded.
+channels:
+  - name: walk-replays
+    kind: manual
+    visibility: public
+    config: {description: "walk verdicts, one document per question, read back by a run's {replay: uri}"}
+  - name: walk-questions
+    kind: manual
+    visibility: public
+    config: {description: "each question and its answer key, by uri question:<qid>; never embedded"}

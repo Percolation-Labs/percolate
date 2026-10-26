@@ -15,3 +15,5 @@ load:
   - sources: sources.yaml
   - workflows: workflows
   - texts: texts.jsonl
+  - texts: replays.jsonl
+  - texts: question-texts.jsonl

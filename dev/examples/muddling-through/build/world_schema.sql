@@ -9,3 +9,5 @@ create table walk_world.tags (id uuid primary key, key text unique not null, n i
 create table walk_world.tagged (item uuid not null, tag uuid not null);
 create table walk_world.next (a uuid not null, b uuid not null, sitting text not null, pos int not null);
 create table walk_world.nearest (a uuid not null, b uuid not null, rank int not null);
+create table walk_world.questions (id uuid primary key, key text unique not null, phrasing text not null);
+create table walk_world.seeds (question uuid not null, item uuid not null, rank int not null);

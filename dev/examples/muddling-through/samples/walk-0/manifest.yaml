@@ -8,7 +8,11 @@ name: muddling-through-walk-0
 version: 1.0.0
 description: |-
   A synthetic world of 5,778 documents and 7,499 claims in 214 sittings, with 2,407 tags and 30 questions whose
-  evidence is known, from the reachability study (REM-1191). questions.jsonl carries each question's search order;
-  verdicts.json, the P the world's decider gave each clue, so a walk replays at $0.
+  evidence is known, from the reachability study (REM-1191). search's order per question is stored as walk_seed
+  edges, and replays.jsonl holds, for the seven step questions, the P the world's decider gives every clue, so a walk
+  replays at $0.
 load:
   - sql: world.sql
+  - sources: sources.yaml
+  - texts: replays.jsonl
+  - texts: question-texts.jsonl
