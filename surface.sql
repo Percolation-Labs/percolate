@@ -344,6 +344,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_waves','uuid','walk.sql: per wave, reads, clues judged and accepted, and leads open (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_summary','uuid','walk.sql: a walk''s question, settings, stop and decider (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_verdicts','uuid','walk.sql: a walk''s verdicts as a replay document (REM-1210)'),
+('ai-query-layer','function','aiq.walk_audit','uuid','walk-why.sql: a walk''s state at the stop, open leads and near misses, with no answer key (REM-1211)'),
+('ai-query-layer','function','aiq.walk_why','uuid,jsonb','walk-why.sql: why each unread evidence document was missed: never offered, rejected, or open (REM-1211)'),
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.extension_boundary','','§9b: every place the SQL half calls the compiled half, and whether it is there'),
 ('ai-query-layer','table','aiq.node_resolutions',null,
