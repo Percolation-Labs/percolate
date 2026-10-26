@@ -41897,6 +41897,14 @@ declare
     si      int := coalesce((st->'waves'->-1->>'si')::int, 0);
     reached jsonb := st->'reached';
     open_   jsonb := '{}'::jsonb;   -- {key: {p, targets}}
+    -- Near misses (REM-1207), off unless settings.near_miss = {band, every}: rejected clues with P in [band, gate),
+    -- of which every `every`-th travel takes the best. A fixed rotation rather than the study's coin, so a replay
+    -- reads the same documents in the same order on any engine.
+    nm      jsonb := s->'near_miss';
+    misses  jsonb := '{}'::jsonb;   -- {key: {p, targets}}
+    travel  int := (select count(*) from jsonb_array_elements(st->'waves') w,
+                           jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb)))::int;
+    miss    boolean;
     reads   jsonb := '[]'::jsonb;
     travels jsonb := '[]'::jsonb;
     pending jsonb := st->'pending';
@@ -41925,6 +41933,15 @@ begin
             open_ := open_ || jsonb_build_object(k, jsonb_build_object('p', p, 'targets', st->'next'->k->'targets'));
         end if;
     end loop;
+    if jsonb_typeof(nm) = 'object' then
+        for k in select key from jsonb_each(st->'clues') union select key from jsonb_each(st->'next') loop
+            p := (st->'p'->>k)::real;
+            if p >= (nm->>'band')::real and p < (s->>'gate')::real and not (st->'travelled') ? k then
+                misses := misses || jsonb_build_object(k, jsonb_build_object('p', p,
+                              'targets', coalesce(st->'clues'->k->'targets', st->'next'->k->'targets')));
+            end if;
+        end loop;
+    end if;
     -- The wave's size: cumulative reads reach wave * size (wave 0's seeds count toward wave 1).
     target := wn * (s->>'wave')::int
               - (select count(*) from jsonb_array_elements(st->'waves') w, jsonb_array_elements(w->'reads'))::int;
@@ -41949,24 +41966,41 @@ begin
             n := n + 1;
             continue;
         end if;
-        -- the best accepted clue that still leads somewhere unread, ties by key
+        -- the best accepted clue that still leads somewhere unread, ties by key; on every `every`-th travel the
+        -- best near miss instead, when one leads somewhere unread
         best := null;
-        select o.key, (o.value->>'p')::real into best, bp
-          from jsonb_each(open_) o
-         where exists (select 1 from jsonb_array_elements(o.value->'targets') t where not reached ? (t #>> '{}'))
-         order by (o.value->>'p')::real desc, o.key
-         limit 1;
+        miss := false;
+        if jsonb_typeof(nm) = 'object' and travel % (nm->>'every')::int = (nm->>'every')::int - 1 then
+            select o.key, (o.value->>'p')::real into best, bp
+              from jsonb_each(misses) o
+             where exists (select 1 from jsonb_array_elements(o.value->'targets') t where not reached ? (t #>> '{}'))
+             order by (o.value->>'p')::real desc, o.key
+             limit 1;
+            miss := best is not null;
+        end if;
+        if not miss then
+            select o.key, (o.value->>'p')::real into best, bp
+              from jsonb_each(open_) o
+             where exists (select 1 from jsonb_array_elements(o.value->'targets') t where not reached ? (t #>> '{}'))
+             order by (o.value->>'p')::real desc, o.key
+             limit 1;
+        end if;
         if best is not null then
             select coalesce(jsonb_agg(t order by ord_), '[]'::jsonb) into land
-              from jsonb_array_elements(open_->best->'targets') with ordinality x(t, ord_)
+              from jsonb_array_elements(case when miss then misses else open_ end->best->'targets')
+                   with ordinality x(t, ord_)
              where not reached ? (t #>> '{}');
             open_ := open_ - best;
+            misses := misses - best;
+            travel := travel + 1;
             for doc in select value #>> '{}' from jsonb_array_elements(land) loop
                 reached := reached || jsonb_build_object(doc, true);
             end loop;
             pending := pending || land;
             travels := travels || jsonb_build_array(jsonb_build_object('key', best, 'p', round(bp::numeric, 3),
-                                                                       'land', land));
+                                                                       'land', land)
+                                                    || case when miss then '{"near_miss": true}'::jsonb
+                                                            else '{}'::jsonb end);
             continue;
         end if;
         -- nothing accepted is left: search fills the wave. With search spent too the wave ends here, but it is
