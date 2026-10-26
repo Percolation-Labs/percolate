@@ -67,6 +67,7 @@ begin
 end $$;
 
 select aiq.install_walk_workflow('walk_fixture_run', 'jev', 3);
+select aiq.install_walk_workflow('walk_fixture_long', 'jev', 10);
 
 do $$
 declare
@@ -79,6 +80,8 @@ declare
     r uuid := workflow.start_workflow('walk_fixture_run', inp);
     reads text[];
     got text;
+    stop_wave int;
+    last_read int;
 begin
     if (select status from workflow.runs where id = r) is distinct from 'succeeded' then
         raise exception 'the walk did not finish in-database: %', (select string_agg(step_key || ' ' || status || ' '
@@ -126,6 +129,16 @@ begin
        or not exists (select 1 from workflow.tasks where run_id = r and status = 'failed'
                                                     and error::text like '%another task wording%') then
         raise exception 'a replay judged under another wording was accepted';
+    end if;
+    -- A dry stop is a certificate only once every read's clues were judged: the walk that reads the whole graph
+    -- stops in a wave after its last reads, never in the wave that read them (james, REM-1205).
+    r := workflow.start_workflow('walk_fixture_long', jsonb_set(inp, '{settings,wave}', '6'));
+    stop_wave := (aiq.walk_summary(r)->'stop'->>'wave')::int;
+    last_read := (select max(wave) from aiq.walk_reads(r));
+    if aiq.walk_summary(r)->'stop'->>'reason' is distinct from 'dry'
+       or stop_wave is null or last_read is null or stop_wave <= last_read then
+        raise exception 'a walk stopped dry before its last reads were judged: stop %, last read wave %',
+            aiq.walk_summary(r)->'stop', (select max(wave) from aiq.walk_reads(r));
     end if;
     raise notice 'query/33: a walk runs as a workflow, its reads and clues are rows, and a replay replays';
 end $$;
