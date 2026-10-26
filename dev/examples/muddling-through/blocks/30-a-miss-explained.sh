@@ -1,15 +1,16 @@
 # Step 3: a real miss, explained. Walk the ladder question, answering every clue from the sample's recorded verdicts
 # (offline, so no model is asked and the walk is the same each time), then ask why the answer is incomplete. The
-# question and its answer key come from the sample's own questions file; the walk never reads the key.
+# question and its answer key come from the sample's own question record; the walk never reads the key.
 # In the study the ladder message was the miss. Here every read raises clues, so the walk reaches it, and the miss
 # is the moving help: behind open leads ranked too low, with 'moving' rejected just under the gate (REM-1206).
-Q=1M:22:multi_session_reasoning:1
-RUN=$(psql "$P8_DSN" -Atq -v q="$(grep -F "\"qid\": \"$Q\"" samples/beam/questions.jsonl)" <<'SQL'
+RUN=$(psql "$P8_DSN" -Atq <<'SQL'
 select workflow.start_workflow('walk', jsonb_build_object(
-         'channel', 'beam-1m22',
-         'question', :'q'::jsonb || jsonb_build_object('id', :'q'::jsonb->>'qid', 'text', :'q'::jsonb->>'question'),
-         'replay', 'replay:' || (:'q'::jsonb->>'qid'),
-         'offline', true));
+         'channel', q.metadata->>'channel',
+         'question', q.metadata || jsonb_build_object('id', q.metadata->>'qid', 'text', q.metadata->>'question'),
+         'replay', 'replay:' || (q.metadata->>'qid'),
+         'offline', true))
+  from content.resources q
+ where q.uri = 'question:1M:22:multi_session_reasoning:1';
 SQL
 )
 # The walk runs in the stack's worker; wait for it to finish.
