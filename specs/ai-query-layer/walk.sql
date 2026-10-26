@@ -355,6 +355,14 @@ begin
 end;
 $$;
 
+-- Whether the question needs embedding: only a channel walk with no stored
+-- order searches by meaning. A graph walk, or one given its order, skips the
+-- embed step, so a walk over a graph runs with no worker at all.
+create or replace function aiq.walk_needs_vector(p_run uuid) returns boolean
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select coalesce((select input ? 'channel' and not input ? 'search' from workflow.runs where id = p_run), false)
+$$;
+
 -- The start step: search's order, and its first `seeds` reads as wave 0.
 create or replace function aiq.walk_start(p_run uuid, p_vector vector default null)
 returns jsonb
@@ -371,6 +379,11 @@ begin
     inp := r.input;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
+    -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
+    -- matrix expansion: walk_state raises if it is missing or was judged under another wording.
+    if inp ? 'replay' then
+        perform aiq.walk_state(p_run);
+    end if;
     if inp ? 'search' then
         ord := inp->'search';
     elsif p_vector is not null and inp ? 'channel' then
@@ -562,6 +575,17 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 1, 2
 $$;
 
+-- Search's own order for the run's question: what plain search would have
+-- read, rank by rank, for setting a walk beside it read for read.
+create or replace function aiq.walk_search_order(p_run uuid)
+returns table (rank int, doc text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select o.ordinality::int, o.value #>> '{}'
+      from workflow.tasks tk, jsonb_array_elements(tk.output->'result'->0->'state'->'order') with ordinality o
+     where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded'
+     order by 1
+$$;
+
 create or replace function aiq.walk_clues(p_run uuid)
 returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
                travelled_wave int)
@@ -583,14 +607,16 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 3, 1
 $$;
 
+drop function if exists aiq.walk_waves(uuid);
 create or replace function aiq.walk_waves(p_run uuid)
-returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int)
+returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int,
+               total_reads int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with c as materialized (select * from aiq.walk_clues(p_run)),
     r as materialized (select * from aiq.walk_reads(p_run)),
     w as (select distinct wave from r)
     select w.wave,
-           (select count(*) from r where r.wave <= w.wave)::int,
+           (select count(*) from r where r.wave = w.wave)::int,
            (select count(*) from r where r.wave = w.wave - 1 and r.expanded)::int,
            (select count(*) from c where c.wave = w.wave and c.p is not null)::int,
            (select count(*) from c where c.wave = w.wave and c.decision = 'accepted')::int,
@@ -600,7 +626,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                                                    and c.source = r.doc)))::real / count(*) end
               from r where r.wave = w.wave - 1 and r.expanded),
            (select count(*) from c where c.decision = 'accepted' and c.wave <= w.wave
-                                     and (c.travelled_wave is null or c.travelled_wave > w.wave))::int
+                                     and (c.travelled_wave is null or c.travelled_wave > w.wave))::int,
+           (select count(*) from r where r.wave <= w.wave)::int
       from w where w.wave > 0
      order by 1
 $$;
@@ -652,6 +679,7 @@ begin
 name: %1$s
 steps:
   - id: q
+    when: "aiq.walk_needs_vector({{run.$id}}::uuid)"
     embed: '{{run.question.text}}'
   - id: start
     needs: [q]
@@ -681,9 +709,9 @@ $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider));
 end;
 $$;
 
-grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_graph(jsonb, timestamptz),
+grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
-                          aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid),
+                          aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
 revoke all on function aiq.install_walk_workflow(text, text, int) from public;
