@@ -47,4 +47,7 @@ done
 S=$CAP/01-setup.txt
 grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
   || { echo "setup did not leave what the article says"; cat $S; exit 1; }
+# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
+grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
+  || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
 echo "all blocks ok: $W"
