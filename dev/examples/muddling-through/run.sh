@@ -50,4 +50,10 @@ grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'wal
 # Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
 grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
+# A block with an expected file prints exactly that: the article quotes it.
+for e in "$HERE"/expected/*.txt; do
+  [ -e "$e" ] || continue
+  diff -q "$e" "$CAP/$(basename "$e")" > /dev/null \
+    || { echo "$(basename "$e" .txt) differs from what the article quotes"; diff "$e" "$CAP/$(basename "$e")"; exit 1; }
+done
 echo "all blocks ok: $W"
