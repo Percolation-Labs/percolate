@@ -222,6 +222,7 @@ def check_raise_format(path, text):
 # those are named in the reason where they exist.
 REPLAYED_DML = {
     ("claims/tags.sql", "insert aiq.relation_types"):
+    ("ai-query-layer/walk.sql",                 "the clue walk as a workflow (REM-1210): reads in waves, Jev judges clues between them, and the run's own task rows are the record -- after claims, whose deciders row names Jev"),
         (1, "the three shipped relations a resource's tag and question links and a tag's duals are edges under "
             "(REM-1144); do update on conflict, so a corrected description reaches every deployment"),
     ("claims/schema.sql", "insert claims.deciders"):
