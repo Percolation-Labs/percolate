@@ -9,9 +9,11 @@ the steps whose point is the graph's shape: the coverage certificate (step 2) an
 
 - `world.sql` holds the tables `walk_world.items` and `walk_world.tags`, projected as `world_item` and `world_tag`
   nodes, and the edges `walk_tagged`, `walk_next` and `walk_nearest`, all derived from the world by construction.
-- `questions.jsonl` has every question with its evidence (`gold`), the tags it names, and `search`, the first 1,600
-  items in the order search ranks them. The world's vectors stay in the study; search's order is what a walk needs.
-- `verdicts.json` holds every P the world's own decider gave on the study's walks (182,545 of them), as a
-  `percolate walk` verdict file. The decider is not Jev: there are no words for a model to read.
+- `questions.jsonl` has every question with its evidence (`gold`) and the tags it names. Search's order is stored as
+  `walk_seed` edges from each `world_question` node, the first 1,600 items.
+- `replays.jsonl` stores, for step 2's q6 and step 4's six instruction questions, a P for every clue the world can
+  raise (`replay/<qid>.json`), from the world's own decider. It is not Jev: there are no words for a model to read.
+- `question-texts.jsonl` stores each question and its answer key, by uri `question:walk-0/<qid>`.
 
-`build/world.py` made all three from the reachability study's `runs/worlds/walk-0`.
+`build/world.py`, `build/world_replay.py`, `build/replays.py` and `build/questions.py` made them from the
+reachability study's `runs/worlds/walk-0`.

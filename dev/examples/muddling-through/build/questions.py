@@ -19,6 +19,8 @@ def main(sample):
     with (sample / "question-texts.jsonl").open("w") as f:
         for q in map(json.loads, open(sample / "questions.jsonl")):
             md = {k: q[k] for k in ("qid", "question", "gold", "channel", "phrasing", "type", "named") if k in q}
+            # The walk's contract names a question {id, text}; walk-0's questions have no words, so their text is the id.
+            md.update(id=q["qid"], text=q.get("question") or q["qid"])
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q.get("question") or q["qid"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q.get("question") or q["qid"]}], "metadata": md}) + "\n")
