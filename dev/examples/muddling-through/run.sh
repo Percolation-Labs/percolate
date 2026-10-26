@@ -27,7 +27,11 @@ P8_QUERY_MCP_PORT=5807
 ENV
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
 python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install "$CORE" > /dev/null 2>&1
-export P8_ADMIN_DSN=postgres://p8:p8@localhost:5801/percolate
+export P8_ADMIN_DSN=postgres://p8:p8@localhost:5801/percolate P8_DSN=postgres://p8:p8@localhost:5801/percolate
+export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
+# A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.
+psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
+export TOKEN=$(percolate auth token --email me@example.com)
 cp -R "$HERE/samples" .
 
 # --- the setup block, as the article prints it ---------------------------------------------------------------------
