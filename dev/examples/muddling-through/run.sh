@@ -54,9 +54,12 @@ grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
 grep -Eq '^ now +\| .*\$160' $CAP/60-time.txt && grep -Eq '^ 2024-08-12 00:11:20 \| .*\$150' $CAP/60-time.txt \
   || { echo "step 5 did not answer as the article says"; cat $CAP/60-time.txt; exit 1; }
 # A block with an expected file prints exactly that: the article quotes it.
+# Every file is compared before failing, so one difference cannot hide another.
+differ=0
 for e in "$HERE"/expected/*.txt; do
   [ -e "$e" ] || continue
   diff -q "$e" "$CAP/$(basename "$e")" > /dev/null \
-    || { echo "$(basename "$e" .txt) differs from what the article quotes"; diff "$e" "$CAP/$(basename "$e")"; exit 1; }
+    || { echo "$(basename "$e" .txt) differs from what the article quotes"; diff "$e" "$CAP/$(basename "$e")"; differ=1; }
 done
+[ $differ = 0 ] || exit 1
 echo "all blocks ok: $W"
