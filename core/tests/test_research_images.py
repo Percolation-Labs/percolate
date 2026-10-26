@@ -53,9 +53,12 @@ class IdentifyTest(unittest.TestCase):
 
 class RoutesTest(unittest.TestCase):
     def app(self, conn, claims):
+        self.roles = []
+
         @asynccontextmanager
-        async def scoped(_claims):
+        async def scoped(_claims, role="authenticated"):
             self.seen = _claims
+            self.roles.append(role)
             yield conn
         application = build_app(())
         application.dependency_overrides[caller] = lambda: claims
@@ -77,6 +80,7 @@ class RoutesTest(unittest.TestCase):
         conn.fetchval.side_effect = [{"status": "unlimited"}, UUID("22222222-2222-2222-2222-222222222222")]
         application, scoped = self.app(conn, {"sub": "writer"})
         with patch("percolate_core.content.server.as_caller", scoped), \
+                patch("percolate_core.content.server.content_role", AsyncMock(return_value="content_server")), \
                 patch("percolate_core.content.server.storage.put", return_value=("sum", "key")) as put, \
                 patch("percolate_core.content.server.storage.bucket", return_value="bucket"), \
                 TestClient(application) as client:
@@ -89,6 +93,8 @@ class RoutesTest(unittest.TestCase):
         sql, *args = conn.fetchval.call_args.args
         self.assertIn("content.register_research_image", sql)
         self.assertEqual(args[4:], ["image/jpeg", "Cover"])
+        # The allowance is read as the person; the image is registered as the Content Server (REM-1118).
+        self.assertEqual(self.roles, ["authenticated", "content_server"])
 
     def test_an_upload_needs_a_signed_in_caller(self):
         application, _ = self.app(AsyncMock(), None)

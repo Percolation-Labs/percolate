@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request,
 from fastapi.responses import JSONResponse
 
 from .. import __version__
-from ..core import as_caller, as_service, claims_from_jwt, optional
+from ..core import as_caller, as_service, claims_from_jwt, content_role, optional
 from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from . import storage
 
@@ -146,7 +146,8 @@ async def upload(request: Request,
         trace_id = traceparent.split("-")[1]
 
     try:
-        async with as_caller(claims) as conn:
+        # As the Content Server (REM-1118): it has the bytes, so it says where they are stored.
+        async with as_caller(claims, await content_role()) as conn:
             try:
                 resource_id = await conn.fetchval(
                     "select content.register_upload($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
@@ -305,7 +306,7 @@ async def save_evidence(request: Request, claims: dict | None = Depends(caller))
                                  "limit": state}, status_code=REFUSED_STATUS)
 
         checksum, key = await asyncio.to_thread(storage.put, data, content_type)
-        async with as_caller(claims) as conn:
+        async with as_caller(claims, await content_role()) as conn:
             resource_id = await conn.fetchval(
                 "select content.register_evidence($1,$2,$3,$4,$5,$6,$7)",
                 body["url"], checksum, storage.bucket(), key, len(data), content_type, title)
@@ -354,7 +355,7 @@ async def save_research_image(request: Request, claims: dict | None = Depends(ca
                                  "limit": state}, status_code=REFUSED_STATUS)
 
         checksum, key = await asyncio.to_thread(storage.put, data, content_type)
-        async with as_caller(claims) as conn:
+        async with as_caller(claims, await content_role()) as conn:
             resource_id = await conn.fetchval(
                 "select content.register_research_image($1,$2,$3,$4,$5,$6)",
                 checksum, storage.bucket(), key, len(data), content_type, x_p8_title)

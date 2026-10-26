@@ -46,6 +46,7 @@ class Tree:
     def version(self, v):
         self.write("pyproject.toml", f'[project]\nname = "percolate-core"\nversion = "{v}"\n')
         self.write("percolate_core/__init__.py", f'__version__ = "{v}"\n')
+        self.write("uv.lock", f'version = 1\n\n[[package]]\nname = "percolate-core"\nversion = "{v}"\nsource = {{ editable = "." }}\n')
 
     def commit(self, msg):
         run(self.dir, "git", "add", "-A")
@@ -127,6 +128,9 @@ class TheTailOfARelease(unittest.TestCase):
         self.assertEqual(self.t.read("README.md").count(IMAGE + "0.1.12"), 2)
         self.assertIn('version = "0.1.13"', self.t.read("pyproject.toml"))
         self.assertIn('__version__ = "0.1.13"', self.t.read("percolate_core/__init__.py"))
+        # The image installs with `uv export --locked`, which refuses a lock
+        # whose own version is behind pyproject's (REM-1151).
+        self.assertIn('name = "percolate-core"\nversion = "0.1.13"', self.t.read("uv.lock"))
         changelog = self.t.read("CHANGELOG.md")
         self.assertIn("## 0.1.12\n\n### A fix", changelog)
         self.assertNotIn("Not published", changelog)

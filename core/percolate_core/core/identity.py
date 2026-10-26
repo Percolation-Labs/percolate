@@ -83,6 +83,34 @@ SERVICE_ROLE = os.getenv("P8_SERVICE_ROLE", "worker")
 """The role for the service's own work. `workflow-engine` grants task claiming
 and completion to `worker`, and no table privileges to anything."""
 
+CONTENT_ROLE = "content_server"
+"""The role the Content Server registers stored bytes as (REM-1118).
+
+It is ``authenticated`` and one thing more: the database binds a file's bucket
+and key only for this role, because only the Content Server has read the bytes
+whose checksum it registers. Over PostgREST a person is ``authenticated`` and
+could otherwise name any location for any checksum, and every later upload of
+those bytes would resolve to it."""
+
+_CONTENT_ROLE: str | None = None
+
+
+async def content_role() -> str:
+    """``content_server`` where the cluster has it and this login may become it, else ``ROLE``.
+
+    A cluster made before the role existed lacks it until an operator creates it
+    (``dev/image-init/00-superuser.sql`` in percolate), and uploads there keep
+    working as ``authenticated`` meanwhile. Asked once per process.
+    """
+    global _CONTENT_ROLE
+    if _CONTENT_ROLE is None:
+        async with acquired(await pool()) as conn:
+            ok = await conn.fetchval(
+                "select case when exists (select 1 from pg_roles where rolname = $1)"
+                " then pg_has_role($1, 'member') else false end", CONTENT_ROLE)
+        _CONTENT_ROLE = CONTENT_ROLE if ok else ROLE
+    return _CONTENT_ROLE
+
 _POOL: asyncpg.Pool | None = None
 _REFS = 0
 """How many lifespans currently hold the pool open.
