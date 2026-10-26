@@ -9,8 +9,8 @@ walkthrough:
 `texts.jsonl` has one exchange per line, as `percolate sample load` registers it. `questions.jsonl` has the 36 questions
 on these two conversations, each with its evidence as document keys (`beam:1M:22/73` is exchange 73 of 1M:22).
 `build/beam.py` made both files from the walk study's copy of BEAM. `replay/` holds every P Jev (jev-1.13.0) gave the
-workflow walk on the two step questions, 1M:35:event_ordering:0 and 1M:22:multi_session_reasoning:1, exported with
-`aiq.walk_verdicts(run)`, so a reader replays those walks offline at $0. `question-texts.jsonl` stores each question
+workflow walk on the three step questions, 1M:35:event_ordering:0, 1M:22:multi_session_reasoning:1 and
+1M:22:knowledge_update:1, exported with `aiq.walk_verdicts(run)`, so a reader replays those walks offline at $0. `question-texts.jsonl` stores each question
 and its answer key, by uri `question:<qid>`.
 
 ## Licence and credit
