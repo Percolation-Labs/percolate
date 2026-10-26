@@ -1,0 +1,14 @@
+# walk-0, a synthetic world, for the Muddling Through walkthrough's steps 2 and 4.
+#
+#     percolate sample load samples/walk-0
+#
+# The world has no text, so nothing is ingested and nothing is embedded: its items and tags are the sample's own
+# tables, projected as nodes, and the links a walk follows are edges between them. build/world.py says how.
+name: muddling-through-walk-0
+version: 1.0.0
+description: |-
+  A synthetic world of 5,778 documents and 7,499 claims in 214 sittings, with 2,407 tags and 30 questions whose
+  evidence is known, from the reachability study (REM-1191). questions.jsonl carries each question's search order;
+  verdicts.json, the P the world's decider gave each clue, so a walk replays at $0.
+load:
+  - sql: world.sql

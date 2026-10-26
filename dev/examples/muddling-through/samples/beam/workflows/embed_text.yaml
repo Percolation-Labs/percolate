@@ -1,0 +1,9 @@
+name: embed_text
+steps:
+  - id: embed
+    work: true
+    queue: ingest
+    input:
+      op: embed
+      resource_id: '{{run.resource_id}}'
+      model: bge-small-en-v1.5
