@@ -47,7 +47,7 @@ done
 S=$CAP/01-setup.txt
 grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
   || { echo "setup did not leave what the article says"; cat $S; exit 1; }
-# Tag range: the index holds the study's terms for 1M:22, so the counts by range are the study's.
-diff -q "$HERE/expected/50-tag-range.txt" $CAP/50-tag-range.txt > /dev/null \
-  || { echo "tag range differs from the study's counts"; diff "$HERE/expected/50-tag-range.txt" $CAP/50-tag-range.txt; exit 1; }
+# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
+grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
+  || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
 echo "all blocks ok: $W"
