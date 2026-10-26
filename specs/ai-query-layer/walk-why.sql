@@ -107,7 +107,7 @@ comment on function aiq.walk_audit(uuid) is
     'A walk run''s audit with no answer key: the state at the stop, the accepted leads still open and the near misses (REM-1211).';
 
 
-create or replace function aiq.walk_why(p_run uuid, p_gold jsonb)
+create or replace function aiq.walk_why(p_run uuid, p_gold jsonb default null)
 returns table (doc text, letter text, reason text, key text, p real, detail text)
 language plpgsql stable as $$
 declare
@@ -115,8 +115,16 @@ declare
     v_gate    real  := coalesce((v_summary #>> '{settings,gate}')::real, 0.5);
     v_gold    jsonb := p_gold;
 begin
-    -- the answer key is a list of document keys, or {question id: list}
-    if jsonb_typeof(p_gold) = 'object' then
+    -- the answer key is a list of document keys, or {question id: list}; with none given, the one the sample put in
+    -- the run's start input (walk_summary -> question -> gold), which no step of the walk reads
+    if p_gold is null then
+        v_gold := v_summary #> '{question,gold}';
+        if v_gold is null then
+            raise exception 'no answer key: pass one, or start the walk with the question''s gold'
+                using errcode = 'invalid_parameter_value',
+                      hint = 'select * from aiq.walk_why(<run>, ''["<document key>", ...]'')';
+        end if;
+    elsif jsonb_typeof(p_gold) = 'object' then
         v_gold := p_gold -> (v_summary #>> '{question,id}');
         if v_gold is null then
             raise exception 'the answer key holds no evidence for question %', v_summary #>> '{question,id}'
@@ -170,4 +178,4 @@ begin
 end $$;
 
 comment on function aiq.walk_why(uuid, jsonb) is
-    'For each evidence document a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211).';
+    'For each evidence document a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211). With no answer key, the run''s own question gold.';
