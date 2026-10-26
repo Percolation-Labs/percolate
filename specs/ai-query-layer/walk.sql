@@ -607,14 +607,16 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 3, 1
 $$;
 
+drop function if exists aiq.walk_waves(uuid);
 create or replace function aiq.walk_waves(p_run uuid)
-returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int)
+returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int,
+               total_reads int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with c as materialized (select * from aiq.walk_clues(p_run)),
     r as materialized (select * from aiq.walk_reads(p_run)),
     w as (select distinct wave from r)
     select w.wave,
-           (select count(*) from r where r.wave <= w.wave)::int,
+           (select count(*) from r where r.wave = w.wave)::int,
            (select count(*) from r where r.wave = w.wave - 1 and r.expanded)::int,
            (select count(*) from c where c.wave = w.wave and c.p is not null)::int,
            (select count(*) from c where c.wave = w.wave and c.decision = 'accepted')::int,
@@ -624,7 +626,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                                                    and c.source = r.doc)))::real / count(*) end
               from r where r.wave = w.wave - 1 and r.expanded),
            (select count(*) from c where c.decision = 'accepted' and c.wave <= w.wave
-                                     and (c.travelled_wave is null or c.travelled_wave > w.wave))::int
+                                     and (c.travelled_wave is null or c.travelled_wave > w.wave))::int,
+           (select count(*) from r where r.wave <= w.wave)::int
       from w where w.wave > 0
      order by 1
 $$;
