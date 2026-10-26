@@ -1,7 +1,0 @@
-why = """REM-1163 (Sirsh, M-20261023-164249-a2f2: the fewest tables that represent the thing). aiq.dream_runs logged each
-dream pass, which for a scheduled dream repeated the step output the engine already keeps. A dream is a workflow run of
-`dream`; aiq.dream reads its watermark from the newest finished run, and specs/migrations/0.2.30--0.2.31.sql drops the
-table. Nothing is added."""
-
-[removed]
-tables = ["aiq.dream_runs"]
