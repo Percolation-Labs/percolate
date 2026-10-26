@@ -5,7 +5,8 @@
 #     percolate walk index --source beam-1m35
 #
 # Each exchange is one document, registered as the pieces the walk study embedded, so a document is the unit a walk
-# reads and its sitting and place travel with it. bge-small embeds them in the stack's worker: no key, no bill.
+# reads and its sitting and place travel with it. Each piece ships with its bge-small vector, made by the stack's
+# own worker, so setup loads vectors in seconds rather than computing 7,339 of them.
 name: muddling-through-beam
 version: 1.0.0
 description: |-
@@ -13,7 +14,6 @@ description: |-
   from Tavakoli et al., "Beyond a Million Tokens", ICLR 2026 (arXiv 2510.27246). See README.md.
 load:
   - sources: sources.yaml
-  - workflows: workflows
   - texts: texts.jsonl
   - texts: replays.jsonl
   - texts: question-texts.jsonl

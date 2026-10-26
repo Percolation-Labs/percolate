@@ -13,11 +13,11 @@ channels:
   - name: beam-1m22
     kind: manual
     visibility: public
-    config: {ingest_workflow: embed_text, description: "BEAM 1M:22, one document per exchange"}
+    config: {description: "BEAM 1M:22, one document per exchange"}
   - name: beam-1m35
     kind: manual
     visibility: public
-    config: {ingest_workflow: embed_text, description: "BEAM 1M:35, one document per exchange"}
+    config: {description: "BEAM 1M:35, one document per exchange"}
 
 # Replay documents: each question's verdicts, which a run reads back by uri. Stored, never embedded, so the channel
 # names no workflow.

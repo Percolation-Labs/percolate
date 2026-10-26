@@ -4,19 +4,23 @@
 #
 # walk-0's six instruction questions ask for an instruction the user gave, which the walk can only reach through
 # leads the decider doubts. Each runs twice, offline from its complete replay ($0): accepted clues only, then with
-# near misses. Both are counted at the same number of reads, 1,600.
-psql "$P8_DSN" -Atc "select aiq.install_walk_workflow('walk_20', p_waves => 20)" > /dev/null
-psql "$P8_DSN" -Atc "
-  select workflow.start_workflow('walk_20', jsonb_build_object(
-           'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
-           'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
-           'settings', jsonb_build_object('wave', 160, 'waves', 10)
-                       || case when arm = 'near misses' then '{\"near_miss\": {\"band\": 0.35, \"every\": 3}}'::jsonb
-                               else '{}'::jsonb end))
-    from content.resources r, (values ('accepted only'), ('near misses')) a(arm)
-   where r.uri like 'question:walk-0/%' and r.metadata->>'phrasing' = 'instruction'" > /dev/null
+# near misses. Both stop at, and are counted at, the same 1,600 reads.
+# Twelve walks, each in its own connection so they run side by side: a walk runs to its end inside start_workflow.
+# Ten waves of 160 is the 1,600 reads both are counted at.
+for q in $(psql "$P8_DSN" -Atc "select r.metadata->>'id' from content.resources r
+                                where r.uri like 'question:walk-0/%' and r.metadata->>'phrasing' = 'instruction'"); do
+  for arm in '{}' '{"near_miss": {"band": 0.35, "every": 3}}'; do
+    psql "$P8_DSN" -Atc "
+      select workflow.start_workflow('walk', jsonb_build_object(
+               'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
+               'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
+               'settings', jsonb_build_object('wave', 160, 'waves', 10) || '$arm'::jsonb))
+        from content.resources r where r.uri = 'question:$q'" > /dev/null &
+  done
+done
+wait
 until [ "$(psql "$P8_DSN" -Atc "select count(*) from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
-                                 where d.name = 'walk_20' and r.status = 'running'")" = 0 ]; do sleep 5; done
+                                 where d.name = 'walk' and r.status = 'running'")" = 0 ]; do sleep 2; done
 
 psql "$P8_DSN" <<'SQL'
 -- Each question's two walks, and the evidence each had read by read 1,600. The answer key rides in the run's question.
@@ -24,7 +28,7 @@ with runs as (
   select r.id, r.input->'question'->>'id' as question,
          case when r.input->'settings' ? 'near_miss' then 'near misses' else 'accepted only' end as arm
     from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
-   where d.name = 'walk_20' and r.input->'question'->>'phrasing' = 'instruction'),
+   where d.name = 'walk' and r.input->'question'->>'phrasing' = 'instruction'),
 found as (
   select question, arm,
          (select count(*) from (select doc, row_number() over (order by wave, ord) as n from aiq.walk_reads(id)) x
