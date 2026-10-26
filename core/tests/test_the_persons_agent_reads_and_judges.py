@@ -138,6 +138,10 @@ class ThePersonsAgentReadsAndJudges(unittest.IsolatedAsyncioTestCase):
         verdict = tool.input_schema["properties"]["verdict"]["properties"]
         self.assertIn("relate", verdict["decision"]["enum"])
         self.assertEqual(verdict["relations"]["items"]["required"], ["target", "predicate"])
+        # REM-1123: the confidence decides whether the writer's agent settles the challenge or hands it to the person.
+        # It was once added only in percolate's mirror of this file, and the next mirror erased it.
+        self.assertEqual((verdict["confidence"]["minimum"], verdict["confidence"]["maximum"]), (0, 1))
+        self.assertIn("confidence", tool.description)
         pg, server = self.start()
         result = await self.call(server, "decide_judgement",
                                  {"id": JUDGEMENT, "verdict": RELATE, "reason": "B1 says what A1 says."})

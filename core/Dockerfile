@@ -11,9 +11,17 @@
 # THE DEPENDENCIES ARE A LAYER OF THEIR OWN, KEYED ON WHAT THEY ARE. Installing
 # them with the wheel meant every source change reinstalled all of them, under
 # QEMU for amd64: the image job took 12 minutes of a release on 2026-09-19. This
-# stage writes the requirement list `pip install percolate-core[all]` resolves,
-# with the version left out, so the install layer below is reused until a
-# dependency changes, and a version bump alone does not invalidate it.
+# stage writes the requirement list the install layer below uses, without this
+# package's own line, so that layer is reused until a dependency changes, and a
+# version bump alone does not invalidate it.
+#
+# THE LIST IS THE LOCK, PINNED AND HASHED (REM-1151). It used to be pyproject's
+# ranges, so every build resolved fresh against whatever PyPI held that minute:
+# published 0.2.10 ran pydantic-ai-slim 2.60 while CI and uv.lock were on 2.42,
+# and two builds of one commit an hour apart could differ. `--locked` fails the
+# build when uv.lock disagrees with pyproject.toml, rather than exporting a lock
+# nobody re-resolved. CI installs the same export, so a test run and an image
+# of one commit hold the same versions.
 #
 # EVERY PIP STEP RUNS NATIVELY, FOR THE TARGET PLATFORM. The amd64 image is built
 # on an ARM runner, and pip under QEMU took 783 seconds to install what takes 58
@@ -23,25 +31,11 @@
 # image only copies that directory in. amd64 and arm64 wheels exist for
 # everything in [all], which is what `--only-binary=:all:` insists on.
 FROM --platform=$BUILDPLATFORM python:3.11-slim AS spec
-COPY pyproject.toml /spec/
-RUN python - > /spec/requirements.txt <<'EOF'
-import re, tomllib
-p = tomllib.load(open("/spec/pyproject.toml", "rb"))["project"]
-extras, name = p.get("optional-dependencies", {}), p["name"]
-reqs, seen, todo = set(p.get("dependencies", [])), set(), ["all"]
-while todo:
-    extra = todo.pop()
-    if extra in seen:
-        continue
-    seen.add(extra)
-    for r in extras[extra]:
-        m = re.fullmatch(re.escape(name) + r"\[(.+)\]", r)
-        if m:
-            todo += [x.strip() for x in m.group(1).split(",")]
-        else:
-            reqs.add(r)
-print("\n".join(sorted(reqs)))
-EOF
+COPY --from=ghcr.io/astral-sh/uv:0.10.3 /uv /usr/local/bin/uv
+WORKDIR /spec
+COPY pyproject.toml uv.lock ./
+RUN uv export --locked --no-dev --no-emit-project --extra all -o requirements.txt && \
+    uv export --locked --no-dev --no-emit-project --extra embed -o embed-requirements.txt
 
 # THE EMBEDDING MODEL IS DOWNLOADED AT BUILD TIME, ON THE BUILD PLATFORM
 # (REM-628). fastembed fetches from Hugging Face on first use and caches it. A
@@ -54,7 +48,8 @@ FROM --platform=$BUILDPLATFORM python:3.11-slim AS embedmodel
 ARG P8_EMBED_MODEL=BAAI/bge-small-en-v1.5
 ENV P8_EMBED_MODEL=$P8_EMBED_MODEL
 COPY .github/scripts/cache_embedding_model.py /tmp/cache_embedding_model.py
-RUN pip install --no-cache-dir "fastembed>=0.7" && python /tmp/cache_embedding_model.py && du -sh /embed-cache
+COPY --from=spec /spec/embed-requirements.txt /tmp/embed-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/embed-requirements.txt && python /tmp/cache_embedding_model.py && du -sh /embed-cache
 
 FROM --platform=$BUILDPLATFORM python:3.11-slim AS build
 WORKDIR /src
@@ -89,6 +84,11 @@ COPY --from=deps /deps /usr/local/lib/python3.11/site-packages/
 COPY --from=deps /deps-bin /usr/local/bin/
 COPY --from=deps /pkg /usr/local/lib/python3.11/site-packages/
 COPY --from=deps /pkg-bin /usr/local/bin/
+# And refused here if what landed is not the lock: the same check CI runs, so an
+# image and a test run of one commit are compared rather than assumed equal.
+COPY --from=spec /spec/requirements.txt /opt/percolate/requirements.lock.txt
+COPY .github/scripts/installed_is_locked.py /tmp/installed_is_locked.py
+RUN python /tmp/installed_is_locked.py /opt/percolate/requirements.lock.txt && rm /tmp/installed_is_locked.py
 
 # The embedding model, from the stage above. P8_EMBED_CACHE is where
 # local_embed.py looks, and it is read at run time only: nothing in a pod

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump the version in the two files that carry it, and report the result.
+"""Bump the version in the three files that carry it, and report the result.
 
     bump_version.py patch|minor|major     move the tree's version by one part
     bump_version.py release <part>        decide the number a release publishes
@@ -10,6 +10,10 @@ FastAPI apps put in their OpenAPI title. They drifted once already -- 0.1.3
 went out reporting 0.1.2 -- which is the argument for doing this here rather
 than in a shell one-liner in the workflow: a regex that silently matches
 nothing looks exactly like a regex that had nothing to do.
+
+And `uv.lock`, because the image and CI install from it with `--locked`
+(REM-1151), and the lock records this package's own version: a bump that left
+it behind would fail the next build as a lock out of date.
 
 `release` counts from the LATEST TAG, not from the tree, because after a release
 the tree is one patch past it on purpose (`after_release.py`). So a `minor`
@@ -35,6 +39,7 @@ import urllib.request
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PYPROJECT = ROOT / "pyproject.toml"
 INIT = ROOT / "percolate_core" / "__init__.py"
+LOCK = ROOT / "uv.lock"
 
 
 def fail(msg: str) -> None:
@@ -86,6 +91,16 @@ def write_version(current: str, new: str) -> None:
     if n != 1:
         fail(f"no __version__ assignment found in {INIT.relative_to(ROOT)}")
     INIT.write_text(text)
+
+    # uv.lock: this package's own entry, and only it. The rest of the lock is
+    # what `uv lock` resolved and is not ours to edit.
+    text = LOCK.read_text()
+    text, n = re.subn(
+        r'(\[\[package\]\]\nname = "percolate-core"\nversion = )"[^"]*"', rf'\g<1>"{new}"', text, count=1
+    )
+    if n != 1:
+        fail(f"no percolate-core entry found in {LOCK.relative_to(ROOT)}")
+    LOCK.write_text(text)
 
 
 def latest_tag() -> str | None:
