@@ -41907,7 +41907,6 @@ declare
     n       int := 0;
     k       text;
     p       real;
-    dry     boolean := false;
 begin
     if wn = 0 then
         raise invalid_parameter_value using message = 'the walk has not started: no seeds recorded';
@@ -41970,9 +41969,11 @@ begin
                                                                        'land', land));
             continue;
         end if;
-        -- nothing accepted is left: search fills the wave
+        -- nothing accepted is left: search fills the wave. With search spent too the wave ends here, but it is
+        -- not dry while it read anything: those reads' clues are raised and judged at the next wave's start, and
+        -- only a wave that reads nothing at all has nothing left to judge (james, REM-1205: a stop declared before
+        -- the last reads were judged looked like a certificate and was not one).
         if si >= jsonb_array_length(ord) then
-            dry := true;
             exit;
         end if;
         doc := ord->>si;
@@ -41987,8 +41988,8 @@ begin
     return jsonb_build_object('wave', wn, 'si', si, 'reads', reads, 'travels', travels, 'pending', pending,
                               'judged', (select count(*) from jsonb_each(st->'next') x where (st->'p') ? x.key),
                               'unjudged', (select count(*) from jsonb_each(st->'next') x where not (st->'p') ? x.key),
-                              'dry', dry or (n = 0),
-                              'stop', case when dry or n = 0 then jsonb_build_object('reason', 'dry', 'wave', wn) end);
+                              'dry', n = 0,
+                              'stop', case when n = 0 then jsonb_build_object('reason', 'dry', 'wave', wn) end);
 end;
 $$;
 
