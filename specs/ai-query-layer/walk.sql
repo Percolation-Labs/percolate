@@ -652,7 +652,9 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         'question', st->'question', 'settings', st->'settings',
         'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'offline' from workflow.runs where id = p_run),
         'reads', (select count(*) from aiq.walk_reads(p_run)),
-        'stop', coalesce(st->'stop', jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1)),
+        -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
+        'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
+                     else jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1) end,
         'pending', st->'pending',
         'decider', jsonb_build_object('mode', case when (st->>'offline')::boolean then 'offline'
                                                    when jsonb_typeof(st->'replay') = 'string' then 'replay, then jev'

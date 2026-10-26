@@ -113,6 +113,9 @@ begin
        is distinct from (select count(*)::int from aiq.walk_clues(r) where state = 'open') then
         raise exception 'walk_waves and walk_clues disagree on the leads open at the stop';
     end if;
+    if aiq.walk_summary(r)->'stop'->>'reason' is null then
+        raise exception 'the stop is missing from the summary: %', aiq.walk_summary(r)->'stop';
+    end if;
     if (select count(*) from aiq.walk_waves(r)) < 2 then
         raise exception 'walk_waves has % rows', (select count(*) from aiq.walk_waves(r));
     end if;
