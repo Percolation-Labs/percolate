@@ -296,7 +296,7 @@ class ContentServerTest(unittest.TestCase):
                               (asyncpg.RaiseError("no channel named 'nope'"), 400)):
             with self.subTest(status=status):
                 @asynccontextmanager
-                async def scoped(_claims, error=error):
+                async def scoped(_claims, _role="authenticated", error=error):
                     class Conn:
                         async def fetchval(self, *args):
                             raise error
@@ -305,6 +305,8 @@ class ContentServerTest(unittest.TestCase):
                 app = content_app(())
                 app.dependency_overrides[caller] = lambda: {"sub": ALICE}
                 with patch("percolate_core.content.server.as_caller", scoped), \
+                     patch("percolate_core.content.server.content_role",
+                           AsyncMock(return_value="content_server")), \
                      patch("percolate_core.content.server.storage.put",
                            return_value=("checksum", "object-key")), \
                      patch("percolate_core.content.server.storage.bucket",

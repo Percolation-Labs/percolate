@@ -124,12 +124,16 @@ class FetchTest(unittest.TestCase):
 
 class RouteTest(unittest.TestCase):
     def client(self, conn):
+        self.roles = []
+
         @asynccontextmanager
-        async def scoped(_claims):
+        async def scoped(_claims, role="authenticated"):
+            self.roles.append(role)
             yield conn
         application = build_app(())
         application.dependency_overrides[caller] = lambda: {"sub": "00000000-0000-4000-8000-000000000239"}
         self.patches = [patch("percolate_core.content.server.as_caller", scoped),
+                        patch("percolate_core.content.server.content_role", AsyncMock(return_value="content_server")),
                         patch("percolate_core.content.server.storage.bucket", return_value="evidence-bucket")]
         for p in self.patches:
             p.start()
@@ -150,6 +154,8 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(conn.fetchval.call_args.args[1:],
                          ("https://example.com/study", "sum", "evidence-bucket", "objects/su/sum", len(PAGE),
                           "text/html", "The study"))
+        # The allowance is read as the person; the bytes are registered as the Content Server (REM-1118).
+        self.assertEqual(self.roles, ["authenticated", "content_server"])
 
     def test_a_page_not_kept_says_why_and_stores_nothing(self):
         conn = AsyncMock()

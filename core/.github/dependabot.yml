@@ -5,6 +5,12 @@
 # and they are the half that matters. This file adds the other half, for one
 # ecosystem only.
 #
+# uv, since REM-1151: the image and CI install uv.lock exactly, so the lock is
+# now the only thing that moves a Python dependency. Before it, every build
+# re-resolved pyproject's ranges and nothing could go stale; after it, nothing
+# moves unless this does. One grouped PR a month, and CI grades it on the
+# versions it proposes, because CI installs the lock it edits.
+#
 # github-actions, because an action reference is the dependency nobody
 # re-resolves. Two of them in this collection were BRANCH refs -- `@stable` and
 # `@release/v1`, one of them on the job that publishes to PyPI with an OIDC
@@ -25,5 +31,13 @@ updates:
       interval: monthly
     groups:
       actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      python:
         patterns: ["*"]
     open-pull-requests-limit: 3

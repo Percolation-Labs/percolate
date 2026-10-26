@@ -39,11 +39,11 @@ class ContentCorsTest(unittest.TestCase):
         conn = AsyncMock()
         conn.fetchval.return_value = UUID("11111111-1111-1111-1111-111111111111")
         @asynccontextmanager
-        async def scoped(_claims):
+        async def scoped(_claims, _role="authenticated"):
             yield conn
         application = build_app(())
         application.dependency_overrides[caller] = lambda: {"sub":"test-user"}
-        with patch("percolate_core.content.server.as_caller", scoped), patch("percolate_core.content.server.storage.put", return_value=("checksum","object-key")), patch("percolate_core.content.server.storage.bucket", return_value="test-bucket"):
+        with patch("percolate_core.content.server.as_caller", scoped), patch("percolate_core.content.server.content_role", AsyncMock(return_value="content_server")), patch("percolate_core.content.server.storage.put", return_value=("checksum","object-key")), patch("percolate_core.content.server.storage.bucket", return_value="test-bucket"):
             with TestClient(application) as client:
                 response = client.post("/files", content=b"note", headers={"X-P8-Title-Utf8":quote(title)})
                 self.assertEqual(response.status_code,201)
@@ -66,7 +66,7 @@ class UploadIsAuthorizedBeforeItIsStored(unittest.TestCase):
         conn.fetchval.side_effect = fetchval
 
         @asynccontextmanager
-        async def scoped(_claims):
+        async def scoped(_claims, _role="authenticated"):
             events.append("begin")
             try:
                 yield conn
@@ -83,7 +83,7 @@ class UploadIsAuthorizedBeforeItIsStored(unittest.TestCase):
 
         application = build_app(())
         application.dependency_overrides[caller] = lambda: {"sub": "test-user"}
-        with patch("percolate_core.content.server.as_caller", scoped), \
+        with patch("percolate_core.content.server.as_caller", scoped), patch("percolate_core.content.server.content_role", AsyncMock(return_value="content_server")), \
              patch("percolate_core.content.server.storage.put", side_effect=put), \
              patch("percolate_core.content.server.storage.bucket", return_value="test-bucket"), \
              patch.dict(os.environ, env or {}):
@@ -140,7 +140,7 @@ class StorageRunsOffTheLoop(unittest.TestCase):
         conn.fetchval.side_effect = fetchval
 
         @asynccontextmanager
-        async def scoped(_claims):
+        async def scoped(_claims, _role="authenticated"):
             yield conn
 
         def put(data, content_type=None):
@@ -149,7 +149,7 @@ class StorageRunsOffTheLoop(unittest.TestCase):
 
         application = build_app(())
         application.dependency_overrides[caller] = lambda: {"sub": "test-user"}
-        with patch("percolate_core.content.server.as_caller", scoped), \
+        with patch("percolate_core.content.server.as_caller", scoped), patch("percolate_core.content.server.content_role", AsyncMock(return_value="content_server")), \
              patch("percolate_core.content.server.storage.put", side_effect=put), \
              patch("percolate_core.content.server.storage.bucket", return_value="test-bucket"):
             with TestClient(application) as client:

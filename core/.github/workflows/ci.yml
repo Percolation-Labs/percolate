@@ -56,9 +56,20 @@ jobs:
       # can only fail meaningfully when they are present. With the base install
       # it reports "provider not installed", which is true of the environment
       # rather than of the package.
+      #
+      # FROM THE LOCK, as the image is (REM-1151). `pip install ".[all]"`
+      # resolved pyproject's ranges fresh on every run, so CI tested whatever
+      # PyPI held that minute and the image shipped whatever it held at build
+      # time. Both now install the same hashed `uv export`, and the step after
+      # refuses an environment that is not exactly it.
       - name: Install with every extra it claims to ship
         id: install
-        run: pip install --quiet ".[all]"
+        run: |
+          pip install --quiet uv==0.10.3
+          uv export --locked --no-dev --no-emit-project --extra all -o "$RUNNER_TEMP/requirements.txt"
+          pip install --quiet --require-hashes -r "$RUNNER_TEMP/requirements.txt"
+          pip install --quiet --no-deps .
+          python .github/scripts/installed_is_locked.py "$RUNNER_TEMP/requirements.txt"
 
       # This job names every file it runs, so the step names say what each one
       # protects -- and a file nobody named was never run. Eleven were not,
@@ -293,6 +304,13 @@ jobs:
           for t in test_egress_everywhere.py test_api_probe.py test_evidence.py; do
             python -m unittest discover -s tests -p "$t" || exit 1
           done
+
+      # REM-1118. The database binds a stored file's location only for the
+      # Content Server's role, so the Content Server registers as it where the
+      # cluster has it, and as the person where it does not yet.
+      - name: The Content Server registers stored bytes as itself
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_content_server_role.py
 
       # REM-110. A turn holds one connection for its whole life and takes a
       # second for every query inside it, so a pool of N serves N/2 turns --
