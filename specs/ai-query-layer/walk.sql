@@ -614,6 +614,14 @@ returns table (wave int, reads int, expanded int, judged int, accepted int, fres
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with c as materialized (select * from aiq.walk_clues(p_run)),
     r as materialized (select * from aiq.walk_reads(p_run)),
+    -- reached by a wave's end: read, or landed by a travel and queued to read
+    reached as materialized (
+        select wave, doc from r
+        union
+        select (w->>'wave')::int, l #>> '{}'
+          from jsonb_array_elements(aiq.walk_state(p_run)->'waves') w,
+               jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb)) t,
+               jsonb_array_elements(t->'land') l),
     w as (select distinct wave from r)
     select w.wave,
            (select count(*) from r where r.wave = w.wave)::int,
@@ -625,8 +633,13 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                                  select 1 from c where c.wave = w.wave and c.decision = 'accepted'
                                                    and c.source = r.doc)))::real / count(*) end
               from r where r.wave = w.wave - 1 and r.expanded),
+           -- open: accepted, not travelled by the wave's end, and still leading somewhere not yet reached, so
+           -- the last wave's count is walk_clues' state 'open'
            (select count(*) from c where c.decision = 'accepted' and c.wave <= w.wave
-                                     and (c.travelled_wave is null or c.travelled_wave > w.wave))::int,
+                                     and (c.travelled_wave is null or c.travelled_wave > w.wave)
+                                     and exists (select 1 from unnest(c.targets) t
+                                                  where not exists (select 1 from reached x where x.doc = t
+                                                                                             and x.wave <= w.wave)))::int,
            (select count(*) from r where r.wave <= w.wave)::int
       from w where w.wave > 0
      order by 1
@@ -639,7 +652,9 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         'question', st->'question', 'settings', st->'settings',
         'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'offline' from workflow.runs where id = p_run),
         'reads', (select count(*) from aiq.walk_reads(p_run)),
-        'stop', coalesce(st->'stop', jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1)),
+        -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
+        'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
+                     else jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1) end,
         'pending', st->'pending',
         'decider', jsonb_build_object('mode', case when (st->>'offline')::boolean then 'offline'
                                                    when jsonb_typeof(st->'replay') = 'string' then 'replay, then jev'
@@ -656,7 +671,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                               'verdicts', jsonb_build_object(st->'question'->>'id',
                                   (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
                                      from jsonb_each(st->'p') where (st->'clues') ? key)))
-      from (select aiq.walk_state(p_run) as st) x
+      from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
 
 -- ---------------------------------------------------------------- the workflow
