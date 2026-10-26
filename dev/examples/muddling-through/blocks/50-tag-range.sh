@@ -1,5 +1,5 @@
 # Tag range, part 1: how far tags reach in the ladder conversation, from the index's own links. No walk and no model.
-# The study's tagger gave the same counts for 1M:22 (639, 603, 310, 190); the parts by route come from a walk's rows (REM-1210).
+# The study's tagger gave the same counts for 1M:22 (639, 603, 310, 190).
 psql "$P8_DSN" <<'SQL'
 -- How far tags reach: a term's range is how many of the conversation's messages hold it (the n on its walk_term
 -- edges). Most terms are short; most of their uses are in long ones; and a walk offers a term as a clue only up to
@@ -28,4 +28,41 @@ select range, count(*) as terms,
   from banded
  group by range
  order by min(n);
+SQL
+
+# Part 2: on step 3's walk of the ladder question, where the reads came from and which found evidence. One question,
+# so read it as an example; the study's 150 questions are where the shares come from.
+RUN=$(psql "$P8_DSN" -Atc "select id from workflow.runs
+                           where input->'question'->>'id' = '1M:22:multi_session_reasoning:1' and status = 'succeeded'
+                           order by created_at desc limit 1")
+psql "$P8_DSN" -v run="$RUN" <<'SQL'
+-- Where the walk's reads came from, and which found evidence: search, the next message, the nearest in meaning, or a
+-- shared term, by how many messages hold it. A term held by more than 10 is never offered, so it has no row here.
+with s as materialized (select aiq.walk_summary(:'run') as v),
+gold as materialized (select jsonb_array_elements_text(v->'question'->'gold') as doc from s),
+term as materialized (
+  select distinct t->>'term' as term, (t->>'n')::int as n
+    from s, content.channels c
+    join content.resources r on r.channel_id = c.id
+    join aiq.nodes d on d.entity_id = r.id and d.entity_type = 'document'
+    join aiq.edges_current e on e.src_id = d.id and e.relation = 'walk_term'
+   cross join jsonb_array_elements(e.provenance->'terms') t
+   where c.name = s.v->'scope'->>'channel'
+),
+reads as (
+  select r.doc,
+         case when r.via = 'search' then 'search'
+              when r.via like 'next:%' then 'next message'
+              when r.via like 'near:%' then 'nearest meaning'
+              when t.n <= 2 then 'term, 2 messages'
+              when t.n <= 5 then 'term, 3-5 messages'
+              else 'term, 6-10 messages' end as route
+    from aiq.walk_reads(:'run') r
+    left join term t on r.via = 'term:' || t.term
+)
+select route, count(*) as reads, count(*) filter (where doc in (select doc from gold)) as evidence,
+       round(100.0 * count(*) filter (where doc in (select doc from gold)) / count(*), 1) as evidence_per_100_reads
+  from reads
+ group by route
+ order by min(case route when 'search' then 0 when 'next message' then 1 when 'nearest meaning' then 2 else 3 end), route;
 SQL
