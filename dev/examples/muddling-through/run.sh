@@ -4,7 +4,7 @@
 #     IMG=percolationlabs/percolate-postgres:19-0.2.31 CORE='percolate-core[sample]>=0.2.12' \
 #         dev/examples/muddling-through/run.sh [workdir]
 #
-# It starts a stack, loads the two samples, waits for the worker to embed BEAM, and indexes both conversations. No key
+# It starts a stack and runs blocks/*.sh in order; 01-setup.sh loads the two samples and indexes both conversations. No key
 # and no bill: bge-small runs in the stack's worker. The project is its own (muddling-through), so `down -v` touches
 # nothing else. Each block's output lands in <workdir>/captures. The steps that walk come after this, one per card.
 set -u
@@ -34,30 +34,17 @@ psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long p
 export TOKEN=$(percolate auth token --email me@example.com)
 cp -R "$HERE/samples" .
 
-# --- the setup block, as the article prints it ---------------------------------------------------------------------
-{
-percolate sample load samples/beam
-percolate sample load samples/walk-0
-} > $CAP/01-load.txt 2>&1 || { cat $CAP/01-load.txt; exit 1; }
-
-# The worker embeds 2,159 exchanges in the background; index once it has.
-for i in $(seq 360); do
-  left=$(psql "$P8_ADMIN_DSN" -Atc "select count(*) from workflow.runs r join workflow.definitions d
-                                     on d.id = r.workflow_def_id where d.name = 'embed_text' and r.status = 'running'")
-  [ "$left" = 0 ] && break
-  sleep 10
+# Each block runs in order from this directory, as a reader pastes it; its output is captures/<block>.txt.
+fail=0
+for f in $(ls "$HERE/blocks" | sort); do
+  out=$CAP/${f%.*}.txt
+  bash -eu "$HERE/blocks/$f" > "$out" 2>&1 || { echo "FAILED $f"; tail -20 "$out"; fail=1; break; }
+  echo "ok $f"
 done
-
-{
-percolate walk index --source beam-1m22
-percolate walk index --source beam-1m35
-} > $CAP/02-index.txt 2>&1 || { cat $CAP/02-index.txt; exit 1; }
-# ---------------------------------------------------------------------------------------------------------------------
+[ $fail = 0 ] || exit 1
 
 # What the article says the setup leaves: two conversations and a world, each with the links a walk follows.
-psql "$P8_ADMIN_DSN" -c "select relation, count(*) from aiq.edges_current where relation like 'walk_%'
-                          group by 1 order by 1" > $CAP/03-links.txt
-cat $CAP/02-index.txt $CAP/03-links.txt
-grep -q '"documents": 1101' $CAP/02-index.txt && grep -q '"documents": 1058' $CAP/02-index.txt \
-  && grep -q 'walk_tagged  *| *45156' $CAP/03-links.txt || { echo "setup did not leave what the article says"; exit 1; }
-echo "setup ok: $W"
+S=$CAP/01-setup.txt
+grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
+  || { echo "setup did not leave what the article says"; cat $S; exit 1; }
+echo "all blocks ok: $W"
