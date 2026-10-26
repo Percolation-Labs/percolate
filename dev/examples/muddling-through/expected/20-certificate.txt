@@ -1,4 +1,3 @@
-walk_20: a clue walk of up to 20 waves, judged by jev, with no embed step (graph walks, or a given order)
              stop              
 -------------------------------
  {"wave": 11, "reason": "dry"}

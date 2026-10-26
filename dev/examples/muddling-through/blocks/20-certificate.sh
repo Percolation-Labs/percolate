@@ -4,7 +4,7 @@
 # walk-0 is a synthetic world with a known answer (q6 has 3 pieces of evidence). It has no words, so every clue's P
 # comes from the world's own decider, stored as q6's replay: 'offline' asks nobody and costs $0. The walk runs until
 # it reads nothing new -- up to 20 waves of 320 reads -- so it is installed once more under its own name.
-psql "$P8_DSN" -Atc "select aiq.install_walk_workflow('walk_20', p_waves => 20)"
+psql "$P8_DSN" -Atc "select aiq.install_walk_workflow('walk_20', p_waves => 20)" > /dev/null
 RUN=$(psql "$P8_DSN" -Atc "
   select workflow.start_workflow('walk_20', jsonb_build_object(
            'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
