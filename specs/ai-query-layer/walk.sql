@@ -660,13 +660,32 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
 $$;
 
 -- ---------------------------------------------------------------- the workflow
+drop function if exists aiq.install_walk_workflow(text, text, int);
+-- p_model embeds the question for a channel walk: the deployment's default
+-- model when it has a provider. With none (a database whose vectors are
+-- written directly, as dev/init's demo space is), the workflow has no embed
+-- step, and walks a graph or a channel given its order.
 create or replace function aiq.install_walk_workflow(p_name text default 'walk', p_decider text default 'jev',
-                                                     p_waves int default 10)
+                                                     p_waves int default 10, p_model text default null)
 returns text
 language plpgsql set search_path = pg_catalog, public as $$
 declare
-    d claims.deciders;
+    d       claims.deciders;
+    v_model text := coalesce(p_model, (select name from aiq.embedding_models
+                                        where is_default and provider is not null limit 1));
+    v_q     text := '';
+    v_vec   text := 'null';
 begin
+    if v_model is not null then
+        v_q := format($q$
+  - id: q
+    when: "aiq.walk_needs_vector({{run.$id}}::uuid)"
+    embed:
+      text: '{{run.question.text}}'
+      model: %s
+$q$, v_model);
+        v_vec := '{{steps.q.result}}';
+    end if;
     select * into d from claims.deciders where name = p_decider;
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider),
@@ -677,13 +696,10 @@ begin
     end if;
     perform workflow.define_yaml(format($y$
 name: %1$s
-steps:
-  - id: q
-    when: "aiq.walk_needs_vector({{run.$id}}::uuid)"
-    embed: '{{run.question.text}}'
+steps:%6$s
   - id: start
-    needs: [q]
-    sql: "select aiq.walk_start({{run.$id}}::uuid, {{steps.q.result}}::vector) as state"
+    %7$s
+    sql: "select aiq.walk_start({{run.$id}}::uuid, %8$s::vector) as state"
   - id: wave
     needs: [start]
     repeat:
@@ -704,8 +720,10 @@ steps:
         - id: read
           needs: [judge]
           sql: "select aiq.walk_read({{run.$id}}::uuid) as state"
-$y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider));
-    return format('%s: a clue walk of up to %s waves, judged by %s', p_name, p_waves, p_decider);
+$y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider, v_q,
+      case when v_model is not null then 'needs: [q]' else '' end, v_vec));
+    return format('%s: a clue walk of up to %s waves, judged by %s, %s', p_name, p_waves, p_decider,
+                  coalesce('questions embedded by ' || v_model, 'with no embed step (graph walks, or a given order)'));
 end;
 $$;
 
@@ -714,4 +732,4 @@ grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_ne
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
-revoke all on function aiq.install_walk_workflow(text, text, int) from public;
+revoke all on function aiq.install_walk_workflow(text, text, int, text) from public;
