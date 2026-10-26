@@ -1,0 +1,6 @@
+why = """REM-1211 (the walk is a Percolate workflow, M-20261026-170832-e517): why an answer is incomplete is a query
+over the run's own rows -- never offered, rejected with its P, or open at the stop -- and the audit needs no answer
+key. Two functions over REM-1210's aiq.walk_* functions. No table."""
+
+[added]
+functions = ["aiq.walk_audit", "aiq.walk_why"]
