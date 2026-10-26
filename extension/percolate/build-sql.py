@@ -222,7 +222,6 @@ def check_raise_format(path, text):
 # those are named in the reason where they exist.
 REPLAYED_DML = {
     ("claims/tags.sql", "insert aiq.relation_types"):
-    ("ai-query-layer/walk.sql",                 "the clue walk as a workflow (REM-1210): reads in waves, Jev judges clues between them, and the run's own task rows are the record -- after claims, whose deciders row names Jev"),
         (1, "the three shipped relations a resource's tag and question links and a tag's duals are edges under "
             "(REM-1144); do update on conflict, so a corrected description reaches every deployment"),
     ("claims/schema.sql", "insert claims.deciders"):
@@ -405,6 +404,7 @@ ORDER = [
     ("research-platform/schema.sql",             "the research platform: one access decision over rbac, plans and usage, research revisions, engagement and the trust read, owned by core so any application gets them without installing another. After the content plane and workflow-engine, whose tables it references, and before contract/schema.sql, so percolate.enums() reads its vocabularies"),
     ("claims/schema.sql",                       "the claims graph, step 1 (REM-473): transactions, claims and the expresses assertions that link research.claims occurrences to them. AFTER research-platform, whose research.claims it references and whose research.project calls claims.link_revision, and whose research.refuse_rewrite it reuses; its backfill runs at the end, over revisions already projected"),
     ("claims/tags.sql",                         "tags, their dual questions and the canonical links from a resource to a tag, question or claim, and the search that expands along them (REM-1144). AFTER claims/schema.sql, whose tx, questions and claims they reference, and after the content plane, whose resources they link"),
+    ("ai-query-layer/walk.sql",                 "the clue walk as a workflow (REM-1210): reads in waves, Jev judges clues between them, and the run's own task rows are the record -- after claims, whose deciders row names Jev"),
     ("research-platform/programme.sql",         "a research programme's protocols, runs, evaluations and decisions as data (REM-594). AFTER research-platform, whose revisions it cites and whose research.refuse_rewrite and rbac.require it uses"),
     ("contract/schema.sql",                     "the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them"),
     ("packages/schema.sql",                     "percolate.apply_package(): a domain installed as one document. AFTER agentic (it delegates the servers/skills/agents half to agentic.apply_plugin), after world-model-ingestion (it inserts channels) and after workflow-engine (it defines and schedules workflows) -- it names all three and a `language plpgsql` body is not checked at create time, so the ordering is about the RUNTIME dependency rather than the parse"),
