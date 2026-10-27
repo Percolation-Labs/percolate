@@ -41728,6 +41728,20 @@ begin
 end;
 $$;
 
+-- The verdicts the decider gave this run, one row a clue: the clue's key, its P, when it was answered and the model
+-- that answered. Read from the judge step's tasks, which workflow retention prunes: aiq.walk_keep keeps them.
+create or replace function aiq.walk_answers(p_run uuid)
+returns table (key text, p real, at timestamptz, model text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select kk.value #>> '{}', (ch.output->'result'->'answers'->('c' || (kk.ordinality - 1))->>'noul')::real,
+           ch.completed_at, ch.input->'item'->'body'->>'model'
+      from workflow.tasks jt
+      join workflow.tasks ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
+      cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
+     where jt.run_id = p_run and jt.step_key like 'judge\_%'
+       and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul'
+$$;
+
 -- The walk so far, recomputed from the run's rows. Everything the reader's
 -- functions return comes from here, so they cannot disagree with each other.
 --
@@ -41760,6 +41774,7 @@ declare
     stop     jsonb;
     last     boolean;
     txt      jsonb;
+    mem      real;
 begin
     select * into r from workflow.runs where id = p_run;
     if not found then
@@ -41787,15 +41802,21 @@ begin
         end if;
         pmap := coalesce(rep->'verdicts'->(q->>'id'), '{}'::jsonb);
     end if;
-    select pmap || coalesce(jsonb_object_agg(kk.value #>> '{}',
-                                             (ch.output->'result'->'answers'->('c' || (kk.ordinality - 1))->>'noul')::real),
-                            '{}'::jsonb)
-      into pmap
-      from workflow.tasks jt
-      join workflow.tasks ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
-      cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
-     where jt.run_id = p_run and jt.step_key like 'judge\_%'
-       and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul';
+    select pmap || coalesce(jsonb_object_agg(a.key, a.p), '{}'::jsonb) into pmap from aiq.walk_answers(p_run) a;
+    -- Memory (settings.memory, 0 to 1, default 0): how far this run leans on the verdicts earlier runs kept for the
+    -- same question under the same wording. At 0 they are not read. Above it, a clue judged before and now takes
+    -- (1 - memory) * now + memory * the mean of before, and one judged only before takes the mean and is not asked.
+    mem := coalesce((s->>'memory')::real, 0);
+    if mem > 0 then
+        select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
+                                                   else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
+               || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
+                    where not exists (select 1 from aiq.walk_kept(q->>'id', r.created_at) k where k.key = n.key))
+          into pmap
+          from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
+                  from aiq.walk_kept(q->>'id', r.created_at) k
+                 group by k.key) z;
+    end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
     select jsonb_agg(x.rec order by (x.rec->>'wave')::int) into logs
       from (select tk.output->'result'->0->'state' as rec
@@ -42252,6 +42273,42 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
 
+-- The verdicts earlier runs kept for a question under this wording, each answered before p_before.
+create or replace function aiq.walk_kept(p_question text, p_before timestamptz default null)
+returns table (key text, p real, at timestamptz, model text, run uuid)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select v.key, (v.value->>'p')::real, (v.value->>'at')::timestamptz, v.value->>'model', (res.metadata->>'run')::uuid
+      from content.resources res, jsonb_each(res.metadata->'verdicts') v
+     where left(res.uri, length('verdicts:' || p_question || ':')) = 'verdicts:' || p_question || ':'
+       and res.metadata->>'question' = p_question
+       and res.metadata->>'task' = aiq.walk_task()
+       and (p_before is null or (v.value->>'at')::timestamptz < p_before)
+$$;
+
+-- Keep a run's verdicts: one document a run, verdicts:<question>:<run>, written once and never changed, each verdict
+-- with its P, when it was answered and the model. The log is append-only because a run is: a later run keeps its own
+-- document beside this one. The verdicts are the document's metadata and its one chunk is '-', so search never
+-- finds them. A run that asked nobody keeps nothing.
+create or replace function aiq.walk_keep(p_run uuid, p_channel text default 'walk-replays')
+returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    q   jsonb := (select input->'question' from workflow.runs where id = p_run);
+    v   jsonb;
+    uri text := 'verdicts:' || (q->>'id') || ':' || p_run;
+begin
+    select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
+      from aiq.walk_answers(p_run) a;
+    if v is null then
+        return jsonb_build_object('kept', 0);
+    end if;
+    perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
+                format('verdicts for %s, run %s', q->>'id', p_run), uri, null,
+                jsonb_build_object('question', q->>'id', 'run', p_run, 'task', aiq.walk_task(), 'verdicts', v));
+    return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri);
+end;
+$$;
+
 -- ---------------------------------------------------------------- the workflow
 drop function if exists aiq.install_walk_workflow(text, text, int);
 -- p_model embeds the question for a channel walk: the deployment's default
@@ -42313,6 +42370,9 @@ steps:%6$s
         - id: read
           needs: [judge]
           sql: "select aiq.walk_read({{run.$id}}::uuid) as state"
+  - id: keep
+    needs: [wave]
+    sql: {statement: "select aiq.walk_keep({{run.$id}}::uuid) as kept", write: true}
 $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider, v_q,
       case when v_model is not null then 'needs: [q]' else '' end, v_vec));
     return format('%s: a clue walk of up to %s waves, judged by %s, %s', p_name, p_waves, p_decider,
@@ -42323,6 +42383,7 @@ $$;
 grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
+                          aiq.walk_answers(uuid), aiq.walk_kept(text, timestamptz), aiq.walk_keep(uuid, text),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
