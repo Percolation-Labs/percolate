@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Muddling Through walkthrough's setup block, from an empty directory, on the published images (REM-1203):
 #
-#     IMG=percolationlabs/percolate-postgres:19-0.2.31 CORE='percolate-core[sample]>=0.2.12' \
+#     IMG=percolationlabs/percolate-postgres:19-0.2.32 CORE='percolate-core[sample]>=0.2.12' \
 #         dev/examples/muddling-through/run.sh [workdir]
 #
 # It starts a stack and runs blocks/*.sh in order; 01-setup.sh loads the two samples and indexes both conversations. No key
@@ -12,7 +12,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.31}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.32}
 CORE=${CORE:-percolate-core[sample]>=0.2.12}
 mkdir -p $W $CAP; cd $W
 curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
