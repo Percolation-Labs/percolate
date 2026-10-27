@@ -33,9 +33,11 @@
 -- The state at the stop is judged on the last wave that read:
 --   unknown   that wave expanded no read (fresh is null): its temperature
 --             says nothing
---   ran dry   the walk found nothing left to read before its last wave
+--   ran dry   a wave found nothing left to read; named by that wave, as the
+--             run's stop records it, not by the last wave that read
 --   warm      at least 0.05 of that wave's expanded reads raised a newly
---             accepted lead (sally's calibration, REM-1194)
+--             accepted lead (sally's calibration, REM-1194); a warm walk
+--             that ran out of waves says it stopped at the wave limit
 --   cold      under 0.05; with no accepted lead open it is the certificate
 -- A clue nobody judged (an offline run) could not have been accepted: with no
 -- clue judged the state is unknown, and while unjudged clues still point at
@@ -95,8 +97,12 @@ begin
             then 'unknown: no clue was judged (an offline run), so no lead could be accepted'
         when v_last.fresh is null
             then 'unknown: the last wave expanded no read, so its temperature says nothing'
+        -- the stop named as the run records it: a dry stop is the wave that found nothing left to read
         when v_summary #>> '{stop,reason}' = 'dry'
-            then format('ran dry after wave %s; %s', v_last.wave, v_ending)
+            then format('ran dry at wave %s: nothing left to read; %s', v_summary #>> '{stop,wave}', v_ending)
+        when v_last.fresh >= 0.05 and v_summary #>> '{stop,reason}' = 'waves'
+            then format('stopped at the wave limit (wave %s), still finding new accepted leads',
+                        v_summary #>> '{stop,wave}')
         when v_last.fresh >= 0.05
             then 'warm: still finding new accepted leads'
         else 'cold, ' || v_ending
