@@ -1,0 +1,6 @@
+why = """REM-1199 (james's split, M-20261026-215301-3be9: the engine's per-step cost). Each view of a walk has a form
+over a state already built, so a query reading several views of one run, as walk_waves, walk_summary and the audit
+do, builds the state once instead of once per view."""
+
+[added]
+functions = ["aiq.walk_state_reads", "aiq.walk_state_clues", "aiq.walk_state_waves"]
