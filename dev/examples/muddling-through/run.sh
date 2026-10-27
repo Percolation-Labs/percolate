@@ -27,6 +27,9 @@ P8_MINIO_PORT=5805
 P8_MINIO_CONSOLE_PORT=5806
 P8_QUERY_MCP_PORT=5807
 ENV
+# From empty means from empty: a stack left by an earlier run would add its rows to this one's, and every count
+# doubles. The project is this walkthrough's own, so `down -v` removes nothing else.
+docker compose down -v --remove-orphans > /dev/null 2>&1
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
 # No pip cache: a core installed from a local path keeps its version number between builds, and a cached wheel of
 # that version would be installed in place of the tree it names (cory, 27 Oct).
