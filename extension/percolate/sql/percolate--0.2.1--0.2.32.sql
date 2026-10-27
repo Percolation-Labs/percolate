@@ -42157,35 +42157,39 @@ create or replace function aiq.walk_audit(p_run uuid)
 returns jsonb language plpgsql stable as $$
 declare
     v_summary jsonb := aiq.walk_summary(p_run);
+    -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
+    v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
+    v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;
     v_near    jsonb;
     v_blind   int;     -- unjudged clues that still point at unread documents
     v_ending  text;
     v_state   text;
-    v_counts  record;
+    v_judged   int;
+    v_accepted int;
+    v_unjudged int;
 begin
     -- the last wave that read: an empty wave after it has no temperature of its own
-    select * into v_last from aiq.walk_waves(p_run) w where w.reads > 0 order by w.wave desc limit 1;
+    select (w->>'wave')::int as wave, (w->>'fresh')::real as fresh into v_last
+      from jsonb_array_elements(v_waves) w where (w->>'reads')::int > 0
+     order by (w->>'wave')::int desc limit 1;
 
-    with r as (select distinct doc from aiq.walk_reads(p_run)),
+    with r as (select distinct doc from aiq.walk_state_reads(v_st)),
          c as (select c.*, (select count(*) from unnest(c.targets) t where t not in (select doc from r)) as unread
-                 from aiq.walk_clues(p_run) c)
+                 from aiq.walk_state_clues(v_st) c)
     select count(*) filter (where p is null and unread > 0),
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         filter (where state = 'open' and unread > 0), '[]'),
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         -- 0.35 as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
-                        filter (where decision = 'rejected' and p >= 0.35::real and p < v_gate and unread > 0), '[]')
-      into v_blind, v_open, v_near
+                        filter (where decision = 'rejected' and p >= 0.35::real and p < v_gate and unread > 0), '[]'),
+           count(*) filter (where p is not null),
+           count(*) filter (where decision = 'accepted'),
+           count(*) filter (where p is null)
+      into v_blind, v_open, v_near, v_judged, v_accepted, v_unjudged
       from c;
-
-    select count(*) filter (where p is not null) as judged,
-           count(*) filter (where decision = 'accepted') as accepted,
-           count(*) filter (where p is null) as unjudged
-      into v_counts
-      from aiq.walk_clues(p_run);
 
     -- The certificate says no lead the walk could have followed is left. A clue nobody judged could not be
     -- accepted, so while one still points at unread documents there is no certificate, only the count.
@@ -42196,7 +42200,7 @@ begin
     v_state := case
         when v_last.wave is null
             then 'missing: the run holds no wave that read'
-        when v_counts.judged = 0 and v_counts.unjudged > 0
+        when v_judged = 0 and v_unjudged > 0
             then 'unknown: no clue was judged (an offline run), so no lead could be accepted'
         when v_last.fresh is null
             then 'unknown: the last wave expanded no read, so its temperature says nothing'
@@ -42210,14 +42214,14 @@ begin
     return jsonb_build_object(
         'question',        coalesce(v_summary -> 'question', '"missing"'),
         'reads',           coalesce(v_summary -> 'reads', '"missing"'),
-        'waves',           (select coalesce(jsonb_agg(w.reads order by w.wave), '"missing"') from aiq.walk_waves(p_run) w),
+        'waves',           coalesce((select jsonb_agg(w->'reads' order by (w->>'wave')::int) from jsonb_array_elements(v_waves) w), '"missing"'),
         'stop',            coalesce(nullif(v_summary -> 'stop', 'null'), '"missing"'),  -- a JSON null is missing too
         'gate',            coalesce(to_jsonb(v_gate), '"missing"'),
         'state',           v_state,
         'last wave fresh', case when v_last.wave is null then '"missing"' else to_jsonb(v_last.fresh) end,
-        'judged',          v_counts.judged,
-        'accepted',        v_counts.accepted,
-        'unjudged',        v_counts.unjudged,
+        'judged',          v_judged,
+        'accepted',        v_accepted,
+        'unjudged',        v_unjudged,
         'queued',          coalesce(jsonb_array_length(v_summary -> 'pending'), 0),
         'open',            v_open,
         'near misses',     case when v_gate is null then '"missing"' else v_near end);
@@ -42232,6 +42236,7 @@ returns table (doc text, letter text, reason text, key text, p real, detail text
 language plpgsql stable as $$
 declare
     v_summary jsonb := aiq.walk_summary(p_run);
+    v_st      jsonb := aiq.walk_state(p_run);  -- built once, for both views below
     v_gate    real  := coalesce((v_summary #>> '{settings,gate}')::real, 0.5);
     v_gold    jsonb := p_gold;
 begin
@@ -42257,10 +42262,10 @@ begin
     end if;
 
     return query
-    with r       as (select distinct w.doc from aiq.walk_reads(p_run) w),
+    with r       as (select distinct w.doc from aiq.walk_state_reads(v_st) w),
          pending as (select jsonb_array_elements_text(coalesce(v_summary -> 'pending', '[]')) as doc),
          c       as (select c.*, exists (select 1 from unnest(c.targets) t where t not in (select r.doc from r)) as live
-                       from aiq.walk_clues(p_run) c),
+                       from aiq.walk_state_clues(v_st) c),
          opn     as (select c.key, c.p, c.targets from c where c.state = 'open' and c.live),
          gold    as (select distinct g #>> '{}' as doc from jsonb_array_elements(v_gold) g),
          unread  as (select g.doc from gold g where g.doc not in (select r.doc from r))
