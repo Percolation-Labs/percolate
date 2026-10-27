@@ -1,0 +1,7 @@
+why = """REM-1199 (Sirsh, M-20261027-115632-55e8: store walk verdicts, append-only and dated; how far a read leans on
+them is a setting, memoryless by default). The judge steps' tasks hold a run's verdicts until workflow retention
+prunes them; walk_keep writes them as one document a run, never changed, and settings.memory weighs them in.
+No table: a document in the walk-replays channel, as a replay is."""
+
+[added]
+functions = ["aiq.walk_answers", "aiq.walk_kept", "aiq.walk_keep"]
