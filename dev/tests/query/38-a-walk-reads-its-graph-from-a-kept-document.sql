@@ -33,7 +33,9 @@ begin
                                        and b.summary = 'wc/' || (substr(a.summary, 4)::int + 1)
      where a.entity_type = 'walk_cache_fixture';
     if not exists (select 1 from content.channels where name = 'walk-graphs') then
-        insert into content.channels (name, kind, org_id, visibility) values ('walk-graphs', 'manual', org, 'public');
+        -- in the shared org, where register_text looks for a channel a caller with no org names
+        insert into content.channels (name, kind, org_id, visibility)
+        values ('walk-graphs', 'manual', rbac.shared_org_id(), 'public');
     end if;
 
     perform aiq.walk_index(inp);
