@@ -157,6 +157,12 @@ from .query.cli import app as _query_app
 
 app.add_typer(_query_app, name="query", help="The query tool server: p8ql over MCP, as the caller")
 
+# Direct as well: `walk why` reads a record file with the standard library, and `walk run` needs asyncpg and httpx,
+# which the base install has, and Jev, which is a request.
+from .walk.cli import app as _walk_app
+
+app.add_typer(_walk_app, name="walk", help="The clue walk: run it, index its clues, say why an answer is incomplete")
+
 
 @app.command()
 def worker(
