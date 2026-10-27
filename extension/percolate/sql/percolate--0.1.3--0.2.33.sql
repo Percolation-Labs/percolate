@@ -41633,7 +41633,7 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('walk.span', 'walk', '2', 'How far a next-message clue reaches either side of a read, within its sitting.', 'aiq.walk_settings, aiq.walk_graph_build',
   'The study''s sitting neighbours, 2 either side. REM-1219 found most missed breadth evidence 1-5 exchanges past evidence read and is testing 5.'),
  ('walk.cap', 'walk', '10', 'A term is offered as a clue only when at most this many documents share it.', 'aiq.walk_settings, aiq.walk_state',
-  'A term past ~10 holders floods: Jev accepts it as often wherever it leads, and travelling it reads mostly the wrong documents (REM-1208, REM-1216).'),
+  'Came in with the walk; REM-1208 measured its cost. On BEAM (150 test walks) a tag held by 2 messages points at evidence 12.8x chance, falling to about 3x at 11 or more, and the cap still offers 84.5% of tags. The cost: 161 of 544 never-read evidence documents are reachable only through a wider tag, 153 in event-ordering or summarization questions. A cap that widens with breadth is unbuilt. query/38 pins it.'),
  ('walk.gate', 'walk', '0.5', 'The P at or above which a judged clue is accepted and may be travelled.', 'aiq.walk_settings, aiq.walk_why',
   'Jev''s P read as a probability: accept what is more likely than not to lead to the answer.'),
  ('walk.expand_all', 'walk', 'true', 'Whether every read raises clues, or only search''s seeds and what clues reach.', 'aiq.walk_settings',
