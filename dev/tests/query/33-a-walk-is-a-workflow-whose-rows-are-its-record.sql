@@ -123,6 +123,13 @@ begin
     if (select count(*) from aiq.walk_waves(r)) < 2 then
         raise exception 'walk_waves has % rows', (select count(*) from aiq.walk_waves(r));
     end if;
+    -- The views over a state already built read the same rows as the views over the run.
+    if (select array_agg(w order by w.wave) from aiq.walk_state_waves(aiq.walk_state(r)) w)
+       is distinct from (select array_agg(w order by w.wave) from aiq.walk_waves(r) w)
+       or (select array_agg(c order by c.key) from aiq.walk_state_clues(aiq.walk_state(r)) c)
+       is distinct from (select array_agg(c order by c.key) from aiq.walk_clues(r) c) then
+        raise exception 'the views over a built state disagree with the views over the run';
+    end if;
     -- A step's error fails the step and the run, with the reason on the task.
     r := workflow.start_workflow('walk_fixture_run', inp || '{"replay": "walk-fixture:other-wording"}');
     if (select status from workflow.runs where id = r) is distinct from 'failed'
