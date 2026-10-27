@@ -5,7 +5,7 @@
 # walk stopped, or (?) a lead to it was never judged. Step 3 reads one walk's reasons row by row; here they are counted.
 psql "$P8_DSN" <<'SQL'
 with runs as (
-  select r.id, r.created_at, coalesce(r.input->'question'->>'id', r.input->'question'->>'qid') as question,
+  select r.id, coalesce(r.input->'question'->>'id', r.input->'question'->>'qid') as question,
          case when r.input->'settings'->>'wave' = '320' then 'step 2'
               when r.input->'question'->>'phrasing' = 'instruction'
               then 'step 4, ' || case when r.input->'settings' ? 'near_miss' then 'near misses' else 'accepted only' end
@@ -13,19 +13,15 @@ with runs as (
               when r.input->'question'->>'qid' = '1M:22:multi_session_reasoning:1' then 'step 3' end as step
     from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
    where d.name in ('walk', 'walk_20') and r.status = 'succeeded'),
-why as (
-  select r.id, w.letter from runs r cross join lateral aiq.walk_why(r.id) w)
-select r.step, r.question, a->>'state' as state,
-       (a->'reads')::int as reads,
-       jsonb_array_length(aiq.walk_summary(r.id)->'question'->'gold') as evidence,
-       count(*) filter (where w.letter = 'a') as a,
-       count(*) filter (where w.letter = 'b') as b,
-       count(*) filter (where w.letter = 'c') as c,
-       count(*) filter (where w.letter = '?') as unjudged
-  from runs r
-  cross join lateral aiq.walk_audit(r.id) a
-  left join why w on w.id = r.id
- where r.step is not null
- group by r.step, r.question, r.id, a
- order by r.step, r.question;
+audit as materialized (
+  select r.step, r.question, aiq.walk_audit(r.id) as a,
+         (select array_agg(w.letter) from aiq.walk_why(r.id) w) as letters
+    from runs r where r.step is not null)
+select step, question, a->>'state' as state, (a->'reads')::int as reads,
+       jsonb_array_length(a->'question'->'gold') as evidence,
+       cardinality(array_positions(coalesce(letters, '{}'), 'a')) as a,
+       cardinality(array_positions(coalesce(letters, '{}'), 'b')) as b,
+       cardinality(array_positions(coalesce(letters, '{}'), 'c')) as c,
+       cardinality(array_positions(coalesce(letters, '{}'), '?')) as unjudged
+  from audit order by step, question;
 SQL
