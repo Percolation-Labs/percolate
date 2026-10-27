@@ -124,6 +124,14 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_cron.py
 
+      # The clue walk (REM-1200) on an in-memory fixture with a rule for a
+      # decider: what it travels, what its record holds, and that a recorded
+      # walk replays offline read for read. Reading Percolate's own documents
+      # and links needs a database and is the walkthrough's test in percolate.
+      - name: A clue walk records its verdicts and replays without a model
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_walk.py
+
       - name: Expired browser sessions recover safely
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_session.py
@@ -131,6 +139,14 @@ jobs:
       - name: Browser file uploads preserve authentication
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_content_cors.py
+
+      - name: A walk's clue links come from the text alone, the same way every time
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_walk_index.py
+
+      - name: A sample registers text already in pieces, on a channel that embeds it
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_sample_texts.py
 
       # The in-process embedding provider (REM-628). Both files stub fastembed,
       # so neither downloads a model: the real one is loaded and proved offline
@@ -383,6 +399,16 @@ jobs:
       - name: A Jev decision is typed, pinned and bound
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_decide.py
+
+      # `percolate walk why` (REM-1202): a walk's record says why its answer is incomplete -- never offered, rejected
+      # with its P, or open at the stop -- and a field the record lacks prints as missing, never guessed.
+      - name: A walk's record says why its answer is incomplete
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_walk_why.py
+
+      - name: Walkthrough step 3, a miss behind an open lead ranked too low
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_walk_a_miss.py
 
       # The resolver turns Jev's answers into promote_soft_node, record_distinct
       # or nothing, by thresholds the step must state; pages by keyset; a refused
