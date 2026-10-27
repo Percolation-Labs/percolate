@@ -7,6 +7,8 @@
 # It starts a stack and runs blocks/*.sh in order; 01-setup.sh loads the two samples and indexes both conversations. No key
 # and no bill: bge-small runs in the stack's worker. The project is its own (muddling-through), so `down -v` touches
 # nothing else. Each block's output lands in <workdir>/captures. The steps that walk come after this, one per card.
+# The expected files assume these two samples are all the stack holds: a walk's search is not yet scoped to its own
+# channel, so other loaded sources change the order it reads in (REM-1214).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d)}; CAP=$W/captures
