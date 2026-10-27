@@ -1,6 +1,0 @@
-why = """REM-1118 (Sirsh, M-20261023-052904-d854: the Content Server alone decides where a file is stored).
-register_upload, register_evidence and register_research_image took any caller's bucket and key, and content.files
-keeps the first; content.assert_content_server is the one copy of who may name them, asked by all three. No table."""
-
-[added]
-functions = ["content.assert_content_server"]
