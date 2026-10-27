@@ -147,6 +147,11 @@ begin
         raise exception 'a walk stopped dry before its last reads were judged: stop %, last read wave %',
             aiq.walk_summary(r)->'stop', (select max(wave) from aiq.walk_reads(r));
     end if;
+    -- The audit names the stop as the run records it, so a reader sees one wave for one stop.
+    if aiq.walk_audit(r)->>'state' not like format('ran dry at wave %s: nothing left to read; %%', stop_wave) then
+        raise exception 'the audit names the dry stop differently from the run (wave %): %',
+            stop_wave, aiq.walk_audit(r)->>'state';
+    end if;
     raise notice 'query/33: a walk runs as a workflow, its reads and clues are rows, and a replay replays';
 end $$;
 
