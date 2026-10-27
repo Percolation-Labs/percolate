@@ -1,19 +1,8 @@
-         step          |            question             |                           state                            | reads | evidence | a | b | c | unjudged 
------------------------+---------------------------------+------------------------------------------------------------+-------+----------+---+---+---+----------
- step 1                | 1M:35:event_ordering:0          | warm: still finding new accepted leads                     |   500 |       27 | 0 | 5 | 1 |        0
- step 2                | walk-0/q6                       | ran dry after wave 10; no accepted lead open (certificate) |  2034 |        3 | 0 | 0 | 0 |        0
- step 3                | 1M:22:multi_session_reasoning:1 | warm: still finding new accepted leads                     |   500 |        9 | 0 | 0 | 2 |        0
- step 4, accepted only | walk-0/q14                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, accepted only | walk-0/q19                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, accepted only | walk-0/q24                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, accepted only | walk-0/q29                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, accepted only | walk-0/q4                       | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, accepted only | walk-0/q9                       | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, near misses   | walk-0/q14                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, near misses   | walk-0/q19                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 0 | 0 |        0
- step 4, near misses   | walk-0/q24                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 0 | 0 |        0
- step 4, near misses   | walk-0/q29                      | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, near misses   | walk-0/q4                       | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
- step 4, near misses   | walk-0/q9                       | warm: still finding new accepted leads                     |  1600 |        2 | 0 | 2 | 0 |        0
-(15 rows)
+  step  |            question             |                           state                            | evidence_read | rejected | best_p | open |                                              shows                                              
+--------+---------------------------------+------------------------------------------------------------+---------------+----------+--------+------+-------------------------------------------------------------------------------------------------
+ step 2 | walk-0/q6                       | ran dry after wave 10; no accepted lead open (certificate) | 3 of 3        |        0 |        |    0 | complete: it ran dry with no accepted lead open, so it earns the certificate
+ step 3 | 1M:22:multi_session_reasoning:1 | warm: still finding new accepted leads                     | 7 of 9        |        0 |        |    2 | incomplete: the missing evidence sits behind open leads ranked too low to reach
+ step 4 | walk-0/q19                      | warm: still finding new accepted leads                     | 0 of 2        |        2 |   0.37 |    0 | incomplete: every lead to the instruction was rejected under the gate
+ step 4 | walk-0/q19                      | warm: still finding new accepted leads                     | 2 of 2        |        0 |        |    0 | the same question with near misses explored: the rejected leads are followed, and it reads both
+(4 rows)
 
