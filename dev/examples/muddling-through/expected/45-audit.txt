@@ -1,0 +1,8 @@
+  step  |            question             |                           state                            | evidence_read | rejected | best_p | open |                                              shows                                              
+--------+---------------------------------+------------------------------------------------------------+---------------+----------+--------+------+-------------------------------------------------------------------------------------------------
+ step 2 | walk-0/q6                       | ran dry after wave 10; no accepted lead open (certificate) | 3 of 3        |        0 |        |    0 | complete: it ran dry with no accepted lead open, so it earns the certificate
+ step 3 | 1M:22:multi_session_reasoning:1 | warm: still finding new accepted leads                     | 7 of 9        |        0 |        |    2 | incomplete: the missing evidence sits behind open leads ranked too low to reach
+ step 4 | walk-0/q19                      | warm: still finding new accepted leads                     | 0 of 2        |        2 |   0.37 |    0 | incomplete: every lead to the instruction was rejected under the gate
+ step 4 | walk-0/q19                      | warm: still finding new accepted leads                     | 2 of 2        |        0 |        |    0 | the same question with near misses explored: the rejected leads are followed, and it reads both
+(4 rows)
+
