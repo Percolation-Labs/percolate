@@ -72,11 +72,14 @@ declare
     u1 text := 'verdicts:q1:' || gen_random_uuid();
     u2 text := 'verdicts:q1:' || gen_random_uuid();
 begin
-    perform content.register_text('walk-fixture', u1, '[{"content": "-"}]'::jsonb, 'an earlier run', u1, null, jsonb_build_object('question', 'q1', 'task', aiq.walk_task(), 'verdicts',
+    -- in the shared org, where register_text looks for a channel a caller with no org names
+    insert into content.channels (name, kind, org_id, visibility)
+    values ('walk-fixture-kept', 'manual', rbac.shared_org_id(), 'public');
+    perform content.register_text('walk-fixture-kept', u1, '[{"content": "-"}]'::jsonb, 'an earlier run', u1, null, jsonb_build_object('question', 'q1', 'task', aiq.walk_task(), 'verdicts',
             jsonb_build_object('term:ladder', jsonb_build_object('p', 0.9, 'at', now() - interval '1 day'),
                                'term:risotto', jsonb_build_object('p', 0.7, 'at', now() - interval '1 day'),
                                'term:hallway', jsonb_build_object('p', 0.95, 'at', now() + interval '1 hour'))));
-    perform content.register_text('walk-fixture', u2, '[{"content": "-"}]'::jsonb, 'a run under another wording', u2, null, jsonb_build_object('question', 'q1', 'task', 'another wording',
+    perform content.register_text('walk-fixture-kept', u2, '[{"content": "-"}]'::jsonb, 'a run under another wording', u2, null, jsonb_build_object('question', 'q1', 'task', 'another wording',
             'verdicts', jsonb_build_object('term:ladder', jsonb_build_object('p', 0.0, 'at', now() - interval '1 day'))));
 end $$;
 
