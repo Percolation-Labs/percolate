@@ -19885,18 +19885,25 @@ begin
         return p_source_table;
     end if;
     if jsonb_typeof(p_scope) is distinct from 'object'
-       or exists (select 1 from jsonb_object_keys(p_scope) k where k not in ('agent', 'run'))
+       or exists (select 1 from jsonb_object_keys(p_scope) k where k not in ('agent', 'run', 'channel'))
        or exists (select 1 from jsonb_each(p_scope) e where jsonb_typeof(e.value) <> 'string') then
-        raise exception 'a search scope names an agent and or a run, each a string, not %', p_scope;
+        raise exception 'a search scope names an agent, a run and or a channel, each a string, not %', p_scope;
     end if;
     if not exists (select 1 from pg_attribute where attrelid = p_source_table::regclass
                       and attname = 'resource_id' and not attisdropped) then
-        raise exception 'BY AGENT and BY RUN narrow a source whose rows belong to a memory, and % has no resource_id',
+        raise exception 'a scope narrows a source whose rows belong to a memory, and % has no resource_id',
                         p_source_table
             using hint = 'search FROM chunks, the memories'' own corpus';
     end if;
+    -- A CHANNEL is the resource's channel by name, not its metadata (REM-1214): a walk over one conversation
+    -- searched every chunk in the database and kept that channel's hits afterwards, so other data both moved its
+    -- order and starved it (714 of 1,058 documents reached the first 2,000 hits). Every channel of that name the
+    -- caller can read counts, as a name is unique only within an org.
     return format('(select c.* from %s c join content.resources r on r.id = c.resource_id '
-                  'where r.metadata @> %L::jsonb)', p_source_table, p_scope::text);
+                  'where r.metadata @> %L::jsonb%s)', p_source_table, (p_scope - 'channel')::text,
+                  case when p_scope ? 'channel' then format(
+                      ' and r.channel_id in (select ch.id from content.channels ch where ch.name = %L)',
+                      p_scope->>'channel') else '' end);
 end;
 $$ language plpgsql stable;
 
@@ -41433,7 +41440,7 @@ $$;
 -- expands one hop along its current edges (aiq.edges_current) to the resources it links; the lists fuse by reciprocal rank.
 --
 -- Invoker, so every arm reads as the caller and a resource the caller cannot read never takes a rank.
--- p_scope narrows the resources as aiq.search does (a memory's agent and run). p_layers chooses the arms, so the
+-- p_scope narrows the resources as aiq.search does (a memory's agent and run, or a channel). p_layers chooses the arms, so the
 -- primary-store-only search is the same function with p_layers => '{documents}'. A caller that has chosen its own
 -- tags or questions (a decision model, a person) passes them in p_tags / p_questions as [{"id", "w"}]; otherwise
 -- tags are the ones whose label words the query uses, and questions the nearest by vector. Only the resources store
@@ -42157,7 +42164,8 @@ begin
         select jsonb_agg(doc order by first_rank) into ord
           from (select coalesce(res.uri, res.id::text) as doc, min(h.rn) as first_rank
                   from (select chunk_id, row_number() over () as rn
-                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int)) h
+                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int, 60,
+                                          jsonb_build_object('channel', inp->>'channel'))) h
                   join content.resource_chunks c on c.id = h.chunk_id
                   join content.resources res on res.id = c.resource_id
                   join content.channels ch on ch.id = res.channel_id and ch.name = inp->>'channel'

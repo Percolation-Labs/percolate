@@ -284,7 +284,7 @@ $$;
 -- expands one hop along its current edges (aiq.edges_current) to the resources it links; the lists fuse by reciprocal rank.
 --
 -- Invoker, so every arm reads as the caller and a resource the caller cannot read never takes a rank.
--- p_scope narrows the resources as aiq.search does (a memory's agent and run). p_layers chooses the arms, so the
+-- p_scope narrows the resources as aiq.search does (a memory's agent and run, or a channel). p_layers chooses the arms, so the
 -- primary-store-only search is the same function with p_layers => '{documents}'. A caller that has chosen its own
 -- tags or questions (a decision model, a person) passes them in p_tags / p_questions as [{"id", "w"}]; otherwise
 -- tags are the ones whose label words the query uses, and questions the nearest by vector. Only the resources store

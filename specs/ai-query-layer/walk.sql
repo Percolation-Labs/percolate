@@ -578,7 +578,8 @@ begin
         select jsonb_agg(doc order by first_rank) into ord
           from (select coalesce(res.uri, res.id::text) as doc, min(h.rn) as first_rank
                   from (select chunk_id, row_number() over () as rn
-                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int)) h
+                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int, 60,
+                                          jsonb_build_object('channel', inp->>'channel'))) h
                   join content.resource_chunks c on c.id = h.chunk_id
                   join content.resources res on res.id = c.resource_id
                   join content.channels ch on ch.id = res.channel_id and ch.name = inp->>'channel'
