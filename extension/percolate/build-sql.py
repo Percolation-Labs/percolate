@@ -221,6 +221,9 @@ def check_raise_format(path, text):
 # cannot see is DML inside a DO block or a function a top-level SELECT calls;
 # those are named in the reason where they exist.
 REPLAYED_DML = {
+    ("ai-query-layer/walk.sql", "insert aiq.parameters"):
+        (1, "the walk's shipped parameters (Sirsh, M-20261027-213302-a399); do update only where set_by is still "
+            "'spec', so a value a deployment tuned survives and a corrected default or reason reaches the rest"),
     ("claims/tags.sql", "insert aiq.relation_types"):
         (1, "the three shipped relations a resource's tag and question links and a tag's duals are edges under "
             "(REM-1144); do update on conflict, so a corrected description reaches every deployment"),

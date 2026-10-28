@@ -35,10 +35,10 @@
 --             says nothing
 --   ran dry   a wave found nothing left to read; named by that wave, as the
 --             run's stop records it, not by the last wave that read
---   warm      at least 0.05 of that wave's expanded reads raised a newly
+--   warm      at least explain.cold (aiq.parameters, 0.05) of that wave's expanded reads raised a newly
 --             accepted lead (sally's calibration, REM-1194); a warm walk
 --             that ran out of waves says it stopped at the wave limit
---   cold      under 0.05; with no accepted lead open it is the certificate
+--   cold      under it; with no accepted lead open it is the certificate
 -- A clue nobody judged (an offline run) could not have been accepted: with no
 -- clue judged the state is unknown, and while unjudged clues still point at
 -- unread documents a walk earns no certificate.
@@ -53,6 +53,8 @@ declare
     -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
     v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
+    v_cold    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.cold');
+    v_band    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.near_miss');
     v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;
@@ -76,8 +78,8 @@ begin
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         filter (where state = 'open' and unread > 0), '[]'),
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
-                        -- 0.35 as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
-                        filter (where decision = 'rejected' and p >= 0.35::real and p < v_gate and unread > 0), '[]'),
+                        -- the band as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
+                        filter (where decision = 'rejected' and p >= v_band and p < v_gate and unread > 0), '[]'),
            count(*) filter (where p is not null),
            count(*) filter (where decision = 'accepted'),
            count(*) filter (where p is null)
@@ -100,10 +102,10 @@ begin
         -- the stop named as the run records it: a dry stop is the wave that found nothing left to read
         when v_summary #>> '{stop,reason}' = 'dry'
             then format('ran dry at wave %s: nothing left to read; %s', v_summary #>> '{stop,wave}', v_ending)
-        when v_last.fresh >= 0.05 and v_summary #>> '{stop,reason}' = 'waves'
+        when v_last.fresh >= v_cold and v_summary #>> '{stop,reason}' = 'waves'
             then format('stopped at the wave limit (wave %s), still finding new accepted leads',
                         v_summary #>> '{stop,wave}')
-        when v_last.fresh >= 0.05
+        when v_last.fresh >= v_cold
             then 'warm: still finding new accepted leads'
         else 'cold, ' || v_ending
     end;

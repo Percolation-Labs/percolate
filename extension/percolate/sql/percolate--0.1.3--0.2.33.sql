@@ -41603,23 +41603,89 @@ grant execute on function claims.search_leads(text, vector, text, jsonb, text[],
 -- "search": [keys] for a short list.
 -- ============================================================================
 
--- The decider's wording. A verdict belongs to its wording: a replay made
--- under another one is refused rather than mixed (percolate-core decide.py).
-create or replace function aiq.walk_task() returns text
-language sql immutable as $$
-select 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages '
-    || 'share, or the messages beside or close in meaning to one already read. Would following it likely reach '
-    || 'information needed to answer `question`, or part of it?'
+-- THE PARAMETERS (Sirsh, M-20261027-213302-a399): every number and wording the walk, its index, its decider, its
+-- explanations and dreaming read is a row here, never a literal in code, and each row says what it controls, where
+-- it is read and why it has the value it has, so the table also explains the algorithm:
+--     select name, value, controls, why from aiq.parameters order by part, name;
+-- The spec seeds the rows, set_by 'spec'. A later spec refreshes only rows still set by the spec, so a value tuned on
+-- a deployment (set_by naming who, why saying on what evidence) survives an upgrade. One table for all of them,
+-- rather than one per part, because they are one algorithm and are tuned against each other.
+create table if not exists aiq.parameters (
+    name       text primary key check (name ~ '^[a-z]+\.[a-z_]+$'),
+    part       text not null check (part in ('index', 'search', 'walk', 'decider', 'explain', 'dream')),
+    value      jsonb not null,
+    controls   text not null check (btrim(controls) <> ''),
+    read_by    text not null check (btrim(read_by) <> ''),
+    why        text not null check (btrim(why) <> ''),
+    set_by     text not null default 'spec',
+    updated_at timestamptz not null default now(),
+    check (split_part(name, '.', 1) = part)
+);
+comment on table aiq.parameters is
+    'The walk''s, its index''s, its decider''s, its explanations'' and dreaming''s parameters: value, what it controls, where it is read and why.';
+alter table aiq.parameters enable row level security;
+drop policy if exists parameters_readable on aiq.parameters;
+create policy parameters_readable on aiq.parameters for select using (true);
+grant select on aiq.parameters to authenticated;
+
+insert into aiq.parameters as p (name, part, value, controls, read_by, why) values
+ ('walk.waves', 'walk', '10', 'How many waves a walk runs before it stops.', 'aiq.walk_settings',
+  'Ten waves of 50 is 500 reads, the budget the BEAM study and REM-1204''s crossover curves were measured at.'),
+ ('walk.wave', 'walk', '50', 'Reads per wave; Jev judges the clues a wave raised before the next wave reads.', 'aiq.walk_settings',
+  'The study''s waves2 arm: 50 reads keep a judge round near 48k tokens and let the walk change course ten times.'),
+ ('walk.seeds', 'walk', '10', 'Search''s first reads, the ones that raise the first clues.', 'aiq.walk_settings',
+  'The study''s explore10_all arm, chosen on 40 dev questions before the 150 test questions were walked.'),
+ ('walk.per_wave', 'walk', '10', 'Search reads taken at the start of every later wave, before any clue is travelled.', 'aiq.walk_settings',
+  'explore10_all: search keeps feeding the walk, so a walk is never worse off than search for long.'),
+ ('walk.span', 'walk', '5', 'How far a next-message clue reaches either side of a read, within its sitting.', 'aiq.walk_settings, aiq.walk_graph_build',
+  'Sirsh approved 5 (M-20261027-223456-e71c) on REM-1219''s test: 122 BEAM questions with stored verdicts, span 5 against 2 at 500 reads raised evidence share 0.897 to 0.931 (95% CI +0.008 to +0.066; 19 questions up, 8 down, sign p 0.052) and all-evidence questions 90 to 93; instruction following went 0.846 to 1.000 and no narrow type dropped. Missed evidence sat a few exchanges past evidence already read.'),
+ ('walk.cap', 'walk', '10', 'A term is offered as a clue only when at most this many documents share it.', 'aiq.walk_settings, aiq.walk_state',
+  'Came in with the walk; REM-1208 measured its cost. On BEAM (150 test walks) a tag held by 2 messages points at evidence 12.8x chance, falling to about 3x at 11 or more, and the cap still offers 84.5% of tags. The cost: 161 of 544 never-read evidence documents are reachable only through a wider tag, 153 in event-ordering or summarization questions. A cap that widens with breadth is unbuilt. query/38 pins it.'),
+ ('walk.gate', 'walk', '0.5', 'The P at or above which a judged clue is accepted and may be travelled.', 'aiq.walk_settings, aiq.walk_why',
+  'Jev''s P read as a probability: accept what is more likely than not to lead to the answer.'),
+ ('walk.expand_all', 'walk', 'true', 'Whether every read raises clues, or only search''s seeds and what clues reach.', 'aiq.walk_settings',
+  'The study''s _all arms beat seeds-only on BEAM test reach.'),
+ ('walk.near', 'walk', '3', 'Nearest-in-meaning clues a read raises, from the index''s nearest neighbours.', 'aiq.walk_settings, aiq.walk_graph_build',
+  'The study''s 3 nearest both ways; the index keeps index.nearest so this can be raised without re-indexing.'),
+ ('walk.memory', 'walk', '0', 'How far a walk leans on stored verdicts: 0 asks afresh, 1 takes past verdicts whole.', 'aiq.walk_state',
+  'Sirsh, M-20261027-115632-55e8: verdicts are stored, and reads are memoryless by default.'),
+ ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
+  'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
+ ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
+  'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
+ ('search.hits', 'search', '2000', 'How many search hits a channel walk takes as its search order.', 'aiq.walk_start',
+  'Enough to rank every document of a 1M BEAM conversation (about 1,100) by its best chunk.'),
+ ('decider.task', 'decider', to_jsonb(text 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages share, or the messages beside or close in meaning to one already read. Would following it likely reach information needed to answer `question`, or part of it?'),
+  'The question Jev answers for every clue. A verdict is kept with this wording and is never mixed with another''s.', 'aiq.walk_task',
+  'Ported from the BEAM study with REM-1200, where the generic wording beat one naming BEAM''s question types on 7 of 9 types.'),
+ ('index.nearest', 'index', '10', 'Nearest-in-meaning documents the index links from each document.', 'percolate walk index (core walk/index.py)',
+  'Ten keeps room above walk.near for a walk that asks for more, at about 10 edges a document.'),
+ ('explain.cold', 'explain', '0.05', 'A wave is cold when under this share of its expanded reads raised a new accepted clue.', 'aiq.walk_why, aiq.walk_audit (core walk/why.py)',
+  'Not measured. Core walk/why.py credits REM-1194''s BEAM calibration, but that calibration binned cold at under 0.2; 0.05 is a stricter choice nobody tested.'),
+ ('explain.near_miss', 'explain', '0.35', 'A rejected clue with P from this up to the gate is reported as a near miss.', 'aiq.walk_why (core walk/why.py)',
+  'Not measured: a reporting band 0.15 under the gate, equal to the band REM-1207''s walkthrough travelled (0.35), so the audit and the walk agree on what a near miss is.')
+on conflict (name) do update
+   set value = excluded.value, controls = excluded.controls, read_by = excluded.read_by, why = excluded.why,
+       updated_at = now()
+ where p.set_by = 'spec';
+
+-- One part's parameters as {name without the part: value}.
+create or replace function aiq.parameters_of(p_part text) returns jsonb
+language sql stable set search_path = pg_catalog, public as $$
+select coalesce(jsonb_object_agg(split_part(name, '.', 2), value), '{}'::jsonb) from aiq.parameters where part = p_part
 $$;
 
--- The settings, with the study's test arm as the default (explore10_all
--- without the random draw): 10 waves of 50, 3 travels a step's worth, seeds
--- 10, search 10 a wave, next reaching 2 either side, terms shared by at most
--- 10, the gate at 0.5, every read raising clues.
+-- The wording a verdict is kept under (aiq.parameters decider.task). Verdicts given under another wording are
+-- refused rather than mixed (percolate-core decide.py).
+create or replace function aiq.walk_task() returns text
+language sql stable set search_path = pg_catalog, public as $$
+select value #>> '{}' from aiq.parameters where name = 'decider.task'
+$$;
+
+-- The settings: the walk's parameters, under what a run's input asks for.
 create or replace function aiq.walk_settings(p_input jsonb) returns jsonb
-language sql immutable as $$
-select jsonb_build_object('waves', 10, 'wave', 50, 'seeds', 10, 'per_wave', 10, 'span', 2, 'cap', 10,
-                          'gate', 0.5, 'expand_all', true, 'near', 3)
+language sql stable set search_path = pg_catalog, public as $$
+select aiq.parameters_of('walk') || jsonb_build_object('hits', aiq.parameters_of('search')->'hits')
        || coalesce(p_input->'settings', '{}'::jsonb)
 $$;
 
@@ -41695,7 +41761,7 @@ $$;
 -- from its first registration.
 create or replace function aiq.walk_graph_uri(p_input jsonb, p_version jsonb)
 returns text
-language sql immutable set search_path = pg_catalog, public as $$
+language sql stable set search_path = pg_catalog, public as $$
     select 'walk-graph:' || md5(((p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')
                                  || jsonb_build_object('span', aiq.walk_settings(p_input)->'span',
                                                        'near', aiq.walk_settings(p_input)->'near'))::text)
@@ -42064,7 +42130,7 @@ begin
         select jsonb_agg(doc order by first_rank) into ord
           from (select coalesce(res.uri, res.id::text) as doc, min(h.rn) as first_rank
                   from (select chunk_id, row_number() over () as rn
-                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, 2000, 60,
+                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int, 60,
                                           jsonb_build_object('channel', inp->>'channel'))) h
                   join content.resource_chunks c on c.id = h.chunk_id
                   join content.resources res on res.id = c.resource_id
@@ -42558,10 +42624,10 @@ revoke all on function aiq.install_walk_workflow(text, text, int, text) from pub
 --             says nothing
 --   ran dry   a wave found nothing left to read; named by that wave, as the
 --             run's stop records it, not by the last wave that read
---   warm      at least 0.05 of that wave's expanded reads raised a newly
+--   warm      at least explain.cold (aiq.parameters, 0.05) of that wave's expanded reads raised a newly
 --             accepted lead (sally's calibration, REM-1194); a warm walk
 --             that ran out of waves says it stopped at the wave limit
---   cold      under 0.05; with no accepted lead open it is the certificate
+--   cold      under it; with no accepted lead open it is the certificate
 -- A clue nobody judged (an offline run) could not have been accepted: with no
 -- clue judged the state is unknown, and while unjudged clues still point at
 -- unread documents a walk earns no certificate.
@@ -42576,6 +42642,8 @@ declare
     -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
     v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
+    v_cold    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.cold');
+    v_band    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.near_miss');
     v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;
@@ -42599,8 +42667,8 @@ begin
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
                         filter (where state = 'open' and unread > 0), '[]'),
            coalesce(jsonb_agg(jsonb_build_array(key, p, unread) order by p desc, key)
-                        -- 0.35 as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
-                        filter (where decision = 'rejected' and p >= 0.35::real and p < v_gate and unread > 0), '[]'),
+                        -- the band as real: P is real, and real 0.35 is under numeric 0.35, which dropped every lead at 0.35
+                        filter (where decision = 'rejected' and p >= v_band and p < v_gate and unread > 0), '[]'),
            count(*) filter (where p is not null),
            count(*) filter (where decision = 'accepted'),
            count(*) filter (where p is null)
@@ -42623,10 +42691,10 @@ begin
         -- the stop named as the run records it: a dry stop is the wave that found nothing left to read
         when v_summary #>> '{stop,reason}' = 'dry'
             then format('ran dry at wave %s: nothing left to read; %s', v_summary #>> '{stop,wave}', v_ending)
-        when v_last.fresh >= 0.05 and v_summary #>> '{stop,reason}' = 'waves'
+        when v_last.fresh >= v_cold and v_summary #>> '{stop,reason}' = 'waves'
             then format('stopped at the wave limit (wave %s), still finding new accepted leads',
                         v_summary #>> '{stop,wave}')
-        when v_last.fresh >= 0.05
+        when v_last.fresh >= v_cold
             then 'warm: still finding new accepted leads'
         else 'cold, ' || v_ending
     end;

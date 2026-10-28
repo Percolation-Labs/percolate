@@ -103,7 +103,8 @@ declare
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
         'replay', 'walk-fixture:replay', 'offline', true,
-        'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
+        'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false,
+                                       'span', 2));  -- the fixture's walk was laid out for next reaching 2
     gold jsonb := '["wt/2", "wt/4", "wt/5", "wt/7", "wt/99"]';
     eager uuid := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', 'walk-fixture:eager',
                       'settings', inp->'settings' || '{"wave": 2}'));
