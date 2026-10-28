@@ -345,6 +345,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_keep','uuid, text','walk.sql: keep a run''s verdicts as one append-only, dated document (REM-1199)'),
 ('ai-query-layer','function','aiq.walk_snippet','text,text','walk.sql: a clue''s one-line description (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_state','uuid','walk.sql: a walk recomputed from its run''s rows (REM-1210)'),
+('ai-query-layer','function','aiq.walk_run_graph','uuid','walk.sql: the graph a run walked, from the kept document its start step recorded, so a past walk is read as it was'),
 ('ai-query-layer','function','aiq.walk_needs_vector','uuid','walk.sql: whether a walk''s question is embedded (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_start','uuid,vector','walk.sql: the start step, search''s order and the seeds (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_requests','uuid,text','walk.sql: the judge step''s rows, one Jev request per 60 clues (REM-1210)'),

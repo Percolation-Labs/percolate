@@ -258,11 +258,42 @@ declare
     uri text := aiq.walk_graph_uri(p_input, v);
     g   jsonb;
 begin
+    -- the channel is made on first use, in the shared org where register_text looks for a channel a caller with no
+    -- org names, so the first index on a fresh stack (percolate walk index keeps its graph) does not fail on it
+    if not exists (select 1 from content.channels where name = p_channel) then
+        insert into content.channels (name, kind, org_id, visibility)
+        values (p_channel, 'manual', rbac.shared_org_id(), 'public');
+    end if;
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
     return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')::text, uri,
                null, jsonb_build_object('walk_graph', g, 'version', v))
            || jsonb_build_object('uri', uri, 'version', v);
+end;
+$$;
+
+-- The graph a run walked (Sirsh, M-20261028-200720-890b). A walk's leads are read back from its graph, and an edge's
+-- identity has no time in it: a re-index rewrites a walk_term's terms in place, and a tag renamed renames its leads.
+-- So the start step records the kept graph document (aiq.walk_index) that holds the scope's links as they are when it
+-- starts, and every later reading of the run (walk_state, so walk_clues, walk_why and the rest) takes the graph from
+-- that document. Documents are never rewritten (changed links name a new one), so a pinned run reads what it walked.
+-- A step is read-only and cannot write the document itself: a scope is pinned when it was indexed after its links
+-- last changed, and a run started otherwise records no document and is read as of its start, as before.
+create or replace function aiq.walk_run_graph(p_run uuid)
+returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    r    workflow.runs;
+    kept jsonb;
+begin
+    select * into r from workflow.runs where id = p_run;
+    select res.metadata->'walk_graph' into kept
+      from workflow.tasks tk
+      join content.resources res on res.uri = tk.output->'result'->0->'state'->>'graph'
+     where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded'
+     order by res.updated_at desc
+     limit 1;
+    return coalesce(kept, aiq.walk_graph(r.input, r.created_at));
 end;
 $$;
 
@@ -428,7 +459,7 @@ begin
     inp := r.input;
     s := aiq.walk_settings(inp);
     q := inp->'question';
-    g := aiq.walk_graph(inp, r.created_at);
+    g := aiq.walk_run_graph(p_run);
     -- Search's order: the start step's record of it.
     select tk.output->'result'->0->'state'->'order' into ord
       from workflow.tasks tk where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded';
@@ -622,7 +653,10 @@ begin
      where ordinality <= (s->>'seeds')::int
        and (value #>> '{}') in (select k.v from jsonb_each_text(g->'keys') k(n, v));
     return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds,
-                              'travels', '[]'::jsonb, 'pending', '[]'::jsonb);
+                              'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
+                              'graph', (select res.uri from content.resources res
+                                         where res.uri = aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)))
+                                         limit 1));
 end;
 $$;
 
@@ -1061,6 +1095,7 @@ grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_ne
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
                           aiq.walk_answers(uuid), aiq.walk_kept(text, timestamptz), aiq.walk_keep(uuid, text),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
+                          aiq.walk_run_graph(uuid),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
