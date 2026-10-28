@@ -79,8 +79,9 @@ async def documents(conn: Any, channel: str) -> list[dict[str, Any]]:
     return out
 
 
-def term_edges(docs: list[dict[str, Any]]) -> dict[tuple, dict]:
-    postings = T.fit([d["text"] for d in docs])
+def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR,
+               df_share: float = T.DF_SHARE) -> dict[tuple, dict]:
+    postings = T.fit([d["text"] for d in docs], df_floor=df_floor, df_share=df_share)
     rank = {i: {t: r for r, t in enumerate(ts)} for i, ts in T.terms_of(postings).items()}
     out: dict[tuple, dict] = {}
     for t, ix in postings.items():
@@ -183,8 +184,20 @@ async def write(conn: Any, relation: str, edges: dict[tuple, dict], nodes: list[
     return {"derived": len(edges), "written": written, "retracted": retracted}
 
 
-async def index(conn: Any, channel: str, k: int = NEAREST) -> dict[str, Any]:
-    """Build every walk relation for one channel's documents, in one transaction."""
+async def parameters(conn: Any) -> dict[str, Any]:
+    """The index's rows in aiq.parameters (name without 'index.'), or none on a database that predates the table."""
+    if not await conn.fetchval("select to_regclass('aiq.parameters') is not null"):
+        return {}
+    p = await conn.fetchval("select aiq.parameters_of('index')")
+    return json.loads(p) if isinstance(p, str) else (p or {})
+
+
+async def index(conn: Any, channel: str, k: int | None = None) -> dict[str, Any]:
+    """Build every walk relation for one channel's documents, in one transaction. k, the nearest count and the term
+    fit's cap come from aiq.parameters' index rows; an explicit k wins over the table."""
+    p = await parameters(conn)
+    k = int(p.get("nearest", NEAREST)) if k is None else k
+    df_floor, df_share = int(p.get("df_floor", T.DF_FLOOR)), float(p.get("df_share", T.DF_SHARE))
     docs = await documents(conn, channel)
     if not docs:
         raise RuntimeError(f"channel {channel!r} has no ingested documents -- load them, wait for ingestion, then index")
@@ -197,11 +210,11 @@ async def index(conn: Any, channel: str, k: int = NEAREST) -> dict[str, Any]:
                 " on conflict (src_type, relation, dst_type) do update set description = excluded.description",
                 relation, description)
         built = {
-            "walk_term": term_edges(docs),
+            "walk_term": term_edges(docs, df_floor, df_share),
             "walk_next": next_edges(docs),
             "walk_nearest": await nearest_edges(conn, docs, k),
         }
-        report = {"documents": len(docs)}
+        report = {"documents": len(docs), "nearest": k, "df_floor": df_floor, "df_share": df_share}
         for relation, edges in built.items():
             report[relation] = await write(conn, relation, edges, nodes)
     return report

@@ -494,7 +494,9 @@ jobs:
       # live (REM-958). It went to the private tree, which is frozen for those
       # paths. core/ there is a mirror of this repository and is synced on its
       # own, so the sweep leaves it alone; what it moves is the dev stack's
-      # `percolate-core:<v>` literal (dev/docker-compose.yml).
+      # `percolate-core:<v>` literal (dev/docker-compose.yml). The PR merges
+      # itself: --auto hands it to percolate's merge queue, which waits for the
+      # required checks, so a green pin no longer waits on an agent to merge it.
       - name: Open the percolate pin PR
         if: inputs.publish
         working-directory: percolate
@@ -518,7 +520,8 @@ jobs:
           git push -q origin "$branch"
           gh pr create --repo "$REPO" --head "$branch" \
             --title "percolate-core $V: the dev stack's core pin follows it" \
-            --body "percolate-core **$V** is published ([release]($RUN)). This moves every \`percolate-core:$PREV\` literal outside core/ to $V. Merging is the judgement: the dev stack then runs against $V."
+            --body "percolate-core **$V** is published ([release]($RUN)). This moves every \`percolate-core:$PREV\` literal outside core/ to $V. It merges itself through the merge queue once the required checks pass; the dev stack then runs against $V."
+          gh pr merge --repo "$REPO" "$branch" --auto --merge
 
   # The same tail on a dry run, against a tag that exists only in this runner.
   # Without it a rehearsal would say nothing about the part of a release that
