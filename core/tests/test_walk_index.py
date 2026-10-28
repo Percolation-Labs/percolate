@@ -56,6 +56,11 @@ class Edges(unittest.TestCase):
         self.assertTrue(all(a != b for a, b in e))
         self.assertEqual(len(e), 6)
 
+    def test_the_fit_cap_comes_from_the_caller(self):
+        three = docs("ladder", "ladder", "ladder")
+        self.assertEqual(I.term_edges(three, df_floor=2, df_share=0.0), {})
+        self.assertEqual(len(I.term_edges(three, df_floor=3, df_share=0.0)), 6)
+
     def test_next_follows_position_within_a_sitting(self):
         meta = {0: {"sitting": 1, "position": 2}, 1: {"sitting": 1, "position": 1},
                 2: {"sitting": 2, "position": 1}, 3: {}}
