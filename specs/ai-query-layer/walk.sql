@@ -256,6 +256,12 @@ declare
     uri text := aiq.walk_graph_uri(p_input, v);
     g   jsonb;
 begin
+    -- the channel is made on first use, in the shared org where register_text looks for a channel a caller with no
+    -- org names, so the first index on a fresh stack (percolate walk index keeps its graph) does not fail on it
+    if not exists (select 1 from content.channels where name = p_channel) then
+        insert into content.channels (name, kind, org_id, visibility)
+        values (p_channel, 'manual', rbac.shared_org_id(), 'public');
+    end if;
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
     return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')::text, uri,
