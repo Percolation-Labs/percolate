@@ -4,7 +4,8 @@
 #     IMG=percolationlabs/percolate-postgres:19-0.2.32 CORE='percolate-core[sample]>=0.2.12' \
 #         dev/examples/muddling-through/run.sh [workdir]
 #
-# It starts a stack and runs blocks/*.sh in order; 01-setup.sh loads the two samples and indexes both conversations. No key
+# It starts a stack and runs blocks/*.sh in order; 01-setup.sh downloads BEAM from Hugging Face, loads the two samples and
+# indexes both conversations. No key
 # and no bill: bge-small runs in the stack's worker. The project is its own (muddling-through), so `down -v` touches
 # nothing else. Each block's output lands in <workdir>/captures. The steps that walk come after this, one per card.
 # The expected files assume these two samples are all the stack holds: a walk's search is not yet scoped to its own
@@ -39,7 +40,7 @@ export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
 # A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.
 psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
 export TOKEN=$(percolate auth token --email me@example.com)
-cp -R "$HERE/samples" .
+cp -R "$HERE/samples" "$HERE/build" .
 
 # Each block runs in order from this directory, as a reader pastes it; its output is captures/<block>.txt.
 fail=0

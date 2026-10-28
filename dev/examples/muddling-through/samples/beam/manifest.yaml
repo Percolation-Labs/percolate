@@ -1,12 +1,13 @@
 # Two BEAM conversations for the Muddling Through walkthrough (REM-1199).
 #
+#     python3 build/beam_fetch.py samples/beam    # BEAM's text, downloaded from Hugging Face
 #     percolate sample load samples/beam
 #     percolate walk index --source beam-1m22
 #     percolate walk index --source beam-1m35
 #
 # Each exchange is one document, registered as the pieces the walk study embedded, so a document is the unit a walk
-# reads and its sitting and place travel with it. Each piece ships with its bge-small vector, made by the stack's
-# own worker, so setup loads vectors in seconds rather than computing 7,339 of them.
+# reads and its sitting and place travel with it. The text is downloaded; the vectors ship here (vectors.jsonl), made
+# by the stack's own worker, so setup loads them in seconds rather than computing 7,339.
 name: muddling-through-beam
 version: 1.0.0
 description: |-
