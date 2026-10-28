@@ -34,7 +34,7 @@ from typing import Any
 
 from . import agent_document
 
-STEP_KINDS = ("sql", "sources", "graph", "plugin", "workflows", "documents")
+STEP_KINDS = ("sql", "sources", "graph", "plugin", "workflows", "documents", "texts")
 
 
 class SampleError(RuntimeError):
@@ -270,6 +270,18 @@ async def apply_sources(conn: Any, doc: dict[str, Any]) -> list[str]:
                 f"insert into content.channels ({', '.join(cols)})"
                 f" values ({', '.join(vals)})", *args,
             )
+        # A channel's CONFIG names the workflow its intake starts. A `texts`
+        # step registers text that has no bytes, so its channel needs a
+        # workflow that embeds and does not parse: the default ingest_file
+        # pipeline's parse step refuses a resource with no file. Applied on
+        # every load, so an edit to the sample reaches a channel that exists.
+        if c.get("config") is not None or c.get("visibility") is not None:
+            await conn.execute(
+                "update content.channels set config = config || coalesce($3::jsonb, '{}'),"
+                "       visibility = coalesce($4, visibility)"
+                " where name = $1 and org_id = coalesce($2::uuid, rbac.shared_org_id())",
+                c["name"], c.get("org"), json.dumps(c.get("config") or {}), c.get("visibility"),
+            )
         done.append(f"channel {c['name']}" + ("" if not exists else " (existed)"))
 
     for k in doc.get("node_keys") or []:
@@ -436,6 +448,96 @@ def orgs_in_documents(where: Path, yaml: Any) -> list[str]:
         if org and org not in seen:
             seen.append(org)
     return seen
+
+
+async def apply_texts(conn: Any, path: Path) -> tuple[list[str], int]:
+    """Text that is already in pieces, one JSON object per line, registered as it stands.
+
+    Each line is `{"channel", "external_id", "title", "uri", "chunks": [{"content"}, ...],
+    "metadata"}` -- content.register_text's arguments. A document whose pieces
+    matter -- a conversation whose unit is the exchange, a walk whose `next` is
+    the following message -- cannot go through POST /files, because the
+    chunker packs text to a token budget and does not know where a message
+    ends. The channel's workflow embeds the pieces with the sample's model.
+
+    A SECOND LOAD KEEPS THE FIRST METADATA. register_text keys on (channel,
+    external_id) and updates only the text, so a sample that changes a line's
+    metadata must be removed and loaded again. Same text, same hash: unchanged.
+
+    VECTORS CAN COME WITH THE TEXT. A chunk may carry `vector_f32`, its vector
+    as base64 little-endian float32, and the line then names the `model` that
+    made it. The vector is written into that model's space as it stands, so a
+    sample embedded once by the stack's own model loads in seconds instead of
+    being embedded again. It is refused unless the model is registered and the
+    length is the model's dimension: a vector from another model would rank
+    against this one's and mean nothing.
+
+    Returns the lines to print and how many texts went to a channel whose
+    workflow embeds them, which the caller reports as still embedding.
+    """
+    counts: dict[str, int] = {}
+    embeds: dict[str, bool] = {}
+    spaces: dict[str, tuple[str, int]] = {}
+    started = 0
+    with path.open() as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                t = json.loads(line)
+                args = (t["channel"], t["external_id"], json.dumps(t["chunks"]), t.get("title"),
+                        t.get("uri"), t.get("org"), json.dumps(t.get("metadata") or {}))
+            except (ValueError, KeyError) as err:
+                raise SampleError(f"{path}:{n}: not a text line ({err})") from err
+            vectors = [c.pop("vector_f32", None) for c in t["chunks"]]
+            if any(v is not None for v in vectors):
+                args = (args[0], args[1], json.dumps(t["chunks"])) + args[3:]
+            out = await conn.fetchval(
+                "select content.register_text($1, $2, $3::jsonb, $4, $5, $6::uuid, $7::jsonb)::text", *args)
+            status = json.loads(out).get("status", "registered")
+            if any(v is not None for v in vectors):
+                await _write_vectors(conn, path, n, t, json.loads(out)["resource_id"], vectors, spaces)
+            counts[status] = counts.get(status, 0) + 1
+            if status != "unchanged":
+                # Only a channel that names a workflow embeds what it is given; a store of replay documents names none.
+                if t["channel"] not in embeds:
+                    embeds[t["channel"]] = bool(await conn.fetchval(
+                        "select config ? 'ingest_workflow' from content.channels where name = $1 limit 1",
+                        t["channel"]))
+                started += embeds[t["channel"]]
+    return [f"texts {path.name}: " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))], started
+
+
+async def _write_vectors(conn: Any, path: Path, n: int, t: dict[str, Any], resource_id: str,
+                         vectors: list[str | None], spaces: dict[str, tuple[str, int]]) -> None:
+    """Write a text's shipped vectors into its model's space, chunk by chunk, by ordinal."""
+    import base64
+    import struct
+
+    model = t.get("model")
+    if not model:
+        raise SampleError(f"{path}:{n}: chunks carry vectors but the line names no model")
+    if model not in spaces:
+        row = await conn.fetchrow(
+            "select format('aiq.%I', aiq.embedding_space_name(name)) as space, dim"
+            "  from aiq.embedding_models where name = $1", model)
+        if row is None:
+            raise SampleError(f"{path}:{n}: model {model!r} is not registered; the sources step registers it")
+        spaces[model] = (row["space"], row["dim"])
+    space, dim = spaces[model]
+    for ordinal, v in enumerate(vectors):
+        if v is None:
+            continue
+        raw = base64.b64decode(v)
+        if len(raw) != 4 * dim:
+            raise SampleError(f"{path}:{n}: chunk {ordinal} has {len(raw) // 4} dimensions, {model} has {dim}")
+        vec = "[" + ",".join(repr(x) for x in struct.unpack(f"<{dim}f", raw)) + "]"
+        await conn.execute(
+            f"insert into {space} (chunk_id, embedding)"
+            "  select k.id, $3::vector from content.resource_chunks k"
+            "   where k.resource_id = $1::uuid and k.ordinal = $2"
+            "  on conflict (chunk_id) do update set embedding = excluded.embedding",
+            resource_id, ordinal, vec)
 
 
 async def apply_workflows(conn: Any, paths: list[Path]) -> list[str]:

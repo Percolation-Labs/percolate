@@ -394,6 +394,22 @@
     },
     {
       "admits": [
+        "index",
+        "search",
+        "walk",
+        "decider",
+        "explain",
+        "dream"
+      ],
+      "column": "part",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "parameters",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "graph",
         "lake",
         "p8ql",
@@ -1486,7 +1502,7 @@
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.2.32",
+  "extension": "0.2.33",
   "types": [
     {
       "consumed_by": [

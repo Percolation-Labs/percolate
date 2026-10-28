@@ -19,6 +19,18 @@ headed by the version that first carried them, which `git tag --contains` on
 each item's commit decided, not the heading's guess. Nothing has been written
 for 0.2.2–0.2.5 after the fact, for the reason the first paragraph gives.
 
+## 0.2.12
+
+- **`percolate walk run` walks a question in waves, and a decider chooses where to look between them**
+  (REM-1200). Search supplies the first reads; every read raises clues (a term a few documents share, the
+  messages beside it, the ones nearest in meaning); Jev gives each clue a P, P >= 0.5 accepts it, and each step
+  travels the best accepted clues. It reads a channel's `document` nodes and the `walk_term` and `walk_nearest`
+  links `percolate walk index` builds (REM-1201), or a fixture directory. The walk's record holds every clue with
+  its targets, P and fate, every travel and the leads still open, so `walk why` can explain a miss from the record
+  alone. `--save-verdicts` keeps what Jev said, and `--verdicts` replays it, so the second run of a walk is free;
+  `--offline` asks nobody and counts what it could not judge. Ported from the BEAM study's walk and checked read
+  for read against its recorded walk of question 1M:22.
+
 ## 0.2.9
 
 - **`percolate package apply` installs a package, as the user who will own it**

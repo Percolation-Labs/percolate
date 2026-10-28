@@ -51,57 +51,108 @@
 -- "search": [keys] for a short list.
 -- ============================================================================
 
--- The decider's wording. A verdict belongs to its wording: a replay made
--- under another one is refused rather than mixed (percolate-core decide.py).
-create or replace function aiq.walk_task() returns text
-language sql immutable as $$
-select 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages '
-    || 'share, or the messages beside or close in meaning to one already read. Would following it likely reach '
-    || 'information needed to answer `question`, or part of it?'
+-- THE PARAMETERS (Sirsh, M-20261027-213302-a399): every number and wording the walk, its index, its decider, its
+-- explanations and dreaming read is a row here, never a literal in code, and each row says what it controls, where
+-- it is read and why it has the value it has, so the table also explains the algorithm:
+--     select name, value, controls, why from aiq.parameters order by part, name;
+-- The spec seeds the rows, set_by 'spec'. A later spec refreshes only rows still set by the spec, so a value tuned on
+-- a deployment (set_by naming who, why saying on what evidence) survives an upgrade. One table for all of them,
+-- rather than one per part, because they are one algorithm and are tuned against each other.
+create table if not exists aiq.parameters (
+    name       text primary key check (name ~ '^[a-z]+\.[a-z_]+$'),
+    part       text not null check (part in ('index', 'search', 'walk', 'decider', 'explain', 'dream')),
+    value      jsonb not null,
+    controls   text not null check (btrim(controls) <> ''),
+    read_by    text not null check (btrim(read_by) <> ''),
+    why        text not null check (btrim(why) <> ''),
+    set_by     text not null default 'spec',
+    updated_at timestamptz not null default now(),
+    check (split_part(name, '.', 1) = part)
+);
+comment on table aiq.parameters is
+    'The walk''s, its index''s, its decider''s, its explanations'' and dreaming''s parameters: value, what it controls, where it is read and why.';
+alter table aiq.parameters enable row level security;
+drop policy if exists parameters_readable on aiq.parameters;
+create policy parameters_readable on aiq.parameters for select using (true);
+grant select on aiq.parameters to authenticated;
+
+insert into aiq.parameters as p (name, part, value, controls, read_by, why) values
+ ('walk.waves', 'walk', '10', 'How many waves a walk runs before it stops.', 'aiq.walk_settings',
+  'Ten waves of 50 is 500 reads, the budget the BEAM study and REM-1204''s crossover curves were measured at.'),
+ ('walk.wave', 'walk', '50', 'Reads per wave; Jev judges the clues a wave raised before the next wave reads.', 'aiq.walk_settings',
+  'The study''s waves2 arm: 50 reads keep a judge round near 48k tokens and let the walk change course ten times.'),
+ ('walk.seeds', 'walk', '10', 'Search''s first reads, the ones that raise the first clues.', 'aiq.walk_settings',
+  'The study''s explore10_all arm, chosen on 40 dev questions before the 150 test questions were walked.'),
+ ('walk.per_wave', 'walk', '10', 'Search reads taken at the start of every later wave, before any clue is travelled.', 'aiq.walk_settings',
+  'explore10_all: search keeps feeding the walk, so a walk is never worse off than search for long.'),
+ ('walk.span', 'walk', '5', 'How far a next-message clue reaches either side of a read, within its sitting.', 'aiq.walk_settings, aiq.walk_graph_build',
+  'Sirsh approved 5 (M-20261027-223456-e71c) on REM-1219''s test: 122 BEAM questions with stored verdicts, span 5 against 2 at 500 reads raised evidence share 0.897 to 0.931 (95% CI +0.008 to +0.066; 19 questions up, 8 down, sign p 0.052) and all-evidence questions 90 to 93; instruction following went 0.846 to 1.000 and no narrow type dropped. Missed evidence sat a few exchanges past evidence already read.'),
+ ('walk.cap', 'walk', '100', 'A term is offered as a clue only when at most this many documents share it.', 'aiq.walk_settings, aiq.walk_state',
+  'Set wide on Sirsh''s direction (M-20261028-074522-1623) until a sweep plots the walk across caps. At the old cap of 10 (REM-1208), on BEAM, 161 of 544 never-read evidence documents were reachable only through a wider tag, 153 of them in event-ordering or summarization questions. On REM-1204''s 156 buried test questions (deep order, span 2, 500 reads) the walk led search by +0.058 (95% CI +0.035 to +0.082) at cap 10, +0.049 at 30 and +0.050 at 100: no gain from widening, and a cost of about 0.01, inside the noise. query/38 pins the cap''s behaviour.'),
+ ('walk.gate', 'walk', '0.5', 'The P at or above which a judged clue is accepted and may be travelled.', 'aiq.walk_settings, aiq.walk_why',
+  'Jev''s P read as a probability: accept what is more likely than not to lead to the answer.'),
+ ('walk.expand_all', 'walk', 'true', 'Whether every read raises clues, or only search''s seeds and what clues reach.', 'aiq.walk_settings',
+  'The study''s _all arms beat seeds-only on BEAM test reach.'),
+ ('walk.near', 'walk', '3', 'Nearest-in-meaning clues a read raises, from the index''s nearest neighbours.', 'aiq.walk_settings, aiq.walk_graph_build',
+  'The study''s 3 nearest both ways; the index keeps index.nearest so this can be raised without re-indexing.'),
+ ('walk.memory', 'walk', '0', 'How far a walk leans on stored verdicts: 0 asks afresh, 1 takes past verdicts whole.', 'aiq.walk_state',
+  'Sirsh, M-20261027-115632-55e8: verdicts are stored, and reads are memoryless by default.'),
+ ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
+  'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
+ ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
+  'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
+ ('search.hits', 'search', '2000', 'How many search hits a channel walk takes as its search order.', 'aiq.walk_start',
+  'Enough to rank every document of a 1M BEAM conversation (about 1,100) by its best chunk.'),
+ ('decider.task', 'decider', to_jsonb(text 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages share, or the messages beside or close in meaning to one already read. Would following it likely reach information needed to answer `question`, or part of it?'),
+  'The question Jev answers for every clue. A verdict is kept with this wording and is never mixed with another''s.', 'aiq.walk_task',
+  'Ported from the BEAM study with REM-1200, where the generic wording beat one naming BEAM''s question types on 7 of 9 types.'),
+ ('index.nearest', 'index', '10', 'Nearest-in-meaning documents the index links from each document.', 'percolate walk index (core walk/index.py)',
+  'Ten keeps room above walk.near for a walk that asks for more, at about 10 edges a document.'),
+ ('explain.cold', 'explain', '0.05', 'A wave is cold when under this share of its expanded reads raised a new accepted clue.', 'aiq.walk_why, aiq.walk_audit (core walk/why.py)',
+  'Not measured. Core walk/why.py credits REM-1194''s BEAM calibration, but that calibration binned cold at under 0.2; 0.05 is a stricter choice nobody tested.'),
+ ('explain.near_miss', 'explain', '0.35', 'A rejected clue with P from this up to the gate is reported as a near miss.', 'aiq.walk_why (core walk/why.py)',
+  'Not measured: a reporting band 0.15 under the gate, equal to the band REM-1207''s walkthrough travelled (0.35), so the audit and the walk agree on what a near miss is.')
+on conflict (name) do update
+   set value = excluded.value, controls = excluded.controls, read_by = excluded.read_by, why = excluded.why,
+       updated_at = now()
+ where p.set_by = 'spec';
+
+-- One part's parameters as {name without the part: value}.
+create or replace function aiq.parameters_of(p_part text) returns jsonb
+language sql stable set search_path = pg_catalog, public as $$
+select coalesce(jsonb_object_agg(split_part(name, '.', 2), value), '{}'::jsonb) from aiq.parameters where part = p_part
 $$;
 
--- The settings, with the study's test arm as the default (explore10_all
--- without the random draw): 10 waves of 50, 3 travels a step's worth, seeds
--- 10, search 10 a wave, next reaching 2 either side, terms shared by at most
--- 10, the gate at 0.5, every read raising clues.
+-- The wording a verdict is kept under (aiq.parameters decider.task). Verdicts given under another wording are
+-- refused rather than mixed (percolate-core decide.py).
+create or replace function aiq.walk_task() returns text
+language sql stable set search_path = pg_catalog, public as $$
+select value #>> '{}' from aiq.parameters where name = 'decider.task'
+$$;
+
+-- The settings: the walk's parameters, under what a run's input asks for.
 create or replace function aiq.walk_settings(p_input jsonb) returns jsonb
-language sql immutable as $$
-select jsonb_build_object('waves', 10, 'wave', 50, 'seeds', 10, 'per_wave', 10, 'span', 2, 'cap', 10,
-                          'gate', 0.5, 'expand_all', true, 'near', 3)
+language sql stable set search_path = pg_catalog, public as $$
+select aiq.parameters_of('walk') || jsonb_build_object('hits', aiq.parameters_of('search')->'hits')
        || coalesce(p_input->'settings', '{}'::jsonb)
 $$;
 
--- One documents-and-links load for a run's scope, as the caller, as of p_at.
--- Returned as one jsonb so a walk's state is computed in one pass over it:
---   keys:  {node uuid: key}         text: {key: body}
---   terms: {key: [term, ...]}       post: {term: [key, ...]}
---   beside:{key: [key, ...]} within span either side, by walk_next
---   near:  {key: [key, ...]} the first `near` nearest, and who has it as one
-create or replace function aiq.walk_graph(p_input jsonb, p_at timestamptz default null)
+-- A run's scope, {node uuid: key}: the `document` nodes of a channel's resources by uri, or the nodes of an entity
+-- type by canonical key.
+create or replace function aiq.walk_keys(p_input jsonb)
 returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    s      jsonb := aiq.walk_settings(p_input);
-    v_at   timestamptz := coalesce(p_at, now());
-    docs   jsonb;
-    terms  jsonb;
-    post   jsonb;
-    beside jsonb;
-    near   jsonb;
+    docs jsonb;
 begin
     if p_input ? 'channel' then
-        select jsonb_object_agg(n.id::text, coalesce(r.uri, r.id::text)),
-               jsonb_object_agg(coalesce(r.uri, r.id::text),
-                   coalesce((select string_agg(c.content, ' ' order by c.ordinal)
-                               from content.resource_chunks c where c.resource_id = r.id), ''))
-          into docs, terms   -- terms holds the text map for a moment
+        select jsonb_object_agg(n.id::text, coalesce(r.uri, r.id::text)) into docs
           from content.resources r
           join content.channels ch on ch.id = r.channel_id
           join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
          where ch.name = p_input->>'channel';
     elsif p_input ? 'nodes' then
-        select jsonb_object_agg(n.id::text, k.key), jsonb_object_agg(k.key, coalesce(n.summary, k.key))
-          into docs, terms
+        select jsonb_object_agg(n.id::text, k.key) into docs
           from aiq.nodes n
           join aiq.node_keys k on k.node_id = n.id and k.kind = 'canonical'
          where n.entity_type = p_input->>'nodes'
@@ -114,6 +165,121 @@ begin
         raise no_data_found using message = format('nothing to walk in %s', p_input - 'question' - 'settings'),
             hint = 'load the sample first; a channel walks its document nodes';
     end if;
+    return docs;
+end;
+$$;
+
+-- The text of some of a scope's documents, for the snippets a judge reads: a document's chunks in order, or a
+-- node's summary. Fetched for the few a round needs rather than carried in the graph (4.4 MB on a BEAM channel).
+create or replace function aiq.walk_texts(p_input jsonb, p_docs text[])
+returns jsonb
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select coalesce(jsonb_object_agg(d.doc, d.body), '{}'::jsonb) from (
+        select coalesce(r.uri, r.id::text) as doc,
+               coalesce((select string_agg(c.content, ' ' order by c.ordinal)
+                           from content.resource_chunks c where c.resource_id = r.id), '') as body
+          from content.resources r join content.channels ch on ch.id = r.channel_id
+         where p_input ? 'channel' and ch.name = p_input->>'channel' and coalesce(r.uri, r.id::text) = any(p_docs)
+        union all
+        select k.key, coalesce(n.summary, k.key)
+          from aiq.nodes n join aiq.node_keys k on k.node_id = n.id and k.kind = 'canonical'
+         where p_input ? 'nodes' and n.entity_type = p_input->>'nodes' and k.key = any(p_docs)
+    ) d
+$$;
+
+-- What a scope's graph is built from: its documents and the walk links out of them, each link by its ends, relation,
+-- provenance and validity. Any change to one, a close backdated or a new row, moves a sum; as_of is the time after
+-- which the graph no longer depends on the moment it is read. (48 ms on a BEAM channel, against 200 ms to build.)
+create or replace function aiq.walk_graph_version(p_keys jsonb)
+returns jsonb
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select jsonb_build_object(
+               'docs', (select count(*) from jsonb_object_keys(p_keys)), 'edges', count(*), 'closed', count(e.valid_to),
+               'links', sum(hashtext(e.src_id::text || e.dst_id::text || e.relation || e.provenance::text)::bigint),
+               'from', sum(extract(epoch from e.valid_from)), 'to', sum(extract(epoch from e.valid_to)),
+               'newest', max(e.created_at),
+               'as_of', max(greatest(e.created_at, e.valid_from, coalesce(e.valid_to, e.valid_from))))
+      from aiq.edges e
+     where e.src_id = any (array(select k::uuid from jsonb_object_keys(p_keys) k))
+       and e.relation in ('walk_term', 'walk_tagged', 'walk_next', 'walk_nearest')
+$$;
+
+-- Where a scope's graph is kept: one document per scope, the two settings the graph depends on, and the version of
+-- its links. Links that change name a new document rather than rewrite one, because a resource's metadata is kept
+-- from its first registration.
+create or replace function aiq.walk_graph_uri(p_input jsonb, p_version jsonb)
+returns text
+language sql stable set search_path = pg_catalog, public as $$
+    select 'walk-graph:' || md5(((p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')
+                                 || jsonb_build_object('span', aiq.walk_settings(p_input)->'span',
+                                                       'near', aiq.walk_settings(p_input)->'near'))::text)
+           || ':' || md5(p_version::text)
+$$;
+
+-- A scope's graph, read from its document when that was built from the links as they are, and built otherwise.
+-- The graph is the same on every step of every run over the scope, and building it was most of a walk's cost
+-- (76% of a BEAM walk's database time); a run as of a time before the links last changed builds its own.
+create or replace function aiq.walk_graph(p_input jsonb, p_at timestamptz default null)
+returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    v_at timestamptz := coalesce(p_at, now());
+    v    jsonb := aiq.walk_graph_version(aiq.walk_keys(p_input));
+    kept jsonb;
+begin
+    select res.metadata->'walk_graph' into kept
+      from content.resources res
+     where res.uri = aiq.walk_graph_uri(p_input, v)
+     order by res.updated_at desc
+     limit 1;
+    if kept is not null and v_at >= (v->>'as_of')::timestamptz then
+        return kept;
+    end if;
+    return aiq.walk_graph_build(p_input, v_at);
+end;
+$$;
+
+-- Keep a scope's graph as a document in p_channel, so every walk over the scope reads it rather than building it.
+-- Run it after loading the links, and again after changing them: a graph kept for links that have since changed
+-- is never read, so a stale one costs a rebuild per step and is never wrong. The graph is the document's metadata;
+-- its one chunk is '-', which indexes to no words, so search never finds it (as chunk text, a graph's terms put it
+-- in the keyword ranking and moved the walk's own search order).
+create or replace function aiq.walk_index(p_input jsonb, p_channel text default 'walk-graphs')
+returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    v   jsonb := aiq.walk_graph_version(aiq.walk_keys(p_input));
+    uri text := aiq.walk_graph_uri(p_input, v);
+    g   jsonb;
+begin
+    g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
+    return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
+               'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')::text, uri,
+               null, jsonb_build_object('walk_graph', g, 'version', v))
+           || jsonb_build_object('uri', uri, 'version', v);
+end;
+$$;
+
+-- One documents-and-links load for a run's scope, as the caller, as of p_at.
+-- Returned as one jsonb so a walk's state is computed in one pass over it:
+--   keys:  {node uuid: key}
+--   terms: {key: [term, ...]}       post: {term: [key, ...]}
+--   beside:{key: [key, ...]} within span either side, by walk_next
+--   near:  {key: [key, ...]} the first `near` nearest, and who has it as one
+-- A document's text is not in it: aiq.walk_texts fetches the few a round's snippets need.
+create or replace function aiq.walk_graph_build(p_input jsonb, p_at timestamptz default null)
+returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    s      jsonb := aiq.walk_settings(p_input);
+    v_at   timestamptz := coalesce(p_at, now());
+    docs   jsonb;
+    terms  jsonb;
+    post   jsonb;
+    beside jsonb;
+    near   jsonb;
+begin
+    docs := aiq.walk_keys(p_input);
     -- Terms: walk_term between two documents (provenance terms[]), and
     -- walk_tagged from a node to a tag node (the tag's summary is the term).
     with t as (
@@ -144,7 +310,7 @@ begin
                 select term, jsonb_agg(doc order by doc) as ds from holders where doc is not null group by term) b)
       into s, post;
     -- (s now holds the term lists; the settings are re-read below)
-    terms := jsonb_build_object('text', terms, 'terms', coalesce(s, '{}'::jsonb));
+    terms := coalesce(s, '{}'::jsonb);
     s := aiq.walk_settings(p_input);
     -- Beside: the next chain, both ways, within span.
     with recursive nx as (
@@ -176,7 +342,7 @@ begin
     )
     select jsonb_object_agg(doc, ks) into near
       from (select doc, jsonb_agg(other order by dir, rank, other) as ks from lists group by doc) z;
-    return jsonb_build_object('keys', docs, 'text', terms->'text', 'terms', terms->'terms',
+    return jsonb_build_object('keys', docs, 'terms', terms,
                               'post', coalesce(post, '{}'::jsonb), 'beside', coalesce(beside, '{}'::jsonb),
                               'near', coalesce(near, '{}'::jsonb));
 end;
@@ -198,6 +364,20 @@ begin
     end if;
     return left(t, 160);
 end;
+$$;
+
+-- The verdicts the decider gave this run, one row a clue: the clue's key, its P, when it was answered and the model
+-- that answered. Read from the judge step's tasks, which workflow retention prunes: aiq.walk_keep keeps them.
+create or replace function aiq.walk_answers(p_run uuid)
+returns table (key text, p real, at timestamptz, model text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select kk.value #>> '{}', (ch.output->'result'->'answers'->('c' || (kk.ordinality - 1))->>'noul')::real,
+           ch.completed_at, ch.input->'item'->'body'->>'model'
+      from workflow.tasks jt
+      join workflow.tasks ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
+      cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
+     where jt.run_id = p_run and jt.step_key like 'judge\_%'
+       and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul'
 $$;
 
 -- The walk so far, recomputed from the run's rows. Everything the reader's
@@ -229,12 +409,10 @@ declare
     sources  jsonb := '[]'::jsonb;   -- the reads whose clues the next round judges
     nxt      jsonb := '{}'::jsonb;   -- clues the next round raises: {key: {kind, x, source, targets, text}}
     waves    jsonb := '[]'::jsonb;
-    rd       jsonb;
-    src      text;
-    t        text;
-    tg       jsonb;
-    k        text;
     stop     jsonb;
+    last     boolean;
+    txt      jsonb;
+    mem      real;
 begin
     select * into r from workflow.runs where id = p_run;
     if not found then
@@ -262,15 +440,21 @@ begin
         end if;
         pmap := coalesce(rep->'verdicts'->(q->>'id'), '{}'::jsonb);
     end if;
-    select pmap || coalesce(jsonb_object_agg(kk.value #>> '{}',
-                                             (ch.output->'result'->'answers'->('c' || (kk.ordinality - 1))->>'noul')::real),
-                            '{}'::jsonb)
-      into pmap
-      from workflow.tasks jt
-      join workflow.tasks ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
-      cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
-     where jt.run_id = p_run and jt.step_key like 'judge\_%'
-       and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul';
+    select pmap || coalesce(jsonb_object_agg(a.key, a.p), '{}'::jsonb) into pmap from aiq.walk_answers(p_run) a;
+    -- Memory (settings.memory, 0 to 1, default 0): how far this run leans on the verdicts earlier runs kept for the
+    -- same question under the same wording. At 0 they are not read. Above it, a clue judged before and now takes
+    -- (1 - memory) * now + memory * the mean of before, and one judged only before takes the mean and is not asked.
+    mem := coalesce((s->>'memory')::real, 0);
+    if mem > 0 then
+        select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
+                                                   else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
+               || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
+                    where not exists (select 1 from aiq.walk_kept(q->>'id', r.created_at) k where k.key = n.key))
+          into pmap
+          from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
+                  from aiq.walk_kept(q->>'id', r.created_at) k
+                 group by k.key) z;
+    end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
     select jsonb_agg(x.rec order by (x.rec->>'wave')::int) into logs
       from (select tk.output->'result'->0->'state' as rec
@@ -278,74 +462,77 @@ begin
              where tk.run_id = p_run and tk.status = 'succeeded'
                and (tk.step_key = 'start' or tk.step_key like 'read\_%')) x
      where x.rec ? 'wave';
+    -- Each wave is applied as a whole: one jsonb merge per accumulator per wave. A merge per key copied the
+    -- growing object every time, so a walk's state cost the square of its reads (1.3 s of 1.6 s at 500 reads).
     for w in select value from jsonb_array_elements(coalesce(logs, '[]'::jsonb)) loop
         wn := (w->>'wave')::int;
+        -- Only the last wave's clues are still to be judged, and a clue's text is only read by its judge.
+        last := wn = (logs->-1->>'wave')::int;
+        txt := case when last then aiq.walk_texts(inp, array(select value->>'doc' from jsonb_array_elements(w->'reads')
+                                                              where (value->>'expanded')::boolean)) end;
         -- The clues this wave's round judged: raised by the previous wave's expanded reads.
         if wn > 0 then
-            for k in select key from jsonb_each(nxt) loop
-                clues := clues || jsonb_build_object(k, (nxt->k) - 'text'
-                                     || jsonb_build_object('wave', wn, 'p', pmap->k));
-                if (pmap->>k)::real >= (s->>'gate')::real then
-                    null;  -- accepted; open until travelled or spent
-                end if;
-            end loop;
+            clues := clues || coalesce((select jsonb_object_agg(key, (value - 'text')
+                                                 || jsonb_build_object('wave', wn, 'p', pmap->key))
+                                          from jsonb_each(nxt)), '{}'::jsonb);
         end if;
         -- Apply the wave's reads and travels.
-        for rd in select value from jsonb_array_elements(w->'reads') loop
-            reached := reached || jsonb_build_object(rd->>'doc', true);
-        end loop;
-        for rd in select value from jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb)) loop
-            travelled := travelled || jsonb_build_object(rd->>'key', wn);
-            for t in select value #>> '{}' from jsonb_array_elements(rd->'land') loop
-                reached := reached || jsonb_build_object(t, true);
-            end loop;
-        end loop;
+        reached := reached || coalesce((select jsonb_object_agg(d, true) from (
+                       select value->>'doc' as d from jsonb_array_elements(w->'reads')
+                       union
+                       select l #>> '{}' from jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb)) tr,
+                                              jsonb_array_elements(tr->'land') l) x), '{}'::jsonb);
+        travelled := travelled || coalesce((select jsonb_object_agg(value->>'key', wn)
+                                              from jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb))),
+                                           '{}'::jsonb);
         pending := coalesce(w->'pending', '[]'::jsonb);
         waves := waves || jsonb_build_array(w || jsonb_build_object('raised',
                      (select coalesce(jsonb_agg(key order by key), '[]'::jsonb) from jsonb_each(nxt))));
         -- The next round's clues: out of this wave's expanded reads, never raised before, leading somewhere unread.
-        nxt := '{}'::jsonb;
-        for rd in select value from jsonb_array_elements(w->'reads') where (value->>'expanded')::boolean loop
-            src := rd->>'doc';
-            for t in select value #>> '{}' from jsonb_array_elements(coalesce(g->'terms'->src, '[]'::jsonb)) loop
-                k := 'term:' || t;
-                if jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) <= (s->>'cap')::int
-                   and not clues ? k then
-                    select coalesce(jsonb_agg(value order by value #>> '{}'), '[]'::jsonb) into tg
-                      from jsonb_array_elements(g->'post'->t) where not reached ? (value #>> '{}');
-                    if jsonb_array_length(tg) > 0 then
-                        if nxt ? k then
-                            select jsonb_agg(distinct value) into tg
-                              from (select value from jsonb_array_elements(tg)
-                                    union select value from jsonb_array_elements(nxt->k->'targets')) u;
-                            nxt := jsonb_set(nxt, array[k, 'targets'], tg);
-                        else
-                            nxt := nxt || jsonb_build_object(k, jsonb_build_object(
-                                'kind', 'term', 'x', t, 'source', src, 'targets', tg,
-                                'text', format('the term ''%s'', which %s unread message(s) share with this read one: "%s"',
-                                               t, jsonb_array_length(tg), aiq.walk_snippet(g->'text'->>src, t))));
-                        end if;
-                    end if;
-                end if;
-            end loop;
-            foreach t in array array['next', 'near'] loop
-                k := t || ':' || src;
-                if not clues ? k then
-                    select coalesce(jsonb_agg(distinct value), '[]'::jsonb) into tg
-                      from jsonb_array_elements(coalesce(g->(case t when 'next' then 'beside' else 'near' end)->src,
+        -- A term's source is the first expanded read that carries it; its targets are the term's unread postings.
+        with ex as (
+            select value->>'doc' as src, o from jsonb_array_elements(w->'reads') with ordinality r(value, o)
+             where (value->>'expanded')::boolean
+        ), term as (
+            select t, min(o) as o, count(*) as n
+              from ex, jsonb_array_elements_text(coalesce(g->'terms'->src, '[]'::jsonb)) t
+             where jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) <= (s->>'cap')::int
+               and not clues ? ('term:' || t)
+             group by t
+        ), term_clue as (
+            select 'term:' || term.t as k, term.t, ex.src,
+                   -- a term raised by two reads had its targets re-aggregated distinct; kept so the record is unchanged
+                   case when term.n > 1 then (select jsonb_agg(distinct value) from jsonb_array_elements(g->'post'->term.t)
+                                               where not reached ? (value #>> '{}'))
+                        else (select jsonb_agg(value order by value #>> '{}') from jsonb_array_elements(g->'post'->term.t)
+                               where not reached ? (value #>> '{}')) end as tg
+              from term join ex on ex.o = term.o
+        ), side_clue as (
+            select kind || ':' || ex.src as k, kind, ex.src,
+                   (select jsonb_agg(distinct value)
+                      from jsonb_array_elements(coalesce(g->(case kind when 'next' then 'beside' else 'near' end)->ex.src,
                                                          '[]'::jsonb))
-                     where not reached ? (value #>> '{}') and value #>> '{}' <> src;
-                    if jsonb_array_length(tg) > 0 then
-                        nxt := nxt || jsonb_build_object(k, jsonb_build_object(
-                            'kind', t, 'x', src, 'source', src, 'targets', tg,
-                            'text', format('%s: "%s"',
-                                           case t when 'next' then 'the messages just before and after this read one, in the same sitting'
-                                                  else 'the messages closest in meaning to this read one' end,
-                                           aiq.walk_snippet(g->'text'->>src))));
-                    end if;
-                end if;
-            end loop;
-        end loop;
+                     where not reached ? (value #>> '{}') and value #>> '{}' <> ex.src) as tg
+              from ex, unnest(array['next', 'near']) kind
+             where not clues ? (kind || ':' || ex.src)
+        )
+        select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) into nxt from (
+            select k, jsonb_build_object(
+                       'kind', 'term', 'x', t, 'source', src, 'targets', tg,
+                       'text', case when last then
+                                   format('the term ''%s'', which %s unread message(s) share with this read one: "%s"',
+                                          t, jsonb_array_length(tg), aiq.walk_snippet(txt->>src, t)) end) as c
+              from term_clue where tg is not null
+            union all
+            select distinct on (k) k, jsonb_build_object(
+                       'kind', kind, 'x', src, 'source', src, 'targets', tg,
+                       'text', case when last then
+                                   format('%s: "%s"',
+                                          case kind when 'next' then 'the messages just before and after this read one, in the same sitting'
+                                                    else 'the messages closest in meaning to this read one' end,
+                                          aiq.walk_snippet(txt->>src)) end)
+              from side_clue where tg is not null
+        ) z;
         stop := w->'stop';
     end loop;
     return jsonb_build_object('settings', s, 'question', q, 'order', coalesce(ord, '[]'::jsonb),
@@ -391,7 +578,8 @@ begin
         select jsonb_agg(doc order by first_rank) into ord
           from (select coalesce(res.uri, res.id::text) as doc, min(h.rn) as first_rank
                   from (select chunk_id, row_number() over () as rn
-                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, 2000)) h
+                          from aiq.search('chunks', inp->'question'->>'text', p_vector, null, (s->>'hits')::int, 60,
+                                          jsonb_build_object('channel', inp->>'channel'))) h
                   join content.resource_chunks c on c.id = h.chunk_id
                   join content.resources res on res.id = c.resource_id
                   join content.channels ch on ch.id = res.channel_id and ch.name = inp->>'channel'
@@ -411,7 +599,8 @@ begin
     select jsonb_agg(jsonb_build_object('doc', value #>> '{}', 'via', 'search', 'expanded', true) order by ordinality)
       into seeds
       from jsonb_array_elements(ord) with ordinality
-     where ordinality <= (s->>'seeds')::int and g->'text' ? (value #>> '{}');
+     where ordinality <= (s->>'seeds')::int
+       and (value #>> '{}') in (select k.v from jsonb_each_text(g->'keys') k(n, v));
     return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds,
                               'travels', '[]'::jsonb, 'pending', '[]'::jsonb);
 end;
@@ -485,34 +674,27 @@ declare
     land    jsonb;
     doc     text;
     n       int := 0;
-    k       text;
-    p       real;
 begin
     if wn = 0 then
         raise invalid_parameter_value using message = 'the walk has not started: no seeds recorded';
     end if;
     -- Every accepted clue still leading somewhere unread: earlier waves' not
     -- yet travelled, and this round's.
-    for k in select key from jsonb_each(st->'clues') loop
-        p := (st->'p'->>k)::real;
-        if p >= (s->>'gate')::real and not (st->'travelled') ? k then
-            open_ := open_ || jsonb_build_object(k, jsonb_build_object('p', p, 'targets', st->'clues'->k->'targets'));
-        end if;
-    end loop;
-    for k in select key from jsonb_each(st->'next') loop
-        p := (st->'p'->>k)::real;
-        if p >= (s->>'gate')::real then
-            open_ := open_ || jsonb_build_object(k, jsonb_build_object('p', p, 'targets', st->'next'->k->'targets'));
-        end if;
-    end loop;
+    -- (each built in one aggregate: a merge per key copies the growing object every time)
+    select coalesce(jsonb_object_agg(c.key, jsonb_build_object('p', (st->'p'->>c.key)::real, 'targets', c.value->'targets')),
+                    '{}'::jsonb) into open_
+      from (select key, value from jsonb_each(st->'clues') where not (st->'travelled') ? key
+            union all
+            select key, value from jsonb_each(st->'next')) c
+     where (st->'p'->>c.key)::real >= (s->>'gate')::real;
     if jsonb_typeof(nm) = 'object' then
-        for k in select key from jsonb_each(st->'clues') union select key from jsonb_each(st->'next') loop
-            p := (st->'p'->>k)::real;
-            if p >= (nm->>'band')::real and p < (s->>'gate')::real and not (st->'travelled') ? k then
-                misses := misses || jsonb_build_object(k, jsonb_build_object('p', p,
-                              'targets', coalesce(st->'clues'->k->'targets', st->'next'->k->'targets')));
-            end if;
-        end loop;
+        select coalesce(jsonb_object_agg(c.key, jsonb_build_object('p', (st->'p'->>c.key)::real,
+                                                                  'targets', coalesce(st->'clues'->c.key->'targets',
+                                                                                      st->'next'->c.key->'targets'))),
+                        '{}'::jsonb) into misses
+          from (select key from jsonb_each(st->'clues') union select key from jsonb_each(st->'next')) c
+         where (st->'p'->>c.key)::real >= (nm->>'band')::real and (st->'p'->>c.key)::real < (s->>'gate')::real
+           and not (st->'travelled') ? c.key;
     end if;
     -- The wave's size: cumulative reads reach wave * size (wave 0's seeds count toward wave 1).
     target := wn * (s->>'wave')::int
@@ -600,14 +782,21 @@ end;
 $$;
 
 -- ---------------------------------------------------------------- what a reader queries
+-- Each view comes in two forms: one over a run, and one over a state already built (aiq.walk_state_*), so a
+-- query that reads several views of one run builds its state once rather than once per view.
+create or replace function aiq.walk_state_reads(p_state jsonb)
+returns table (wave int, ord int, doc text, via text, expanded boolean)
+language sql immutable security invoker set search_path = pg_catalog, public as $$
+    select (w->>'wave')::int, r.ordinality::int, r.value->>'doc', r.value->>'via', (r.value->>'expanded')::boolean
+      from jsonb_array_elements(p_state->'waves') w,
+           jsonb_array_elements(w->'reads') with ordinality r
+     order by 1, 2
+$$;
+
 create or replace function aiq.walk_reads(p_run uuid)
 returns table (wave int, ord int, doc text, via text, expanded boolean)
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    with st as materialized (select aiq.walk_state(p_run) as st)
-    select (w->>'wave')::int, r.ordinality::int, r.value->>'doc', r.value->>'via', (r.value->>'expanded')::boolean
-      from st, jsonb_array_elements(st->'waves') w,
-           jsonb_array_elements(w->'reads') with ordinality r
-     order by 1, 2
+    select * from aiq.walk_state_reads(aiq.walk_state(p_run))
 $$;
 
 -- Search's own order for the run's question: what plain search would have
@@ -621,11 +810,11 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 1
 $$;
 
-create or replace function aiq.walk_clues(p_run uuid)
+create or replace function aiq.walk_state_clues(p_state jsonb)
 returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
                travelled_wave int)
-language sql stable security invoker set search_path = pg_catalog, public as $$
-    with st as materialized (select aiq.walk_state(p_run) as st)
+language sql immutable security invoker set search_path = pg_catalog, public as $$
+    with st as (select p_state as st)
     select c.key, c.value->>'kind', (c.value->>'wave')::int, c.value->>'source',
            array(select jsonb_array_elements_text(c.value->'targets')),
            (st->'p'->>c.key)::real,
@@ -642,19 +831,26 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 3, 1
 $$;
 
+create or replace function aiq.walk_clues(p_run uuid)
+returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
+               travelled_wave int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from aiq.walk_state_clues(aiq.walk_state(p_run))
+$$;
+
 drop function if exists aiq.walk_waves(uuid);
-create or replace function aiq.walk_waves(p_run uuid)
+create or replace function aiq.walk_state_waves(p_state jsonb)
 returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int,
                total_reads int)
-language sql stable security invoker set search_path = pg_catalog, public as $$
-    with c as materialized (select * from aiq.walk_clues(p_run)),
-    r as materialized (select * from aiq.walk_reads(p_run)),
+language sql immutable security invoker set search_path = pg_catalog, public as $$
+    with c as materialized (select * from aiq.walk_state_clues(p_state)),
+    r as materialized (select * from aiq.walk_state_reads(p_state)),
     -- reached by a wave's end: read, or landed by a travel and queued to read
     reached as materialized (
         select wave, doc from r
         union
         select (w->>'wave')::int, l #>> '{}'
-          from jsonb_array_elements(aiq.walk_state(p_run)->'waves') w,
+          from jsonb_array_elements(p_state->'waves') w,
                jsonb_array_elements(coalesce(w->'travels', '[]'::jsonb)) t,
                jsonb_array_elements(t->'land') l),
     w as (select distinct wave from r)
@@ -680,13 +876,20 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 1
 $$;
 
+create or replace function aiq.walk_waves(p_run uuid)
+returns table (wave int, reads int, expanded int, judged int, accepted int, fresh real, open_leads int,
+               total_reads int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from aiq.walk_state_waves(aiq.walk_state(p_run))
+$$;
+
 create or replace function aiq.walk_summary(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object(
         'question', st->'question', 'settings', st->'settings',
         'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'offline' from workflow.runs where id = p_run),
-        'reads', (select count(*) from aiq.walk_reads(p_run)),
+        'reads', (select count(*) from aiq.walk_state_reads(st)),
         -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
         'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
                      else jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1) end,
@@ -707,6 +910,42 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                                   (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
                                      from jsonb_each(st->'p') where (st->'clues') ? key)))
       from (select aiq.walk_state(p_run) as st offset 0) x
+$$;
+
+-- The verdicts earlier runs kept for a question under this wording, each answered before p_before.
+create or replace function aiq.walk_kept(p_question text, p_before timestamptz default null)
+returns table (key text, p real, at timestamptz, model text, run uuid)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select v.key, (v.value->>'p')::real, (v.value->>'at')::timestamptz, v.value->>'model', (res.metadata->>'run')::uuid
+      from content.resources res, jsonb_each(res.metadata->'verdicts') v
+     where left(res.uri, length('verdicts:' || p_question || ':')) = 'verdicts:' || p_question || ':'
+       and res.metadata->>'question' = p_question
+       and res.metadata->>'task' = aiq.walk_task()
+       and (p_before is null or (v.value->>'at')::timestamptz < p_before)
+$$;
+
+-- Keep a run's verdicts: one document a run, verdicts:<question>:<run>, written once and never changed, each verdict
+-- with its P, when it was answered and the model. The log is append-only because a run is: a later run keeps its own
+-- document beside this one. The verdicts are the document's metadata and its one chunk is '-', so search never
+-- finds them. A run that asked nobody keeps nothing.
+create or replace function aiq.walk_keep(p_run uuid, p_channel text default 'walk-replays')
+returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    q   jsonb := (select input->'question' from workflow.runs where id = p_run);
+    v   jsonb;
+    uri text := 'verdicts:' || (q->>'id') || ':' || p_run;
+begin
+    select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
+      from aiq.walk_answers(p_run) a;
+    if v is null then
+        return jsonb_build_object('kept', 0);
+    end if;
+    perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
+                format('verdicts for %s, run %s', q->>'id', p_run), uri, null,
+                jsonb_build_object('question', q->>'id', 'run', p_run, 'task', aiq.walk_task(), 'verdicts', v));
+    return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri);
+end;
 $$;
 
 -- ---------------------------------------------------------------- the workflow
@@ -770,6 +1009,9 @@ steps:%6$s
         - id: read
           needs: [judge]
           sql: "select aiq.walk_read({{run.$id}}::uuid) as state"
+  - id: keep
+    needs: [wave]
+    sql: {statement: "select aiq.walk_keep({{run.$id}}::uuid) as kept", write: true}
 $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider, v_q,
       case when v_model is not null then 'needs: [q]' else '' end, v_vec));
     return format('%s: a clue walk of up to %s waves, judged by %s, %s', p_name, p_waves, p_decider,
@@ -778,6 +1020,9 @@ end;
 $$;
 
 grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
+                          aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
+                          aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
+                          aiq.walk_answers(uuid), aiq.walk_kept(text, timestamptz), aiq.walk_keep(uuid, text),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)

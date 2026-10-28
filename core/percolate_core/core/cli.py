@@ -451,6 +451,11 @@ def sample_load(
                     plugin_servers.extend(s["name"] for s in plugin_doc.get("tool_servers") or [])
                 elif kind == "workflows":
                     done = await samples.apply_workflows(conn, list(where.glob("*.yaml")))
+                elif kind == "texts":
+                    done, started = await samples.apply_texts(conn, where)
+                    if started:
+                        done.append(f"  {started} embedding in the background; "
+                                    "a search finds them once the ingest worker is done")
                 elif kind == "documents":
                     if skip_documents:
                         typer.echo("  documents  skipped")
