@@ -2,7 +2,8 @@
 --
 -- Every number and wording the walk, its decider and its explanations read is a row of aiq.parameters, which also
 -- says what it controls, where it is read and why. What is held:
---   1. every row explains itself: controls, read_by and why are written, and each part's name is its prefix;
+--   1. every row explains itself: controls, read_by and why are written, and each part's name is its prefix; the
+--      index's tagging strategies and their limits are rows too;
 --   2. a walk's settings are the table's walk rows, so changing a row changes the walk, and a run's own settings
 --      still win over the table;
 --   3. the decider's wording is the table's, so a verdict is kept under the wording the table holds;
@@ -24,6 +25,11 @@ begin
     end if;
     if (select count(*) from aiq.parameters where part = 'walk') < 10 then
         raise exception 'the walk''s parameters are not in the table: %', aiq.parameters_of('walk');
+    end if;
+    -- The index's tagger reads its strategies and every strategy's limits from here (core walk/terms.py).
+    if not aiq.parameters_of('index') ?& array['strategies', 'min_df', 'df_floor', 'df_share', 'entity_labels',
+                                              'entity_df_floor', 'phrase_df_floor', 'spacy_model', 'nearest'] then
+        raise exception 'the index''s tagging parameters are not in the table: %', aiq.parameters_of('index');
     end if;
 
     -- 2. The walk reads the table, and a run's settings win.
