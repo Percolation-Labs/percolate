@@ -41537,9 +41537,9 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('index.nearest', 'index', '10', 'Nearest-in-meaning documents the index links from each document.', 'percolate walk index (core walk/index.py)',
   'Ten keeps room above walk.near for a walk that asks for more, at about 10 edges a document.'),
  ('explain.cold', 'explain', '0.05', 'A wave is cold when under this share of its expanded reads raised a new accepted clue.', 'aiq.walk_why, aiq.walk_audit (core walk/why.py)',
-  'REM-1211: a stop is a certificate only when the last wave found almost nothing new.'),
+  'Not measured. Core walk/why.py credits REM-1194''s BEAM calibration, but that calibration binned cold at under 0.2; 0.05 is a stricter choice nobody tested.'),
  ('explain.near_miss', 'explain', '0.35', 'A rejected clue with P from this up to the gate is reported as a near miss.', 'aiq.walk_why (core walk/why.py)',
-  'Equal to the band a near-miss walk travels in the walkthrough (REM-1207), so the audit and the walk agree on what a near miss is.')
+  'Not measured: a reporting band 0.15 under the gate, equal to the band REM-1207''s walkthrough travelled (0.35), so the audit and the walk agree on what a near miss is.')
 on conflict (name) do update
    set value = excluded.value, controls = excluded.controls, read_by = excluded.read_by, why = excluded.why,
        updated_at = now()
