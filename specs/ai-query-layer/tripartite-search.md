@@ -118,7 +118,7 @@ so every arm reads only what the caller may read.
 ```
 claims.search_leads(
     p_query text, p_vector vector, p_model text,
-    p_scope       jsonb  default null,    -- a memory's agent and run, as aiq.search narrows
+    p_scope       jsonb  default null,    -- a memory's agent and run, or a channel, as aiq.search narrows
     p_layers      text[] default '{documents,tags,questions}',
     p_documents   text   default 'semantic',   -- or 'lexical', 'hybrid'
     p_budget      int    default 20,
