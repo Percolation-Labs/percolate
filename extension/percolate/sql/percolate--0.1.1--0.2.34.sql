@@ -42260,9 +42260,26 @@ declare
     land    jsonb;
     doc     text;
     n       int := 0;
+    failed  int;
+    asked   int;
+    why     text;
 begin
     if wn = 0 then
         raise invalid_parameter_value using message = 'the walk has not started: no seeds recorded';
+    end if;
+    -- A Jev request that failed leaves its clues unjudged, and a walk that read on without them would end succeeded
+    -- with a result it does not have (REM-1225: an empty account cost 244 walks 4,579 of 10,112 requests, and all
+    -- 244 ended succeeded). So a failed request stops the walk, here, before it reads past the gap.
+    -- A request is failed only once its retries are spent, or at once when the provider says retrying will not help
+    -- (workflow.fail_task puts a retryable failure back to ready), so one timeout does not stop a walk.
+    select count(*) filter (where t.status = 'failed'), count(*),
+           (array_agg(t.error->>'error' order by t.updated_at) filter (where t.status = 'failed'))[1]
+      into failed, asked, why
+      from workflow.tasks t
+     where t.run_id = p_run and t.step_key like 'judge\_%' and t.matrix_parent_id is not null;
+    if failed > 0 then
+        raise exception '% of the % Jev requests in this walk failed, so their clues were never judged', failed, asked
+            using hint = 'the walk stops rather than read on without them; the first error: ' || coalesce(why, 'none recorded');
     end if;
     -- Every accepted clue still leading somewhere unread: earlier waves' not
     -- yet travelled, and this round's.
