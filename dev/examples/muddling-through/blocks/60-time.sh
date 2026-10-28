@@ -1,6 +1,7 @@
-# Step 5: time. A fact that changed: the hallway lighting budget was $150, then the user raised it to $160. Walk the
-# question offline from the sample's recorded verdicts, as step 3 does, then land what the walk read as edges that
-# hold from the moment each message was said, and ask the graph what the answer is now and what it was before.
+# Step 5: time, on two clocks. A fact that changed: the hallway lighting budget was $150, then the user raised it to
+# $160. Walk the question offline from the sample's recorded verdicts, as step 3 does, land what the walk read as edges
+# that hold from the moment each message was said, in two sittings, and ask the graph what the budget was at two
+# moments of the conversation, as the agent knew it after each sitting.
 RUN=$(psql "$P8_DSN" -Atq <<'SQL'
 select workflow.start_workflow('walk', jsonb_build_object(
          'channel', q.metadata->>'channel',
@@ -29,12 +30,19 @@ select wave, doc, said_at, said from evidence order by said_at;
 -- vocabulary takes the relation first; then aiq.upsert_graph writes it, as part two lands what a memory says.
 select 'answered_in' as relation from aiq.register_graph_vocabulary(
   '[{"relation": "answered_in", "description": "a document answers the question, or part of it, from when it was said"}]');
-select e.doc, aiq.upsert_graph(
-         jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('k', 'document', 'n', 'question:1M:22:knowledge_update:1'),
-                                                       jsonb_build_object('k', 'document', 'n', e.doc)),
-                            'edges', '[{"s": 0, "t": 1, "r": "answered_in"}]'::jsonb),
-         jsonb_build_object('resource_id', e.id, 'valid_from', e.said_at, 'agent', 'walk')) ->> 'edges_new' as landed
-  from evidence e order by e.said_at;
+-- Two sittings, so the second clock has something to show. The walk read all three messages in its first wave; here
+-- the agent records the two $150 messages first and hears about the raise later, as it would if the conversation
+-- reached it in two parts. Two seconds stand in for the days between.
+create temp view landing as
+select e.doc, e.said_at, e.said_at = max(e.said_at) over () as last,
+       jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('k', 'document', 'n', 'question:1M:22:knowledge_update:1'),
+                                                     jsonb_build_object('k', 'document', 'n', e.doc)),
+                          'edges', '[{"s": 0, "t": 1, "r": "answered_in"}]'::jsonb) as graph,
+       jsonb_build_object('resource_id', e.id, 'valid_from', e.said_at, 'agent', 'walk') as context
+  from evidence e;
+select 1 as sitting, doc, aiq.upsert_graph(graph, context) ->> 'edges_new' as landed from landing where not last order by said_at;
+select 'two seconds later' as pause from pg_sleep(2);
+select 2 as sitting, doc, aiq.upsert_graph(graph, context) ->> 'edges_new' as landed from landing where last;
 
 -- On a knowledge update the latest word holds: the last message ends the earlier ones' edges at the moment it was
 -- said. Here that follows from the question's type; in use a decider would judge that /688 changes what /671 and
@@ -44,14 +52,37 @@ select e.doc, aiq.close_edge(jsonb_build_object('resource_id', e.id, 'relation',
   from evidence e, (select * from evidence order by said_at desc limit 1) l
  where e.id <> l.id order by e.said_at;
 
--- One query, two moments: the answer now, and as of 00:11:20 on 12 August 2024, between the two budgets. Time is
--- the graph's own: aiq.edge_is_current reads each edge's valid_from and valid_to.
-select t.asked, d.summary as document, x.metadata->>'terms_text' as said
-  from (values (1, 'now', now()), (2, '2024-08-12 00:11:20', timestamptz '2024-08-12 00:11:20+00')) t(n, asked, at)
-  join aiq.nodes q on q.entity_type = 'document'
-                  and q.entity_id = (select id from content.resources where uri = 'question:1M:22:knowledge_update:1')
-  join aiq.edges a on a.src_id = q.id and a.relation = 'answered_in' and aiq.edge_is_current(a.valid_from, a.valid_to, t.at)
+-- Every edge now carries two clocks. valid_from and valid_to say when the budget held, in the conversation's time.
+-- created_at says when the agent recorded the edge, and close_edge recorded when it learned the edge had ended.
+create temp view answers as
+select d.summary as document, (regexp_match(x.metadata->>'terms_text', '\$\d+'))[1] as budget,
+       a.valid_from, a.valid_to, a.created_at as recorded, (a.provenance->'closed'->>'at')::timestamptz as end_recorded
+  from aiq.nodes q
+  join aiq.edges a on a.src_id = q.id and a.relation = 'answered_in'
   join aiq.nodes d on d.id = a.dst_id
   join content.resources x on x.id = d.entity_id
- order by t.n, x.metadata->>'said_at';
+ where q.entity_type = 'document'
+   and q.entity_id = (select id from content.resources where uri = 'question:1M:22:knowledge_update:1');
+select document, budget, valid_from as held_from, valid_to as held_until,
+       case when recorded = first then 'first sitting' else 'second sitting' end as recorded_in,
+       case when end_recorded > first then 'second sitting' end as end_recorded_in
+  from answers, (select min(recorded) as first from answers) f
+ order by valid_from;
+
+-- One query, both clocks: the budget at two moments in the conversation, as the agent knew it after the first
+-- sitting and as it knows it now. An edge counts at a recorded moment if it had been recorded by then, and its end
+-- counts only if the end had been recorded by then too.
+select k.known, t.held, a.document, a.budget
+  from (values (1, 'after the first sitting', (select min(recorded) from answers)), (2, 'now', now())) k(n, known, at)
+ cross join (values (1, '2024-08-12 00:11:20', timestamptz '2024-08-12 00:11:20+00'), (2, 'now', now())) t(n, held, at)
+  join answers a on a.recorded <= k.at
+                and aiq.edge_is_current(a.valid_from, case when a.end_recorded <= k.at then a.valid_to end, t.at)
+ order by k.n, t.n, a.valid_from;
+
+-- What the memory had wrong, and over which stretch of each clock: in the conversation, from 00:11:28, when the
+-- budget changed; in the agent, from when it recorded the old budget until it recorded the change.
+select o.document as held_wrong, o.budget as said, n.budget as actually, n.valid_from as wrong_from,
+       n.recorded > o.recorded as corrected_later
+  from answers o join answers n on n.valid_from = o.valid_to and n.valid_to is null
+ order by o.valid_from;
 SQL

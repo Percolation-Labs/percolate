@@ -11,12 +11,22 @@ CREATE VIEW
  answered_in
 (1 row)
 
-      doc       | landed 
-----------------+--------
- beam:1M:22/671 | 1
- beam:1M:22/675 | 1
- beam:1M:22/688 | 1
-(3 rows)
+CREATE VIEW
+ sitting |      doc       | landed 
+---------+----------------+--------
+       1 | beam:1M:22/671 | 1
+       1 | beam:1M:22/675 | 1
+(2 rows)
+
+       pause       
+-------------------
+ two seconds later
+(1 row)
+
+ sitting |      doc       | landed 
+---------+----------------+--------
+       2 | beam:1M:22/688 | 1
+(1 row)
 
       doc       |           ended           
 ----------------+---------------------------
@@ -24,10 +34,28 @@ CREATE VIEW
  beam:1M:22/675 | 2024-08-12T00:11:28+00:00
 (2 rows)
 
-        asked        |         document         |                                                                                   said                                                                                   
----------------------+--------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- now                 | BEAM 1M:22, exchange 688 | I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that extra money?
- 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
- 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
+CREATE VIEW
+         document         | budget |       held_from        |       held_until       |  recorded_in   | end_recorded_in 
+--------------------------+--------+------------------------+------------------------+----------------+-----------------
+ BEAM 1M:22, exchange 671 | $150   | 2024-08-12 00:11:11+00 | 2024-08-12 00:11:28+00 | first sitting  | second sitting
+ BEAM 1M:22, exchange 675 | $150   | 2024-08-12 00:11:15+00 | 2024-08-12 00:11:28+00 | first sitting  | second sitting
+ BEAM 1M:22, exchange 688 | $160   | 2024-08-12 00:11:28+00 |                        | second sitting | 
 (3 rows)
+
+          known          |        held         |         document         | budget 
+-------------------------+---------------------+--------------------------+--------
+ after the first sitting | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
+ after the first sitting | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
+ after the first sitting | now                 | BEAM 1M:22, exchange 671 | $150
+ after the first sitting | now                 | BEAM 1M:22, exchange 675 | $150
+ now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
+ now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
+ now                     | now                 | BEAM 1M:22, exchange 688 | $160
+(7 rows)
+
+        held_wrong        | said | actually |       wrong_from       | corrected_later 
+--------------------------+------+----------+------------------------+-----------------
+ BEAM 1M:22, exchange 671 | $150 | $160     | 2024-08-12 00:11:28+00 | t
+ BEAM 1M:22, exchange 675 | $150 | $160     | 2024-08-12 00:11:28+00 | t
+(2 rows)
 

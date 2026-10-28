@@ -57,8 +57,10 @@ grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'wal
 # Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
 grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
-# Step 5: the budget the graph gives now is the raised one, and as of 00:11:20 the earlier one (REM-1213).
-grep -Eq '^ now +\| .*\$160' $CAP/60-time.txt && grep -Eq '^ 2024-08-12 00:11:20 \| .*\$150' $CAP/60-time.txt \
+# Step 5, on both clocks (REM-1213): known now, the budget now is the raised one and at 00:11:20 the earlier one;
+# known after the first sitting, the budget now is still the earlier one, which is the memory being wrong.
+grep -Eq '^ now +\| now +\| .*\$160' $CAP/60-time.txt && grep -Eq '^ now +\| 2024-08-12 00:11:20 \| .*\$150' $CAP/60-time.txt \
+  && grep -Eq '^ after the first sitting \| now +\| .*\$150' $CAP/60-time.txt \
   || { echo "step 5 did not answer as the article says"; cat $CAP/60-time.txt; exit 1; }
 # A block with an expected file prints exactly that: the article quotes it.
 # Every file is compared before failing, so one difference cannot hide another.
