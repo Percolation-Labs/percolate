@@ -1,0 +1,7 @@
+why = """REM-1204, walk.describe (Sirsh approved target-term door signs as the default after the train). aiq.walk_signs
+builds a clue's sign under walk.describe = targets: the rarest stored terms of up to 3 of its targets. It is its own
+function because aiq.walk_state calls it from two clue kinds and a test calls it directly; the wording per
+description folds into aiq.walk_task's new argument instead of a second function."""
+
+[added]
+functions = ["aiq.walk_signs"]
