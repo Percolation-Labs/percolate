@@ -394,6 +394,22 @@
     },
     {
       "admits": [
+        "index",
+        "search",
+        "walk",
+        "decider",
+        "explain",
+        "dream"
+      ],
+      "column": "part",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "parameters",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "graph",
         "lake",
         "p8ql",
