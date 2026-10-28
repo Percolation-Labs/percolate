@@ -1374,6 +1374,32 @@ end;
 $$;
 
 -- ------------------------------------------------------------
+-- 6c. An edge is closed, never deleted (Sirsh, M-20261028-200720-890b).
+--
+-- A fact that stops holding is closed: aiq.close_edge, or valid_to set by the
+-- writer that retracts it (percolate walk index, aiq.retract_derived). The row
+-- stays, so a past walk, a past answer and the record clock still read what
+-- held then. A DELETE or TRUNCATE issued against aiq.edges is refused. The one
+-- exception is a delete that cascades from a node being removed (a document,
+-- a user or an org leaving): it runs inside the foreign key's cascade, one
+-- trigger level down, and the edge goes with the thing it was about.
+-- ------------------------------------------------------------
+create or replace function aiq.edges_close_never_delete() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    if pg_trigger_depth() = 1 then
+        raise exception 'aiq.edges are closed, never deleted (% refused)', tg_op
+            using hint = 'end a fact by setting valid_to (aiq.close_edge); removing a node removes its edges';
+    end if;
+    return null;
+end;
+$$;
+
+create or replace trigger edges_close_never_delete
+    before delete or truncate on aiq.edges
+    for each statement execute function aiq.edges_close_never_delete();
+
+-- ------------------------------------------------------------
 -- A DELETED MEMORY TAKES THE FACTS IT ALONE SUPPORTED WITH IT (REM-964).
 --
 -- An owner deletes their resource; its chunks go by foreign key, their
