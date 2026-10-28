@@ -97,6 +97,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'The study''s 3 nearest both ways; the index keeps index.nearest so this can be raised without re-indexing.'),
  ('walk.memory', 'walk', '0', 'How far a walk leans on stored verdicts: 0 asks afresh, 1 takes past verdicts whole.', 'aiq.walk_state',
   'Sirsh, M-20261027-115632-55e8: verdicts are stored, and reads are memoryless by default.'),
+ ('walk.memory_as_of', 'walk', 'null', 'Which stored verdicts a walk with memory reads: those given before this run started (null), before a past run started (its id), or before a time.', 'aiq.walk_state',
+  'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
  ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
@@ -413,6 +415,7 @@ declare
     last     boolean;
     txt      jsonb;
     mem      real;
+    asof     timestamptz;
 begin
     select * into r from workflow.runs where id = p_run;
     if not found then
@@ -444,15 +447,28 @@ begin
     -- Memory (settings.memory, 0 to 1, default 0): how far this run leans on the verdicts earlier runs kept for the
     -- same question under the same wording. At 0 they are not read. Above it, a clue judged before and now takes
     -- (1 - memory) * now + memory * the mean of before, and one judged only before takes the mean and is not asked.
+    -- settings.memory_as_of moves the store's cutoff back: to a past run's start, given its id, or to a time. It never
+    -- moves it past this run's own start, so the state of a finished run does not change as later runs keep verdicts.
     mem := coalesce((s->>'memory')::real, 0);
+    asof := r.created_at;
+    if mem > 0 and jsonb_typeof(s->'memory_as_of') = 'string' then
+        if s->>'memory_as_of' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+            select least(asof, x.created_at) into asof from workflow.runs x where x.id = (s->>'memory_as_of')::uuid;
+            if not found then
+                raise no_data_found using message = format('memory_as_of names no run %s that you may read', s->>'memory_as_of');
+            end if;
+        else
+            asof := least(asof, (s->>'memory_as_of')::timestamptz);
+        end if;
+    end if;
     if mem > 0 then
         select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
                                                    else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
                || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
-                    where not exists (select 1 from aiq.walk_kept(q->>'id', r.created_at) k where k.key = n.key))
+                    where not exists (select 1 from aiq.walk_kept(q->>'id', asof) k where k.key = n.key))
           into pmap
           from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
-                  from aiq.walk_kept(q->>'id', r.created_at) k
+                  from aiq.walk_kept(q->>'id', asof) k
                  group by k.key) z;
     end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
