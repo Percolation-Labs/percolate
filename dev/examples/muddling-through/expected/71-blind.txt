@@ -1,0 +1,18 @@
+
+ reads | search | walk | blind_mean | blind_min | blind_max | blind_as_good | blind_walks 
+-------+--------+------+------------+-----------+-----------+---------------+-------------
+    50 |      3 |    7 |        2.2 |         0 |         8 |             1 |          20
+   100 |      5 |   12 |        6.7 |         3 |        13 |             1 |          20
+   500 |     15 |   21 |       15.0 |         9 |        21 |             1 |          20
+(3 rows)
+
+      doc       |         via         | search_rank |                                  said                                  
+----------------+---------------------+-------------+------------------------------------------------------------------------
+ beam:1M:35/387 | next:beam:1M:35/385 |         734 | Can you help me come up with a good way to explain our moment of silen
+ beam:1M:35/900 | next:beam:1M:35/898 |         654 | I'm planning to serve Turkish coffee and baklava on December 25th, wha
+ beam:1M:35/178 | next:beam:1M:35/180 |         642 | I'm planning to order 2 kg of baklava for $50, is that a good deal?
+ beam:1M:35/177 | next:beam:1M:35/179 |         747 | What's the best way to share Turkish baklava from “Güllüoğlu” bakery w
+ beam:1M:35/388 | next:beam:1M:35/386 |             | That sounds perfect! Thanks for the tips and the sample explanation. I
+ beam:1M:35/16  | next:beam:1M:35/18  |         765 | We're doing a Secret Santa gift exchange, how do I make sure everyone 
+(6 rows)
+

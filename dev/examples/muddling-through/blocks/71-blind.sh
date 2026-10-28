@@ -1,9 +1,9 @@
-# Step 1, run three ways (last: its twenty replay documents join the stack, and on 0.2.32 a walk's search is not yet
-# scoped to its own channel, so running it earlier could move the other steps' search orders). Search's order, the walk, and the walk with its choices made blind: the same workflow on the
+# Step 1, run three ways (last, so its twenty replay documents join the stack after every other step has run).
+# Search's order, the walk, and the walk with its choices made blind: the same workflow on the
 # same graph, but every lead the conversation could raise gets a P drawn at random from this question's own verdicts.
 # The blind walk accepts leads at the same rate and follows them by the same rules, for no reason the question gives.
 # If the walk's lead over search comes from reading, the blind walks lose it. Twenty blind walks, offline: $0, a few
-# minutes.
+# minutes. Pinned to span 2 and cap 10 like step 1, the settings its verdicts were recorded under.
 psql "$P8_DSN" -Atq <<'SQL'
 select setseed(0.1204);
 -- One replay document per blind walk: a P for every possible lead (a term, the exchanges beside one, its nearest),
@@ -32,7 +32,8 @@ for i in $(seq 1 20); do
   RUN=$(psql "$P8_DSN" -Atc "
     select workflow.start_workflow('walk', jsonb_build_object(
              'question', r.metadata, 'channel', r.metadata->>'channel',
-             'replay', 'replay:blind:$i', 'offline', true))
+             'replay', 'replay:blind:$i', 'offline', true,
+             'settings', jsonb_build_object('span', 2, 'cap', 10)))
       from content.resources r where r.uri = 'question:1M:35:event_ordering:0'")
   until [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$RUN'")" != running ]; do sleep 2; done
 done
