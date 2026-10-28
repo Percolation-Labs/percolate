@@ -9,7 +9,7 @@ select setseed(0.1204);
 -- One replay document per blind walk: a P for every possible lead (a term, the exchanges beside one, its nearest),
 -- each drawn from the P values Jev gave this question's leads.
 with q as (select metadata as m from content.resources where uri = 'question:1M:35:event_ordering:0'),
-g as (select aiq.walk_graph(jsonb_build_object('channel', m->>'channel', 'question', m)) as g from q),
+g as (select aiq.walk_graph(jsonb_build_object('channel', m->>'channel')) as g from q),
 keys as (select 'term:' || t as key from g, jsonb_object_keys(g->'post') t
          union all
          select kind || ':' || d from g, jsonb_object_keys(g->'beside') d, unnest(array['next', 'near']) kind),
@@ -31,41 +31,35 @@ SQL
 for i in $(seq 1 20); do
   RUN=$(psql "$P8_DSN" -Atc "
     select workflow.start_workflow('walk', jsonb_build_object(
-             'question', r.metadata, 'channel', r.metadata->>'channel',
+             'question', jsonb_build_object('id', r.metadata->>'id', 'text', r.metadata->>'text'),
+             'channel', r.metadata->>'channel',
              'replay', 'replay:blind:$i', 'offline', true,
              'settings', jsonb_build_object('span', 2, 'cap', 10)))
       from content.resources r where r.uri = 'question:1M:35:event_ordering:0'")
   until [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$RUN'")" != running ]; do sleep 2; done
 done
 
-psql "$P8_DSN" <<'SQL'
+# The answer key is the benchmark's: the harness reads it from the sample's file and passes it in.
+psql "$P8_DSN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" <<'SQL'
 -- Evidence read by 50, 100 and 500 reads: search's order, the walk, and the twenty blind walks (their mean and range,
--- and how many did at least as well as the walk).
-with gold as (select jsonb_array_elements_text(r.metadata->'gold') as doc
-                from content.resources r where r.uri = 'question:1M:35:event_ordering:0'),
-runs as (select id, coalesce(input->>'replay', '') like 'replay:blind:%' as blind
+-- and how many did at least as well as the walk), each counted by aiq.walk_coverage.
+with runs as (select id, coalesce(input->>'replay', '') like 'replay:blind:%' as blind
            from workflow.runs where input->'question'->>'id' = '1M:35:event_ordering:0' and status = 'succeeded'),
-seen as (select r.id, r.blind, n.n,
-                (select count(*) from (select doc, row_number() over (order by wave, ord) k from aiq.walk_reads(r.id)) w
-                   join gold using (doc) where w.k <= n.n) as found
-           from runs r, (values (50), (100), (500)) n(n))
-select w.n as reads,
-       (select count(*) from aiq.walk_search_order(w.id) s join gold using (doc) where s.rank <= w.n) as search,
-       w.found as walk, round(avg(b.found), 1) as blind_mean, min(b.found) as blind_min, max(b.found) as blind_max,
+seen as (select r.id, r.blind, c.k as n, c.walk as found, c.search
+           from runs r, aiq.walk_coverage(r.id, :'labelled', array[50, 100, 500]) c)
+select w.n as reads, w.search, w.found as walk, round(avg(b.found), 1) as blind_mean, min(b.found) as blind_min, max(b.found) as blind_max,
        count(*) filter (where b.found >= w.found) as blind_as_good, count(b.*) as blind_walks
   from seen w join seen b on b.blind and b.n = w.n
  where not w.blind
- group by w.n, w.id, w.found order by w.n;
+ group by w.n, w.search, w.found order by w.n;
 
 -- The evidence the walk read that search's own top 500 does not hold (no rank: not among its 2,000 hits).
-with gold as (select jsonb_array_elements_text(r.metadata->'gold') as doc
-                from content.resources r where r.uri = 'question:1M:35:event_ordering:0'),
-walk as (select id from workflow.runs where input->'question'->>'id' = '1M:35:event_ordering:0'
+with walk as (select id from workflow.runs where input->'question'->>'id' = '1M:35:event_ordering:0'
             and status = 'succeeded' and input->>'replay' = 'replay:1M:35:event_ordering:0' order by created_at limit 1)
 select w.doc, w.via, s.rank as search_rank, left(r.metadata->>'terms_text', 70) as said
-  from walk, aiq.walk_reads(walk.id) w join gold g using (doc)
+  from walk, aiq.walk_reads(walk.id) w
   join content.resources r on r.uri = w.doc
   left join aiq.walk_search_order(walk.id) s on s.doc = w.doc
- where s.rank is null or s.rank > 500
+ where w.doc = any(:'labelled'::text[]) and (s.rank is null or s.rank > 500)
  order by w.wave, w.ord;
 SQL
