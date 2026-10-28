@@ -4,12 +4,14 @@
 # walk-0 is a synthetic world with a known answer (q6 has 3 pieces of evidence). It has no words, so every clue's P
 # comes from the world's own decider, stored as q6's replay: 'offline' asks nobody and costs $0. The walk runs until
 # it reads nothing new -- up to 20 waves of 320 reads -- so it is installed once more under its own name.
+# walk-0's replay answers every lead, so any settings work; the walk is pinned to span 2 and cap 10, the defaults
+# before 0.2.33, which the article's counts were taken under.
 psql "$P8_DSN" -Atc "select aiq.install_walk_workflow('walk_20', p_waves => 20)" > /dev/null
 RUN=$(psql "$P8_DSN" -Atc "
   select workflow.start_workflow('walk_20', jsonb_build_object(
            'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
            'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
-           'settings', jsonb_build_object('wave', 320, 'waves', 20)))
+           'settings', jsonb_build_object('wave', 320, 'waves', 20, 'span', 2, 'cap', 10)))
     from content.resources r where r.uri = 'question:walk-0/q6'")
 until [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$RUN'")" != running ]; do sleep 2; done
 

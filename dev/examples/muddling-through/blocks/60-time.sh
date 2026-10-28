@@ -2,12 +2,14 @@
 # $160. Walk the question offline from the sample's recorded verdicts, as step 3 does, land what the walk read as edges
 # that hold from the moment each message was said, in two landings, and ask the graph what the budget was at two
 # moments of the conversation, as the agent knew it after each landing.
+# The recorded verdicts were given under span 2 and cap 10, the defaults before 0.2.33, so the walk is pinned to them:
+# under wider settings it would raise leads its replay never judged.
 RUN=$(psql "$P8_DSN" -Atq <<'SQL'
 select workflow.start_workflow('walk', jsonb_build_object(
          'channel', q.metadata->>'channel',
          'question', q.metadata || jsonb_build_object('id', q.metadata->>'qid', 'text', q.metadata->>'question'),
          'replay', 'replay:' || (q.metadata->>'qid'),
-         'offline', true))
+         'offline', true, 'settings', jsonb_build_object('span', 2, 'cap', 10)))
   from content.resources q
  where q.uri = 'question:1M:22:knowledge_update:1';
 SQL

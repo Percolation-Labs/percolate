@@ -3,12 +3,14 @@
 # question and its answer key come from the sample's own question record; the walk never reads the key.
 # In the study the ladder message was the miss. Here every read raises clues, so the walk reaches it, and the miss
 # is the moving help: behind open leads ranked too low, with 'moving' rejected just under the gate (REM-1206).
+# The recorded verdicts were given under span 2 and cap 10, the defaults before 0.2.33, so the walk is pinned to them:
+# under wider settings it would raise leads its replay never judged.
 RUN=$(psql "$P8_DSN" -Atq <<'SQL'
 select workflow.start_workflow('walk', jsonb_build_object(
          'channel', q.metadata->>'channel',
          'question', q.metadata || jsonb_build_object('id', q.metadata->>'qid', 'text', q.metadata->>'question'),
          'replay', 'replay:' || (q.metadata->>'qid'),
-         'offline', true))
+         'offline', true, 'settings', jsonb_build_object('span', 2, 'cap', 10)))
   from content.resources q
  where q.uri = 'question:1M:22:multi_session_reasoning:1';
 SQL
