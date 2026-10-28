@@ -16,7 +16,7 @@ for q in $(psql "$P8_DSN" -Atc "select r.metadata->>'id' from content.resources 
   for arm in '{}' '{"near_miss": {"band": 0.35, "every": 3}}'; do
     psql "$P8_DSN" -Atc "
       select workflow.start_workflow('walk', jsonb_build_object(
-               'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
+               'question', jsonb_build_object('id', r.metadata->>'id', 'text', r.metadata->>'text'), 'nodes', 'world_item', 'prefix', 'walk-0/',
                'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
                'settings', jsonb_build_object('wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || '$arm'::jsonb))
         from content.resources r where r.uri = 'question:$q'" > /dev/null &
@@ -27,23 +27,22 @@ wait
 until [ "$(psql "$P8_DSN" -Atc "select count(*) from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
                                  where d.name = 'walk' and r.status = 'running'")" = 0 ]; do sleep 2; done
 
-psql "$P8_DSN" <<'SQL'
--- Each question's two walks, and the evidence each had read by read 1,600. The answer key rides in the run's question.
+psql "$P8_DSN" -v labels="$(python3 build/labels.py samples/walk-0/questions.jsonl --where phrasing=instruction)" <<'SQL'
+-- Each question's two walks, and the evidence each had read by read 1,600. The harness passes the world's answer key
+-- for the six questions; the walks never held it.
 -- aiq.walk_state(run) builds a walk's state from its rows once; the walk_state_* views read from that one state.
 with runs as materialized (
   select r.id, r.input->'question'->>'id' as question,
          case when r.input->'settings' ? 'near_miss' then 'near misses' else 'accepted only' end as arm,
          aiq.walk_state(r.id) as st
     from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
-   where d.name = 'walk' and r.input->'question'->>'phrasing' = 'instruction'),
+   where d.name = 'walk' and (:'labels')::jsonb ? (r.input->'question'->>'id')),
 found as (
-  select question, arm,
-         (select count(*) from (select doc, row_number() over (order by wave, ord) as n from aiq.walk_state_reads(st)) x
-           where x.n <= 1600
-             and x.doc in (select jsonb_array_elements_text(st->'question'->'gold'))) as read,
-         jsonb_array_length(st->'question'->'gold') as evidence,
+  select question, arm, c.walk as read, c.labelled as evidence,
          (select count(*) from aiq.walk_state_clues(st) where decision = 'rejected' and state = 'travelled') as near_misses
-    from runs)
+    from runs,
+         aiq.walk_coverage(runs.id, array(select jsonb_array_elements_text((:'labels')::jsonb -> runs.question)),
+                           array[1600]) c)
 select arm, sum(read) as evidence_read_by_1600, sum(evidence) as evidence, sum(near_misses) as near_misses_travelled
   from found group by arm order by arm;
 SQL

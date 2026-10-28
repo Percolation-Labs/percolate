@@ -13,7 +13,8 @@ the steps whose point is the graph's shape: the coverage certificate (step 2) an
   `walk_seed` edges from each `world_question` node, the first 1,600 items.
 - `replays.jsonl` stores, for step 2's q6 and step 4's six instruction questions, a P for every clue the world can
   raise (`replay/<qid>.json`), from the world's own decider. It is not Jev: there are no words for a model to read.
-- `question-texts.jsonl` stores each question and its answer key, by uri `question:walk-0/<qid>`.
+- `question-texts.jsonl` stores each question by uri `question:walk-0/<qid>`, without its answer key: the database
+  never holds it, and `build/labels.py` reads it from `questions.jsonl` for the evaluation functions.
 
 `build/world.py`, `build/world_replay.py`, `build/replays.py` and `build/questions.py` made them from the
 reachability study's `runs/worlds/walk-0`.

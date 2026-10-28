@@ -195,8 +195,9 @@ comment on function aiq.walk_why(uuid, text[]) is
 -- One function for every evaluation, so no query counts reads by hand (REM-1231). The labels come from the caller:
 -- the run is not asked what it should have found, and the same set compares any runs, one lateral call each:
 --     select r.id, c.* from runs r, aiq.walk_coverage(r.id, :'labelled', array[50, 100, 500]) c;
--- A node read twice counts once, at its first read; k past the run's last read counts every read.
-create or replace function aiq.walk_coverage(p_run uuid, p_nodes text[], p_budgets int[])
+-- A node read twice counts once, at its first read; k past the run's last read counts every read. With no budgets,
+-- one row at k = every read the run made.
+create or replace function aiq.walk_coverage(p_run uuid, p_nodes text[], p_budgets int[] default null)
 returns table (k int, walk int, search int, labelled int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with lab as (select distinct n from unnest(p_nodes) n),
@@ -207,7 +208,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
            (select count(*) from wr where wr.n <= b.k)::int,
            (select count(*) from sr where sr.n <= b.k)::int,
            (select count(*) from lab)::int
-      from unnest(p_budgets) with ordinality b(k, i)
+      from unnest(coalesce(p_budgets, array[(select count(*) from r)::int])) with ordinality b(k, i)
      order by b.i
 $$;
 

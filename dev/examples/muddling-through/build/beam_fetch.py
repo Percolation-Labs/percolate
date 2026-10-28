@@ -14,7 +14,8 @@ downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-S
                         with BEAM's trailing '->-> n,m' plan index removed: what the walk tags. Each piece gets its
                         vector from vectors.jsonl only if the piece's sha256 is the one that vector was made from.
   questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys.
-  question-texts.jsonl  each question stored by uri question:<qid>, so SQL finds it and its answer key.
+  question-texts.jsonl  each question stored by uri question:<qid>, so SQL finds it. Not its answer key: that stays
+                        in questions.jsonl, which build/labels.py hands to the evaluation functions (REM-1231).
 
 These are the rules the walk study used on the same file, so the documents, keys and pieces are the study's.
 """
@@ -138,7 +139,7 @@ def main(sample):
         f.writelines(json.dumps(q) + "\n" for q in qs)
     with (sample / "question-texts.jsonl").open("w") as f:
         for q in qs:
-            md = dict(q, id=q["qid"], text=q["question"])
+            md = dict({k: v for k, v in q.items() if k != "gold"}, id=q["qid"], text=q["question"])
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")

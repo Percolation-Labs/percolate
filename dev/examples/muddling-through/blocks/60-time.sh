@@ -7,7 +7,7 @@
 RUN=$(psql "$P8_DSN" -Atq <<'SQL'
 select workflow.start_workflow('walk', jsonb_build_object(
          'channel', q.metadata->>'channel',
-         'question', q.metadata || jsonb_build_object('id', q.metadata->>'qid', 'text', q.metadata->>'question'),
+         'question', jsonb_build_object('id', q.metadata->>'id', 'text', q.metadata->>'text'),
          'replay', 'replay:' || (q.metadata->>'qid'),
          'offline', true, 'settings', jsonb_build_object('span', 2, 'cap', 10)))
   from content.resources q
@@ -18,14 +18,14 @@ until [ "$(psql "$P8_DSN" -Atc "select status not in ('pending', 'running') from
   sleep 2
 done
 
-psql "$P8_DSN" -v run="$RUN" <<'SQL'
--- The evidence the walk read, and when each message was said. The answer key marks which reads are evidence here;
--- in use a decider would.
+psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:22:knowledge_update:1)" <<'SQL'
+-- The evidence the walk read, and when each message was said. The benchmark's answer key, passed in by the harness,
+-- marks which reads are evidence here; in use a decider would.
 create temp view evidence as
 select r.wave, r.doc, x.id, (x.metadata->>'said_at')::timestamptz as said_at, x.metadata->>'terms_text' as said
   from aiq.walk_reads(:'run') r
   join content.resources x on x.uri = r.doc
- where r.doc in (select jsonb_array_elements_text(aiq.walk_summary(:'run')->'question'->'gold'));
+ where r.doc = any(:'labelled'::text[]);
 select wave, doc, said_at, said from evidence order by said_at;
 
 -- Each piece lands as an edge from the question to the document, holding from when it was said. The graph's

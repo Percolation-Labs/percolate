@@ -35,11 +35,11 @@ SQL
 RUN=$(psql "$P8_DSN" -Atc "select id from workflow.runs
                            where input->'question'->>'id' = '1M:22:multi_session_reasoning:1' and status = 'succeeded'
                            order by created_at desc limit 1")
-psql "$P8_DSN" -v run="$RUN" <<'SQL'
+psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:22:multi_session_reasoning:1)" <<'SQL'
 -- Where the walk's reads came from, and which found evidence: search, the next message, the nearest in meaning, or a
 -- shared term, by how many messages hold it. A term held by more than 10 is never offered, so it has no row here.
 with s as materialized (select aiq.walk_summary(:'run') as v),
-gold as materialized (select jsonb_array_elements_text(v->'question'->'gold') as doc from s),
+labelled as materialized (select unnest(:'labelled'::text[]) as doc),
 term as materialized (
   select distinct t->>'term' as term, (t->>'n')::int as n
     from s, content.channels c
@@ -60,8 +60,8 @@ reads as (
     from aiq.walk_reads(:'run') r
     left join term t on r.via = 'term:' || t.term
 )
-select route, count(*) as reads, count(*) filter (where doc in (select doc from gold)) as evidence,
-       round(100.0 * count(*) filter (where doc in (select doc from gold)) / count(*), 1) as evidence_per_100_reads
+select route, count(*) as reads, count(*) filter (where doc in (select doc from labelled)) as evidence,
+       round(100.0 * count(*) filter (where doc in (select doc from labelled)) / count(*), 1) as evidence_per_100_reads
   from reads
  group by route
  order by min(case route when 'search' then 0 when 'next message' then 1 when 'nearest meaning' then 2 else 3 end), route;

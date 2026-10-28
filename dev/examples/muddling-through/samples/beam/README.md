@@ -9,8 +9,9 @@ walkthrough:
 The sample carries none of BEAM's text. `build/beam_fetch.py` downloads BEAM's million-token split from Hugging Face at
 a pinned revision, checks its sha256, and writes three files here: `texts.jsonl`, one exchange per line as `percolate
 sample load` registers it; `questions.jsonl`, the 36 questions on these two conversations, each with its evidence as
-document keys (`beam:1M:22/73` is exchange 73 of 1M:22); and `question-texts.jsonl`, each question and its answer key
-by uri `question:<qid>`. They follow the walk study's rules on the same file, and match its copy exactly.
+document keys (`beam:1M:22/73` is exchange 73 of 1M:22); and `question-texts.jsonl`, each question
+by uri `question:<qid>`, without its answer key, which `build/labels.py` reads from `questions.jsonl` for the
+evaluation functions. They follow the walk study's rules on the same file, and match its copy exactly.
 
 What ships here is ours: `vectors.jsonl`, the bge-small vector the stack's own worker gave each piece, with the sha256
 of the piece's text, so the download gets its vectors only where its text is the text they were made from
