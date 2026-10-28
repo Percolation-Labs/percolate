@@ -1,8 +1,0 @@
-why = """REM-1199 (Sirsh, M-20261027-114952-f4f6: the document cache first). A walk's graph is the same on every step of
-every run over its scope, and building it was 76% of a walk's database time. walk_index keeps it as a document,
-walk_graph reads it while the links match, and a document's text is fetched only for the snippets a round needs.
-No table: the graph is a resource's metadata in a channel nothing embeds."""
-
-[added]
-functions = ["aiq.walk_keys", "aiq.walk_texts", "aiq.walk_graph_version", "aiq.walk_graph_uri", "aiq.walk_graph_build",
-             "aiq.walk_index"]
