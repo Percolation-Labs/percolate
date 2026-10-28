@@ -9,10 +9,10 @@
         route        | reads | evidence | evidence_per_100_reads 
 ---------------------+-------+----------+------------------------
  search              |   100 |        1 |                    1.0
- next message        |   214 |        1 |                    0.5
+ next message        |   213 |        1 |                    0.5
  nearest meaning     |   145 |        5 |                    3.4
  term, 2 messages    |    21 |        0 |                    0.0
  term, 3-5 messages  |     4 |        0 |                    0.0
- term, 6-10 messages |    16 |        0 |                    0.0
+ term, 6-10 messages |    17 |        0 |                    0.0
 (6 rows)
 

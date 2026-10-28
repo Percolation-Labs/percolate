@@ -55,8 +55,9 @@ done
 S=$CAP/01-setup.txt
 grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
   || { echo "setup did not leave what the article says"; cat $S; exit 1; }
-# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
-grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
+# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 15 (REM-1204; 16 before 0.2.33 scoped
+# a walk's search to its own channel, REM-1214).
+grep -Eq '^ +10 \| +500 \| +21 \| +15 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
 # Step 5, on both clocks (REM-1213): known now, the budget now is the raised one and at 00:11:20 the earlier one;
 # known after the first landing, the budget now is still the earlier one, which is the memory being wrong.
