@@ -12,7 +12,7 @@ CREATE VIEW
 (1 row)
 
 CREATE VIEW
- sitting |      doc       | landed 
+ landing |      doc       | landed 
 ---------+----------------+--------
        1 | beam:1M:22/671 | 1
        1 | beam:1M:22/675 | 1
@@ -23,7 +23,7 @@ CREATE VIEW
  two seconds later
 (1 row)
 
- sitting |      doc       | landed 
+ landing |      doc       | landed 
 ---------+----------------+--------
        2 | beam:1M:22/688 | 1
 (1 row)
@@ -37,17 +37,17 @@ CREATE VIEW
 CREATE VIEW
          document         | budget |       held_from        |       held_until       |  recorded_in   | end_recorded_in 
 --------------------------+--------+------------------------+------------------------+----------------+-----------------
- BEAM 1M:22, exchange 671 | $150   | 2024-08-12 00:11:11+00 | 2024-08-12 00:11:28+00 | first sitting  | second sitting
- BEAM 1M:22, exchange 675 | $150   | 2024-08-12 00:11:15+00 | 2024-08-12 00:11:28+00 | first sitting  | second sitting
- BEAM 1M:22, exchange 688 | $160   | 2024-08-12 00:11:28+00 |                        | second sitting | 
+ BEAM 1M:22, exchange 671 | $150   | 2024-08-12 00:11:11+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
+ BEAM 1M:22, exchange 675 | $150   | 2024-08-12 00:11:15+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
+ BEAM 1M:22, exchange 688 | $160   | 2024-08-12 00:11:28+00 |                        | second landing | 
 (3 rows)
 
           known          |        held         |         document         | budget 
 -------------------------+---------------------+--------------------------+--------
- after the first sitting | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
- after the first sitting | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
- after the first sitting | now                 | BEAM 1M:22, exchange 671 | $150
- after the first sitting | now                 | BEAM 1M:22, exchange 675 | $150
+ after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
+ after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
+ after the first landing | now                 | BEAM 1M:22, exchange 671 | $150
+ after the first landing | now                 | BEAM 1M:22, exchange 675 | $150
  now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
  now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
  now                     | now                 | BEAM 1M:22, exchange 688 | $160
