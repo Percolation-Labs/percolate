@@ -5,8 +5,12 @@
 # walk-0's six instruction questions ask for an instruction the user gave, which the walk can only reach through
 # leads the decider doubts. Each runs twice, offline from its complete replay ($0): accepted clues only, then with
 # near misses. Both stop at, and are counted at, the same 1,600 reads.
-# Twelve walks, each in its own connection so they run side by side: a walk runs to its end inside start_workflow.
+# walk-0's replay answers every lead, so any settings work; the walk is pinned to span 2 and cap 10, the defaults
+# before 0.2.33, which the article's counts were taken under.
+# Twelve walks, four at a time, each in its own connection: a walk runs to its end inside start_workflow. Twelve at
+# once ran Postgres out of memory on an 8 GB Docker VM.
 # Ten waves of 160 is the 1,600 reads both are counted at.
+n=0
 for q in $(psql "$P8_DSN" -Atc "select r.metadata->>'id' from content.resources r
                                 where r.uri like 'question:walk-0/%' and r.metadata->>'phrasing' = 'instruction'"); do
   for arm in '{}' '{"near_miss": {"band": 0.35, "every": 3}}'; do
@@ -14,8 +18,9 @@ for q in $(psql "$P8_DSN" -Atc "select r.metadata->>'id' from content.resources 
       select workflow.start_workflow('walk', jsonb_build_object(
                'question', r.metadata, 'nodes', 'world_item', 'prefix', 'walk-0/',
                'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
-               'settings', jsonb_build_object('wave', 160, 'waves', 10) || '$arm'::jsonb))
+               'settings', jsonb_build_object('wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || '$arm'::jsonb))
         from content.resources r where r.uri = 'question:$q'" > /dev/null &
+    n=$((n + 1)); [ $((n % 4)) = 0 ] && wait
   done
 done
 wait

@@ -36,7 +36,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-# sally's calibration on BEAM test (REM-1194): a last wave under this share of fresh reads reads cold.
+# Neither is measured. A last wave under COLD's share of fresh reads reads cold (REM-1194's coverage study binned cold
+# at 0.2, not this). NEAR_MISS is a reporting band 0.15 under the gate, the band REM-1207's walkthrough travelled.
 COLD = 0.05
 NEAR_MISS = 0.35
 LETTER = {"queued": "c", "open": "c", "rejected": "b", "unjudged": "?", "never offered": "a"}

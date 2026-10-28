@@ -4,10 +4,13 @@
 # workflow: search reads the first ten, then each wave Jev judges the clues the last wave's reads raised, and the wave
 # travels the accepted ones. 'offline' answers every clue from the sample's replay document, so this costs $0; drop
 # it, with JEV_API_KEY bound to the worker, to judge new clues live.
+# The recorded verdicts were given under span 2 and cap 10, the defaults before 0.2.33, so the walk is pinned to them:
+# under wider settings it would raise leads its replay never judged.
 RUN=$(psql "$P8_DSN" -Atc "
   select workflow.start_workflow('walk', jsonb_build_object(
            'question', r.metadata, 'channel', r.metadata->>'channel',
-           'replay', 'replay:' || (r.metadata->>'id'), 'offline', true))
+           'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
+           'settings', jsonb_build_object('span', 2, 'cap', 10)))
     from content.resources r where r.uri = 'question:1M:35:event_ordering:0'")
 until [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$RUN'")" != running ]; do sleep 2; done
 

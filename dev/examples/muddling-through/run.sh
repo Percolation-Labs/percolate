@@ -1,10 +1,11 @@
 #!/bin/bash
 # The Muddling Through walkthrough's setup block, from an empty directory, on the published images (REM-1203):
 #
-#     IMG=percolationlabs/percolate-postgres:19-0.2.32 CORE='percolate-core[sample]>=0.2.12' \
+#     IMG=percolationlabs/percolate-postgres:19-0.2.33 CORE='percolate-core[sample]>=0.2.13' \
 #         dev/examples/muddling-through/run.sh [workdir]
 #
-# It starts a stack and runs blocks/*.sh in order; 01-setup.sh loads the two samples and indexes both conversations. No key
+# It starts a stack and runs blocks/*.sh in order; 01-setup.sh downloads BEAM from Hugging Face, loads the two samples and
+# indexes both conversations. No key
 # and no bill: bge-small runs in the stack's worker. The project is its own (muddling-through), so `down -v` touches
 # nothing else. Each block's output lands in <workdir>/captures. The steps that walk come after this, one per card.
 # The expected files assume these two samples are all the stack holds: a walk's search is not yet scoped to its own
@@ -12,8 +13,8 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.32}
-CORE=${CORE:-percolate-core[sample]>=0.2.12}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.33}
+CORE=${CORE:-percolate-core[sample]>=0.2.13}
 mkdir -p $W $CAP; cd $W
 curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
 cat > .env <<ENV
@@ -39,7 +40,7 @@ export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
 # A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.
 psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
 export TOKEN=$(percolate auth token --email me@example.com)
-cp -R "$HERE/samples" .
+cp -R "$HERE/samples" "$HERE/build" .
 
 # Each block runs in order from this directory, as a reader pastes it; its output is captures/<block>.txt.
 fail=0
@@ -54,8 +55,9 @@ done
 S=$CAP/01-setup.txt
 grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
   || { echo "setup did not leave what the article says"; cat $S; exit 1; }
-# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 16 (REM-1204).
-grep -Eq '^ +10 \| +500 \| +21 \| +16 \| +27$' $CAP/10-walk-vs-search.txt \
+# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 15 (REM-1204; 16 before 0.2.33 scoped
+# a walk's search to its own channel, REM-1214).
+grep -Eq '^ +10 \| +500 \| +21 \| +15 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
 # Step 5, on both clocks (REM-1213): known now, the budget now is the raised one and at 00:11:20 the earlier one;
 # known after the first landing, the budget now is still the earlier one, which is the memory being wrong.
