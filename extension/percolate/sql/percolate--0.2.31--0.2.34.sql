@@ -30662,6 +30662,37 @@ end;
 $$;
 
 -- ------------------------------------------------------------
+-- 6c. An edge is closed, never deleted (Sirsh, M-20261028-200720-890b).
+--
+-- A fact that stops holding is closed: aiq.close_edge, or valid_to set by the
+-- writer that retracts it (percolate walk index, aiq.retract_derived). The row
+-- stays, so a past walk, a past answer and the record clock still read what
+-- held then. A DELETE or TRUNCATE issued against aiq.edges is refused, with
+-- two exceptions. A delete that follows something leaving (a node removed by
+-- cascade, or a deleted memory's sole-sourced edges, trg_forget_deleted_sources)
+-- runs one trigger level down, and the edge goes with the thing it was about.
+-- And an identity merge (aiq.promote_soft_node) deletes the candidate's edges
+-- after moving them onto the node that now carries the identity: the fact did
+-- not stop holding, it moved, so a closed duplicate would assert what did not
+-- happen. The merge marks its transaction (aiq.merging_nodes) and only then is
+-- a direct delete let through.
+-- ------------------------------------------------------------
+create or replace function aiq.edges_close_never_delete() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    if pg_trigger_depth() = 1 and coalesce(current_setting('aiq.merging_nodes', true), '') <> 'on' then
+        raise exception 'aiq.edges are closed, never deleted (% refused)', tg_op
+            using hint = 'end a fact by setting valid_to (aiq.close_edge); removing a node removes its edges';
+    end if;
+    return null;
+end;
+$$;
+
+create or replace trigger edges_close_never_delete
+    before delete or truncate on aiq.edges
+    for each statement execute function aiq.edges_close_never_delete();
+
+-- ------------------------------------------------------------
 -- A DELETED MEMORY TAKES THE FACTS IT ALONE SUPPORTED WITH IT (REM-964).
 --
 -- An owner deletes their resource; its chunks go by foreign key, their
@@ -30916,6 +30947,7 @@ begin
     -- and the surviving edge on the target keeps the merged provenance. A
     -- retracted duplicate would assert that the relationship stopped being
     -- true, which is exactly what did not happen.
+    perform set_config('aiq.merging_nodes', 'on', true);  -- the one direct delete aiq.edges lets through (6c)
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
@@ -30946,6 +30978,7 @@ begin
     -- 3. An edge the repoint made self-referential.
     delete from aiq.edges where src_id = p_target_node_id and dst_id = p_target_node_id;
     get diagnostics v_self = row_count;
+    perform set_config('aiq.merging_nodes', 'off', true);
 
     -- 4a. The target answers to the candidate's name, as an alias -- graph-identity.md
     --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The
@@ -41521,11 +41554,42 @@ declare
     uri text := aiq.walk_graph_uri(p_input, v);
     g   jsonb;
 begin
+    -- the channel is made on first use, in the shared org where register_text looks for a channel a caller with no
+    -- org names, so the first index on a fresh stack (percolate walk index keeps its graph) does not fail on it
+    if not exists (select 1 from content.channels where name = p_channel) then
+        insert into content.channels (name, kind, org_id, visibility)
+        values (p_channel, 'manual', rbac.shared_org_id(), 'public');
+    end if;
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
     return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')::text, uri,
                null, jsonb_build_object('walk_graph', g, 'version', v))
            || jsonb_build_object('uri', uri, 'version', v);
+end;
+$$;
+
+-- The graph a run walked (Sirsh, M-20261028-200720-890b). A walk's leads are read back from its graph, and an edge's
+-- identity has no time in it: a re-index rewrites a walk_term's terms in place, and a tag renamed renames its leads.
+-- So the start step records the kept graph document (aiq.walk_index) that holds the scope's links as they are when it
+-- starts, and every later reading of the run (walk_state, so walk_clues, walk_why and the rest) takes the graph from
+-- that document. Documents are never rewritten (changed links name a new one), so a pinned run reads what it walked.
+-- A step is read-only and cannot write the document itself: a scope is pinned when it was indexed after its links
+-- last changed, and a run started otherwise records no document and is read as of its start, as before.
+create or replace function aiq.walk_run_graph(p_run uuid)
+returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    r    workflow.runs;
+    kept jsonb;
+begin
+    select * into r from workflow.runs where id = p_run;
+    select res.metadata->'walk_graph' into kept
+      from workflow.tasks tk
+      join content.resources res on res.uri = tk.output->'result'->0->'state'->>'graph'
+     where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded'
+     order by res.updated_at desc
+     limit 1;
+    return coalesce(kept, aiq.walk_graph(r.input, r.created_at));
 end;
 $$;
 
@@ -41691,7 +41755,7 @@ begin
     inp := r.input;
     s := aiq.walk_settings(inp);
     q := inp->'question';
-    g := aiq.walk_graph(inp, r.created_at);
+    g := aiq.walk_run_graph(p_run);
     -- Search's order: the start step's record of it.
     select tk.output->'result'->0->'state'->'order' into ord
       from workflow.tasks tk where tk.run_id = p_run and tk.step_key = 'start' and tk.status = 'succeeded';
@@ -41885,7 +41949,10 @@ begin
      where ordinality <= (s->>'seeds')::int
        and (value #>> '{}') in (select k.v from jsonb_each_text(g->'keys') k(n, v));
     return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds,
-                              'travels', '[]'::jsonb, 'pending', '[]'::jsonb);
+                              'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
+                              'graph', (select res.uri from content.resources res
+                                         where res.uri = aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)))
+                                         limit 1));
 end;
 $$;
 
@@ -42324,6 +42391,7 @@ grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_ne
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
                           aiq.walk_answers(uuid), aiq.walk_kept(text, timestamptz), aiq.walk_keep(uuid, text),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
+                          aiq.walk_run_graph(uuid),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
