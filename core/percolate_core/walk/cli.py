@@ -188,7 +188,8 @@ def run(
 def index(
     source: str = typer.Option(..., "--source", help="The channel whose documents to index."),
     dsn: Optional[str] = typer.Option(None, help="Owner-level DSN. Default: P8_ADMIN_DSN, then P8_DSN."),
-    nearest: int = typer.Option(10, help="How many nearest documents to link from each."),
+    nearest: Optional[int] = typer.Option(None, help="How many nearest documents to link from each. "
+                                          "Default: aiq.parameters' index.nearest."),
 ) -> None:
     """Write walk_term, walk_next and walk_nearest edges for one source's documents (REM-1201).
 

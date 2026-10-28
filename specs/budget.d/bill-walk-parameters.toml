@@ -1,8 +1,0 @@
-why = """Sirsh, M-20261027-213302-a399: one table of the walk's, its index's, decider's, explanations' and dreaming's
-parameters, which code reads and which explains the algorithm: name, value, what it controls, where it is read and
-why. Sirsh asked for the table. No existing table holds parameters: claims.deciders names a decider service, and the
-walk's defaults were literals in aiq.walk_settings, aiq.walk_task and aiq.walk_why."""
-
-[added]
-tables = ["aiq.parameters"]
-functions = ["aiq.parameters_of"]
