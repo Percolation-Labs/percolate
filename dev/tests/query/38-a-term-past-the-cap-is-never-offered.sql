@@ -71,8 +71,7 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_range', 'prefix', 'wr/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'Which of my renovation jobs need a ladder or new tiles?',
-                                       'gold', jsonb_build_array('wr/7', 'wr/8')),
+        'question', jsonb_build_object('id', 'q1', 'text', 'Which of my renovation jobs need a ladder or new tiles?'),
         'search', to_jsonb(array['wr/1','wr/11','wr/12','wr/13','wr/14','wr/2','wr/3','wr/4','wr/5','wr/6','wr/7','wr/8']),
         'replay', 'walk-range:replay', 'offline', true,
         'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1, 'cap', 3));
