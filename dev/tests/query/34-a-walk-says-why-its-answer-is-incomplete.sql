@@ -66,8 +66,7 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility) values (ch, 'walk-fixture:replay', 'replay', org, 'public')
     returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-        'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.9, 'term:hallway', 0.2)))::text);
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.9, 'term:hallway', 0.2))::text);
     insert into content.resources (channel_id, uri, title, org_id, visibility) values (ch, 'walk-fixture:other-wording', 'x', org, 'public')
     returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
@@ -78,9 +77,8 @@ select aiq.install_walk_workflow('walk_fixture_run', 'jev', 3);
 
 do $$
 declare
-    chunk text := jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-        'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.6, 'term:hallway', 0.2, 'next:wt/1', 0.8,
-                                 'near:wt/1', 0.75, 'next:wt/2', 0.7, 'near:wt/2', 0.65)))::text;
+    chunk text := jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.6, 'term:hallway', 0.2, 'next:wt/1', 0.8,
+                                 'near:wt/1', 0.75, 'next:wt/2', 0.7, 'near:wt/2', 0.65))::text;
     res uuid;
 begin
     insert into content.resources (channel_id, uri, title, org_id, visibility)
@@ -90,8 +88,7 @@ begin
     insert into content.resource_chunks (resource_id, ordinal, content)
     select id, 0, chunk from content.resources where uri = 'walk-fixture:eager';
     insert into content.resource_chunks (resource_id, ordinal, content)
-    select id, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-               'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2)))::text
+    select id, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2))::text
       from content.resources where uri = 'walk-fixture:no-ladder';
 end $$;
 
@@ -99,16 +96,16 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_fixture', 'prefix', 'wt/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'the ladder'),
+        'question', jsonb_build_object('text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
-        'replay', 'walk-fixture:replay', 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-fixture:replay'), 'offline', true,
         'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false,
                                        'span', 2));  -- the fixture's walk was laid out for next reaching 2
     gold text[] := array['wt/2', 'wt/4', 'wt/5', 'wt/7', 'wt/99'];
-    eager uuid := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', 'walk-fixture:eager',
+    eager uuid := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', (select id from content.resources where uri = 'walk-fixture:eager'),
                       'settings', inp->'settings' || '{"wave": 2}'));
-    noladder uuid := workflow.start_workflow('walk_fixture_run', inp || '{"replay": "walk-fixture:no-ladder"}');
+    noladder uuid := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', (select id from content.resources where uri = 'walk-fixture:no-ladder')));
     offline uuid := workflow.start_workflow('walk_fixture_run', inp);
     carrier uuid;
     got text;
@@ -174,7 +171,7 @@ begin
         raise exception 'coverage of the offline walk is %', got;
     end if;
 
-    -- A walk never carries its answer key: a question holding anything beside {id, text} fails at the start step.
+    -- A walk never carries its answer key: a question holding anything beside {node_id, text} fails at the start step.
     carrier := workflow.start_workflow('walk_fixture_run',
                    inp || jsonb_build_object('question', inp->'question' || '{"gold": ["wt/2"]}'));
     if (select status from workflow.runs where id = carrier) is distinct from 'failed'

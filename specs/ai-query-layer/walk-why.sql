@@ -139,7 +139,7 @@ declare
     v_st      jsonb := aiq.walk_state(p_run);  -- built once, for both views below
     v_gate    real  := coalesce((v_summary #>> '{settings,gate}')::real, 0.5);
 begin
-    -- the labelled nodes come from the caller: a walk's question is {id, text} and never carries them (REM-1231)
+    -- the labelled nodes come from the caller: a walk's question is {node_id, text} and never carries them (REM-1231)
     if p_nodes is null then
         raise exception 'no labelled nodes: pass the keys the walk should have read'
             using errcode = 'invalid_parameter_value',

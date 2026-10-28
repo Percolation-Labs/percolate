@@ -58,8 +58,7 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility) values (ch, 'walk-fixture:replay', 'replay', org, 'public')
     returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-        'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.9, 'term:hallway', 0.2)))::text);
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.9, 'term:hallway', 0.2))::text);
     insert into content.resources (channel_id, uri, title, org_id, visibility) values (ch, 'walk-fixture:other-wording', 'x', org, 'public')
     returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
@@ -72,10 +71,10 @@ select aiq.install_walk_workflow('walk_fixture_long', 'jev', 10);
 do $$
 declare
     inp jsonb := jsonb_build_object(
-        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('id', 'q1', 'text', 'the ladder'),
+        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
-        'replay', 'walk-fixture:replay', 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-fixture:replay'), 'offline', true,
         'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     r uuid := workflow.start_workflow('walk_fixture_run', inp);
     reads text[];
@@ -110,7 +109,7 @@ begin
     if (select travelled_wave from aiq.walk_clues(r) where key = 'term:ladder') is distinct from 2 then
         raise exception 'ladder was not travelled in wave 2';
     end if;
-    if (aiq.walk_verdicts(r)->'verdicts'->'q1'->>'term:ladder')::real is distinct from 0.9::real then
+    if (aiq.walk_verdicts(r)->'verdicts'->>'term:ladder')::real is distinct from 0.9::real then
         raise exception 'the verdicts a later run replays lack ladder: %', aiq.walk_verdicts(r);
     end if;
     if (select open_leads from aiq.walk_waves(r) order by wave desc limit 1)
@@ -131,7 +130,7 @@ begin
         raise exception 'the views over a built state disagree with the views over the run';
     end if;
     -- A step's error fails the step and the run, with the reason on the task.
-    r := workflow.start_workflow('walk_fixture_run', inp || '{"replay": "walk-fixture:other-wording"}');
+    r := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', (select id from content.resources where uri = 'walk-fixture:other-wording')));
     if (select status from workflow.runs where id = r) is distinct from 'failed'
        or not exists (select 1 from workflow.tasks where run_id = r and status = 'failed'
                                                     and error::text like '%another task wording%') then
