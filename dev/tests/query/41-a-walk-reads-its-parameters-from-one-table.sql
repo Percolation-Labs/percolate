@@ -28,7 +28,7 @@ begin
     end if;
     -- The index's tagger reads its strategies and every strategy's limits from here (core walk/terms.py).
     if not aiq.parameters_of('index') ?& array['strategies', 'min_df', 'df_floor', 'df_share', 'entity_labels',
-                                              'entity_df_floor', 'phrase_df_floor', 'spacy_model', 'nearest'] then
+                                              'entity_df_floor', 'phrase_df_floor', 'spacy_model', 'spacy_chars', 'nearest'] then
         raise exception 'the index''s tagging parameters are not in the table: %', aiq.parameters_of('index');
     end if;
 
