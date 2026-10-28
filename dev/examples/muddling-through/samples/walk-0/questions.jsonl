@@ -1,0 +1,30 @@
+{"qid": "walk-0/q0", "phrasing": "direct", "gold": ["walk-0/d12501", "walk-0/d12502"], "named": ["walk-0/t25.e0.1", "walk-0/t25.e0.own0", "walk-0/t25.e0.own1"]}
+{"qid": "walk-0/q1", "phrasing": "indirect", "gold": ["walk-0/d12524", "walk-0/d12525", "walk-0/d12526"], "named": ["walk-0/c46", "walk-0/t46.e1.0"]}
+{"qid": "walk-0/q2", "phrasing": "vague", "gold": ["walk-0/d12560", "walk-0/d12561", "walk-0/d12562"], "named": ["walk-0/c47"]}
+{"qid": "walk-0/q3", "phrasing": "wrong", "gold": ["walk-0/d12593", "walk-0/d12595", "walk-0/d12596"], "named": ["walk-0/c32", "walk-0/t32.20", "walk-0/t32.5"]}
+{"qid": "walk-0/q4", "phrasing": "instruction", "gold": ["walk-0/d12640", "walk-0/d12641"], "named": ["walk-0/c35", "walk-0/t35.0"]}
+{"qid": "walk-0/q5", "phrasing": "direct", "gold": ["walk-0/d12644"], "named": ["walk-0/t22.e5.1", "walk-0/t22.e5.own0"]}
+{"qid": "walk-0/q6", "phrasing": "indirect", "gold": ["walk-0/d12657", "walk-0/d12658", "walk-0/d12659"], "named": ["walk-0/c55", "walk-0/t55.e6.0"]}
+{"qid": "walk-0/q7", "phrasing": "vague", "gold": ["walk-0/d12692", "walk-0/d12693", "walk-0/d12694"], "named": ["walk-0/c3"]}
+{"qid": "walk-0/q8", "phrasing": "wrong", "gold": ["walk-0/d12725", "walk-0/d12726"], "named": ["walk-0/c5", "walk-0/t5.1", "walk-0/t5.9"]}
+{"qid": "walk-0/q9", "phrasing": "instruction", "gold": ["walk-0/d12782", "walk-0/d12783"], "named": ["walk-0/c25", "walk-0/t25.2"]}
+{"qid": "walk-0/q10", "phrasing": "direct", "gold": ["walk-0/d12787", "walk-0/d12788", "walk-0/d12789"], "named": ["walk-0/t51.e10.2", "walk-0/t51.e10.own0", "walk-0/t51.e10.own1", "walk-0/t51.e10.own2"]}
+{"qid": "walk-0/q11", "phrasing": "indirect", "gold": ["walk-0/d12823", "walk-0/d12824"], "named": ["walk-0/c55", "walk-0/t55.e11.0"]}
+{"qid": "walk-0/q12", "phrasing": "vague", "gold": ["walk-0/d12845", "walk-0/d12847", "walk-0/d12848"], "named": ["walk-0/c56"]}
+{"qid": "walk-0/q13", "phrasing": "wrong", "gold": ["walk-0/d12879"], "named": ["walk-0/c19", "walk-0/t19.5", "walk-0/t19.6"]}
+{"qid": "walk-0/q14", "phrasing": "instruction", "gold": ["walk-0/d12914", "walk-0/d12915"], "named": ["walk-0/c27", "walk-0/t27.1"]}
+{"qid": "walk-0/q15", "phrasing": "direct", "gold": ["walk-0/d12918", "walk-0/d12919", "walk-0/d12920"], "named": ["walk-0/t38.e15.1", "walk-0/t38.e15.own0", "walk-0/t38.e15.own1", "walk-0/t38.e15.own2"]}
+{"qid": "walk-0/q16", "phrasing": "indirect", "gold": ["walk-0/d12953", "walk-0/d12954"], "named": ["walk-0/c39", "walk-0/t39.e16.0"]}
+{"qid": "walk-0/q17", "phrasing": "vague", "gold": ["walk-0/d12975"], "named": ["walk-0/c41"]}
+{"qid": "walk-0/q18", "phrasing": "wrong", "gold": ["walk-0/d12988"], "named": ["walk-0/c21", "walk-0/t21.0", "walk-0/t21.10"]}
+{"qid": "walk-0/q19", "phrasing": "instruction", "gold": ["walk-0/d13022", "walk-0/d13023"], "named": ["walk-0/c40", "walk-0/t40.30"]}
+{"qid": "walk-0/q20", "phrasing": "direct", "gold": ["walk-0/d13025", "walk-0/d13026", "walk-0/d13027"], "named": ["walk-0/t54.e20.0", "walk-0/t54.e20.own0", "walk-0/t54.e20.own1", "walk-0/t54.e20.own2"]}
+{"qid": "walk-0/q21", "phrasing": "indirect", "gold": ["walk-0/d13059", "walk-0/d13060", "walk-0/d13061"], "named": ["walk-0/c41", "walk-0/t41.e21.0"]}
+{"qid": "walk-0/q22", "phrasing": "vague", "gold": ["walk-0/d13093", "walk-0/d13094", "walk-0/d13095"], "named": ["walk-0/c56"]}
+{"qid": "walk-0/q23", "phrasing": "wrong", "gold": ["walk-0/d13127", "walk-0/d13128"], "named": ["walk-0/c43", "walk-0/t43.2", "walk-0/t43.3"]}
+{"qid": "walk-0/q24", "phrasing": "instruction", "gold": ["walk-0/d13182", "walk-0/d13183"], "named": ["walk-0/c40", "walk-0/t40.3"]}
+{"qid": "walk-0/q25", "phrasing": "direct", "gold": ["walk-0/d13185", "walk-0/d13187"], "named": ["walk-0/t19.e25.1", "walk-0/t19.e25.own0", "walk-0/t19.e25.own1"]}
+{"qid": "walk-0/q26", "phrasing": "indirect", "gold": ["walk-0/d13209"], "named": ["walk-0/c13", "walk-0/t13.e26.0"]}
+{"qid": "walk-0/q27", "phrasing": "vague", "gold": ["walk-0/d13220", "walk-0/d13221", "walk-0/d13222"], "named": ["walk-0/c13"]}
+{"qid": "walk-0/q28", "phrasing": "wrong", "gold": ["walk-0/d13255"], "named": ["walk-0/c60", "walk-0/t60.1"]}
+{"qid": "walk-0/q29", "phrasing": "instruction", "gold": ["walk-0/d13288", "walk-0/d13289"], "named": ["walk-0/c54", "walk-0/t54.0"]}
