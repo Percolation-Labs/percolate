@@ -1,7 +1,7 @@
 # Setup: download BEAM from its public release, cut the two conversations from it, load both samples, and index them.
 # The sample ships only the vectors the stack's own bge-small gave each piece, matched to the downloaded text by sha256.
 pip install -q --disable-pip-version-check pyarrow
-python3 build/beam_fetch.py samples/beam
+python3 harness/beam_fetch.py samples/beam
 percolate sample load samples/beam
 percolate sample load samples/walk-0
 

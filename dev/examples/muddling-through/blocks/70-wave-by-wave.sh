@@ -1,18 +1,21 @@
 # Step 1, wave by wave (run last, so nothing it reads changes what earlier steps capture): the walk from step 1, read back from its own rows. Nothing here walks again; every function
 # reads the run's task rows, so the same query works on a walk still running.
-RUN=$(psql "$P8_DSN" -Atc "
-  select id from workflow.runs
-   where input->'question'->>'id' = '1M:35:event_ordering:0' and status = 'succeeded'
-   order by created_at limit 1")
+Q='How did my focus on different aspects of the holiday celebration evolve throughout our conversations in order? Mention ONLY and ONLY seven items.'
+RUN=$(psql "$P8_DSN" -At -v q="$Q" <<'SQL'
+select run from aiq.walk_runs where question_text = :'q' and status = 'succeeded' and control_of is null
+ order by created_at limit 1;
+SQL
+)
 
-psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" <<'SQL'
--- What the walk is asked, and what search hands it first: the top ten of search's order, each with the start of what
--- the user said. ev marks the exchanges the benchmark's answer key names, passed in by the harness; the walk never
+# Evaluation harness, not product: the benchmark's answer key, read from the sample's file and passed in.
+psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 harness/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" <<'SQL'
+-- What the walk is asked, and what search hands it first: the top ten of search's order, each with its node's summary:
+-- the exchange and the start of what the user said. ev marks the exchanges the benchmark's answer key names, passed in by the harness; the walk never
 -- holds it.
-select s.rank, s.doc, case when s.doc = any(:'labelled'::text[]) then 'ev' else '' end as ev,
-       left(r.metadata->>'terms_text', 60) as said
+select s.rank, case when s.doc = any(:'labelled'::text[]) then 'ev' else '' end as ev, left(n.summary, 90) as said
   from aiq.walk_search_order(:'run') s
-  join content.resources r on r.uri = s.doc
+  cross join lateral aiq.lookup(s.doc) l
+  join aiq.nodes n on n.id = l.node_id
  where s.rank <= 10 order by s.rank;
 
 -- Wave 1 judges the leads those ten reads raised: a shared term, the exchanges beside one in its sitting, its nearest

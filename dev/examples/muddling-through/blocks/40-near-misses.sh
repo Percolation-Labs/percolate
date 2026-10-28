@@ -10,16 +10,23 @@
 # Twelve walks, four at a time, each in its own connection: a walk runs to its end inside start_workflow. Twelve at
 # once ran Postgres out of memory on an 8 GB Docker VM.
 # Ten waves of 160 is the 1,600 reads both are counted at.
+# Evaluation harness, not product: which questions are the instruction ones is the world's label, and the harness
+# names them, by their nodes' keys (walk-0's questions have no words).
+# Evaluation harness, not product: the benchmark's answer key, read from the sample's file and passed in.
+LABELS=$(python3 harness/labels.py samples/walk-0/questions.jsonl --where phrasing=instruction)
 n=0
-for q in $(psql "$P8_DSN" -Atc "select r.metadata->>'id' from content.resources r
-                                where r.uri like 'question:walk-0/%' and r.metadata->>'phrasing' = 'instruction'"); do
+for q in $(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])))' "$LABELS"); do
   for arm in '{}' '{"near_miss": {"band": 0.35, "every": 3}}'; do
-    psql "$P8_DSN" -Atc "
-      select workflow.start_workflow('walk', jsonb_build_object(
-               'question', jsonb_build_object('id', r.metadata->>'id', 'text', r.metadata->>'text'), 'nodes', 'world_item', 'prefix', 'walk-0/',
-               'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
-               'settings', jsonb_build_object('wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || '$arm'::jsonb))
-        from content.resources r where r.uri = 'question:$q'" > /dev/null &
+    psql "$P8_DSN" -Atq -v q="$q" -v arm="$arm" > /dev/null <<'SQL' &
+select workflow.start_workflow('walk', jsonb_build_object(
+         'question', jsonb_build_object('node_id', k.node_id, 'text', k.key), 'nodes', 'world_item', 'prefix', 'walk-0/',
+         'replay', (select v.id from content.resources v join content.channels vc on vc.id = v.channel_id
+                     where vc.name = 'walk-replays' and v.title = k.key),
+         'offline', true,
+         'settings', jsonb_build_object('wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || (:'arm')::jsonb))
+  from aiq.node_keys k join aiq.nodes n on n.id = k.node_id and n.entity_type = 'world_question'
+ where k.kind = 'canonical' and k.key = :'q';
+SQL
     n=$((n + 1)); [ $((n % 4)) = 0 ] && wait
   done
 done
@@ -27,16 +34,18 @@ wait
 until [ "$(psql "$P8_DSN" -Atc "select count(*) from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
                                  where d.name = 'walk' and r.status = 'running'")" = 0 ]; do sleep 2; done
 
-psql "$P8_DSN" -v labels="$(python3 build/labels.py samples/walk-0/questions.jsonl --where phrasing=instruction)" <<'SQL'
+psql "$P8_DSN" -v labels="$LABELS" <<'SQL'
 -- Each question's two walks, and the evidence each had read by read 1,600. The harness passes the world's answer key
 -- for the six questions; the walks never held it.
 -- aiq.walk_state(run) builds a walk's state from its rows once; the walk_state_* views read from that one state.
 with runs as materialized (
-  select r.id, r.input->'question'->>'id' as question,
+  select w.run as id, k.key as question,
          case when r.input->'settings' ? 'near_miss' then 'near misses' else 'accepted only' end as arm,
-         aiq.walk_state(r.id) as st
-    from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
-   where d.name = 'walk' and (:'labels')::jsonb ? (r.input->'question'->>'id')),
+         aiq.walk_state(w.run) as st
+    from aiq.walk_runs w
+    join workflow.runs r on r.id = w.run
+    join aiq.node_keys k on k.node_id = w.question and k.kind = 'canonical'
+   where (:'labels')::jsonb ? k.key),
 found as (
   select question, arm, c.walk as read, c.labelled as evidence,
          (select count(*) from aiq.walk_state_clues(st) where decision = 'rejected' and state = 'travelled') as near_misses

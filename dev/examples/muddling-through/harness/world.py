@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build samples/walk-0 from the reachability study's world walk-0: a synthetic graph, its questions and its verdicts.
+"""Evaluation harness, not product: build samples/walk-0 from the reachability study's world walk-0: a synthetic graph, its questions and its verdicts.
 
-    python3 build/world.py <reachability spike dir> samples/walk-0
+    python3 harness/world.py <reachability spike dir> samples/walk-0
 
 Run once by whoever refreshes the sample; a reader never runs it. walk-0 has no text, so it cannot go in through
 ingestion. Its items, tags and sittings ARE the world, so they go in as a graph: two tables of the sample's own,
@@ -23,7 +23,7 @@ It writes:
   questions.jsonl  every question: its phrasing, and its evidence and the tags it names, as node keys. Search's order
                    is in world.sql as walk_seed edges (the world's vectors stay in the study).
 
-The replay documents, a P for every clue on the step questions, come from build/world_replay.py.
+The replay documents, a P for every clue on the step questions, come from harness/world_replay.py.
 """
 import json
 import sys

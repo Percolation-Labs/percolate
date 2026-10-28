@@ -32,10 +32,13 @@ SQL
 
 # Part 2: on step 3's walk of the ladder question, where the reads came from and which found evidence. One question,
 # so read it as an example; the study's 150 questions are where the shares come from.
-RUN=$(psql "$P8_DSN" -Atc "select id from workflow.runs
-                           where input->'question'->>'id' = '1M:22:multi_session_reasoning:1' and status = 'succeeded'
-                           order by created_at desc limit 1")
-psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:22:multi_session_reasoning:1)" <<'SQL'
+Q='Considering my budget, tool priorities, ladder needs, and moving help, how should I sequence and allocate resources to complete my DIY projects safely and efficiently?'
+RUN=$(psql "$P8_DSN" -At -v q="$Q" <<'SQL'
+select run from aiq.walk_runs where question_text = :'q' and status = 'succeeded' order by created_at desc limit 1;
+SQL
+)
+# Evaluation harness, not product: the benchmark's answer key, read from the sample's file and passed in.
+psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 harness/labels.py samples/beam/questions.jsonl 1M:22:multi_session_reasoning:1)" <<'SQL'
 -- Where the walk's reads came from, and which found evidence: search, the next message, the nearest in meaning, or a
 -- shared term, by how many messages hold it. A term held by more than 10 is never offered, so it has no row here.
 with s as materialized (select aiq.walk_summary(:'run') as v),

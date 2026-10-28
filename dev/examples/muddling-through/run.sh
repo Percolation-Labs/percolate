@@ -42,7 +42,7 @@ export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
 # A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.
 psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
 export TOKEN=$(percolate auth token --email me@example.com)
-cp -R "$HERE/samples" "$HERE/build" .
+cp -R "$HERE/samples" "$HERE/harness" .
 
 # Each block runs in order from this directory, as a reader pastes it; its output is captures/<block>.txt.
 fail=0

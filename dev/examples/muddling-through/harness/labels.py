@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """The benchmark's answer key, for the evaluation functions: harness, not product (REM-1231).
 
-    python3 build/labels.py <questions.jsonl>... <qid>                one question's evidence, as a Postgres text[]
-    python3 build/labels.py <questions.jsonl>... [--where field=value] {qid: [evidence]} as JSON
+    python3 harness/labels.py <questions.jsonl>... <qid>                one question's evidence, as a Postgres text[]
+    python3 harness/labels.py <questions.jsonl>... [--where field=value] {qid: [evidence]} as JSON
 
 A walk never carries its answer key and the database never holds it: a block reads it from the sample's own
 questions file and passes it to aiq.walk_coverage(run, nodes, budgets) or aiq.walk_why(run, nodes) as a psql
 variable, e.g.
 
-    psql -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" \\
+    psql -v labelled="$(python3 harness/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" \\
          -c "select * from aiq.walk_coverage(:'run', :'labelled', array[50, 100, 500])"
 """
 import json
