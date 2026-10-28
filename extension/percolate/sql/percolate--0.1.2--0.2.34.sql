@@ -30990,15 +30990,20 @@ $$;
 -- A fact that stops holding is closed: aiq.close_edge, or valid_to set by the
 -- writer that retracts it (percolate walk index, aiq.retract_derived). The row
 -- stays, so a past walk, a past answer and the record clock still read what
--- held then. A DELETE or TRUNCATE issued against aiq.edges is refused. The one
--- exception is a delete that cascades from a node being removed (a document,
--- a user or an org leaving): it runs inside the foreign key's cascade, one
--- trigger level down, and the edge goes with the thing it was about.
+-- held then. A DELETE or TRUNCATE issued against aiq.edges is refused, with
+-- two exceptions. A delete that follows something leaving (a node removed by
+-- cascade, or a deleted memory's sole-sourced edges, trg_forget_deleted_sources)
+-- runs one trigger level down, and the edge goes with the thing it was about.
+-- And an identity merge (aiq.promote_soft_node) deletes the candidate's edges
+-- after moving them onto the node that now carries the identity: the fact did
+-- not stop holding, it moved, so a closed duplicate would assert what did not
+-- happen. The merge marks its transaction (aiq.merging_nodes) and only then is
+-- a direct delete let through.
 -- ------------------------------------------------------------
 create or replace function aiq.edges_close_never_delete() returns trigger
 language plpgsql set search_path = pg_catalog, public as $$
 begin
-    if pg_trigger_depth() = 1 then
+    if pg_trigger_depth() = 1 and coalesce(current_setting('aiq.merging_nodes', true), '') <> 'on' then
         raise exception 'aiq.edges are closed, never deleted (% refused)', tg_op
             using hint = 'end a fact by setting valid_to (aiq.close_edge); removing a node removes its edges';
     end if;
@@ -31265,6 +31270,7 @@ begin
     -- and the surviving edge on the target keeps the merged provenance. A
     -- retracted duplicate would assert that the relationship stopped being
     -- true, which is exactly what did not happen.
+    perform set_config('aiq.merging_nodes', 'on', true);  -- the one direct delete aiq.edges lets through (6c)
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
@@ -31295,6 +31301,7 @@ begin
     -- 3. An edge the repoint made self-referential.
     delete from aiq.edges where src_id = p_target_node_id and dst_id = p_target_node_id;
     get diagnostics v_self = row_count;
+    perform set_config('aiq.merging_nodes', 'off', true);
 
     -- 4a. The target answers to the candidate's name, as an alias -- graph-identity.md
     --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The
