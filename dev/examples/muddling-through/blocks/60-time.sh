@@ -57,7 +57,7 @@ select e.doc, aiq.close_edge(jsonb_build_object('resource_id', e.id, 'relation',
 -- Every edge now carries two clocks. valid_from and valid_to say when the budget held, in the conversation's time.
 -- created_at says when the agent recorded the edge, and close_edge recorded when it learned the edge had ended.
 create temp view answers as
-select d.summary as document, (regexp_match(x.metadata->>'terms_text', '\$\d+'))[1] as budget,
+select a.id as edge, d.summary as document, (regexp_match(x.metadata->>'terms_text', '\$\d+'))[1] as budget,
        a.valid_from, a.valid_to, a.created_at as recorded, (a.provenance->'closed'->>'at')::timestamptz as end_recorded
   from aiq.nodes q
   join aiq.edges a on a.src_id = q.id and a.relation = 'answered_in'
@@ -72,13 +72,13 @@ select document, budget, valid_from as held_from, valid_to as held_until,
  order by valid_from;
 
 -- One query, both clocks: the budget at two moments in the conversation, as the agent knew it after the first
--- landing and as it knows it now. An edge counts at a recorded moment if it had been recorded by then, and its end
--- counts only if the end had been recorded by then too.
+-- landing and as it knows it now. aiq.edges_as_of(valid_at, known_at) reads both from the edges themselves: an edge
+-- counts once it was recorded, and its end only once that end was recorded too.
 select k.known, t.held, a.document, a.budget
   from (values (1, 'after the first landing', (select min(recorded) from answers)), (2, 'now', now())) k(n, known, at)
  cross join (values (1, '2024-08-12 00:11:20', timestamptz '2024-08-12 00:11:20+00'), (2, 'now', now())) t(n, held, at)
-  join answers a on a.recorded <= k.at
-                and aiq.edge_is_current(a.valid_from, case when a.end_recorded <= k.at then a.valid_to end, t.at)
+ cross join lateral aiq.edges_as_of(t.at, k.at) e
+  join answers a on a.edge = e.id
  order by k.n, t.n, a.valid_from;
 
 -- What the memory had wrong, and over which stretch of each clock: in the conversation, from 00:11:28, when the
