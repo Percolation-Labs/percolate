@@ -41501,8 +41501,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it. V0''s default (walk spec 68c02f68). Part three''s published walks pin p.'),
  ('walk.stack', 'walk', 'true', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). The walkthrough''s published steps ran memoryless and pin it. V0 walks with the stack (walk spec 68c02f68, sally): a reader who starts a walk with the shipped defaults gets V0, and changes one row to see what it does. Part three''s published walks pin stack false, describe source and order p, which is what they ran.'),
- ('stack.link_floor', 'stack', '0.7', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
-  'A floor under the rank rule (sally''s guard on F10, adopted by bill, M-20261029-114953-bb74): rank alone links something even where nothing read is evidence. 0.7 is the walk spec''s value (1ee004f1), set by mike on REM-1240''s recognition run, not on any walk.'),
+ ('stack.link_floor', 'stack', '0.5', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
+  'A floor under the rank rule (sally''s guard on F10, adopted by bill, M-20261029-114953-bb74): rank alone links something even where nothing read is evidence. 0.5 since F14 (spec 1ac0e5dd, Sirsh 13:05Z), reversing 0.7: on the recognition run 0.5 and 0.7 give the same precision (19.0%), and 0.7 cost 1M:35 tr:0 its correct 10-read close and, in the rerun, any close at all. It also decides which lines close sees (F13).'),
  ('stack.link_share', 'stack', '0.02', 'A read links to a question only when its assessment ranks in the top max(stack.close_min_links, ceil(this share x the reads assessed against that question so far)), and clears stack.link_floor.', 'aiq.walk_stack_next',
   'F10, decided by bill (M-20261029-114822-4a81), Sirsh may overrule: at a fixed gate the links were mostly noise (evidence share of links 5.7% at 0.5, 6.6% at 0.7, against a 3.9% base), while by rank within the walk the top 2% were 19% evidence and the top 5% 14% (mike, REM-1240, on the gate''s run). Found on REM-1245''s ladder retest, where 232 of 443 other reads cleared 0.5.'),
  ('stack.close_min_links', 'stack', '2', 'A question is judged for closing only once at least this many reads are linked to it.', 'aiq.walk_stack_next',
@@ -41519,8 +41519,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1244''s draft: at 4 a wave judges at most 4 times today''s leads, under $0.10 of Jev for a 500-read walk.'),
  ('stack.candidates', 'stack', '3', 'How many candidate parts a wave that linked a read offers the decider: the terms the most reads linked to the root share (at least two), ties by specificity, not yet asked about.', 'aiq.walk_stack_next',
   'Few, because each is one judgement. The rarest term of each linked read was tried first and filled every slot with one aspect''s variants by wave 3 (REM-1245''s live ladder walk); walk.md §6 move 2. Not measured.'),
- ('stack.evidence_lines', 'stack', '12', 'How many of a question''s linked reads the decider is shown when asked whether they answer it, highest P first.', 'aiq.walk_stack_next',
-  'About 12 lines of a user''s words fit the decider''s state at about 300 tokens a judgement. Not measured.'),
+ ('stack.evidence_lines', 'stack', '12', 'How many lines the decider is shown when asked whether a question is answered: the lines assessed against it above stack.link_floor, highest P first, shown newest first (F13).', 'aiq.walk_stack_next',
+  'About 12 lines of a user''s words fit the decider''s state at about 300 tokens a judgement. Since F13 the cap on every assessed line close sees, in either direction, highest P first. Not measured.'),
  ('stack.part_wording', 'stack', to_jsonb(text '%s (the part about ''%s'')'), 'How a candidate part is worded from its parent question and a term: format(wording, parent, term).', 'aiq.walk_stack_next',
   'No generative model is in the loop (Sirsh, M-20261029-105852-65d0), so a part is the parent narrowed to a term the evidence holds, and Jev chooses among them. A part written by a model comes through the walk''s input (parts), from a caller the walk asked.'),
  ('decider.request_bytes', 'decider', '24000', 'The most option text one Jev request carries; a round''s options are cut into requests of at most 60 options and at most this many bytes.', 'aiq.walk_requests, aiq.walk_stack_requests',
@@ -43408,61 +43408,52 @@ begin
        -- linked exactly one read and so never asked)
        and rk.rk <= greatest((sp->>'close_min_links')::int, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
-    -- 2. close (walk.md §6 move 4, spec 92fc424a): each open question that gained links, judged on its linked lines,
-    -- each with the date it was said, newest first; the root on every read linked to it or to any part. Close also
-    -- sees every assessed line above link_floor said AFTER the newest linked line: a later statement is the only way an
-    -- answer is superseded, and the newer value can rank below the link cut (on 1M:35 ku:0 the new deadline lost the
-    -- one link slot by 0.02 and the root closed on the old one). Keyed C|<q>|<links>[+<later>], so a question that
-    -- gains links or later lines is asked again. Judged only once it has close_min_links links.
+    -- 2. close (walk.md §6 move 4, F13 at spec 1ac0e5dd): each open question that gained links, once it has
+    -- close_min_links of them, judged on every line assessed against it above link_floor, in either direction of time,
+    -- each with the date it was said, the stack.evidence_lines highest by P, shown newest first. Both sides of a
+    -- contradiction and both values of an update are then in view (on 1M:35 cr:1 the opposing line, read and assessed
+    -- 0.84, was cut by the link slots and was earlier than the links, so 92fc424a's later-only rule never showed it).
+    -- Not keyed on a question's type: BEAM's types are the answer key's kind of knowledge. Keyed C|<q>|<links>/<lines>.
     with gained as (
         select distinct x->>'q' as q from jsonb_array_elements(linked) x
         union
         select 'root' where jsonb_array_length(linked) > 0
-    ), mine as (
-        select gq.q, e->>'doc' as doc, max((e->>'p')::real) as p
+    ), links as (
+        select gq.q, count(distinct e->>'doc') as n
           from gained gq, jsonb_array_elements(ev) e
          where e->>'q' = gq.q or (gq.q = 'root')
-         group by 1, 2
-    ), counted as (
-        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
+         group by 1 having count(distinct e->>'doc') >= (sp->>'close_min_links')::int
     ), assessed as (
         -- every read assessed so far against the question, above the floor
-        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc
+        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc, (x.value #>> '{}')::real as p
           from jsonb_each(ans) x
          where x.key like 'A|%' and (x.value #>> '{}')::real >= (sp->>'link_floor')::real
            and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
                                                     jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
-    ), docs as (
-        select distinct doc from mine union select distinct doc from assessed
+    ), top as (
+        select a.q, a.doc, a.p, row_number() over (partition by a.q order by a.p desc, a.doc) as rk
+          from assessed a join links l on l.q = a.q
+    ), cut as (
+        select * from top where rk <= (sp->>'evidence_lines')::int
     ), pl as (
-        select aiq.walk_places(inp, array(select doc from docs)) as places,
-               aiq.walk_lines(inp, array(select doc from docs)) as lines
-    ), newest as (
-        select m.q, max((pl.places->m.doc->>'said_at')::timestamptz) as at from mine m, pl group by m.q
-    ), later as (
-        select a.q, a.doc from assessed a join newest nw on nw.q = a.q, pl
-         where (pl.places->a.doc->>'said_at')::timestamptz > nw.at
-           and not exists (select 1 from mine m where m.q = a.q and m.doc = a.doc)
+        select aiq.walk_places(inp, array(select distinct doc from cut)) as places,
+               aiq.walk_lines(inp, array(select distinct doc from cut)) as lines
     ), shown as (
-        select x.q, x.doc, x.later, row_number() over (partition by x.q order by x.at desc nulls last, x.doc) as k
-          from (select m.q, m.doc, false as later, (pl.places->m.doc->>'said_at')::timestamptz as at
-                  from mine m, pl
-                 where m.doc in (select doc from mine m2 where m2.q = m.q order by m2.p desc limit (sp->>'evidence_lines')::int)
-                union all
-                select lt.q, lt.doc, true, (pl.places->lt.doc->>'said_at')::timestamptz from later lt, pl) x
+        select cu.q, cu.doc, row_number() over (partition by cu.q order by (pl.places->cu.doc->>'said_at')::timestamptz desc nulls last, cu.doc) as k
+          from cut cu, pl
     ), keyed as (
-        select ct.q, ct.n, (select count(*) from later lt where lt.q = ct.q) as m from counted ct
+        select l.q, l.n, (select count(*) from cut cu where cu.q = l.q) as m from links l
     )
     select coalesce(jsonb_agg(jsonb_build_object(
-               'key', 'C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end, 'q', kd.q,
+               'key', 'C|' || kd.q || '|' || kd.n || '/' || kd.m, 'q', kd.q,
                'text', (select string_agg(format('%s) [%s] "%s"', sh.k,
                                                  coalesce(to_char((pl.places->sh.doc->>'said_at')::timestamptz, 'YYYY-MM-DD'), 'undated'),
                                                  aiq.walk_snippet(coalesce(pl.lines->>sh.doc, sh.doc))), ' ' order by sh.k)
                           from shown sh, pl where sh.q = kd.q),
-               'p', ans->('C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end)) order by kd.q), '[]'::jsonb)
+               'p', ans->('C|' || kd.q || '|' || kd.n || '/' || kd.m)) order by kd.q), '[]'::jsonb)
       into closes
       from keyed kd
-     where open_ ? kd.q;
+     where open_ ? kd.q and kd.m > 0;
     -- 3. candidate parts (walk.md §6 move 2): parts open only under the root, so they never nest. The candidates are
     -- the terms the most reads linked to the root share (at least two), ties by specificity (fewest documents holding
     -- them), not yet asked about. The rarest term of each linked read is not used: on REM-1245's live ladder walk it

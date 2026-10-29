@@ -228,61 +228,52 @@ begin
        -- linked exactly one read and so never asked)
        and rk.rk <= greatest((sp->>'close_min_links')::int, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
-    -- 2. close (walk.md §6 move 4, spec 92fc424a): each open question that gained links, judged on its linked lines,
-    -- each with the date it was said, newest first; the root on every read linked to it or to any part. Close also
-    -- sees every assessed line above link_floor said AFTER the newest linked line: a later statement is the only way an
-    -- answer is superseded, and the newer value can rank below the link cut (on 1M:35 ku:0 the new deadline lost the
-    -- one link slot by 0.02 and the root closed on the old one). Keyed C|<q>|<links>[+<later>], so a question that
-    -- gains links or later lines is asked again. Judged only once it has close_min_links links.
+    -- 2. close (walk.md §6 move 4, F13 at spec 1ac0e5dd): each open question that gained links, once it has
+    -- close_min_links of them, judged on every line assessed against it above link_floor, in either direction of time,
+    -- each with the date it was said, the stack.evidence_lines highest by P, shown newest first. Both sides of a
+    -- contradiction and both values of an update are then in view (on 1M:35 cr:1 the opposing line, read and assessed
+    -- 0.84, was cut by the link slots and was earlier than the links, so 92fc424a's later-only rule never showed it).
+    -- Not keyed on a question's type: BEAM's types are the answer key's kind of knowledge. Keyed C|<q>|<links>/<lines>.
     with gained as (
         select distinct x->>'q' as q from jsonb_array_elements(linked) x
         union
         select 'root' where jsonb_array_length(linked) > 0
-    ), mine as (
-        select gq.q, e->>'doc' as doc, max((e->>'p')::real) as p
+    ), links as (
+        select gq.q, count(distinct e->>'doc') as n
           from gained gq, jsonb_array_elements(ev) e
          where e->>'q' = gq.q or (gq.q = 'root')
-         group by 1, 2
-    ), counted as (
-        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
+         group by 1 having count(distinct e->>'doc') >= (sp->>'close_min_links')::int
     ), assessed as (
         -- every read assessed so far against the question, above the floor
-        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc
+        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc, (x.value #>> '{}')::real as p
           from jsonb_each(ans) x
          where x.key like 'A|%' and (x.value #>> '{}')::real >= (sp->>'link_floor')::real
            and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
                                                     jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
-    ), docs as (
-        select distinct doc from mine union select distinct doc from assessed
+    ), top as (
+        select a.q, a.doc, a.p, row_number() over (partition by a.q order by a.p desc, a.doc) as rk
+          from assessed a join links l on l.q = a.q
+    ), cut as (
+        select * from top where rk <= (sp->>'evidence_lines')::int
     ), pl as (
-        select aiq.walk_places(inp, array(select doc from docs)) as places,
-               aiq.walk_lines(inp, array(select doc from docs)) as lines
-    ), newest as (
-        select m.q, max((pl.places->m.doc->>'said_at')::timestamptz) as at from mine m, pl group by m.q
-    ), later as (
-        select a.q, a.doc from assessed a join newest nw on nw.q = a.q, pl
-         where (pl.places->a.doc->>'said_at')::timestamptz > nw.at
-           and not exists (select 1 from mine m where m.q = a.q and m.doc = a.doc)
+        select aiq.walk_places(inp, array(select distinct doc from cut)) as places,
+               aiq.walk_lines(inp, array(select distinct doc from cut)) as lines
     ), shown as (
-        select x.q, x.doc, x.later, row_number() over (partition by x.q order by x.at desc nulls last, x.doc) as k
-          from (select m.q, m.doc, false as later, (pl.places->m.doc->>'said_at')::timestamptz as at
-                  from mine m, pl
-                 where m.doc in (select doc from mine m2 where m2.q = m.q order by m2.p desc limit (sp->>'evidence_lines')::int)
-                union all
-                select lt.q, lt.doc, true, (pl.places->lt.doc->>'said_at')::timestamptz from later lt, pl) x
+        select cu.q, cu.doc, row_number() over (partition by cu.q order by (pl.places->cu.doc->>'said_at')::timestamptz desc nulls last, cu.doc) as k
+          from cut cu, pl
     ), keyed as (
-        select ct.q, ct.n, (select count(*) from later lt where lt.q = ct.q) as m from counted ct
+        select l.q, l.n, (select count(*) from cut cu where cu.q = l.q) as m from links l
     )
     select coalesce(jsonb_agg(jsonb_build_object(
-               'key', 'C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end, 'q', kd.q,
+               'key', 'C|' || kd.q || '|' || kd.n || '/' || kd.m, 'q', kd.q,
                'text', (select string_agg(format('%s) [%s] "%s"', sh.k,
                                                  coalesce(to_char((pl.places->sh.doc->>'said_at')::timestamptz, 'YYYY-MM-DD'), 'undated'),
                                                  aiq.walk_snippet(coalesce(pl.lines->>sh.doc, sh.doc))), ' ' order by sh.k)
                           from shown sh, pl where sh.q = kd.q),
-               'p', ans->('C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end)) order by kd.q), '[]'::jsonb)
+               'p', ans->('C|' || kd.q || '|' || kd.n || '/' || kd.m)) order by kd.q), '[]'::jsonb)
       into closes
       from keyed kd
-     where open_ ? kd.q;
+     where open_ ? kd.q and kd.m > 0;
     -- 3. candidate parts (walk.md §6 move 2): parts open only under the root, so they never nest. The candidates are
     -- the terms the most reads linked to the root share (at least two), ties by specificity (fewest documents holding
     -- them), not yet asked about. The rarest term of each linked read is not used: on REM-1245's live ladder walk it

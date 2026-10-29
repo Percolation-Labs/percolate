@@ -8,11 +8,11 @@
 --     nothing, so no part is offered. The leads out of 1 are judged against the root: term:ceiling accepted.
 --   wave 1 travels ceiling to 2 and fills from search (11, 12). Iteration 2 links 2 to the root; 1 and 2 share
 --     'ceiling', the one term two root-linked reads hold, so S|root|ceiling is asked and opens part:ceiling. The
---     root's close is asked (C|root|2) and refused. The leads out of 2 are judged against both open questions:
+--     root's close is asked (C|root|2/2: two links, two lines above the floor) and refused. The leads out of 2 are judged against both open questions:
 --     term:ladder is low for the root and high for the part, so it is accepted and serves part:ceiling.
 --   wave 2 reads search's next (13), travels ladder to 5 and 7, and fills its fourth read from search (14, which the
 --     replay never assessed, so it is linked to nothing). Iteration 3 links 5 and 7 to the part; the
---     part closes (C|part:ceiling|2), and the root, with no part left open, closes on its four reads (C|root|4).
+--     part closes (C|part:ceiling|2/2), and the root, with no part left open, closes on its four links, judged on the two lines assessed against it (C|root|4/2).
 --   wave 3 reads nothing: the root is answered, and the walk stops `answered`.
 -- What is held: the board is the fold of each wave's recorded moves; walk_stack, walk_clues' serves and
 -- walk_structure read it; a verdict the replay lacks decides nothing; walk_keep makes it graph rows.
@@ -71,11 +71,11 @@ begin
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
         'A|root|wt/1', 0.9, 'A|root|wt/2', 0.9, 'A|root|wt/11', 0.1, 'A|root|wt/12', 0.1,
         'L|root|term:ceiling', 0.9, 'L|root|term:hallway', 0.2,
-        'S|root|ceiling', 0.8, 'C|root|2', 0.4,
+        'S|root|ceiling', 0.8, 'C|root|2/2', 0.4,
         'L|root|term:ladder', 0.2, 'L|part:ceiling|term:ladder', 0.9,
         'A|root|wt/13', 0.1, 'A|part:ceiling|wt/13', 0.1,
         'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.3, 'A|part:ceiling|wt/7', 0.9,
-        'C|part:ceiling|2', 0.9, 'C|root|4', 0.95))::text);
+        'C|part:ceiling|2/2', 0.9, 'C|root|4/2', 0.95))::text);
 end $$;
 
 select aiq.install_walk_workflow('walk_fixture_stack', 'jev', 6);
