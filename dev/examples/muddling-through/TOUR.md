@@ -76,12 +76,8 @@ against a CI fixture, so a fresh install is where they are proven):
 select name, dim, provider, is_default from aiq.embedding_models;
 -- every walk the bundle started ran to the end: each one's question step embeds through the stack's own service
 select status, count(*) from aiq.walk_runs group by 1;
--- every replayed walk is the walk it replays: a lead with no recorded verdict means the graph changed since the
--- recording, and the replay is partial (bill, 29 Oct); this must be 0
-select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
- where r.replays is not null and c.decision = 'unjudged';
--- and each replayed walk says so itself: walk_summary labels a replay that met leads with no verdict as not
--- faithful (bill, 29 Oct); every row here must read true
+-- every replayed walk is the walk it replays: walk_summary labels a replay that met a lead with no recorded
+-- verdict as not faithful, with the count (bill, 29 Oct); every row here must read true
 select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
   from aiq.walk_runs r where r.replays is not null;
 ```
@@ -159,3 +155,7 @@ Each is checked on the run, and a stuck reader at any of them becomes a board ca
   signing secret. Pass --secret or set P8_JWT_SECRET", because the secret lives in the stack. The tour now mints the
   token where get-percolate's quickstart does, inside the stack's content container. A reader following the
   quickstart would not hit this; one who reached for the CLI the article installs would.
+- **A wrong check of mine (smoke 2, run 40946384658).** The tour counted walk_clues' 'unjudged' leads as the
+  replay's test and failed on 2,242 and 20. walk_clues reads only the plain verdict map, and a stack-on walk keeps
+  its verdicts per open question, so the count says nothing about whether the replay held a verdict. The test is
+  walk_summary's decider.faithful (#326), which reads both.
