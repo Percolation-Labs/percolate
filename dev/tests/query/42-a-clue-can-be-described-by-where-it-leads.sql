@@ -75,7 +75,7 @@ declare
                                        'text', 'Did I rent a ladder?'),
         'search', to_jsonb(array['wd/1','wd/11','wd/12','wd/2','wd/3','wd/4']),
         'replay', (select id from content.resources where uri = 'walk-desc:targets'), 'offline', true,
-        'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1, 'describe', 'targets'));
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 2, 'seeds', 1, 'per_wave', 1, 'describe', 'targets'));
     src uuid := (select id from content.resources where uri = 'walk-desc:source');
     r uuid;
     st jsonb;

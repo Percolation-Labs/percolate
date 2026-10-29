@@ -13,7 +13,7 @@ select workflow.start_workflow('walk', jsonb_build_object(
          'question', jsonb_build_object('node_id', n.id, 'text', r.title),
          'replay', (select v.id from content.resources v join content.channels vc on vc.id = v.channel_id
                      where vc.name = 'walk-replays' and v.title = r.title),
-         'offline', true, 'settings', jsonb_build_object('span', 2, 'cap', 10)))
+         'offline', true, 'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'span', 2, 'cap', 10)))
   from content.resources r
   join content.channels c on c.id = r.channel_id and c.name = 'walk-questions'
   join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id

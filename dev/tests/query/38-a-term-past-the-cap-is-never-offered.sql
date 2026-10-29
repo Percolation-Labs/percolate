@@ -73,7 +73,7 @@ declare
         'question', jsonb_build_object('text', 'Which of my renovation jobs need a ladder or new tiles?'),
         'search', to_jsonb(array['wr/1','wr/11','wr/12','wr/13','wr/14','wr/2','wr/3','wr/4','wr/5','wr/6','wr/7','wr/8']),
         'replay', (select id from content.resources where uri = 'walk-range:replay'), 'offline', true,
-        'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1, 'cap', 3));
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 2, 'seeds', 1, 'per_wave', 1, 'cap', 3));
     r uuid;
     got text;
 begin

@@ -81,7 +81,7 @@ declare
                                                     where k.key = 'wl/1'),
                                        'text', 'Did I rent a ladder?'),
         'search', to_jsonb(array['wl/1','wl/11','wl/12','wl/2','wl/3','wl/4']), 'offline', true,
-        'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1));
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 2, 'seeds', 1, 'per_wave', 1));
     runs jsonb := '{}'::jsonb;
     w    text;
     r    uuid;

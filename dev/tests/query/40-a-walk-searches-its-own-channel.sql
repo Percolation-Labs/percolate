@@ -85,7 +85,7 @@ steps:
   - id: hold
     sql: {statement: "select 1"}
 $y$);
-    r := workflow.start_workflow('walk_query40', '{"question": {"text": "ladder rung"}, "channel": "query40-a"}');
+    r := workflow.start_workflow('walk_query40', '{"question": {"text": "ladder rung"}, "channel": "query40-a", "settings": {"stack": false, "describe": "source", "order": "p"}}');
     st := aiq.walk_start(r, '[1,0,0,0]');
     select jsonb_agg('query40-a:' || n order by n) into want from generate_series(1, 6) n;
     if st->'order' is distinct from want then

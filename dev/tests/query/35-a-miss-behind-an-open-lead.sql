@@ -75,7 +75,7 @@ declare
         'question', jsonb_build_object('text', 'How should I sequence my budget, tools and ladder?'),
         'search', to_jsonb(array['wm/1','wm/11','wm/12','wm/13','wm/14','wm/2','wm/3','wm/4','wm/5','wm/6','wm/7','wm/8']),
         'replay', (select id from content.resources where uri = 'walk-miss:replay'), 'offline', true,
-        'settings', jsonb_build_object('wave', 3, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 3, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     r uuid;
     got text;
 begin

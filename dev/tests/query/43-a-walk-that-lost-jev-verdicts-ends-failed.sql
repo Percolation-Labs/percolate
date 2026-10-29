@@ -61,7 +61,7 @@ declare
         'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
-        'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     r uuid := workflow.start_workflow('walk_fixture_lost', inp);
     t record;
     asked int := 0;
