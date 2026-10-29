@@ -200,7 +200,7 @@ begin
                               order by o.q, r.o), '[]'::jsonb)
       into assess
       from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
-    -- A read links to a question when its P clears stack.answers_gate AND ranks in the top stack.link_share of the reads
+    -- A read links to a question when its P clears stack.link_floor AND ranks in the top stack.link_share of the reads
     -- assessed against that question so far (walk.md §6 move 1, F10). Rank, because at a fixed gate the links were
     -- mostly noise (6% evidence at 0.5 against a 3.9% base; the top 2% by rank were 19%, REM-1240). It is relative, so
     -- a walk with no evidence still links its best reads; the close step is what must say no. "So far" is the reads of
@@ -220,7 +220,7 @@ begin
       into linked
       from jsonb_array_elements(assess) a
       join ranked rk on rk.q = a->>'q' and rk.doc = a->>'doc'
-     where (a->>'p')::real >= (sp->>'answers_gate')::real
+     where (a->>'p')::real >= (sp->>'link_floor')::real
        and rk.rk <= greatest(1, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
     -- 2. close: each open question that gained evidence, by its reads' lines; the root by every read linked to it or
@@ -235,8 +235,8 @@ begin
          where e->>'q' = gq.q or (gq.q = 'root')
          group by 1, 2
     ), counted as (
-        -- close judges a question's links only once it has stack.close_min of them
-        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min')::int
+        -- close judges a question's links only once it has stack.close_min_links of them
+        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
     ), shown as (
         select m.q, m.doc, m.p, row_number() over (partition by m.q order by m.p desc, m.doc) as k from mine m
     )
@@ -306,8 +306,8 @@ begin
               order by (x->>'p')::real desc, x->>'term' loop
         if nparts >= (sp->>'max_open')::int then
             -- the slot rule (F11): a candidate with higher P displaces the weakest open part that has no link of its
-            -- own, at most stack.replacements a wave; the displaced part keeps its leads and its record
-            exit when swaps >= (sp->>'replacements')::int;
+            -- own, at most stack.max_displace a wave; the displaced part keeps its leads and its record
+            exit when swaps >= (sp->>'max_displace')::int;
             select o as q, (qs->o->>'opened_p')::real as p into weak
               from jsonb_array_elements_text(open_) o
              where o <> 'root' and not exists (select 1 from jsonb_array_elements(ev) e where e->>'q' = o)
