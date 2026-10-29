@@ -29,6 +29,8 @@ directory, as data derived from BEAM, carries the same licence; the code that lo
 
 Changes from the original: each user turn's trailing `->-> n,m` plan index is removed from `terms_text`, the text a
 walk tags, and from every piece. The index is BEAM's generator's (sitting, plan step), and plan step predicts which
-exchanges BEAM's questions cite, so no decider may read it (REM-1240). Each piece's vector is still matched by the
-text the study embedded, index included, so the vectors are the study's. Search is not: its keyword half reads the
-stripped text, so search's order, and every walk that starts from it, moves by a few places.
+exchanges BEAM's questions cite, so no decider may read it (REM-1240). Each piece's vector is made from the text it is
+stored with: the 1,858 pieces the strip changed were re-embedded from their stripped text by the stack's own worker
+(the same bge-small; on unchanged pieces it reproduces the study's vectors to cosine 0.999996 or better), so neither
+half of search reads the index. Search's order, and every walk that starts from it, moves by a few places from the
+study's (REM-1245).

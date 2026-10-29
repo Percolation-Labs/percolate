@@ -145,12 +145,14 @@ def main(sample, split=DEFAULT_SPLIT, conversations=DEFAULT_CONVERSATIONS, extra
             uri = f"beam:{run}/{i}"
             cs = []
             for n, c in enumerate(chunks(p["turns"])):
-                # The piece keeps its boundaries and loses the plan index; its vector is still matched by the text the
-                # study embedded, mark included, so the vectors are the study's. Search's keyword half reads the
-                # stripped text, so search's order moves a little (james's run from empty, 40dfbed1).
+                # The piece keeps its boundaries and loses the plan index, and its vector is matched by the text it
+                # is stored with, so vector and text agree: the 1,858 pieces of 1M:22 and 1M:35 the strip changed were
+                # re-embedded by the stack's own worker (bge-small, fastembed) from their stripped text (REM-1245;
+                # before, they kept the study's vector of the marked text). A vector made from any other text is
+                # refused, so a piece without one stops the fetch.
                 piece, v = {"content": MARK_IN_PIECE.sub("", c)}, vectors.get((uri, n))
                 pieces += 1
-                if v and v["sha256"] == hashlib.sha256(c.encode()).hexdigest():
+                if v and v["sha256"] == hashlib.sha256(piece["content"].encode()).hexdigest():
                     piece["vector_f32"] = v["vector_f32"]
                     matched += 1
                 cs.append(piece)
