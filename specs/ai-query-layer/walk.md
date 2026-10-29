@@ -30,12 +30,12 @@ telling it to do something, or the walk returns a result it can interrogate.
 
 | # | principle | mark | evidence, or the test that would show it |
 |---|---|---|---|
-| 3 | Search is a branching process, kept critical by a counter-process that tracks direction and progress | PARTLY SHOWN | The open search is supercritical: one walk accepted 1,035 of 1,927 leads and opened 305 (Appendix A, F8). 80% of the headroom at 100 reads lies behind accepted leads never opened (the replay tests, §3). The counter-process that fixes it is §8–§10, TO BE SHOWN. |
+| 3 | Search is a branching process, kept critical by a counter-process that tracks direction and progress and closes out leads no longer worth chasing | PARTLY SHOWN | The open search is supercritical: one walk accepted 1,035 of 1,927 leads and opened 305 (Appendix A, F8). 80% of the headroom at 100 reads lies behind accepted leads never opened (the replay tests, §3). The counter-process that fixes it is §8–§10, TO BE SHOWN. |
 | 4 | The graph: node types and link kinds built at index time, bitemporal, closed and never deleted, multi-index | SHOWN (structure); PARTLY SHOWN (multi-index) | Every missed answer piece lies within 2 lead hops of search's top 10, and none hangs on one hub (REM-1204). Bitemporal edges and replay as of a start: REM-1199. The multi-index term is defined once in REM-1251. |
 | 5 | A lead shows Jev what its targets say and where they sit, built at ingest | SHOWN | `lines` raises within-source AUC to 0.657 [0.611, 0.703] from `source`'s 0.548 (REM-1240). |
 | 6 | Waves: the decider acts before the read; leads are raised, judged, then opened by P per unread target | PARTLY SHOWN | Opening by P per unread target landed +1.04 fresh evidence per walk [+0.23, +1.98] in a one-step replay that matched the walk's picks 36–46% (REM-1240). |
 | 7 | Jev judges each lead once, against the open questions | SHOWN (as built); the state line SHOWN not to help | The one-line board state scores −0.018 [−0.048, +0.016] against `lines` alone (REM-1240). |
-| 8 | Stack B, Jev's direction memory: the found evidence in its state, the question unchanged | PARTLY SHOWN | It helps when it is exact: a small exact B lifts progress against echo by +0.254 on the echo case, pooled +0.036 [−0.004, +0.080]. Jev cannot yet build it: a Jev-built B pools −0.041 [−0.083, −0.001] (bill, REM-1244). |
+| 8 | Stack B, Jev's direction memory: the small per-wave set of finds that added the most evidence, used to judge which new leads add more | PARTLY SHOWN | It helps when it is exact: a small exact B lifts progress against echo by +0.254 on the echo case, pooled +0.036 [−0.004, +0.080]. Jev cannot yet build it: a Jev-built B pools −0.041 [−0.083, −0.001] (bill, REM-1244). |
 | 9 | Stack A, the full evidence streamed to the caller, which Jev never holds | TO BE SHOWN | The test: A at a top-k-per-wave cut against V0's reads in order, and against S's links on the pilot, on recall and precision at equal list size (§9). |
 | 10 | The question stack: parts, splitting, and closing by structure | PARTLY SHOWN | Template parts do not help: S − P −1.1 [−3.1, +0.2] at 100 reads (§17). Caller-supplied parts show no direction on two blind sets (§10). Expected cardinality separates set from single questions at AUC 0.936. The per-line close failed its calibration (Appendix A, F12). The slot-structured stack is TO BE SHOWN. |
 | 11 | Stops: stack empty, budget, dry, cold | PARTLY SHOWN | Built. The cold stop runs only under the stack, and it cost S evidence: past S's own stop P found 16 more labelled pieces, 14 through leads (§11). |
@@ -58,8 +58,8 @@ budget allows.
   answer.
 
 **The counter-process.** A second process runs beside the search and tracks direction and progress: what has been
-found, what is still open, and whether the last wave moved toward it. It is what keeps the search critical, by
-lowering the P of leads that only echo what was found (§8), by narrowing what a lead is judged against (§10), and by
+found, what is still open, and whether the last wave moved toward it. It closes out leads no longer worth chasing,
+and that is what keeps the search critical: it lowers the P of leads that only echo what was found (§8), by narrowing what a lead is judged against (§10), and by
 stopping when nothing believed in is left to follow (§11). Jev sees the direction memory (Stack B, §8), and never
 the full evidence (Stack A, §9), so the decider's context stays small however long the walk runs.
 
@@ -236,8 +236,9 @@ them from new information. Its AUC on leads fell to 0.27–0.36 in later waves (
 is itself evidence is about 12 times as likely to lead to more, yet Jev gives it about 0.04 more P, because nothing
 it is shown says which reads were evidence.
 
-**The design** (bill, from Sirsh's 18:26Z and 19:50Z). B is a small working memory of the evidence found so far,
-put into Jev's state beside the question. The question itself is unchanged. B is what the counter-process (§3)
+**The design** (Sirsh, 18:26Z, 19:50Z and M-20261029-195722-b687; built and tested by bill). B is the small per-wave
+set of finds that added the most evidence, put into Jev's state beside the question and used to judge which new
+leads add more. The question itself is unchanged. B is what the counter-process (§3)
 hands the decider: the direction already covered, so a lead toward more of the same can be told from a lead toward
 what is missing.
 
