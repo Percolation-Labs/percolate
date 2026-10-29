@@ -100,6 +100,22 @@ jobs:
           nohup percolate ui serve --host 127.0.0.1 --port 8082 > ../out/04-ui.log 2>&1 &
           for i in $(seq 1 30); do curl -fs http://127.0.0.1:8082/ > ../out/04-ui.html && break; sleep 2; done
           grep -qi walks ../out/04-ui.html
+      - name: 4b. the app serves its icon, and the Walks screen renders (a headless browser has no tab strip, so the tab icon itself is the Mac leg's)
+        run: |
+          curl -fsS -o out/favicon.svg -w '%{http_code} %{content_type}\n' http://127.0.0.1:8082/favicon.svg | tee out/04b-favicon.txt
+          grep -q '^200 image/svg+xml' out/04b-favicon.txt
+          grep -Eiq '<link[^>]+rel="?(shortcut )?icon"?[^>]+favicon\.svg|<link[^>]+favicon\.svg[^>]+rel="?icon' out/04-ui.html
+          cd tour && . .venv/bin/activate && pip -q install playwright && python -m playwright install --with-deps chromium > /dev/null
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              b = p.chromium.launch(); pg = b.new_page(viewport={"width": 1400, "height": 900})
+              pg.goto("http://127.0.0.1:8082/#/walks"); pg.wait_for_timeout(3000)
+              pg.screenshot(path="../out/04b-walks.png", full_page=True)
+              icon = pg.evaluate("[...document.querySelectorAll('link[rel~=icon]')].map(l => l.href)")
+              print("icon links:", icon); assert any(h.endswith("/favicon.svg") for h in icon), icon
+              b.close()
+          PY
       - name: 5. query it from psql
         run: |
           psql "$P8_DSN" -c "select run, question_text, status from aiq.walk_runs order by created_at" | tee out/05-psql.txt

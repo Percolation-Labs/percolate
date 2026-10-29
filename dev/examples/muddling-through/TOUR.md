@@ -100,6 +100,9 @@ readable by the account that ran it, its org and operators; the bundle's walks a
 one account sees them. Oracle mode: in a walk, open 'oracle' and choose `beam-walks/oracle/all.json`. To fill in on the
 run: one screenshot each of a question, its stack, its graph and a finished walk with oracle mode off and on.
 
+The app's icon: `curl -sI http://localhost:8082/favicon.svg` answers 200 with `image/svg+xml`, and the browser tab
+shows it (checked by eye on the Mac leg; the runner checks the page links it and keeps a screenshot of the Walks screen).
+
 ## 5. Query it from your own client (to run)
 
 The same rows the screen shows, from psql:
