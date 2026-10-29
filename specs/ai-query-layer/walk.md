@@ -906,9 +906,12 @@ thing to find (REM-1244). Two forms come after it.
     checked against the rubric for repeated distinctive words, and any that repeat are quoted. Otherwise a result
     that leads score better against the parts measures the key, not the stack. The same rule holds for any example
     the article shows.
-  - *Status:* a candidate, pending bill's directional check (3–4 recorded questions, hand-written sub-questions, Jev
-    re-judging the recorded leads). If the leads score no better against the parts than against the root, it is not
-    built for part three.
+  - *Status: not built for part three* (bill's directional check, 29 Oct 18:11Z, REM-1244). Jev re-judged recorded
+    leads on 4 questions, against sub-questions and against the original question. The best sub-question's score
+    minus the original's came to −0.036, +0.005, −0.030 and −0.068, so there is no direction, and by this section's
+    rule it is not built. Part three's V0 is the plain walk with the original question. The stack appears in the
+    document only as measured: the template parts and this check. This rules out the caller-supplied stack as it
+    was tested here, not real sub-questions in general. Those belong to the structured form below.
 - **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
   structure.** Each open question is a slot built from closed lists:
   - *subject:* an entity in the graph;
