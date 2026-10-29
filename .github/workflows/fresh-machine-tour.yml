@@ -51,8 +51,11 @@ jobs:
       - name: 2. sign in
         run: |
           cd tour && . .venv/bin/activate
-          psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" | tee ../out/02-sign-in.txt
-          percolate auth token --email me@example.com > ../out/token
+          # the quickstart's route: the token is signed inside the stack, which holds the secret it verifies with
+          uid=$(psql "$P8_DSN" -Atc "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')")
+          echo "first user $uid" | tee ../out/02-sign-in.txt
+          docker compose exec -T content percolate auth token --sub "$uid" > ../out/token
+          test -s ../out/token
       - name: 3. fetch the example's data
         run: |
           cd tour && . .venv/bin/activate
