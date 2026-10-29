@@ -21,9 +21,9 @@ declare
 begin
     insert into aiq.parameters (name, part, value, controls, read_by, why)
     values ('walk.query_fiftyone', 'walk', '1', 'query/51', 'query/51', 'query/51');
-    -- a row from before this transaction (as every row is, once committed): from -infinity
-    if (select valid_from from aiq.parameters where name = 'walk.query_fiftyone') is distinct from '-infinity' then
-        raise exception 'a new name did not start from -infinity';
+    -- a row from before this transaction (as every row is, once committed): from 1970-01-01 UTC, before any run
+    if (select valid_from from aiq.parameters where name = 'walk.query_fiftyone') is distinct from '1970-01-01 00:00:00+00'::timestamptz then
+        raise exception 'a new name did not start from 1970-01-01';
     end if;
     -- seeding again what is there adds no row, as every upgrade does
     select count(*) into n from aiq.parameters;
@@ -40,9 +40,9 @@ begin
     -- changes that new row in place
     update aiq.parameters set value = '2' where name = 'walk.query_fiftyone';
     update aiq.parameters set value = '3', why = 'query/51, again' where name = 'walk.query_fiftyone';
-    if (select string_agg(format('%s[%s,%s)', value, case when valid_from = now() then 'now' else valid_from::text end,
+    if (select string_agg(format('%s[%s,%s)', value, case when valid_from = now() then 'now' when valid_from = '1970-01-01 00:00:00+00'::timestamptz then 'start' else valid_from::text end,
                                  case when valid_to = now() then 'now' else coalesce(valid_to::text, '') end), ' ' order by valid_from)
-          from aiq.parameters where name = 'walk.query_fiftyone') is distinct from '1[-infinity,now) 3[now,)' then
+          from aiq.parameters where name = 'walk.query_fiftyone') is distinct from '1[start,now) 3[now,)' then
         raise exception 'the history is %, where it is 1 until now and 3 from now', (select string_agg(format('%s[%s,%s)', value,
             valid_from, valid_to), ' ' order by valid_from) from aiq.parameters where name = 'walk.query_fiftyone');
     end if;

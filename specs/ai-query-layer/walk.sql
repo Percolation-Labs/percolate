@@ -68,28 +68,43 @@ create table if not exists aiq.parameters (
     set_by     text not null default 'spec',
     updated_at timestamptz not null default now(),
     -- the row's interval: a value holds from valid_from until valid_to (null while it is the current one)
-    valid_from timestamptz not null default '-infinity',
+    valid_from timestamptz not null default '1970-01-01 00:00:00+00',
     valid_to   timestamptz,
     primary key (name, valid_from),
-    check (valid_to is null or valid_to >= valid_from),
-    check (split_part(name, '.', 1) = part)
+    constraint parameters_interval check (valid_to is null or valid_to >= valid_from),
+    constraint parameters_part_name check (split_part(name, '.', 1) = part)
 );
 -- HISTORY (Sirsh, M-20261029-142849-f9d4): the table is append-only, so every walk reads its defaults and wordings as
 -- of its own start. A change closes the current row and adds the new value as the next one (aiq.parameters_append);
 -- a delete closes the row; a closed row never changes. A row the spec seeds, and every row from before history was
--- kept, holds from -infinity: what a parameter was before its first recorded change is not known, so its first value
+-- kept, holds from 1970-01-01 UTC, before any run (not -infinity: the upgrade gates compare tables through XML,
+-- which has no infinite timestamp): what a parameter was before its first recorded change is not known, so its first value
 -- stands for it. On 5801 a default changed under finished walks and they were read back under the new one (REM-1245).
 do $$
+declare
+    c record;
 begin
     if not exists (select 1 from pg_attribute where attrelid = 'aiq.parameters'::regclass and attname = 'valid_from'
                       and not attisdropped) then
         alter table aiq.parameters
-            add column valid_from timestamptz not null default '-infinity',
+            add column valid_from timestamptz not null default '1970-01-01 00:00:00+00',
             add column valid_to timestamptz,
             drop constraint parameters_pkey,
             add primary key (name, valid_from),
-            add check (valid_to is null or valid_to >= valid_from);
+            add constraint parameters_interval check (valid_to is null or valid_to >= valid_from);
     end if;
+    -- The table-level checks by name, so an upgraded table and a fresh one are the same: before they were named,
+    -- each took parameters_check or parameters_check1 in the order it was added, which differs between the two paths.
+    -- Only a table still carrying a numbered name is renamed (a brief exclusive lock, once).
+    for c in select conname, pg_get_constraintdef(oid) as d from pg_constraint
+              where conrelid = 'aiq.parameters'::regclass and contype = 'c'
+                and conname in ('parameters_check', 'parameters_check1') loop
+        if c.d like '%split_part%' then
+            execute format('alter table aiq.parameters rename constraint %I to parameters_part_name', c.conname);
+        elsif c.d like '%valid_to%' then
+            execute format('alter table aiq.parameters rename constraint %I to parameters_interval', c.conname);
+        end if;
+    end loop;
 end $$;
 create unique index if not exists parameters_current on aiq.parameters (name) where valid_to is null;
 
@@ -488,24 +503,23 @@ $$;
 -- read them directly worked only as the database owner; cory's UI, signed in, got 'permission denied for table runs'.
 -- The predicate is the engine's own, as workflow.plan_status asks it: an operator session, or a caller
 -- workflow.may_access_run admits. Everything else a walk reads (documents, links, nodes) keeps the caller's own RLS.
+-- The predicate lives in workflow.readable_run, readable_run_tasks and readable_runs, the definers the run's own engine
+-- owns; these are INVOKER wrappers over them, so nothing on aiq's read path runs past the caller's RLS (query/06).
 create or replace function aiq.walk_run(p_run uuid)
 returns setof workflow.runs
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select r.* from workflow.runs r
-     where r.id = p_run and (rbac.is_operator() or workflow.may_access_run(r.id, 'select'))
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from workflow.readable_run(p_run)
 $$;
 create or replace function aiq.walk_tasks(p_run uuid)
 returns setof workflow.tasks
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select t.* from workflow.tasks t
-     where t.run_id = p_run and (rbac.is_operator() or workflow.may_access_run(p_run, 'select'))
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from workflow.readable_run_tasks(p_run)
 $$;
 -- Every walk the caller may read, for the list of walks (aiq.walk_runs).
 create or replace function aiq.walk_runs_visible()
 returns setof workflow.runs
-language sql stable security definer set search_path = pg_catalog, public as $$
-    select r.* from workflow.runs r
-     where r.input ? 'question' and (rbac.is_operator() or workflow.may_access_run(r.id, 'select'))
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select * from workflow.readable_runs() r where r.input ? 'question'
 $$;
 revoke all on function aiq.walk_run(uuid), aiq.walk_tasks(uuid), aiq.walk_runs_visible() from public;
 grant execute on function aiq.walk_run(uuid), aiq.walk_tasks(uuid), aiq.walk_runs_visible() to authenticated, worker;
@@ -706,6 +720,29 @@ $$;
 --   beside:{key: [key, ...]} within span either side, by walk_next
 --   near:  {key: [key, ...]} the first `near` nearest, and who has it as one
 -- A document's text is not in it: aiq.walk_texts fetches the few a round's snippets need.
+-- Each document's vector, the mean of its pieces' bge-small vectors, for a channel or a list of documents (REM-1245:
+-- the cosine quantile a graph keeps, and walk.split = clusters). Read through EXECUTE, because a database with no
+-- bge-small embedding space has no aiq."emb_bge_small_en_v1.5" at all, and a function that names it could not even
+-- be planned there: it returns no vectors, and what needs them is skipped.
+create or replace function aiq.walk_doc_vectors(p_channel text default null, p_docs text[] default null)
+returns table (doc text, vec vector)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+begin
+    if to_regclass('aiq."emb_bge_small_en_v1.5"') is null then
+        return;
+    end if;
+    return query execute $q$
+        select coalesce(r.uri, r.id::text), avg(e.embedding)::vector
+          from content.resources r
+          join content.resource_chunks ck on ck.resource_id = r.id
+          join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
+         where ($1::text is null or r.channel_id in (select ch.id from content.channels ch where ch.name = $1))
+           and ($2::text[] is null or coalesce(r.uri, r.id::text) = any($2))
+         group by 1 $q$ using p_channel, p_docs;
+end;
+$$;
+grant execute on function aiq.walk_doc_vectors(text, text[]) to authenticated, worker;
+
 create or replace function aiq.walk_graph_build(p_input jsonb, p_at timestamptz default null)
 returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
@@ -788,11 +825,7 @@ begin
     -- 2,000 pairs, chosen by a fixed hash order so the same history always gives the same value. Channel scopes only.
     if p_input ? 'channel' then
         with v as (
-            select coalesce(r.uri, r.id::text) as doc, avg(e.embedding) as vec
-              from content.resources r join content.channels ch on ch.id = r.channel_id and ch.name = p_input->>'channel'
-              join content.resource_chunks ck on ck.resource_id = r.id
-              join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
-             group by 1
+            select dv.doc, dv.vec from aiq.walk_doc_vectors(p_input->>'channel') dv
         ), n as (
             select doc, vec, row_number() over (order by md5(doc)) as rn, count(*) over () as cnt from v
         )

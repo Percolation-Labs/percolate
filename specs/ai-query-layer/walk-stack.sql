@@ -337,14 +337,10 @@ begin
         with recursive lr as (
             select distinct x->>'doc' as doc from jsonb_array_elements(ev) x where x->>'q' = 'root'
         ), vecs as (
-            select lr.doc, avg(e.embedding) as v
-              from lr
-              join content.resources r on coalesce(r.uri, r.id::text) = lr.doc
-              join content.resource_chunks ck on ck.resource_id = r.id
-              join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
+            select dv.doc, dv.vec as v
+              from aiq.walk_doc_vectors(null, array(select doc from lr)) dv
              -- the graph's cosine for this quantile; a graph kept before it, or for another quantile, has none
              where (g->'cos_quantile'->>'q')::float8 = (sp->>'cluster_quantile')::float8
-             group by lr.doc
         ), pairs as (
             select a.doc as a, b.doc as b from lr a, lr b
              where a.doc < b.doc
@@ -848,7 +844,7 @@ begin
     select * into root from aiq.nodes where id = (inp->'question'->>'node_id')::uuid;
     for q in select key, value from jsonb_each(board->'questions') loop
         insert into aiq.nodes (entity_type, entity_id, summary, org_id, visibility, owner_id)
-        values ('walk_question', md5(p_run::text || ':' || q.key)::uuid, q.value->>'text',
+        values ('walk_question', percolate.uuidv5(percolate.id_namespace('walk_question'), p_run::text || ':' || q.key), q.value->>'text',
                 coalesce(root.org_id, rbac.shared_org_id()), coalesce(root.visibility, 'private'), root.owner_id)
         on conflict (entity_type, entity_id) do update set summary = excluded.summary
         returning id into nid;
