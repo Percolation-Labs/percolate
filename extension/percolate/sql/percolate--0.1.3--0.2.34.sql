@@ -44012,6 +44012,23 @@ begin
                         left join lateral (select (r->>'wave')::int as wave, (r->>'k')::int as k, r->>'doc' as doc
                                              from jsonb_array_elements(reads) r
                                             where it->'docs' ? (r->>'doc') order by (r->>'k')::int limit 1) fr on true),
+            -- per labelled piece, when a lead toward it was first offered and first accepted, and when the walk read
+            -- it (cory and Sirsh, M-20261029-122922-d364): a late read after an early offer is a judging miss, a late
+            -- offer is distance. A lead's targets are as it was raised, so 'offered' means it led there unread.
+            'timeline', (select coalesce(jsonb_agg(jsonb_build_object(
+                                 'doc', d.doc,
+                                 'first_offered_wave', fo.wave, 'first_offered_lead', fo.key,
+                                 'first_accepted_wave', fa.wave, 'first_accepted_lead', fa.key, 'first_accepted_p', fa.p,
+                                 'read_wave', rd.wave, 'read_ord', rd.ord, 'read_via', rd.via,
+                                 'wait', rd.wave - fo.wave) order by d.doc), '[]'::jsonb)
+                           from unnest(p_oracle) d(doc)
+                           left join lateral (select c.wave, c.key from aiq.walk_state_clues(st) c
+                                               where d.doc = any(c.targets) order by c.wave, c.key limit 1) fo on true
+                           left join lateral (select c.wave, c.key, c.p from aiq.walk_state_clues(st) c
+                                               where d.doc = any(c.targets) and c.decision = 'accepted'
+                                               order by c.wave, c.p desc, c.key limit 1) fa on true
+                           left join lateral (select r.wave, r.ord, r.via from aiq.walk_state_reads(st) r
+                                               where r.doc = d.doc order by r.wave, r.ord limit 1) rd on true),
             'ceiling', jsonb_build_object('built', false,
                                           'note', 'the oracle decider of walk.md §11 is not in the query layer yet')));
     end if;
