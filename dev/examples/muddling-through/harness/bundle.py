@@ -145,7 +145,11 @@ def export_walks(dsn, walks, out):
         if not order:
             sys.exit(f"run {run} recorded no search order to ship")
         graphs.add((inp["channel"], json.dumps(settings, sort_keys=True)))
+        # Each start in its own transaction: with search's order given, a replay has no worker step to wait on, so
+        # start_workflow runs the whole walk inline, and the 30 s statement_timeout workflow.run_sql sets locally for
+        # a step would otherwise outlive it and cancel the next walk (the loader sends start.sql as one string).
         starts.append(
+            "begin;\n"
             "select workflow.start_workflow('walk', jsonb_build_object(\n"
             "  'question', jsonb_build_object('node_id', n.id, 'text', r.title),\n"
             f"  'channel', {sql_text(inp['channel'])}, 'offline', true,\n"
@@ -153,7 +157,8 @@ def export_walks(dsn, walks, out):
             f"  'settings', {sql_text(json.dumps(settings, sort_keys=True))}::jsonb,\n"
             f"  'search', {sql_text(json.dumps(order))}::jsonb))\n"
             "  from content.resources r join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id\n"
-            f" where r.uri like 'question:%' and r.title = {sql_text(q)};")
+            f" where r.uri like 'question:%' and r.title = {sql_text(q)};\n"
+            "commit;")
     write_jsonl(out / "replays.jsonl", replays)
     (out / "check.sql").write_text(CHECK)
     # A graph is kept per channel and settings; build each walk's first, as the setup block does, or the walk builds
@@ -161,7 +166,8 @@ def export_walks(dsn, walks, out):
     index = [f"select aiq.walk_index(jsonb_build_object('channel', {sql_text(c)}, 'settings', {sql_text(st)}::jsonb))->>'uri';"
              for c, st in sorted(graphs)]
     (out / "start.sql").write_text(
-        "-- Starts each shipped walk offline, from the verdicts Jev gave it (replays.jsonl): no model key, $0.\n"
+        "-- Starts each shipped walk offline, from the verdicts Jev gave it (replays.jsonl): no model key, $0. Each walk\n"
+        "-- runs to its end inside its start, so this step returns when they have all finished; then check.sql.\n"
         "select aiq.install_walk_workflow();\n" + "\n".join(index) + "\n\n" + "\n\n".join(starts) + "\n")
     # The replays live in their own channel, which the conversations' sources do not declare.
     (out / "sources.yaml").write_text(
