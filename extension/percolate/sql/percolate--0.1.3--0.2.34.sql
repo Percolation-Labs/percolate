@@ -41767,9 +41767,13 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message from the user''s earlier conversations that the search has already read. Does it hold information needed to answer `question`, or part of it?'),
   'The question Jev answers for each new read and each open question: does this read answer it (REM-1245).', 'aiq.walk_stack_requests',
   'REM-1240''s recognition test, in its words: shown each read as ''the user wrote: "<line>"'', Jev picked out labelled evidence at a mean per-walk AUC of 0.745 [0.690, 0.799] over 53 walks of mixed types (oracle-scored). On REM-1245''s first two live stack walks (an event-ordering and a multi-session question, both all-on-topic) evidence and other reads scored alike (mean P 0.36 against 0.35, and 0.42 against 0.41).'),
- ('decider.task_close', 'decider', to_jsonb(text 'The option lists messages the user wrote that bear on `question`, newest first, each with the date it was said. As of the latest of them, do they answer it fully enough that nothing more needs to be found?'),
-  'The question Jev answers for an open question with new linked reads: are they enough to close it, as of the latest of them (REM-1245, walk spec 92fc424a).', 'aiq.walk_stack_requests',
-  'Dated, newest first and as of the latest because on 1M:35 ku:0 the root closed on a deadline the user had since changed: the undated lines showed the old and new values as equally right (REM-1245''s test walks). Not measured.'),
+ ('decider.task_state', 'decider', to_jsonb(text 'For each option, a message the user wrote, with the date it was said. Does this message answer `question`?'),
+  'Asked of each candidate line of a leaf question, one line at a time: does this line answer it (walk spec 1d5f38d8 §6 move 4). A leaf closes on a line that clears stack.state_gate.', 'aiq.walk_stack_requests',
+  'Jev is never asked whether a set of messages answers a question (Sirsh, 13:15Z): on the ten walks that holistic ask separated asks holding labelled evidence at AUC 0.622 and closed once in ten, wrongly. Jev judges one line well. Not measured in these words.'),
+ ('stack.broad_after', 'stack', '2', 'A root still open with no parts at this wave has had no line answer it: the walk raises DECOMPOSITION_REQUIRED to the client, once, and keeps splitting in the loop.', 'aiq.walk_stack_next',
+  'Breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a Jev call on the root''s words would add a gate nobody has measured. Two waves give the seeds and one wave of leads their chance to answer it. Not measured.'),
+ ('stack.state_gate', 'stack', 'null', 'The P at or above which one line is judged to answer a leaf question, which closes it; unset, the walk records each line''s verdict and closes nothing.', 'aiq.walk_stack_next',
+  'Set on the calibration set registered in walk spec 4fed4425 §14 (F12): the lowest P whose closes are at least 90% correct, a correct close being one whose lines state BEAM''s reference answer, then tested once on a fresh draw. Unset until then.'),
  ('decider.task_split', 'decider', to_jsonb(text 'For each option, a narrower question. Is it a part of `question` that a complete answer needs?'),
   'The question Jev answers for each candidate part (REM-1245).', 'aiq.walk_stack_requests',
   'Not measured.'),
@@ -42719,11 +42723,12 @@ begin
         raise invalid_parameter_value using message = format('walk.order is p or per_target here, not %s', s->>'order'),
             hint = 'votes and wvotes exist only in core''s Python walk';
     end if;
-    -- The question stack (REM-1245): with the root answered there is nothing left to look for, and the walk stops.
-    if st->'board'->'questions'->'root'->>'state' = 'answered' then
+    -- The question stack (REM-1245): with the root closed (answered, or partly answered with the rest stale) the stack
+    -- is empty and there is nothing left to look for, so the walk stops (walk.md §8).
+    if coalesce(st->'board'->'questions'->'root'->>'state', 'open') <> 'open' then
         return jsonb_build_object('wave', wn, 'si', si, 'reads', '[]'::jsonb, 'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
                                   'judged', 0, 'unjudged', 0, 'dry', true,
-                                  'stop', jsonb_build_object('reason', 'answered', 'wave', wn,
+                                  'stop', jsonb_build_object('reason', st->'board'->'questions'->'root'->>'state', 'wave', wn,
                                                              'closed_at', st->'board'->'questions'->'root'->'closed_wave'));
     end if;
     -- Every accepted clue still leading somewhere unread: earlier waves' not
@@ -43435,7 +43440,7 @@ comment on function aiq.walk_coverage(uuid, text[], int[]) is
 -- A WAVE, after the previous wave's reads (wave 0's are search's seeds):
 --     assess  matrix  each new read x each open question: does the read answer it, or part of it?   A|<q>|<read>
 --     shape   matrix  each candidate part: is it a part the root's answer needs?                   S|root|<term>
---                     each open question that gained evidence: do its reads answer it?              C|<q>|<n reads>
+--                     each candidate line of a leaf with links: does this line answer it?          T|<q>|<read>
 --     stack   sql     the moves those verdicts decide, recorded: linked, answered, added, open
 --     judge   matrix  each live lead x each open question it has not been judged against           L|<q>|<lead>
 --     read    sql     a lead's P is its highest against an open question; read as before
@@ -43495,8 +43500,19 @@ begin
                      'opened_p', x->'p', 'state', 'open', 'closed_wave', null, 'close_p', null)));
         end loop;
         for x in select value from jsonb_array_elements(m->'answered') loop
+            if coalesce((x->>'reanswered')::boolean, false) then
+                -- a later line replaced the answer; the earlier ones stay as its history
+                b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
+                               || jsonb_build_object('answer', x->'answer', 'answer_said_at', x->'answer_said_at',
+                                                     'answered_by', (x->'lines') || coalesce(b->'questions'->(x->>'q')->'answered_by', '[]'::jsonb)));
+                continue;
+            end if;
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
-                           || jsonb_build_object('state', 'answered', 'closed_wave', m->'wave', 'close_p', x->'p'));
+                           || jsonb_build_object('state', coalesce(x->>'state', 'answered'), 'closed_wave', m->'wave',
+                                                 'close_p', x->'p', 'closed_by', x->'closed_by', 'answer', x->'answer',
+                                                 'answer_said_at', x->'answer_said_at',
+                                                 'answered_by', coalesce(x->'lines', x->'parts'),
+                                                 'stale_parts', x->'stale_parts'));
         end loop;
         for x in select value from jsonb_array_elements(coalesce(m->'stale', '[]'::jsonb)) loop
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
@@ -43506,6 +43522,10 @@ begin
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
                            || jsonb_build_object('state', 'displaced', 'closed_wave', m->'wave', 'displaced_by', x->'by'));
         end loop;
+        -- a semantic exception raised to the client stays on the board, so it is raised once
+        if jsonb_array_length(coalesce(m->'raised', '[]'::jsonb)) > 0 then
+            b := b || jsonb_build_object('raised', coalesce(b->'raised', '[]'::jsonb) || (m->'raised'));
+        end if;
         -- when each question last gained a link, which is what makes a part stale
         for x in select distinct on (value->>'q') value from jsonb_array_elements(m->'linked') loop
             b := jsonb_set(b, array['questions', x->>'q', 'last_linked_wave'], m->'wave');
@@ -43576,7 +43596,7 @@ declare
     s       jsonb := p_state->'settings';
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
-                                                         'evidence_lines', 'part_wording', 'split_gate']);
+                                                         'evidence_lines', 'part_wording', 'split_gate', 'broad_after']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -43598,6 +43618,8 @@ declare
     weak    record;
     nparts  int;
     swaps   int := 0;
+    live_q  jsonb;                   -- the questions reads are assessed against: open, and answered parts
+    raised  jsonb := '[]'::jsonb;    -- semantic exceptions this wave raises to the client
 begin
     -- the reads of the wave after the last one assessed; none yet, and there is nothing to do
     select coalesce(jsonb_agg(r.value->>'doc' order by r.ordinality), '[]'::jsonb) into reads
@@ -43612,7 +43634,10 @@ begin
                                                                    'stale', '[]'::jsonb, 'displaced', '[]'::jsonb, 'open', open_)));
     end if;
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
-    -- 1. assess: each new read against each open question
+    -- 1. assess: each new read against each open question, and against each answered part, so a later statement that
+    -- supersedes a part's answer can still be read and replace it (newest wins after closing; sally, mike ea7ceec3)
+    live_q := open_ || coalesce((select jsonb_agg(x.key) from jsonb_each(qs) x
+                                  where x.key <> 'root' and x.value->>'state' = 'answered'), '[]'::jsonb);
     select coalesce(jsonb_agg(jsonb_build_object('key', 'A|' || o.q || '|' || r.doc, 'q', o.q, 'doc', r.doc,
                                                  -- worded as REM-1240's recognition test showed a read, so the wording
                                                  -- that ships is the one measured
@@ -43620,7 +43645,7 @@ begin
                                                  'p', ans->('A|' || o.q || '|' || r.doc))
                               order by o.q, r.o), '[]'::jsonb)
       into assess
-      from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
+      from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(live_q) o(q);
     -- A read links to a question when its P clears stack.link_floor AND ranks in the top stack.link_share of the reads
     -- assessed against that question so far (walk.md §6 move 1, F10). Rank, because at a fixed gate the links were
     -- mostly noise (6% evidence at 0.5 against a 3.9% base; the top 2% by rank were 19%, REM-1240). It is relative, so
@@ -43647,52 +43672,53 @@ begin
        -- linked exactly one read and so never asked)
        and rk.rk <= greatest((sp->>'close_min_links')::int, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
-    -- 2. close (walk.md §6 move 4, F13 at spec 1ac0e5dd): each open question that gained links, once it has
-    -- close_min_links of them, judged on every line assessed against it above link_floor, in either direction of time,
-    -- each with the date it was said, the stack.evidence_lines highest by P, shown newest first. Both sides of a
-    -- contradiction and both values of an update are then in view (on 1M:35 cr:1 the opposing line, read and assessed
-    -- 0.84, was cut by the link slots and was earlier than the links, so 92fc424a's later-only rule never showed it).
-    -- Not keyed on a question's type: BEAM's types are the answer key's kind of knowledge. Keyed C|<q>|<links>/<lines>.
+    -- 2. close, by structure, never by a holistic judgement (walk.md §6 move 4, spec 1d5f38d8, Sirsh 13:15Z). Jev is
+    -- never asked whether a set of messages answers a question. A LEAF (a part, or the root while it has no parts)
+    -- closes on ONE line: once it has close_min_links links, its
+    -- candidate lines (its links plus every line assessed against it above link_floor, either direction of time, the
+    -- evidence_lines highest by P, F13) are judged one at a time, with their dates: does this line answer this
+    -- question (decider.task_state, T|<q>|<read>), each asked once. A PARENT closes by structure below, with no call.
+    -- Why not the holistic ask: on the ten walks it separated asks holding evidence at AUC 0.622 and closed once in
+    -- ten, wrongly; Jev judges one line well and a pile of mixed lines badly (spec §6, postmortem).
     with gained as (
         select distinct x->>'q' as q from jsonb_array_elements(linked) x
         union
         select 'root' where jsonb_array_length(linked) > 0
+    ), leaves as (
+        select o.q from jsonb_array_elements_text(live_q) o(q)
+         where o.q <> 'root' or not exists (select 1 from jsonb_each(qs) x where x.key <> 'root')
     ), links as (
-        select gq.q, count(distinct e->>'doc') as n
-          from gained gq, jsonb_array_elements(ev) e
-         where e->>'q' = gq.q or (gq.q = 'root')
-         group by 1 having count(distinct e->>'doc') >= (sp->>'close_min_links')::int
+        select lv.q, e->>'doc' as doc, (e->>'p')::real as p
+          from leaves lv, jsonb_array_elements(ev) e
+         where e->>'q' = lv.q or lv.q = 'root'
+    ), enough as (
+        select q from links group by q having count(distinct doc) >= (sp->>'close_min_links')::int
     ), assessed as (
-        -- every read assessed so far against the question, above the floor
         select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc, (x.value #>> '{}')::real as p
           from jsonb_each(ans) x
          where x.key like 'A|%' and (x.value #>> '{}')::real >= (sp->>'link_floor')::real
            and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
                                                     jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
-    ), top as (
-        select a.q, a.doc, a.p, row_number() over (partition by a.q order by a.p desc, a.doc) as rk
-          from assessed a join links l on l.q = a.q
+    ), cand as (
+        select q, doc, max(p) as p from (select * from links union all select * from assessed) u
+         where q in (select q from enough) and q in (select q from gained)
+         group by q, doc
     ), cut as (
-        select * from top where rk <= (sp->>'evidence_lines')::int
+        select q, doc, p from (select cd.*, row_number() over (partition by cd.q order by cd.p desc, cd.doc) as rk from cand cd) z
+         where rk <= (sp->>'evidence_lines')::int
     ), pl as (
         select aiq.walk_places(inp, array(select distinct doc from cut)) as places,
                aiq.walk_lines(inp, array(select distinct doc from cut)) as lines
-    ), shown as (
-        select cu.q, cu.doc, row_number() over (partition by cu.q order by (pl.places->cu.doc->>'said_at')::timestamptz desc nulls last, cu.doc) as k
-          from cut cu, pl
-    ), keyed as (
-        select l.q, l.n, (select count(*) from cut cu where cu.q = l.q) as m from links l
     )
     select coalesce(jsonb_agg(jsonb_build_object(
-               'key', 'C|' || kd.q || '|' || kd.n || '/' || kd.m, 'q', kd.q,
-               'text', (select string_agg(format('%s) [%s] "%s"', sh.k,
-                                                 coalesce(to_char((pl.places->sh.doc->>'said_at')::timestamptz, 'YYYY-MM-DD'), 'undated'),
-                                                 aiq.walk_snippet(coalesce(pl.lines->>sh.doc, sh.doc))), ' ' order by sh.k)
-                          from shown sh, pl where sh.q = kd.q),
-               'p', ans->('C|' || kd.q || '|' || kd.n || '/' || kd.m)) order by kd.q), '[]'::jsonb)
+               'key', 'T|' || cu.q || '|' || cu.doc, 'q', cu.q, 'doc', cu.doc,
+               'said_at', pl.places->cu.doc->>'said_at',
+               'text', format('[%s] the user wrote: "%s"',
+                              coalesce(to_char((pl.places->cu.doc->>'said_at')::timestamptz, 'YYYY-MM-DD'), 'undated'),
+                              coalesce(pl.lines->>cu.doc, cu.doc)),
+               'p', ans->('T|' || cu.q || '|' || cu.doc)) order by cu.q, cu.doc), '[]'::jsonb)
       into closes
-      from keyed kd
-     where open_ ? kd.q and kd.m > 0;
+      from cut cu, pl;
     -- 3. candidate parts (walk.md §6 move 2): parts open only under the root, so they never nest. The candidates are
     -- the terms the most reads linked to the root share (at least two), ties by specificity (fewest documents holding
     -- them), not yet asked about. The rarest term of each linked read is not used: on REM-1245's live ladder walk it
@@ -43716,21 +43742,40 @@ begin
       into cands
       from top
      where jsonb_array_length(linked) > 0;
-    -- the moves the verdicts decide: closes first, the root only with no part of it left open, then parts
-    for c in select x->>'q' as q, (x->>'p')::real as p from jsonb_array_elements(closes) x
-              where x->>'q' <> 'root' and (x->>'p')::real >= (sp->>'close_gate')::real loop
-        qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object('state', 'answered', 'closed_wave', w, 'close_p', c.p));
-        closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p));
-        open_ := open_ - c.q;
-    end loop;
-    for c in select x->>'q' as q, (x->>'p')::real as p from jsonb_array_elements(closes) x
-              where x->>'q' = 'root' and (x->>'p')::real >= (sp->>'close_gate')::real loop
-        if not exists (select 1 from jsonb_array_elements_text(open_) o where o <> 'root') then
-            qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object('state', 'answered', 'closed_wave', w, 'close_p', c.p));
-            closed := closed || jsonb_build_array(jsonb_build_object('q', 'root', 'p', c.p));
-            open_ := open_ - 'root';
-        end if;
-    end loop;
+    -- leaves the verdicts close: one line at or above state_gate answers the leaf; among the lines that clear, the
+    -- newest is the answer and the older ones its history, so a contradiction keeps both sides. Unset, the gate closes
+    -- nothing and the walk records the verdicts (the calibration's input).
+    if jsonb_typeof(sp->'state_gate') = 'number' then
+        for c in select x->>'q' as q, max((x->>'p')::real) as p,
+                        jsonb_agg(x->>'doc' order by (x->>'said_at')::timestamptz desc nulls last, x->>'doc')
+                            filter (where (x->>'p')::real >= (sp->>'state_gate')::real) as by_lines,
+                        (array_agg(x->>'said_at' order by (x->>'said_at')::timestamptz desc nulls last, x->>'doc')
+                            filter (where (x->>'p')::real >= (sp->>'state_gate')::real))[1] as newest_at
+                   from jsonb_array_elements(closes) x
+                  group by x->>'q'
+                 having max((x->>'p')::real) >= (sp->>'state_gate')::real
+                  order by x->>'q' loop
+            if qs->c.q->>'state' = 'answered' then
+                -- an answered leaf takes a later-dated clearing line as its answer; the old one becomes history
+                continue when c.newest_at is null or (qs->c.q->>'answer_said_at') is not null
+                              and c.newest_at::timestamptz <= (qs->c.q->>'answer_said_at')::timestamptz;
+                qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object(
+                          'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
+                          'answered_by', c.by_lines || coalesce(qs->c.q->'answered_by', '[]'::jsonb)));
+                closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'closed_by', 'line', 'reanswered', true,
+                                                                         'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
+                                                                         'lines', c.by_lines));
+                continue;
+            end if;
+            qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object(
+                      'state', 'answered', 'closed_wave', w, 'close_p', c.p, 'closed_by', 'line',
+                      'answer', c.by_lines->0, 'answer_said_at', c.newest_at, 'answered_by', c.by_lines));
+            closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'closed_by', 'line',
+                                                                     'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
+                                                                     'lines', c.by_lines));
+            open_ := open_ - c.q;
+        end loop;
+    end if;
     -- stale (F9): a part that has gained no link for stack.stale_waves waves leaves the open list as 'stale'. It is
     -- not answered, and its leads keep their P (aiq.walk_state), so a stale part never hides evidence behind it.
     for c in select o as q from jsonb_array_elements_text(open_) o
@@ -43741,6 +43786,44 @@ begin
         stale := stale || jsonb_build_array(jsonb_build_object('q', c.q));
         open_ := open_ - c.q;
     end loop;
+    -- a parent closes by structure, with no Jev call, once none of its parts is open and at least one is answered:
+    -- 'answered' when every part it still has is answered, 'partly_answered' when the rest closed stale, with the parts
+    -- listed and never reported as an answer (sally; a displaced part was replaced, not a child any more)
+    if open_ ? 'root' and exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                                     and x.value->>'state' <> 'displaced')
+       and not exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root' and x.value->>'state' = 'open')
+       and exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root' and x.value->>'state' = 'answered') then
+        qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object(
+                  'state', case when exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                                                and x.value->>'state' = 'stale') then 'partly_answered' else 'answered' end,
+                  'closed_wave', w, 'closed_by', 'structure',
+                  'answered_by', (select jsonb_agg(x.key order by x.key) from jsonb_each(qs) x
+                                   where x.value->>'parent' = 'root' and x.value->>'state' = 'answered'),
+                  'stale_parts', (select coalesce(jsonb_agg(x.key order by x.key), '[]'::jsonb) from jsonb_each(qs) x
+                                   where x.value->>'parent' = 'root' and x.value->>'state' = 'stale')));
+        closed := closed || jsonb_build_array(jsonb_build_object('q', 'root', 'closed_by', 'structure',
+                      'state', qs->'root'->'state', 'parts', qs->'root'->'answered_by', 'stale_parts', qs->'root'->'stale_parts'));
+        open_ := open_ - 'root';
+    end if;
+    -- a parent every one of whose parts closed stale, none answered, closes stale: it ends, and is never an answer
+    if open_ ? 'root' and exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                                     and x.value->>'state' <> 'displaced')
+       and not exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                          and x.value->>'state' not in ('stale', 'displaced')) then
+        qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object('state', 'stale', 'closed_wave', w, 'closed_by', 'structure',
+                  'stale_parts', (select jsonb_agg(x.key order by x.key) from jsonb_each(qs) x
+                                   where x.value->>'parent' = 'root' and x.value->>'state' = 'stale')));
+        stale := stale || jsonb_build_array(jsonb_build_object('q', 'root'));
+        open_ := open_ - 'root';
+    end if;
+    -- breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a root still open with no parts by
+    -- wave stack.broad_after has had no line answer it, so the walk raises DECOMPOSITION_REQUIRED to the client for a
+    -- split (walk.md §12), once, and keeps splitting in the loop from the aspects its reads name
+    if open_ ? 'root' and not exists (select 1 from jsonb_each(qs) x where x.key <> 'root')
+       and w >= (sp->>'broad_after')::int and not (board ? 'raised') then
+        raised := jsonb_build_array(jsonb_build_object('code', 'DECOMPOSITION_REQUIRED', 'question', 'root', 'wave', w,
+                      'prompt', 'split your question up: no single message has answered it'));
+    end if;
     nparts := (select count(*) from jsonb_array_elements_text(open_) o where o <> 'root');
     for c in select x->>'parent' as parent, x->>'term' as term, x->>'text' as text, (x->>'p')::real as p
                from jsonb_array_elements(cands) x
@@ -43775,11 +43858,12 @@ begin
     -- outgrow a task's 64 KB, a wave's moves are bounded by its reads and the open questions
     return jsonb_build_object(
         'assess', assess, 'closes', closes, 'candidates', cands,
+
         'record', jsonb_build_object(
             'iteration', (board->>'iteration')::int + 1, 'assessed', w,
             'asked_terms', coalesce((select jsonb_agg(x->'term') from jsonb_array_elements(cands) x), '[]'::jsonb),
             'moves', jsonb_build_object('wave', w, 'linked', linked, 'answered', closed, 'added', added,
-                                        'stale', stale, 'displaced', gone, 'open', open_)));
+                                        'stale', stale, 'displaced', gone, 'raised', raised, 'open', open_)));
 end;
 $$;
 
@@ -43804,7 +43888,7 @@ begin
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
-    perform aiq.parameters_need('decider', array['task_assess', 'task_close', 'task_split', 'request_bytes']);
+    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'request_bytes']);
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
@@ -43813,9 +43897,10 @@ begin
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_assess') as task, x->>'text' as text
           from jsonb_array_elements(nx->'assess') x where p_phase = 'assess'
         union all
-        select x->>'key', 'C|' || (x->>'q'), st->'board'->'questions'->(x->>'q')->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_close'), x->>'text'
+        select x->>'key', 'T|' || (x->>'q'), st->'board'->'questions'->(x->>'q')->>'text',
+               (select value #>> '{}' from aiq.parameters where name = 'decider.task_state'), x->>'text'
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
+
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_split'), x->>'text'
@@ -43985,6 +44070,8 @@ begin
                                         order by (q.value->>'opened_wave')::int, q.key = 'root' desc, q.key), '[]'::jsonb)
                         from jsonb_each(board->'questions') q),
         'open', board->'open',
+        -- semantic exceptions the walk raised to its client (walk.md §12), e.g. DECOMPOSITION_REQUIRED
+        'raised', coalesce(board->'raised', '[]'::jsonb),
         'evidence', board->'evidence',
         'boards', (select coalesce(jsonb_agg(tk.output->'result'->0->'state'->'moves'
                                              order by (tk.output->'result'->0->'state'->>'iteration')::int), '[]'::jsonb)
@@ -44299,6 +44386,68 @@ begin
 end;
 $$;
 grant execute on function aiq.walk_oracle(uuid, text[], int) to authenticated;
+
+-- The questions a signed-in caller may walk (cory, REM-1246: a UI starts a walk without assembling its input): each
+-- question resource of the walk-questions channel the caller can read, its node, its words, the channel its
+-- conversation is in, and the replay recorded for it, if any (a walk-replays document under the same words).
+create or replace function aiq.walk_questions()
+returns table (node_id uuid, text text, channel text, has_replay boolean, replay_uri text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select n.id, r.title, r.metadata->>'channel', v.id is not null, v.uri
+      from content.resources r
+      join content.channels c on c.id = r.channel_id and c.name = 'walk-questions'
+      join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
+      left join lateral (select v.id, v.uri from content.resources v join content.channels vc on vc.id = v.channel_id
+                          where vc.name = 'walk-replays' and v.title = r.title limit 1) v on true
+     where r.metadata ? 'channel'
+     order by r.title
+$$;
+
+-- Start a walk of one of those questions, as the caller, and return its run. 'replay' walks offline from the
+-- question's recorded verdicts, at $0, under the description they were recorded in (read from the replay's own task
+-- wording) and memoryless, since recorded verdicts are per lead, not per question; 'live' asks Jev, under V0's
+-- defaults. p_settings overrides either. A replay mode with no recorded replay is refused. A live walk with no Jev key
+-- bound to the worker cannot be refused here (the key is the worker's, not the database's): its first request fails
+-- with the provider's error, and walk_structure's state says so.
+create or replace function aiq.walk_launch(p_question uuid, p_mode text default 'replay', p_settings jsonb default null)
+returns uuid
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    q   record;
+    rep jsonb;
+    describe text;
+    inp jsonb;
+begin
+    select * into q from aiq.walk_questions() w where w.node_id = p_question;
+    if not found then
+        raise no_data_found using message = format('no question %s that you may walk', p_question),
+            hint = 'aiq.walk_questions() lists them';
+    end if;
+    if p_mode not in ('replay', 'live') then
+        raise invalid_parameter_value using message = format('a walk starts as replay or live, not %s', p_mode);
+    end if;
+    inp := jsonb_build_object('question', jsonb_build_object('node_id', q.node_id, 'text', q.text), 'channel', q.channel);
+    if p_mode = 'replay' then
+        if not q.has_replay then
+            raise no_data_found using message = format('no replay is recorded for "%s"', q.text),
+                hint = 'start it live, which asks Jev';
+        end if;
+        select (string_agg(c.content, '' order by c.ordinal))::jsonb into rep
+          from content.resources r join content.resource_chunks c on c.resource_id = r.id
+         where r.uri = q.replay_uri group by r.id;
+        select d into describe from unnest(array['source', 'targets', 'lines', 'lines_nocount']) d
+         where aiq.walk_task(d) = rep->>'task' limit 1;
+        inp := inp || jsonb_build_object('replay', (select id from content.resources where uri = q.replay_uri),
+                                         'offline', true,
+                                         'settings', jsonb_build_object('stack', false, 'describe', coalesce(describe, 'source'))
+                                                     || coalesce(p_settings, '{}'::jsonb));
+    else
+        inp := inp || jsonb_build_object('settings', coalesce(p_settings, '{}'::jsonb));
+    end if;
+    return workflow.start_workflow('walk', inp);
+end;
+$$;
+grant execute on function aiq.walk_questions(), aiq.walk_launch(uuid, text, jsonb) to authenticated;
 
 
 -- ============================================================

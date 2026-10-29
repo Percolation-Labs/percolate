@@ -119,8 +119,8 @@ begin
         raise exception 'the board went %', got;
     end if;
     -- what closed each question: a line for the leaf, the structure for the parent
-    if (select (st0->'board'->'questions'->'root'->>'by') || ' ' || (st0->'board'->'questions'->'root'->'answered_by')::text
-              || ' ' || (st0->'board'->'questions'->'part:ceiling'->>'by') || ' ' || (st0->'board'->'questions'->'part:ceiling'->>'answer')
+    if (select (st0->'board'->'questions'->'root'->>'closed_by') || ' ' || (st0->'board'->'questions'->'root'->'answered_by')::text
+              || ' ' || (st0->'board'->'questions'->'part:ceiling'->>'closed_by') || ' ' || (st0->'board'->'questions'->'part:ceiling'->>'answer')
           from (select aiq.walk_state(r) as st0) z) is distinct from 'structure ["part:ceiling"] line wt/5' then
         raise exception 'the answers recorded are %', (select aiq.walk_state(r)->'board'->'questions');
     end if;

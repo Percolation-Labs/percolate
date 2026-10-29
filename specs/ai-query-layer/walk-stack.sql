@@ -85,7 +85,7 @@ begin
             end if;
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
                            || jsonb_build_object('state', coalesce(x->>'state', 'answered'), 'closed_wave', m->'wave',
-                                                 'close_p', x->'p', 'by', x->'by', 'answer', x->'answer',
+                                                 'close_p', x->'p', 'closed_by', x->'closed_by', 'answer', x->'answer',
                                                  'answer_said_at', x->'answer_said_at',
                                                  'answered_by', coalesce(x->'lines', x->'parts'),
                                                  'stale_parts', x->'stale_parts'));
@@ -338,15 +338,15 @@ begin
                 qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object(
                           'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
                           'answered_by', c.by_lines || coalesce(qs->c.q->'answered_by', '[]'::jsonb)));
-                closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'by', 'line', 'reanswered', true,
+                closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'closed_by', 'line', 'reanswered', true,
                                                                          'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
                                                                          'lines', c.by_lines));
                 continue;
             end if;
             qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object(
-                      'state', 'answered', 'closed_wave', w, 'close_p', c.p, 'by', 'line',
+                      'state', 'answered', 'closed_wave', w, 'close_p', c.p, 'closed_by', 'line',
                       'answer', c.by_lines->0, 'answer_said_at', c.newest_at, 'answered_by', c.by_lines));
-            closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'by', 'line',
+            closed := closed || jsonb_build_array(jsonb_build_object('q', c.q, 'p', c.p, 'closed_by', 'line',
                                                                      'answer', c.by_lines->0, 'answer_said_at', c.newest_at,
                                                                      'lines', c.by_lines));
             open_ := open_ - c.q;
@@ -372,12 +372,12 @@ begin
         qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object(
                   'state', case when exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
                                                 and x.value->>'state' = 'stale') then 'partly_answered' else 'answered' end,
-                  'closed_wave', w, 'by', 'structure',
+                  'closed_wave', w, 'closed_by', 'structure',
                   'answered_by', (select jsonb_agg(x.key order by x.key) from jsonb_each(qs) x
                                    where x.value->>'parent' = 'root' and x.value->>'state' = 'answered'),
                   'stale_parts', (select coalesce(jsonb_agg(x.key order by x.key), '[]'::jsonb) from jsonb_each(qs) x
                                    where x.value->>'parent' = 'root' and x.value->>'state' = 'stale')));
-        closed := closed || jsonb_build_array(jsonb_build_object('q', 'root', 'by', 'structure',
+        closed := closed || jsonb_build_array(jsonb_build_object('q', 'root', 'closed_by', 'structure',
                       'state', qs->'root'->'state', 'parts', qs->'root'->'answered_by', 'stale_parts', qs->'root'->'stale_parts'));
         open_ := open_ - 'root';
     end if;
@@ -386,7 +386,7 @@ begin
                                      and x.value->>'state' <> 'displaced')
        and not exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
                           and x.value->>'state' not in ('stale', 'displaced')) then
-        qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object('state', 'stale', 'closed_wave', w, 'by', 'structure',
+        qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object('state', 'stale', 'closed_wave', w, 'closed_by', 'structure',
                   'stale_parts', (select jsonb_agg(x.key order by x.key) from jsonb_each(qs) x
                                    where x.value->>'parent' = 'root' and x.value->>'state' = 'stale')));
         stale := stale || jsonb_build_array(jsonb_build_object('q', 'root'));
