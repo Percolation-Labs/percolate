@@ -885,70 +885,64 @@ Still open:
   - no judgement reads holistic state;
   - a parent's close is structure over its children, not a Jev call.
 
-## 16. The stack's next form (Sirsh, M-20261029-180634-2357)
+## 16. Proposals (not V0)
 
-The pilot turned the stack off by default (§10, outcome i), and the definition behind that decision found why it
-added nothing: its parts are the root's own words plus a keyword (`stack.part_wording`), so they name no narrower
-thing to find (REM-1244). Two forms come after it.
+**Nothing in this section ships as V0 behaviour.** V0 is the plain walk with the original question (§10, outcome
+(i)). Each entry says what it is meant to solve, its status and evidence, and the test that would promote it into
+the decided spec (Sirsh, 29 Oct 18:29Z).
 
-- **Part three's candidate: the caller-supplied stack.** The agent that asks the question also supplies its
-  sub-questions, written by the agent in its own words, and the walk opens them as `client:<n>` parts (§6, move 3)
-  from the start, instead of templating parts from shared terms.
-  - *What it changes:* the parts are real questions, so a lead is judged against something narrower than the root.
-    Everything else stays as built: judging, linking, stale and displaced, and the structural close of a parent.
-  - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as the start's
-    `question.parts` (not built; today `walk_start` takes only the question), and it would refuse any part that carries an answer, evidence or rubric, as it does for
-    the question.
-  - *Who writes the parts, for any test or example* (sally, 18:09Z). On BEAM the easy source of sub-questions is the
-    rubric, whose items are the answer key, and a refusal at `walk_start` does not catch a part whose words were
-    copied from it. So a test's parts are written from the question's words alone, by a fresh client that never saw
-    the rubric or BEAM's answer, with its prompt recorded. The prompt and the parts are kept. Afterwards each part is
-    checked against the rubric for repeated distinctive words, and any that repeat are quoted. Otherwise a result
-    that leads score better against the parts measures the key, not the stack. The same rule holds for any example
-    the article shows.
-  - *Status: not built for part three* (bill's directional check, 29 Oct 18:14Z, REM-1244). Jev re-judged recorded
-    leads on 4 questions, against sub-questions and against the original question. **The result is the blind set**,
-    written under the rule above: a fresh subagent given only the four question texts, with its prompt kept
-    verbatim, and the rubric overlap checked afterwards (only generic words overlap). Best sub-question minus the
-    original, in AUC with 95% intervals:
-    - house sale: −0.170 [−0.264, −0.077];
-    - Japan trip: −0.020 [−0.068, +0.029];
-    - GPU issues: +0.005 [−0.014, +0.027];
-    - days between: −0.098 [−0.159, −0.038].
+### 16.1 Decomposition: a question stack with real sub-questions
 
-    No question gains, and two lose. Judging the original twice moved its AUC by at most 0.010, which is Jev's
-    run-to-run noise. The earlier, hand-written set (written from the question text only, before this rule) gave
-    −0.036, +0.005, −0.030 and −0.068. Both checks cost $0.052 together. By this section's rule it is not built.
-    Part three's V0 is the plain walk with the original question, and the stack appears in the document only as
-    measured: the template parts (−1.1 against P) and this check. This rules out the caller-supplied stack as tested
-    here, not real sub-questions in general; those belong to the structured form below.
-  - *Why the earlier set's null held anyway:* copying the rubric could only have helped the parts, so a null holds
-    all the more under possible contamination, and a positive result run that way would not have counted (sally,
-    18:12Z).
-  - *Why it shows no direction:* Jev already reads a multi-part question's parts in the question itself (sally),
-    and taking the best score over several parts adds false positives (bill's write-up).
-- **Proposals, measured but not built** (REM-1244, 29 Oct).
-  - *Stack B: the found evidence in Jev's state, the question unchanged* (bill). On 400 leads out of evidence reads
-    (80 progress, 320 echo, four questions), adding the exact found evidence to the decider's state lifts
-    progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004, +0.094]. Nearly all of it is one question,
-    1M:13, where the question alone ranked below chance (0.464 → 0.687). A task worded as "not already in what was
-    found" hurts (−0.07 to −0.17). *Step 2, tested* (bill, 18:36Z): when Jev builds B itself, by admitting reads it
-    judges as found evidence, B balloons to 42–72% of the reads, with precision 0.03–0.29 against the labels, and no
-    gate fixes it. So step 1's gain needs a small, exact B that Jev cannot yet build. The next test is a top-k
-    admission rule.
-  - *Where the headroom is* (the free replay tests). Of the 194 labelled pieces the oracle read by 100 and P did not,
-    80% were behind leads P had accepted and not opened, 10% behind rejected leads only, and 10% had no lead pointing
-    at them. Within the accepted set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source read is
-    evidence", the 12x relation, raises it to 0.671 (an oracle ceiling, not deployable), and a keyless proxy
-    ("the source read came by a lead") lowers it to 0.554. Cutting search's per-wave share changes nothing at 100
-    reads. So ranking the accepted leads is the open problem, and Stack B is the keyless candidate for carrying the
-    evidence relation into it.
-- **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
-  structure.** Each open question is a slot built from closed lists:
-  - *subject:* an entity in the graph;
-  - *aspect:* a tag or a relationship type;
-  - *time:* past, now, later, or before or after an event;
-  - *ask:* a fact, a change, a count or a list item. The ask also says when the slot is filled.
+**Meant to solve:** a lead judged against the whole question cannot tell progress on one part from an echo of
+another. The V0 stack's parts did not help, because they are the root's own words plus a keyword
+(`stack.part_wording`): S − P was −1.1 [−3.1, +0.2] at 100 reads (§10).
 
-  Jev picks slots, judges leads against the open ones, and closes a slot when evidence fills it. The closed lists
-  are evolved over time, which tests whether a closed set of types covers most questions.
+- **(a) The caller-supplied stack.** The asking agent supplies its own sub-questions, opened as `client:<n>` parts
+  (§6, move 3) from the start, with everything else as built.
+  - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as
+    `question.parts`, which is not built (today `walk_start` takes only the question), and would be refused if they
+    carried an answer, evidence or rubric.
+  - *Who writes them, in any test or example* (sally, 18:09Z): on BEAM the rubric's items are the answer key, and a
+    refusal at `walk_start` cannot catch a part copied from one. So a fresh client given only the question's words
+    writes the parts, its prompt is kept, and afterwards each part is checked against the rubric for repeated
+    distinctive words, with any repeat quoted.
+  - *Status: tested, no direction* (bill, 18:14Z, REM-1244). Jev re-judged recorded leads on 4 questions, against
+    blind sub-questions written under that rule and against the original. Best sub-question minus original, in AUC:
+    house sale −0.170 [−0.264, −0.077]; Japan trip −0.020 [−0.068, +0.029]; GPU issues +0.005 [−0.014, +0.027];
+    days between −0.098 [−0.159, −0.038]. Judging the original twice moves its AUC by at most 0.010. An earlier
+    hand-written set (written from the question text only) gave −0.036, +0.005, −0.030 and −0.068; its null held all
+    the more, since copying the rubric could only have helped (sally). Both checks cost $0.052.
+  - *Why no direction:* Jev already reads a multi-part question's parts in the question itself (sally), and taking
+    the best score over several parts adds false positives (bill's write-up).
+  - *The test that would promote it:* leads scoring better against blind parts than against the root on a
+    registered set of questions. On tonight's evidence it is not built for part three.
+- **(b) The slot-structured stack** (Sirsh, M-20261029-180634-2357; a project and a follow-up article, not part
+  three). Each open question is a slot built from closed lists: *subject* (an entity in the graph), *aspect* (a tag
+  or a relationship type), *time* (past, now, later, or before or after an event) and *ask* (a fact, a change, a
+  count or a list item; the ask also says when the slot is filled). Jev picks slots, judges leads against the open
+  ones, and closes a slot when evidence fills it.
+  - *Status:* untested.
+  - *The test that would promote it:* the closed lists cover most questions as they are evolved, and leads judged
+    against filled-in slots separate evidence better than against the root.
+
+### 16.2 Progress: telling new evidence from an echo of what was found
+
+**Meant to solve:** late in a walk the unread leads are mostly echoes of what has been read, and Jev cannot tell them
+from new information (AUC fell to 0.27–0.36 in later waves, REM-1240). The free replay tests (29 Oct, REM-1244) put
+the headroom here. Of the 194 labelled pieces the oracle read by 100 and P did not, 80% were behind leads P had
+accepted and not opened, 10% behind rejected leads only, and 10% had no lead pointing at them. Within the accepted
+set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source read is evidence", the 12x relation,
+raises it to 0.671 (an oracle ceiling, not deployable), and a keyless proxy ("the source read came by a lead") lowers
+it to 0.554. Cutting search's per-wave share changes nothing at 100 reads.
+
+- **Stack A** (bill's progress design). *Status:* untested. Its definition and promotion test are bill's to supply.
+- **Stack B: the found evidence in Jev's state, the question unchanged** (bill).
+  - *Step 1, tested:* on 400 leads out of evidence reads (80 progress, 320 echo, four questions), adding the exact
+    found evidence to the decider's state lifts progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004,
+    +0.094]. Nearly all of it is one question, 1M:13, where the question alone ranked below chance
+    (0.464 → 0.687). A task worded as "not already in what was found" hurts (−0.07 to −0.17).
+  - *Step 2, tested* (bill, 18:36Z): when Jev builds B itself, by admitting reads it judges as found evidence, B
+    balloons to 42–72% of the reads, with precision 0.03–0.29 against the labels, and no gate fixes it. So step 1's
+    gain needs a small, exact B that Jev cannot yet build.
+  - *The test that would promote it:* a keyless admission rule (top-k is next) whose B is small and exact enough to
+    keep step 1's gain, then replayed coverage at 100 above P's on the registered set.
