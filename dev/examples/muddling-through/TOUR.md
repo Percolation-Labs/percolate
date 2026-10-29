@@ -37,8 +37,9 @@ verdicts at no cost.
 
 ```bash
 export P8_DSN=postgres://p8:p8@localhost:5432/percolate
-psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')"
-export TOKEN=$(percolate auth token --email me@example.com)
+uid=$(psql "$P8_DSN" -Atc "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')")
+# signed inside the stack, which holds the secret it verifies with (get-percolate's quickstart)
+export TOKEN=$(docker compose exec -T content percolate auth token --sub "$uid")
 ```
 
 Open question for the run: which users the Walks screen needs besides the admin (a plain reader, to show what a
@@ -154,4 +155,7 @@ Each is checked on the run, and a stuck reader at any of them becomes a board ca
 
 ## Where a reader got stuck
 
-Filled in from the run.
+- **Sign-in (smoke, 29 Oct, run 40943231212).** `percolate auth token` from the pip-installed CLI refuses with "no
+  signing secret. Pass --secret or set P8_JWT_SECRET", because the secret lives in the stack. The tour now mints the
+  token where get-percolate's quickstart does, inside the stack's content container. A reader following the
+  quickstart would not hit this; one who reached for the CLI the article installs would.
