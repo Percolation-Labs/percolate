@@ -121,8 +121,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'About 12 lines of a user''s words fit the decider''s state at about 300 tokens a judgement. Not measured.'),
  ('stack.part_wording', 'stack', to_jsonb(text '%s (the part about ''%s'')'), 'How a candidate part is worded from its parent question and a term: format(wording, parent, term).', 'aiq.walk_stack_next',
   'No generative model is in the loop (Sirsh, M-20261029-105852-65d0), so a part is the parent narrowed to a term the evidence holds, and Jev chooses among them. A part written by a model comes through the walk''s input (parts), from a caller the walk asked.'),
- ('decider.request_bytes', 'decider', '40000', 'The most option text one Jev request carries; a round''s options are cut into requests of at most 60 options and at most this many bytes.', 'aiq.walk_requests, aiq.walk_stack_requests',
-  'The workflow caps a task''s input at 64 KB (workflow.max_payload_bytes). Sixty options fit when a lead is described by one snippet of its source; described by three targets'' lines and what its source answered (walk.describe lines, walk.stack) sixty came to 83 KB and the request was refused (REM-1245''s first live stack walk). 40,000 leaves room for the request''s own state and keys.'),
+ ('decider.request_bytes', 'decider', '24000', 'The most option text one Jev request carries; a round''s options are cut into requests of at most 60 options and at most this many bytes.', 'aiq.walk_requests, aiq.walk_stack_requests',
+  'The workflow caps a task''s input at 64 KB (workflow.max_payload_bytes). Sixty options fit when a lead is described by one snippet of its source; described by three targets'' lines and what its source answered (walk.describe lines, walk.stack) sixty came to 83 KB and the request was refused (REM-1245''s first live stack walk). A task''s input holds the body twice (the matrix row, and the REST body rendered from it), so 40,000 bytes of options still came to 78 KB; 24,000 keeps two copies, the state and the keys under the cap.'),
  ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message the user wrote, already read. Does it hold information needed to answer `question`, or part of it?'),
   'The question Jev answers for each new read and each open question: does this read answer it (REM-1245).', 'aiq.walk_stack_requests',
   'REM-1240''s recognition test asked whether a read answers the question, shown its own line. Not measured in these words.'),
@@ -887,19 +887,17 @@ begin
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
     if coalesce((st->'settings'->>'stack')::boolean, false) then
-        -- The question stack (REM-1245): every live lead -- raised, not travelled, still leading somewhere unread --
-        -- against every open question it has not been judged against. One request per open question, the question
-        -- as Jev's `question`, so a lead is judged against what is still to be found rather than the root alone. Each
-        -- lead's description says what its source was found to answer, so the decider knows which reads were
-        -- evidence (REM-1240: a term lead out of an evidence read is about 12 times as likely to be right).
+        -- The question stack (REM-1245, walk.md §7): each lead this round raised, against every question open now.
+        -- One request per open question, the question as Jev's `question`, so a lead is judged against what is still
+        -- to be found rather than the root alone. A lead is judged once, when it is raised, and its P stays fixed
+        -- (Sirsh, F3); a question opened later is served by the leads raised after it. A lead's description says what
+        -- its source was found to answer, so the decider knows which reads were evidence (REM-1240: a term lead out
+        -- of an evidence read is about 12 times as likely to be right); out of a read that answered nothing, it says
+        -- nothing more.
         return query
         with g as (select aiq.walk_run_graph(p_run) as g),
         inp as (select input from workflow.runs where id = p_run),
         live as (
-            select key, value from jsonb_each(st->'clues')
-             where not (st->'travelled') ? key
-               and exists (select 1 from jsonb_array_elements_text(value->'targets') t where not (st->'reached') ? t)
-            union all
             select key, value from jsonb_each(st->'next')
         ), todo as (
             select l.key, l.value as c, o.q
@@ -920,8 +918,8 @@ begin
                                                    (select coalesce(jsonb_agg(x), '[]'::jsonb) from jsonb_array_elements(t.c->'targets') x
                                                      where not (st->'reached') ? (x #>> '{}')),
                                                    srcs.t->>(t.c->>'source')))
-                   || case when sd.qs is not null then ' It comes out of a message found to answer ' || sd.qs || '.'
-                           else ' It comes out of a message found to answer none of the questions.' end as text
+                   || case when sd.qs is not null then ' It comes out of a message found to answer: ' || sd.qs || '.'
+                           else '' end as text
               from todo t cross join g cross join srcs left join said sd on sd.doc = t.c->>'source'
         ), numbered as (
             -- a request holds at most 60 options and decider.request_bytes of their text
@@ -1052,6 +1050,18 @@ begin
           from (select key from jsonb_each(st->'clues') union select key from jsonb_each(st->'next')) c
          where (st->'p'->>c.key)::real >= (nm->>'band')::real and (st->'p'->>c.key)::real < (s->>'gate')::real
            and not (st->'travelled') ? c.key;
+    end if;
+    -- Cold (walk.md §8, Sirsh F1), under walk.stack: this round accepted no lead it raised, and no accepted lead is
+    -- still open. Nothing the decider believes in is left to follow, so the walk stops rather than read on in search's
+    -- order: REM-1211's certificate, now a stop. (Read literally, "no newly accepted lead" would also stop a walk
+    -- with accepted leads still unopened, abandoning them; it waits for those.)
+    if coalesce((s->>'stack')::boolean, false) and open_ = '{}'::jsonb
+       and not exists (select 1 from jsonb_each(st->'next') x where (st->'p'->>x.key)::real >= (s->>'gate')::real) then
+        return jsonb_build_object('wave', wn, 'si', si, 'reads', '[]'::jsonb, 'travels', '[]'::jsonb, 'pending', pending,
+                                  'judged', (select count(*) from jsonb_each(st->'next') x where (st->'answers') ? x.key),
+                                  'unjudged', 0, 'dry', true,
+                                  'stop', jsonb_build_object('reason', 'cold', 'wave', wn,
+                                                             'raised', (select count(*) from jsonb_each(st->'next'))));
     end if;
     -- The wave's size: cumulative reads reach wave * size (wave 0's seeds count toward wave 1).
     target := wn * (s->>'wave')::int

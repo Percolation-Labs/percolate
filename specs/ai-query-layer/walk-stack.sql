@@ -445,16 +445,13 @@ begin
             'leads', (select count(*) from jsonb_each(st->'clues')),
             'leads_accepted', (select count(*) from aiq.walk_state_clues(st) c where c.decision = 'accepted'),
             'judgements', (select count(*) from jsonb_object_keys(coalesce(st->'answers', st->'p'))),
-            'jev_requests', (select count(*) from workflow.tasks t
-                              where t.run_id = p_run and t.matrix_parent_id is not null
-                                and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%')),
-            -- what the decider's calls cost, as the worker recorded them
-            'jev', (select jsonb_build_object('input_tokens', coalesce(sum(u.input_tokens), 0),
-                                              'output_tokens', coalesce(sum(u.output_tokens), 0),
-                                              'cost_usd', sum(u.cost_usd))
-                      from workflow.task_usage u
-                     where u.run_id = p_run
-                       and (u.step_key like 'judge\_%' or u.step_key like 'assess\_%' or u.step_key like 'shape\_%'))));
+            -- what the decider's calls cost, as Jev reported it in each answer
+            'jev', (select jsonb_build_object('requests', count(*), 'model', min(t.output->'result'->>'model'),
+                                              'input_tokens', coalesce(sum((t.output->'result'->'usage'->>'input_tokens')::bigint), 0),
+                                              'output_tokens', coalesce(sum((t.output->'result'->'usage'->>'output_tokens')::bigint), 0))
+                      from workflow.tasks t
+                     where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
+                       and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'))));
     if p_oracle is not null then
         result := result || jsonb_build_object('oracle', jsonb_build_object(
             'oracle', true,
