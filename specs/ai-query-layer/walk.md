@@ -1,23 +1,93 @@
-# The durable iterative walk, V0 (REM-1244)
+# The durable iterative walk: reasoning as search (REM-1244)
 
-**Status: draft for agreement.** It merges the outline Sirsh agreed (M-20261029-105923-b725) with a review of the
-walk's history (REM-1199 to REM-1240, part three of *Muddling Through*). Where the two disagree, §14 flags it rather
-than choosing. Built today: §2's graph, §5's walk and §10's evaluation, in `walk.sql` and `walk-why.sql`. To build:
-§3's edge information, §6's board, §7's judging, §9's structure and §11's oracle mode. Owner: mike. §3 is co-written
-by cory and §10–§11 by sally.
+**Status: the working theory.** This is the design at full scope, not a V0 document: a durable, iterative,
+bitemporal, multi-index query layer whose algorithm is reasoning as search (Sirsh, M-20261029-195722-b687). Every
+principle carries a mark, and each mark points to its evidence or to the test that would earn it:
+
+- **SHOWN:** measured, or built and tested, with the measurement named.
+- **PARTLY SHOWN:** part of it is measured, or it is measured with a stated caveat.
+- **TO BE SHOWN:** specified, with the test that would show it.
+
+What ships today is one short section, §17 (V0). The decisions F1–F14, the walk-by-walk diagnoses and the
+calibration detail are in Appendix A, unchanged. The registered sweep, pilot and extension are in Appendix B, and
+V0's stated limits in Appendix C. Owner: mike. §5 is co-written by cory, and §14–§15 by sally.
 
 ## 1. Purpose
 
 A query layer with a decision model inside it, and no LLM in the loop. The walk's only decider is Jev. It asks the
 right questions of the data it reads, and so finds the data search alone does not.
 
-An LLM is a client, outside the loop. It talks to the walk in exactly the two ways of §12: the walk raises a
-semantic exception telling it to do something, or the walk returns a result it can interrogate.
+The algorithm is reasoning as search. A question starts a search, every read raises leads to more reads, and a
+decider chooses which to follow before paying for them. A second process tracks direction and progress, so the
+search neither dies out nor spreads without limit (§3). The layer is **multi-index** (REM-1251): vector, key, graph
+and relational indexes behind one layer, each used as fits the step. Search's order is the vector index, a term lead
+is the key index, next and near are the graph, and the walk's state, verdicts and evaluation are relational rows.
 
-## 2. The graph
+An LLM is a client, outside the loop. It talks to the walk in two ways (§16): the walk raises a semantic exception
+telling it to do something, or the walk returns a result it can interrogate.
+
+## 2. The principles, and what shows each
+
+| # | principle | mark | evidence, or the test that would show it |
+|---|---|---|---|
+| 3 | Search is a branching process, kept critical by a counter-process that tracks direction and progress | PARTLY SHOWN | The open search is supercritical: one walk accepted 1,035 of 1,927 leads and opened 305 (Appendix A, F8). 80% of the headroom at 100 reads lies behind accepted leads never opened (the replay tests, §3). The counter-process that fixes it is §8–§10, TO BE SHOWN. |
+| 4 | The graph: node types and link kinds built at index time, bitemporal, closed and never deleted, multi-index | SHOWN (structure); PARTLY SHOWN (multi-index) | Every missed answer piece lies within 2 lead hops of search's top 10, and none hangs on one hub (REM-1204). Bitemporal edges and replay as of a start: REM-1199. The multi-index term is defined once in REM-1251. |
+| 5 | A lead shows Jev what its targets say and where they sit, built at ingest | SHOWN | `lines` raises within-source AUC to 0.657 [0.611, 0.703] from `source`'s 0.548 (REM-1240). |
+| 6 | Waves: the decider acts before the read; leads are raised, judged, then opened by P per unread target | PARTLY SHOWN | Opening by P per unread target landed +1.04 fresh evidence per walk [+0.23, +1.98] in a one-step replay that matched the walk's picks 36–46% (REM-1240). |
+| 7 | Jev judges each lead once, against the open questions | SHOWN (as built); the state line SHOWN not to help | The one-line board state scores −0.018 [−0.048, +0.016] against `lines` alone (REM-1240). |
+| 8 | Stack B, Jev's direction memory: the found evidence in its state, the question unchanged | PARTLY SHOWN | It helps when it is exact: a small exact B lifts progress against echo by +0.254 on the echo case, pooled +0.036 [−0.004, +0.080]. Jev cannot yet build it: a Jev-built B pools −0.041 [−0.083, −0.001] (bill, REM-1244). |
+| 9 | Stack A, the full evidence streamed to the caller, which Jev never holds | TO BE SHOWN | The test: A at a top-k-per-wave cut against V0's reads in order, and against S's links on the pilot, on recall and precision at equal list size (§9). |
+| 10 | The question stack: parts, splitting, and closing by structure | PARTLY SHOWN | Template parts do not help: S − P −1.1 [−3.1, +0.2] at 100 reads (§17). Caller-supplied parts show no direction on two blind sets (§10). Expected cardinality separates set from single questions at AUC 0.936. The per-line close failed its calibration (Appendix A, F12). The slot-structured stack is TO BE SHOWN. |
+| 11 | Stops: stack empty, budget, dry, cold | PARTLY SHOWN | Built. The cold stop runs only under the stack, and it cost S evidence: past S's own stop P found 16 more labelled pieces, 14 through leads (§11). |
+| 12 | Durable, keyless, append-only, replayable, every parameter a dated row | SHOWN | A crashed walk resumes and redoes nothing (REM-1236). `walk_start` refuses more than the question (REM-1231). An old run reads its original defaults (query/51, REM-1245). A changed default reaches an upgraded database (query/54, upgrade-converges). |
+| 13 | The walk is a queryable object, with cost as an observable | SHOWN | Built: `walk_structure`, `walk_cost`. The pilot's spend, $1.44, was read from its own rows. |
+| 14 | Evaluation outside the walk, by eight classes and statistically against search | PARTLY SHOWN | Built: `walk_coverage`, `walk_why`. The pilot ran under its registration. Walk against search is TO BE SHOWN: P − search at 100 is +5.5 [−0.1, +12.7], and the extension decides it (Appendix B). |
+| 15 | Oracle mode: a ceiling on the walk's own schedule | SHOWN | Built: `walk_oracle` reads wave by wave as the walk does (REM-1245). |
+| 16 | The LLM interface: semantic exceptions and interrogable results | PARTLY SHOWN | `DECOMPOSITION_REQUIRED` is raised structurally, and results carry the run's handle. No client has yet split a question in a walk. |
+
+## 3. Search as a branching process, kept critical
+
+**The process.** Each read raises leads, each accepted lead opens reads, and each read raises more leads. That is a
+branching process, and its branching factor is set by how many leads the gate accepts against how many reads the
+budget allows.
+- *Subcritical:* too few leads accepted, and the walk dies out into search's order, reading what search would have
+  read anyway.
+- *Supercritical:* too many accepted, and the frontier grows faster than the budget can open it, so the order of
+  opening decides everything and P cannot choose well within the accepted set.
+- *Critical:* the frontier the walk keeps is about what its budget can open, and what it opens moves toward the
+  answer.
+
+**The counter-process.** A second process runs beside the search and tracks direction and progress: what has been
+found, what is still open, and whether the last wave moved toward it. It is what keeps the search critical, by
+lowering the P of leads that only echo what was found (§8), by narrowing what a lead is judged against (§10), and by
+stopping when nothing believed in is left to follow (§11). Jev sees the direction memory (Stack B, §8), and never
+the full evidence (Stack A, §9), so the decider's context stays small however long the walk runs.
+
+**What shows it** (PARTLY SHOWN):
+- *The open search is supercritical.* On the holiday stack walk the gate accepted 1,035 of 1,927 judged leads, and
+  500 reads opened 305. 51 of the 89 accepted leads toward evidence were never opened (Appendix A, F8).
+- *Direction is where the headroom is* (the free replay tests, REM-1244, 29 Oct, the pilot's 80 recorded walks, $0,
+  oracle-scored). The oracle read 194 labelled pieces by 100 reads that P did not. 155 of them (80%) were targets of
+  leads P had accepted and not opened, 20 (10%) were behind rejected leads only, and 19 (10%) had no lead raised by
+  100 pointing at them.
+- *P alone cannot order the accepted set.* Within it, Jev's P separates leads toward evidence at AUC 0.607. Knowing
+  which source reads were evidence would raise that to 0.671: that uses the key, so it is a ceiling, not a rule. A
+  keyless proxy, "the source read came by a lead", lowers it to 0.554.
+- *Search's share is not what binds.* Cutting search's per-wave share once its yield falls below the leads' changes
+  coverage by +0.0 at 100 reads and −0.2 [−0.9, +0.4] at 500. Later search reads are mostly fill, read because the
+  accepted leads have run out.
+
+**The test that would show the rest:** a counter-process that cuts the evidence left behind accepted-but-unopened
+leads, with coverage at 100 above the plain walk's on a registered set. Stack B (§8) is the leading candidate.
+
+## 4. The graph
+
+**Mark: SHOWN** for the structure, from REM-1204's measurements below, and **PARTLY SHOWN** for the multi-index
+framing, which REM-1251 defines once for the docs. The graph is built at index time by construction, never by a
+model, and a walk reads it as of its own start.
 
 **Nodes.** Documents (a history's exchanges, one `document` node per resource of a channel), terms (tag nodes),
-claims, and questions (the walk's root and its sub-questions, §6).
+claims, and questions (the walk's root and its sub-questions, §10).
 
 **Links.** The walk follows four kinds, stored at index time by construction, never by a model (REM-1201):
 
@@ -39,9 +109,11 @@ was (REM-1199).
 - The first choice is about 90 leads, about 5 of them right (the offline study at cap 100). On the test database at
   cap 10 it is about 66, with 4 right.
 
-V0 walks documents. Claims are nodes of the graph, but no lead runs through them yet (§14, F4: decided, out of V0).
+V0 walks documents. Claims are nodes of the graph, but no lead runs through them yet (Appendix A, F4: decided, out of V0).
 
-## 3. Edges that say where they go (with cory)
+## 5. What a lead shows Jev: edges that say where they go (with cory)
+
+**Mark: SHOWN.** `lines` passes its registered bar on within-source AUC (REM-1240), below.
 
 A decider judges only what it is shown. Under `walk.describe = source`, a lead is described by the read it comes out
 of. Every lead out of one read then shows the same text, and Jev is blind within a read: within-source AUC 0.549
@@ -64,12 +136,12 @@ sources its within-source AUC is 0.657 [0.611, 0.703] against `source`'s 0.548, 
 600 sources drawn from all of them it is +0.083 [+0.033, +0.128] over `source`, pooled and paired. `lines_nocount`
 scores the same (−0.004 [−0.013, +0.006]), because the width cue is not the count: P rises with bundle size under
 both, since a wide bundle shows three lines and a narrow one shows one. That is why opening by P per unread target
-(§4) stays. The cost is $0 at ingest, because all of it is
+(§6) stays. The cost is $0 at ingest, because all of it is
 stored, and about 40 tokens a target at judge time.
 
 **What was weighed and left out, and why** (cory, REM-1240):
 - **The target's search rank.** Free, but it is per walk, not ingest. On 1M:35 the six evidence exchanges only the
-  walk found sat at search ranks 642–765, so rank argues against exactly the leads the walk exists for.
+  walk found sat at search ranks 642–765, so rank argues against the leads the walk exists for.
 - **Place in its sitting.** Free, and on BEAM it separates evidence (AUC 0.74 / 0.70, inverted), but it measures
   BEAM's generator. BEAM's chunks keep a plan index (sitting n, step m), which tracks position at r = 0.86–0.99, and
   evidence falls in plan steps 1–12 (21–27%) against 6–8% after. No unplanned conversation has that schedule.
@@ -83,13 +155,16 @@ high-P misses are as on-topic as the evidence: 143 of 1,031 non-evidence user li
 in the question, not the edge. §7, Jev judging against the open questions, is what addresses it.
 
 **Judging is not reach.** Better judging alone need not add evidence per read. Under `targets`, within-source AUC rose
-to 0.643, and the walk landed no more fresh evidence (bill, REM-1240). The reach side is §4's opening by P per unread
-target, and per-target opening (§14, F8).
+to 0.643, and the walk landed no more fresh evidence (bill, REM-1240). The reach side is §6's opening by P per unread
+target, and per-target opening (Appendix A, F8).
 
 **Built:** `walk.describe = lines` and `lines_nocount`, and `aiq.walk_clue_text(run, key, describe)`, which returns a
 lead's text under any description (REM-1240, 39 of 39 database gates).
 
-## 4. The walk
+## 6. Waves: the decider acts before the read
+
+**Mark: PARTLY SHOWN.** The schedule and opening rule are built. Opening by P per unread target is measured in a
+one-step replay only.
 
 Seeded by search: the first `walk.seeds` of search's order are wave 0. It then moves in waves: each wave judges the
 leads the last wave's reads raised, opens the best, and reads where they go, up to `walk.wave` reads, within a
@@ -99,31 +174,106 @@ A lead is one link kind out of one read, toward the unread documents it reaches:
 **Opening** is by P per unread target, not P alone, where a lead's P is its maximum over open questions (§7). With P
 alone, a wide lead outranks a narrow one at the same P. In a one-step, matched-budget replay of the recorded queue,
 ordering by P per unread read landed +1.04 fresh evidence per walk [+0.23, +1.98], +28% in aggregate (REM-1240). The
-replay matched the walk's own picks only 36–46%, so this is direction and rough size. The width bias (under `targets`,
-P rose with bundle size) is checked again under `lines`, which still states counts, in REM-1240's step 3.
+replay matched the walk's own picks only 36–46%, so this is direction and rough size. Under `lines` P still rises
+with bundle size, as it did under `targets` (§5), which is why opening stays per unread target.
 
-## 5. Durable, keyless, append-only
+**How a lead is raised, judged and opened, as built.**
+- *Raised:* a read raises one lead per link kind, toward the unread documents that link reaches (`term:<t>`,
+  `next:<d>`, `near:<d>`). A lead is live from the wave after the read that raised it.
+- *Judged:* once, when raised, by Jev, shown §5's description (§7).
+- *Opened:* wave 0 is search's first `walk.seeds` (10). Each wave w ≥ 1 brings the reads to `walk.wave` × w (50 × w).
+  From wave 2 a wave first takes `walk.per_wave` (10) of search's next unread documents, then the unread targets of
+  accepted leads, best P per target first, and search fills whatever is left.
+- *About half of every walk's reads are search's order by design:* 10,500 of P's 20,000 in the pilot. By 100 reads,
+  P's labelled pieces came 86 through leads and 83 through search (REM-1244).
 
-- **Durable.** A walk is a workflow run, and every step is a task row (REM-1210). A crashed walk resumes where it
-  stopped and redoes nothing (REM-1236).
-- **Keyless.** A walk is started with `{"question": {"node_id", "text"}}` and nothing else; `walk_start` refuses
-  more (REM-1231). Every move is a decider's judgement, recorded in the run's rows. The answer key enters only in
-  §10–§11. The key is never **stored** in the database either: not as labels, not as a question node's
-  answer or rubric, not in any metadata. A loader that copies a question's fields must leave the key out (cory's
-  REM-1238 fix: `gold`, `answer` and `rubric` stay in the sample's file). A database is checked with
-  `select count(*) from content.resources where uri like 'question:%' and (metadata ? 'answer' or metadata ? 'rubric')`,
-  which must be 0.
-- **Append-only.** A completed task row is never rewritten. A kept walk's verdicts and board are new resources
-  (`aiq.walk_keep`), dated. What a walk did is recomputed from its rows and from the graph as of its start
-  (`aiq.walk_state`), so it is exact, not a model's second opinion.
-- **Replayable.** A run given `replay` takes its P values from a kept verdict document and asks Jev only for the rest,
-  and `offline` asks nobody. A rerun costs nothing.
-- **Every number and wording is a row of `aiq.parameters`**, with what it controls and why, never a literal.
-  The table is bitemporal and append-only: a change closes the old row (`valid_to`) and adds a new one, and
-  `aiq.walk_settings` reads the defaults as of the run's start. So an old run replays under the defaults it started
-  with, and a query test proves it (REM-1245).
+## 7. Judging a lead
 
-## 6. The question stack: the investigation's board
+**Mark: SHOWN as built.** Jev's P for a lead is fixed when it is raised (Appendix A, F3). The board-state line it
+can carry is SHOWN not to help (−0.018, REM-1240).
+
+**What Jev sees** (`aiq.walk_requests`). One request holds at most 60 options and `decider.request_bytes`
+of their text. Its `question` is the question being judged against, and its `task` is the description's wording:
+under `walk.describe = lines`, `decider.task_lines`, "For each option, a lead to messages in the user's earlier
+conversations that have not been read yet, described by what the user said in them and where they sit. Would
+following it likely reach information needed to answer `question`, or part of it?" Each option is the lead's
+description (§5). On the plain walk there is one question, the user's own. Under the stack, a request is made per
+open question, and a lead out of a read linked as evidence
+gets one more sentence, "It comes out of a message found to answer: '<q>'." Jev never sees the board itself, and
+never the full evidence.
+
+**Under the stack** (`walk.stack`, an opt-in since §17), for each live lead and each open question, Jev gives P that
+following the lead serves that question. It is shown:
+- the lead's description (§5);
+- one line of board state: "It comes out of a message found to answer: '<q>'". It is fixed once the source read is
+  assessed, so a (lead, question) verdict is never asked twice. A lead out of a read that answered nothing carries
+  no state line.
+
+The lead's P is the maximum over open questions, and the question it serves is recorded. A lead is judged once,
+when it is raised, against the questions open then, and its P stays fixed (Sirsh, F3: re-judging open leads is
+measured later, not in V0). A question raised later is served by the leads raised after it. Leads raised
+only for questions since answered fall away, which is what cuts the noise Jev has to consider.
+
+**Cost** (under F3, each judgement asked once). A wave judges (new leads × questions open when they are raised) +
+(new reads × open questions) + split candidates + one close judgement per open question with new evidence. A
+500-read walk raises about 2,000 leads (REM-1240). With at most `stack.max_open` = 4 open questions, that is at most
+about 8,000 lead judgements and 2,000 read assessments, at about 150 input tokens an option in batches of 60: about
+1.5M tokens, about $0.06 of Jev a walk at $0.042 per million. Today's memoryless walk is about $0.015.
+
+## 8. Stack B: Jev's direction memory
+
+**Mark: PARTLY SHOWN.** It helps when it is accurate, and Jev cannot yet build it.
+
+**Meant to solve:** late in a walk the unread leads are mostly echoes of what has been read, and Jev cannot tell
+them from new information. Its AUC on leads fell to 0.27–0.36 in later waves (REM-1240). A lead out of a read that
+is itself evidence is about 12 times as likely to lead to more, yet Jev gives it about 0.04 more P, because nothing
+it is shown says which reads were evidence.
+
+**The design** (bill, from Sirsh's 18:26Z and 19:50Z). B is a small working memory of the evidence found so far,
+put into Jev's state beside the question. The question itself is unchanged. B is what the counter-process (§3)
+hands the decider: the direction already covered, so a lead toward more of the same can be told from a lead toward
+what is missing.
+
+**Evidence** (bill, REM-1244):
+- *An exact B helps.* On 400 leads out of evidence reads (80 progress, 320 echo, four questions), adding the exact
+  found evidence to the state lifts progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004, +0.094]. Nearly
+  all of it is one question, 1M:13, where the question alone ranked below chance (0.464 → 0.687).
+- *A small exact B works like the full one.* B holding only 3 exact pieces gives +0.254 on 1M:13, pooled +0.036
+  [−0.004, +0.080].
+- *A negated task hurts.* A task worded "not already in what was found" scores −0.07 to −0.17.
+- *Jev cannot yet build B.* Admitting reads Jev judges as found evidence, B balloons to 42–72% of the reads, at
+  precision 0.03–0.29 against the labels, and no gate fixes it. Taking Jev's own top relevance per wave keeps B
+  small (9–11 pieces), but only about 9% of it is evidence, and judging with it pools −0.041 [−0.083, −0.001].
+
+**What is missing:** an admission signal that separates evidence from reads that are merely on topic.
+
+**The test that would show it:** a keyless admission signal whose B is small and exact enough to keep the exact-B
+gain, then replayed coverage at 100 above P's on a registered set.
+
+## 9. Stack A: the evidence streamed to the caller
+
+**Mark: TO BE SHOWN.**
+
+**Meant to solve:** the caller wants every piece of evidence the walk found, and the decider must not carry it. A is
+the walk's retrieval, kept apart from B.
+
+**The design** (Sirsh, 18:26Z). After each read Jev judges "does this message hold information needed to answer
+`question`?", and if yes the read's node id goes on A. A holds ids only. It never enters Jev's context, and it is
+streamed to the caller as the walk's result, with the handle to interrogate it (§16).
+
+**Evidence so far** (bill, the same run as B's): relevance AUC is 0.686, 0.923, 0.517 and 0.564 on the four
+questions. At relevance ≥ 0.5, A holds 50, 35, 51 and 71 of 100 reads, and catches 1 of 2, 14 of 15, 2 of 3 and 4
+of 5 of the labelled pieces read. Recall is high and precision low, so as a list it is mostly cost to the caller.
+
+**The test that would show it:** A at a top-k-per-wave cut, against V0's reads in order (what V0 returns today)
+and against S's `walk_answers` links on the pilot, on the extension's questions, comparing labelled recall and
+precision of the returned list at equal list size.
+
+## 10. The question stack: splitting and closing by structure
+
+**Mark: PARTLY SHOWN.** The board is built and runs as an opt-in (`walk.stack`). Template parts are SHOWN not to
+help (S − P −1.1 [−3.1, +0.2], §17). The per-line close is SHOWN to fail its calibration (Appendix A, F12), so V0
+closes by structure only. Expected cardinality is SHOWN (AUC 0.936, Appendix A). Real sub-questions are below.
 
 The user's question, which the decider splits, answers and adds to as evidence comes in. Evidence is linked to the
 questions it answers, as a bipartite graph built from existing nodes, edges and runs. It needs no new table.
@@ -134,10 +284,10 @@ questions it answers, as a bipartite graph built from existing nodes, edges and 
 - **Evidence.** A read the decider judged to bear on a question gets a `walk_answers` edge, read → question, with
   provenance `{run, wave, P}`.
 - **Ids.** Questions are named `root`, `part:<term>` (an in-loop split) or `client:<n>` (a split returned by a
-  client, §12).
+  client, §16).
 - **Verdict keys**, in the run's answers and in `aiq.walk_verdicts`: `L|<q>|<lead>` (a lead for a question),
   `A|<q>|<read>` (an assessment), `S|<parent>|<term>` (a split candidate), `C|<q>|<count>` (a close judgement, keyed
-  by its evidence count). So a replay replays the board as well as the leads (§14, F2).
+  by its evidence count). So a replay replays the board as well as the leads (Appendix A, F2).
 - **Moves.** Each wave's moves are the output of that wave's `stack` task: `split`, `answered`, `added`, and `open`
   after them, each with Jev's P. Nothing else writes them. `aiq.walk_keep` materialises the nodes and edges when a
   walk is kept. A walk in flight writes only its task rows.
@@ -162,7 +312,7 @@ Each wave, after its reads:
    open part that has no links of its own yet, at most `stack.max_displace` (1) a wave. The replaced part closes
    `displaced`, recorded with its P, not deleted, and its leads are kept (F11).
 3. **Split, outside the loop.** When Jev judges the root a blend of separate questions (semantic exception `DECOMPOSITION_REQUIRED`,
-   §12), the walk *raises* it to the client with the prompt "split your question up". An LLM client's sub-questions
+   §16), the walk *raises* it to the client with the prompt "split your question up". An LLM client's sub-questions
    come back as `added` moves with `by: client`, recorded like any other. The walk never calls the LLM.
 4. **Close, by structure, never by a holistic judgement** (Sirsh, 13:15Z). Jev is never asked whether a set of
    messages together answers a question. That is not its job.
@@ -183,7 +333,7 @@ Each wave, after its reads:
      leaf.
    - **Narrowness is the board's job.** A question is narrow enough when one message can answer it. Whether the root
      is broad is **structural and keyless**: if no line clears the root by wave `stack.broad_after` (2), the walk
-     raises `DECOMPOSITION_REQUIRED` (§12) to the client, once, and keeps splitting in the loop from the aspects its
+     raises `DECOMPOSITION_REQUIRED` (§16) to the client, once, and keeps splitting in the loop from the aspects its
      reads name (move 2). There is no Jev call on the root's words. The catalogue's check asks whether a question
      *combines distinct parts*, which a set question such as "how did my focus evolve" does not. Its measurement is
      thin (threshold 0.95, F1 0.76 on 12 positives), and a new wording would be an unmeasured judgement with its own
@@ -194,11 +344,11 @@ Each wave, after its reads:
      single message that answers it. Splitting gives one part per aspect found, and each part can close on one line.
      But the walk cannot know the set is complete, so such a parent never closes `answered`. It ends `partly
      answered`, `stale` or at the budget, and the board reports the parts it has answered. That is a stated limit, not
-     a failure. Set or count questions are detected only by Jev's cardinality decision on the question's words (§14), never by
+     a failure. Set or count questions are detected only by Jev's cardinality decision on the question's words (Appendix A), never by
      BEAM's type, which the walk must not know; until its gate is set the walk does not detect them. It reports what it has (answered, partly answered, stale, budget), and the evaluation, outside the walk,
      reports results by BEAM's type (bill, 13:19Z).
    - Stale (`stack.stale_waves`, 2) and displaced parts free their slot, never count as answered, and **their leads do
-     not fall away**; otherwise a stale close would be a new source of §10's class 4. Every close keeps its edges. Each
+     not fall away**; otherwise a stale close would be a new source of §14's class 4. Every close keeps its edges. Each
      threshold is an `aiq.parameters` row with its reason.
 
    **Why the earlier step asked the holistic question (postmortem).** Three causes:
@@ -212,7 +362,7 @@ Each wave, after its reads:
       lines and left the question broad.
 
    The measured cost: close P separated asks holding labelled evidence at only AUC 0.622, and closed once in ten,
-   wrongly (§14).
+   wrongly (Appendix A).
 
 Why: a memoryless walk judges every lead against the original question alone and fixes each P when the lead is raised
 (REM-1240, `aiq.walk_requests`).
@@ -221,26 +371,43 @@ Why: a memoryless walk judges every lead against the original question alone and
 - **A list of reads does not carry it.** Closeness to the reads so far predicts rightness at only 0.54–0.60. What
   carries it is the reads the decider judged as answering a question.
 
-## 7. Jev judges each lead against the open questions only
+**Where its parts come from: three forms.**
+- **Template parts, built.** "<root> (the part about '<term>')", with the term taken from the link graph
+  (`stack.part_wording`). No question text is generated, and all 77 parts in the pilot are this template. SHOWN not
+  to help: they are the root's own words plus a keyword the reads already shared.
+- **Caller-supplied parts, tested, no direction.** The asking agent supplies its own sub-questions, opened as
+  `client:<n>` parts from the start, with everything else as built.
+  - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as
+    `question.parts`, which is not built (today `walk_start` takes only the question), and would be refused if they
+    carried an answer, evidence or rubric.
+  - *Who writes them, in any test or example* (sally, 18:09Z): on BEAM the rubric's items are the answer key, and a
+    refusal at `walk_start` cannot catch a part copied from one. So a fresh client given only the question's words
+    writes the parts, its prompt is kept, and afterwards each part is checked against the rubric for repeated
+    distinctive words, with any repeat quoted.
+  - *Evidence* (bill, 18:14Z, REM-1244). Jev re-judged recorded leads on 4 questions, against blind sub-questions
+    written under that rule and against the original. Best sub-question minus original, in AUC: house sale −0.170
+    [−0.264, −0.077]; Japan trip −0.020 [−0.068, +0.029]; GPU issues +0.005 [−0.014, +0.027]; days between −0.098
+    [−0.159, −0.038]. Judging the original twice moves its AUC by at most 0.010. An earlier hand-written set (from the
+    question text only) gave −0.036, +0.005, −0.030 and −0.068; its null held all the more, since copying the rubric
+    could only have helped (sally). Both checks cost $0.052.
+  - *Why no direction:* Jev already reads a multi-part question's parts in the question itself (sally), and taking
+    the best score over several parts adds false positives (bill's write-up).
+  - *The test that would show it:* leads scoring better against blind parts than against the root on a registered
+    set. On this evidence it is not built for part three.
+- **The slot-structured stack, TO BE SHOWN** (Sirsh, M-20261029-180634-2357; a project and a follow-up article).
+  Each open question is a slot built from closed lists: *subject* (an entity in the graph), *aspect* (a tag or a
+  relationship type), *time* (past, now, later, or before or after an event) and *ask* (a fact, a change, a count
+  or a list item; the ask also says when the slot is filled). Jev picks slots, judges leads against the open ones,
+  and closes a slot when evidence fills it. The closed lists are evolved over time, which tests whether a closed set
+  of types covers most questions. *The test:* the lists cover most questions as they evolve, and leads judged
+  against filled slots separate evidence better than against the root.
+- **Splitting from what exists** (Appendix A, "Splitting without generated text"): evidence clusters are built and
+  TO BE SHOWN (`walk.split = clusters`, off); the leftover vector and term hubs are SHOWN to fail.
 
-For each live lead and each open question, Jev gives P that following the lead serves that question. It is shown:
-- the lead's description (§3);
-- one line of board state: "It comes out of a message found to answer: '<q>'". It is fixed once the source read is
-  assessed, so a (lead, question) verdict is never asked twice. A lead out of a read that answered nothing carries
-  no state line.
+## 11. When a walk stops
 
-The lead's P is the maximum over open questions, and the question it serves is recorded. A lead is judged once,
-when it is raised, against the questions open then, and its P stays fixed (Sirsh, F3: re-judging open leads is
-measured later, not in V0). A question raised later is served by the leads raised after it. Leads raised
-only for questions since answered fall away, which is what cuts the noise Jev has to consider.
-
-**Cost** (under F3, each judgement asked once). A wave judges (new leads × questions open when they are raised) +
-(new reads × open questions) + split candidates + one close judgement per open question with new evidence. A
-500-read walk raises about 2,000 leads (REM-1240). With at most `stack.max_open` = 4 open questions, that is at most
-about 8,000 lead judgements and 2,000 read assessments, at about 150 input tokens an option in batches of 60: about
-1.5M tokens, about $0.06 of Jev a walk at $0.042 per million. Today's memoryless walk is about $0.015.
-
-## 8. When a walk stops
+**Mark: PARTLY SHOWN.** All four stops are built and recorded. The cold stop runs only under the stack, and the
+pilot measured its cost.
 
 The first of these, recorded by the run's `stop` (Sirsh, F1):
 
@@ -260,7 +427,42 @@ The first of these, recorded by the run's `stop` (Sirsh, F1):
 - `stack.close_gate` (0.7) is **unused in V0**. It belongs to the holistic close this section retired. `walk_stack_next` fetches it and no
   code reads it. Its row is marked unused, or removed, in the first percolate change after tonight's release.
 
-## 9. The walk structure: a first-class queryable object
+## 12. Durable, keyless, append-only, replayable, with dated parameters
+
+**Mark: SHOWN.** Each property below names the test or run that shows it.
+
+- **Durable.** A walk is a workflow run, and every step is a task row (REM-1210). A crashed walk resumes where it
+  stopped and redoes nothing (REM-1236).
+- **Keyless.** A walk is started with `{"question": {"node_id", "text"}}` and nothing else; `walk_start` refuses
+  more (REM-1231). Every move is a decider's judgement, recorded in the run's rows. The answer key enters only in
+  §14–§15. The key is never **stored** in the database either: not as labels, not as a question node's
+  answer or rubric, not in any metadata. A loader that copies a question's fields must leave the key out (cory's
+  REM-1238 fix: `gold`, `answer` and `rubric` stay in the sample's file). A database is checked with
+  `select count(*) from content.resources where uri like 'question:%' and (metadata ? 'answer' or metadata ? 'rubric')`,
+  which must be 0.
+- **Append-only.** A completed task row is never rewritten. A kept walk's verdicts and board are new resources
+  (`aiq.walk_keep`), dated. What a walk did is recomputed from its rows and from the graph as of its start
+  (`aiq.walk_state`), so it is exact, not a model's second opinion.
+- **Replayable.** A run given `replay` takes its P values from a kept verdict document and asks Jev only for the rest,
+  and `offline` asks nobody. A rerun costs nothing.
+- **Every number and wording is a row of `aiq.parameters`**, with what it controls and why, never a literal.
+  The table is bitemporal and append-only: a change closes the old row (`valid_to`) and adds a new one, and
+  `aiq.walk_settings` reads the defaults as of the run's start. So an old run replays under the defaults it started
+  with, and a query test proves it (REM-1245).
+
+**Kept from the walk's history.** Each of these exists, is used by part three, and stays in V0 unchanged:
+- **The certificate** (cold, REM-1211).
+- **Near misses** (`walk.near_miss`, off by default, REM-1207).
+- **Verdict memory** (`walk.memory`, `walk.memory_as_of`, REM-1232).
+- **Replay and offline** (REM-1199).
+- **Blind controls** (`control_of`, part three's blind walks).
+- **The two clocks:** valid time and known time, the walk as of a past start (part three's time step).
+- **Search scoped to the walk's channel.**
+- **The graph kept as a document** per scope and version (`walk_index`).
+
+## 13. The walk as a queryable object, with cost as an observable
+
+**Mark: SHOWN.** Built, and read by the pilot's scoring.
 
 Everything a person, a UI or an LLM sees of a walk comes from these functions over the run's rows, through the query
 layer. A UI assembles nothing of its own.
@@ -286,27 +488,30 @@ task rows (each decider task records the model and its input and output tokens a
 - the price per input and output token as an `aiq.parameters` row (`decider.price_in`, `decider.price_out`, dollars per million
   tokens, with their source and date; under the existing `decider` part, so no live table changes), read as of the run's start like every default, so an old run keeps the price it
   ran at;
-- with oracle labels (§11): evidence found per dollar, and coverage against cost at 50, 100 and 500 reads beside
+- with oracle labels (§15): evidence found per dollar, and coverage against cost at 50, 100 and 500 reads beside
   search (no Jev cost) and the oracle ceiling. Budgets nest, so the cost at 100 reads is that of the run's first 100
   reads, not a separate walk.
 
-## 10. Evaluation, outside the walk (with sally)
+## 14. Evaluation, outside the walk (with sally)
+
+**Mark: PARTLY SHOWN.** The measures and classes are built and used. Whether the walk beats search is decided by
+the registered extension (Appendix B).
 
 There is no answer key in the walk. The key enters only here, and every figure it colours says *oracle-scored*:
 
 - `aiq.walk_coverage(run, nodes, budgets)`: a generic coverage measure, the evidence read by each budget, beside
   search's own order at the same budget;
-- the **oracle ceiling**: the oracle decider (§11) on the walk's own graph, seeds and budget;
+- the **oracle ceiling**: the oracle decider (§15) on the walk's own graph, seeds and budget;
 - `aiq.walk_why(run, nodes)`: for each missed piece, why.
 
 **A miss is attributed to the data if an omniscient reader on the same graph would have missed it too; otherwise to
 the implementation** (sally's revision). Each miss is shown with the real lead. A miss is a piece the walk did not
 read, or read but did not link to a question.
 
-**The omniscient reader** is the oracle (§11). It has the same graph, seeds and read budget as the walk and knows the
+**The omniscient reader** is the oracle (§15). It has the same graph, seeds and read budget as the walk and knows the
 answer key, and nothing else. Its reads at each budget are the **ceiling**. The ceiling is a perfect opener with no
 board: a reader who knows the key needs no stack to open the right lead. Stack failures are located piece by piece by
-classes 4 and 8, not by a second ceiling (§14, F7).
+classes 4 and 8, not by a second ceiling (Appendix A, F7).
 
 For each piece, the first class that holds is its class:
 
@@ -314,17 +519,17 @@ For each piece, the first class that holds is its class:
 |---|---|---|---|---|
 | 1 | data: unreachable | no lead path from the seeds reaches it | the graph does not connect it | ingest, links |
 | 2 | data: beyond the ceiling | the oracle does not read it within this budget either | the budget, not the walk | budget |
-| 3 | data: indistinguishable | shown everything the page holds (§3's fullest description: the target's whole text), the decider rejects it as often as the look-alikes around it, and the look-alikes outnumber the evidence | a reader without the key could not tell it from the messages around it; only the benchmark's rubric does | nothing in the walk: a stated limit of the question |
-| 4 | implementation: closed early or on superseded evidence | the question it answers was closed (§6, move 4) before a lead toward it was opened, and that lead then fell away; or it was closed on an earlier statement while a later one that supersedes it was read and not linked, or linked and ignored | the board closed too soon, or on the wrong value | `stack.state_gate` (unset in V0), the link rule, the one-line close judgement |
+| 3 | data: indistinguishable | shown everything the page holds (§5's fullest description: the target's whole text), the decider rejects it as often as the look-alikes around it, and the look-alikes outnumber the evidence | a reader without the key could not tell it from the messages around it; only the benchmark's rubric does | nothing in the walk: a stated limit of the question |
+| 4 | implementation: closed early or on superseded evidence | the question it answers was closed (§10, move 4) before a lead toward it was opened, and that lead then fell away; or it was closed on an earlier statement while a later one that supersedes it was read and not linked, or linked and ignored | the board closed too soon, or on the wrong value | `stack.state_gate` (unset in V0), the link rule, the one-line close judgement |
 | 5 | implementation: never offered | the oracle reaches it, but no lead the walk raised pointed at it | the walk's reads went elsewhere earlier | opening order, seeds |
-| 6 | implementation: rejected | a lead toward it was judged under the gate | judging | §3's description, or the decider |
-| 7 | implementation: open, not read | a lead toward it was accepted but never opened | queue | opening order (§4), budget |
-| 8 | implementation: not linked | it was read, but the decider linked it to no question | assessment | §6, move 1 |
+| 6 | implementation: rejected | a lead toward it was judged under the gate | judging | §5's description, or the decider |
+| 7 | implementation: open, not read | a lead toward it was accepted but never opened | queue | opening order (§6), budget |
+| 8 | implementation: not linked | it was read, but the decider linked it to no question | assessment | §10, move 1 |
 
 - **Where the classes come from.** Classes 5–8 are `walk_why`'s reasons (REM-1211). Class 4 needs a new `walk_why`
   reason, read from the board's close moves. All are computed per piece beside the oracle's reads.
 - **Rejected (6) splits by what the decider was shown.** The lead is re-judged with the fullest description. Accepted
-  then means the description was missing what was needed: an edge-information failure (§3). Still rejected, and not
+  then means the description was missing what was needed: an edge-information failure (§5). Still rejected, and not
   class 3, means the decider could not tell even shown everything: a decider failure.
 - **Class 3's test is keyless on the page side.** The key says which piece is evidence. Whether a reader could tell
   uses only what is on the page: the decider's P under the fullest description, for the piece against the k messages
@@ -357,133 +562,17 @@ For each piece, the first class that holds is its class:
 Measured so far: on BEAM 1M:22 and 1M:35, the oracle reaches 94/100/100% of the evidence by 50/100/500 reads, and
 search's own order 52/67/88% (REM-1204).
 
-### How V0 is judged: statistically, against search
+## 15. Oracle mode
 
-V0 is judged against search, statistically, across many questions of varied difficulty and across data-set sizes.
-A handful of walks is never the verdict.
+**Mark: SHOWN.** Built, on the walk's own schedule.
 
-- **Questions:** every type, many of each. Difficulty is stratified by where search leaves the evidence (all in its
-  top 10; within its top 50; beyond it) and by how many lead hops the evidence lies from the seeds.
-- **Sizes:** BEAM's 100K, 500K, 1M and 10M histories, so the claim is how the gap over search grows with the
-  history, not one point.
-- **The measure:** §10's coverage at matched budgets (50/100/500 reads), as the paired per-question difference from
-  search's own order. That is reported with a bootstrap interval over questions, beside the oracle ceiling and §10's
-  eight-class breakdown. For questions search already answers (§15), it also reports close and stop.
-- **The sweep, registered before it runs** (REM-1244, bill's 12:36Z). The sample is drawn from BEAM's own question
-  ids, every type except abstention, which has no evidence to walk to:
-  - at 100K, 500K and 1M, 10 questions per type, from that size's ids sorted, by
-    `random.Random(f'1246:{size}:{type}').sample(ids, 10)`;
-  - at 10M, every non-abstention question (180).
-  - The data is pinned: 100K, 500K and 1M from `Mohammadta/BEAM` at revision 3205395e; 10M from the separate
-    `Mohammadta/BEAM-10M` at revision 9b209619 (two shards); each file by its sha256 (james, REM-1245).
-
-  That was 450 walks; the 270 at 100K, 500K and 1M are **on hold** (Sirsh, 14:40Z: about 6¢ a walk is too much for
-  what it would show). 10M is out of V0, a stated limit and a follow-up. What runs instead is the pilot below.
-- **The two-arm pilot, registered before it runs** (REM-1244; bill, M-20261029-144111-9155 and -144330-5a51, after
-  sally's review).
-  - *Questions:* 40 of the registered 1M draw, by `random.Random(1252).sample`, disjoint from every question walked
-    so far and from the 18 calibration questions. They are, fixed now: 1M:12 tr:1, 1M:13 pf:1, 1M:13 summ:0, 1M:19 msr:1, 1M:19 summ:1, 1M:20 cr:0, 1M:20 if:1, 1M:20 tr:0, 1M:21 cr:1, 1M:21 msr:1, 1M:23 eo:0, 1M:25 eo:0, 1M:25 ku:0, 1M:26 cr:1, 1M:26 if:1, 1M:26 pf:0, 1M:26 tr:1, 1M:27 summ:0, 1M:28 eo:0, 1M:2 if:0, 1M:2 msr:1, 1M:2 tr:0, 1M:30 pf:1, 1M:31 msr:1, 1M:31 tr:1, 1M:32 eo:1, 1M:32 ie:1, 1M:34 cr:1, 1M:34 summ:0, 1M:34 summ:1, 1M:35 ie:0, 1M:3 msr:0, 1M:4 ie:1, 1M:4 msr:0, 1M:5 eo:0, 1M:5 eo:1, 1M:7 msr:1, 1M:7 tr:0, 1M:9 ie:1, 1M:9 msr:1.
-  - *Arms:* **S**, V0 as designed (`walk.stack` on, committed defaults, `lines`, `per_target`, `stack.state_gate`
-    unset); **P**, the plain walk (`walk.stack` off, `lines`, `per_target`). F8, clusters and cardinality are off in
-    both. Search's own order and the oracle ceiling are free and shared.
-  - *Pairing:* both arms run each question on the same seeds, the same graph and the same commit, named before the
-    first walk. So the per-question difference S − P is the stack alone, and S − search is V0 against search.
-  - *Probe before the batch* (bill, 15:36Z): one walk of each arm runs alone first. The first probe ran arm S only,
-    and arm P then failed every walk on the 64 KB request cap. The run of record is image 42d61547 with the walk SQL
-    from 34f7c80a applied, both arms from scratch on that build. The 6 S walks from before the fix are kept and not
-    scored, so both arms are scored only on the build they share.
-  - *Endpoint:* coverage of the labelled evidence at 100 reads, oracle-scored, as a paired per-question difference
-    with a 95% bootstrap over questions (2,000 draws, seed 1251). 50 and 500 reads, and the burial strata by best
-    search rank (top 10, 11–50, 51–200, beyond), are descriptive.
-  - *S against search:* GO to 100K and 500K if the interval's lower end is above 0; stop, and report the walk as not
-    beating search at 1M, if its upper end is below +5; otherwise extend to 80 questions once and apply the same two
-    rules, and if neither holds, report "no difference detectable at 10 points" and stop.
-    The two rules overlap on an interval wholly inside (0, +5), settled before any data (mike, 15:58Z): the walk
-    read more of the evidence than search at 1M, by between the interval's lower and upper ends, in points at 100
-    reads (95% interval, 40 questions); the document says that, never 'beats search' alone, which claims more
-    than the interval allows (sally, 15:57Z). It does not go to 100K and 500K,
-    since that stage is powered for 10 points and would not resolve a gain under 5, and the document says so: no claim
-    about 100K or 500K, which were not run.
-  - *S against P, all three outcomes stated now:* (i) the interval lies wholly below +5: V0 ships with the stack off
-    by default, recorded as measured; (ii) its lower end is above 0: the stack stays on; (iii) it spans both: the
-    stack is **off** by default, as an opt-in the board still shows, since it costs more Jev with nothing measured for
-    it. (ii) and (i) can both hold (an interval inside (0, +5)); then (ii) wins (bill and sally, 14:50Z): an interval wholly inside (0, +5) is a measured gain, if smaller than
-    5 points, and keeping it costs about $0.006 a walk (about 40% more Jev), so the stack stays on by default.
-  - *Before scoring, not before running:* 1M:25 ku:0 is a knowledge-update question whose key was not among the 19
-    checked. Its key is checked against its conversation first (§10's key groups), and if it falls in group B or C it
-    is scored both ways.
-  - *Cost:* about 40 × ($0.020 + $0.014) = $1.40 at 500 reads, restated from the rows (§9's cost) before it starts.
-    The 100K and 500K stage runs only the arm or arms the pilot keeps. At most 10 walks at once.
-  - *Expectation, said up front:* on what is measured (walk − search from −8 to +7 points, sd 22–31), a null at 10
-    points is the likely outcome for S against search, and outcome (iii) for S against P.
-- **The pilot's result** (REM-1244, 29 Oct, 80 of 80 walks, image 42d61547 with 34f7c80a's walk SQL, the oracle and
-  walk_why read after 42a1a5ee and ed0caa58; oracle-scored; Jev $1.44: S $0.854, P $0.584). Coverage of the labelled
-  evidence, mean over 40 questions, with paired differences in points and 95% bootstraps:
-
-  | reads | S | P | search | oracle | S − search | S − P | P − search |
-  |---|---|---|---|---|---|---|---|
-  | 50 | 55.0% | 55.0% | 54.9% | 69.7% | +0.2 [−5.4, +6.0] | −0.0 [−0.2, +0.2] | +0.2 [−5.4, +6.1] |
-  | **100** | 65.2% | 66.2% | 60.8% | 93.6% | **+4.4 [−1.7, +11.7]** | **−1.1 [−3.1, +0.2]** | +5.5 [−0.1, +12.7] |
-  | 500 | 83.0% | 85.3% | 80.3% | 97.5% | +2.7 [−2.3, +7.0] | −2.3 [−5.3, +0.1] | +5.0 [+1.6, +8.7] |
-
-  - *S against P: outcome (i), registered.* The interval lies wholly below +5, so **V0 ships with `walk.stack` off by
-    default**, as an opt-in the board still shows, recorded as measured. Why the stack loses ground: it stops on its
-    own (7 of 40 S walks before 100 reads; 306 reads on average against P's 500), and on 1M:3 msr:0 it stopped at 50
-    reads with 2 of 3 pieces, where P and search held all 3. What the stop bought: at S's own stop, S holds 83.0% and
-    P at the same read count 82.4% (+0.6 [−0.2, +1.4]), for $0.0028 per labelled piece read against P's $0.0012. The
-    stack judges each lead against its open questions, so it costs more per read, and its stop saves less than that.
-  - *S against search: "extend to 80", registered.* The interval spans both rules. Where the gain sits, by burial
-    stratum at 100 reads (descriptive): top 10, n = 30, +3.3; 11–50, n = 4, −11.1; 51–200, n = 3, +29.7; beyond 200,
-    n = 3, +11.1. On 30 of the 40 questions search already holds the evidence in its top 10, and the walk ties
-    there. The walk's gains come from the buried few. S beats search on 8 questions, loses on 8 and ties on 24.
-  - *Room left:* the oracle reads 93.6% by 100 reads on the walk's own schedule, against the walk's 65%. On the
-    failures, the leading reason a labelled piece stays unread is `open`: a lead that cleared the gate and was
-    never opened within the budget (class 7). The gate accepts more than the budget opens, and P does not rank
-    among the accepted.
-  - *1M:25 ku:0's key, checked before this result was used:* group A. Exchange 488 states the key's 48 beta sign-ups
-    by 19 May, updating 386's 45. The later counts (518: 75 new beta users in the week after launch; 120 and 350
-    active users) count other things. It is scored once, and dropping it moves S − search by +0.4.
-- **The extension, registered before any of its walks runs** (bill, M-20261029-173346-4c41, amended after sally's
-  review). After outcome (i) the walk V0 ships is P, so the extension runs P only.
-  - *The confirmatory result is P against search on the new questions alone,* at 100 reads, under the same three
-    rules: GO (to 100K and 500K) if the 95% interval's lower end is above 0; NO-GO if its upper end is below +5; an
-    interval inside (0, +5) is reported in the small-gain wording; otherwise "no difference detectable at 10 points",
-    and it stops there. P's first 40 were seen before P was chosen, so choosing P and then pooling them would be a
-    forking path. The pooled 79 questions are **descriptive only**.
-  - *S against search is reported as stopped at n = 40,* with its interval: +4.4 [−1.7, +11.7].
-  - *Questions:* `random.Random(1253).sample(sorted(rest), 40)`, where `rest` is the 50 of the sweep's 1M draw of 90
-    left after the pilot's 40 (the pilot's 40 reproduce exactly from the same code). One drawn question, 1M:8 summ:1,
-    has no labelled evidence in BEAM, so it cannot be oracle-scored. It is dropped and not redrawn, which leaves 39. The drop selects on whether a question has labels at all, never
-    on an outcome (sally, 17:43Z). The 39 are:
-    1M:10 cr:0, 1M:10 eo:0, 1M:11 ku:1, 1M:11 tr:0, 1M:12 ie:1, 1M:12 if:1, 1M:13 msr:0, 1M:14 pf:0, 1M:15 ku:0, 1M:15 ku:1, 1M:16 cr:0, 1M:17 ie:0, 1M:18 ie:1, 1M:19 if:0, 1M:1 if:0, 1M:20 cr:1, 1M:20 eo:0, 1M:20 pf:1, 1M:21 if:0, 1M:21 tr:0, 1M:22 summ:1, 1M:26 ku:1, 1M:26 pf:1, 1M:27 eo:0, 1M:29 ku:1, 1M:2 ie:0, 1M:30 if:0, 1M:31 pf:1, 1M:32 pf:0, 1M:34 if:1, 1M:34 ku:0, 1M:34 ku:1, 1M:35 pf:1, 1M:35 summ:1, 1M:3 tr:1, 1M:5 ku:1, 1M:6 summ:1, 1M:7 ie:0, 1M:8 cr:0.
-  - *Build and arm:* the pilot's database and commit (image 42d61547 with 34f7c80a's walk SQL), not 0.2.35. P is set
-    explicitly: `walk.stack` false, `lines`, `per_target`, on the pilot's seeds. One walk runs alone as a probe, the
-    batch stops on its first failure, and the spend is read from `walk_cost`, about $0.015 a walk (about $0.58).
-  - *Conversations:* 16 of the 39 sit in 12 conversations the pilot did not load (1M:1, 6, 8, 10, 11, 14, 15, 16, 17,
-    18, 22, 29). They hold about 12,500 exchanges, so the database grows by about 0.7–0.8 GB (by the pilot's own
-    1,347 MB for 22,745 exchanges). Their pieces are embedded by the stack's worker, which costs no Jev.
-  - *Reported beside the result, not part of its rule* (sally and bill, 17:56Z). About half of every walk's reads
-    are search's order by design: from wave 2 each wave takes `walk.per_wave` of search's next documents first, and
-    the walk falls back on search when its accepted leads run out. So P − search is partly search against itself.
-    For each question at 100 reads: the labelled pieces P read through leads and through search's order (from
-    `walk_reads`' via), the same split for the oracle, and P − search counting the walk's lead reads only. If P's
-    lead over search comes mostly through the fill, the document says so. In the pilot's 40, P's labelled pieces by
-    100 reads came 86 through leads and 83 through search.
-  - *Keys:* 8 of the 39 are knowledge_update questions. Each key is checked against its conversation before
-    scoring, and one in group B or C is scored both ways.
-- **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
-  registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
-  search.
-
-## 11. Oracle mode
-
-A mode of the structure in §9, not of a UI. `aiq.walk_oracle(run, nodes)` computes it, and
-`aiq.walk_structure(run, oracle => nodes)` returns §9's object plus
+A mode of the structure in §13, not of a UI. `aiq.walk_oracle(run, nodes)` computes it, and
+`aiq.walk_structure(run, oracle => nodes)` returns §13's object plus
 what a normal walker cannot see, every part marked `"oracle": true`:
 - the labelled answer set;
 - which reads were evidence;
 - the ceiling's reads at each budget;
-- §10's class for each miss.
+- §14's class for each miss.
 
 **Per labelled piece, when the walk could have had it** (cory, from Sirsh's 12:27Z note):
 `aiq.walk_structure(run, oracle).oracle.timeline`, one entry per labelled piece (built, REM-1245):
@@ -496,45 +585,74 @@ what a normal walker cannot see, every part marked `"oracle": true`:
 On the ladder retest, 266 was offered and accepted at wave 2 (`next:261`, P 0.79) and never read: class 7.
 
 A late read after an early offer is a judging or opening miss: offered but never accepted names the P that kept it
-shut. A late offer is distance. This refines §10's classes 5–7, and the UI draws it without arithmetic of its own.
+shut. A late offer is distance. This refines §14's classes 5–7, and the UI draws it without arithmetic of its own.
 
-Without `oracle`, the object is exactly what the walk knew. **The oracle decider:** same graph, seeds and budget; from
+Without `oracle`, the object is what the walk knew and nothing more. **The oracle decider:** same graph, seeds and budget; from
 the live leads it opens the one with the most unread evidence per target, else the one nearest unread evidence by
 reverse distance. It knows the key and nothing else. It reads wave by wave as the walk does (REM-1245): reads
 reach wave × `walk.per_wave`, from wave 2 it takes `walk.per_wave` of search's next unread documents first, and a
 lead is live only from the wave after the read that raised it. So it is a ceiling for this walk's schedule, not for
 any order of reads. Built as `aiq.walk_oracle(run, nodes)` (REM-1245, about 5 s a walk); `walk_structure(run, oracle).oracle.ceiling.evidence_by` gives oracle, walk and search side by side at 50/100/500.
 
-## 12. The LLM interface
+## 16. The LLM interface
 
-Percolate talks to an LLM in exactly two ways:
+**Mark: PARTLY SHOWN.** The exceptions are specified and `DECOMPOSITION_REQUIRED` is raised structurally. Results
+carry the run's handle. No client has yet split a question within a walk.
+
+Percolate talks to an LLM in two ways:
 
 - **(a) Semantic exceptions.** The walk tells the model to do something. Each exception is a code, its evidence, and a
   prompt the model reads (percolate-core `semantic_exceptions`):
   - `DECOMPOSITION_REQUIRED`: the question blends separate parts; split it into sub-questions, which come back
-    as §6.3 moves;
+    as moves of §10, move 3;
   - `LOOP`: rounds keep opening questions and find nothing new;
   - `CONVERGED`: nothing new to find;
   - `FACET_UNANSWERED`: an open question the walk could not find evidence for, at the stop.
 
   Detection is Jev's or structural, never an LLM's.
-- **(b) Query results that carry the means to interrogate.** A walk's answer is its evidence plus the handle to §9's
+- **(b) Query results that carry the means to interrogate.** A walk's answer is its evidence plus the handle to §13's
   structure: the run id and the named queries above. A client can ask why a piece was read, which question it
   answered, what is still open, and what was rejected.
 
-## 13. Kept from the walk's history
+**Map-reduce, TO BE SHOWN** (Sirsh, 13:16Z). Narrow sub-questions are what make the walk a map: several Jev
+instances can each work their own part independently, and the holistic integration happens afterwards, done by the
+caller, which is the reduce. Jev never needs the whole picture. The design keeps that possible: each sub-question's
+judgements are keyed by the question (`L|<q>|<lead>`, `A|<q>|<read>`), no judgement reads holistic state, and a
+parent's close is structure over its children.
 
-Each of these exists, is used by part three, and stays in V0 unchanged:
-- **The certificate** (cold, REM-1211).
-- **Near misses** (`walk.near_miss`, off by default, REM-1207).
-- **Verdict memory** (`walk.memory`, `walk.memory_as_of`, REM-1232).
-- **Replay and offline** (REM-1199).
-- **Blind controls** (`control_of`, part three's blind walks).
-- **The two clocks:** valid time and known time, the walk as of a past start (part three's time step).
-- **Search scoped to the walk's channel.**
-- **The graph kept as a document** per scope and version (`walk_index`).
+## 17. V0: what ships
 
-## 14. Decided, and still open (Sirsh, M-20261029-111419-ebca: keep V0 minimal, change one thing at a time)
+V0 is the plain walk with the original question: `walk.describe = lines`, `walk.order = per_target`, and
+`walk.stack` **false** by default (percolate #325). F8, clusters and cardinality are off. The board runs as an
+opt-in. Nothing marked TO BE SHOWN above ships as V0 behaviour.
+
+**Why the stack is off: the registered two-arm pilot** (REM-1244, 29 Oct, 40 BEAM 1M questions, 80 walks, paired on
+seeds, graph and commit, oracle-scored, Jev $1.44; the full registration and result are in Appendix B). Coverage of
+the labelled evidence:
+
+| reads | S (stack on) | P (plain) | search | oracle | S − search | S − P | P − search |
+|---|---|---|---|---|---|---|---|
+| 50 | 55.0% | 55.0% | 54.9% | 69.7% | +0.2 [−5.4, +6.0] | −0.0 [−0.2, +0.2] | +0.2 [−5.4, +6.1] |
+| **100** | 65.2% | 66.2% | 60.8% | 93.6% | **+4.4 [−1.7, +11.7]** | **−1.1 [−3.1, +0.2]** | +5.5 [−0.1, +12.7] |
+| 500 | 83.0% | 85.3% | 80.3% | 97.5% | +2.7 [−2.3, +7.0] | −2.3 [−5.3, +0.1] | +5.0 [+1.6, +8.7] |
+
+- *S against P fell in outcome (i):* the interval lies wholly below +5, so the stack is off by default. The stack
+  stops early (7 of 40 before 100 reads; 306 reads on average) and costs $0.0028 per labelled piece read against
+  P's $0.0012. At the same read count S and P are level (+0.6 [−0.2, +1.4]).
+- *Walk against search is not yet settled.* The gains sit in the buried few: by burial stratum at 100 reads, top 10
+  (n = 30) +3.3, 11–50 (n = 4) −11.1, 51–200 (n = 3) +29.7, beyond 200 (n = 3) +11.1. The registered extension, P
+  only on 39 new questions, decides it, with P's evidence split by leads and by search's fill (Appendix B).
+- *Room left:* the oracle reads 93.6% by 100 reads, and 80% of the gap is accepted leads never opened (§3).
+
+**V0's limits** are listed in Appendix C.
+
+---
+
+**About the appendices.** They keep the V0 spec's text unchanged, so their section references use its old numbers.
+Old to new: §2 → §4, §3 → §5, §4 → §6, §5 → §12, §6 → §10, §7 → §7, §8 → §11, §9 → §13, §10 → §14, §11 → §15,
+§12 → §16, §13 → §12, §14 → Appendix A, §15 → Appendix C, §16 → §8–§10.
+
+## Appendix A. Decisions, diagnoses and calibration (unchanged from the V0 spec)
 
 Decided:
 - **F1, stops.** Keep dry and cold as recorded stop reasons, beside stack-empty and budget (§8).
@@ -831,7 +949,125 @@ Still open:
   not on this walk. **Decided yes, on principle** (bill, 13:42Z, under Sirsh's rule): a wide lead's weak targets
   should not spend reads. It is registered for a fresh draw, and bundles stay the default until it passes there.
 
-## 15. V0 limits, stated
+## Appendix B. How V0 is judged: the registered sweep, pilot and extension (unchanged)
+
+V0 is judged against search, statistically, across many questions of varied difficulty and across data-set sizes.
+A handful of walks is never the verdict.
+
+- **Questions:** every type, many of each. Difficulty is stratified by where search leaves the evidence (all in its
+  top 10; within its top 50; beyond it) and by how many lead hops the evidence lies from the seeds.
+- **Sizes:** BEAM's 100K, 500K, 1M and 10M histories, so the claim is how the gap over search grows with the
+  history, not one point.
+- **The measure:** §10's coverage at matched budgets (50/100/500 reads), as the paired per-question difference from
+  search's own order. That is reported with a bootstrap interval over questions, beside the oracle ceiling and §10's
+  eight-class breakdown. For questions search already answers (§15), it also reports close and stop.
+- **The sweep, registered before it runs** (REM-1244, bill's 12:36Z). The sample is drawn from BEAM's own question
+  ids, every type except abstention, which has no evidence to walk to:
+  - at 100K, 500K and 1M, 10 questions per type, from that size's ids sorted, by
+    `random.Random(f'1246:{size}:{type}').sample(ids, 10)`;
+  - at 10M, every non-abstention question (180).
+  - The data is pinned: 100K, 500K and 1M from `Mohammadta/BEAM` at revision 3205395e; 10M from the separate
+    `Mohammadta/BEAM-10M` at revision 9b209619 (two shards); each file by its sha256 (james, REM-1245).
+
+  That was 450 walks; the 270 at 100K, 500K and 1M are **on hold** (Sirsh, 14:40Z: about 6¢ a walk is too much for
+  what it would show). 10M is out of V0, a stated limit and a follow-up. What runs instead is the pilot below.
+- **The two-arm pilot, registered before it runs** (REM-1244; bill, M-20261029-144111-9155 and -144330-5a51, after
+  sally's review).
+  - *Questions:* 40 of the registered 1M draw, by `random.Random(1252).sample`, disjoint from every question walked
+    so far and from the 18 calibration questions. They are, fixed now: 1M:12 tr:1, 1M:13 pf:1, 1M:13 summ:0, 1M:19 msr:1, 1M:19 summ:1, 1M:20 cr:0, 1M:20 if:1, 1M:20 tr:0, 1M:21 cr:1, 1M:21 msr:1, 1M:23 eo:0, 1M:25 eo:0, 1M:25 ku:0, 1M:26 cr:1, 1M:26 if:1, 1M:26 pf:0, 1M:26 tr:1, 1M:27 summ:0, 1M:28 eo:0, 1M:2 if:0, 1M:2 msr:1, 1M:2 tr:0, 1M:30 pf:1, 1M:31 msr:1, 1M:31 tr:1, 1M:32 eo:1, 1M:32 ie:1, 1M:34 cr:1, 1M:34 summ:0, 1M:34 summ:1, 1M:35 ie:0, 1M:3 msr:0, 1M:4 ie:1, 1M:4 msr:0, 1M:5 eo:0, 1M:5 eo:1, 1M:7 msr:1, 1M:7 tr:0, 1M:9 ie:1, 1M:9 msr:1.
+  - *Arms:* **S**, V0 as designed (`walk.stack` on, committed defaults, `lines`, `per_target`, `stack.state_gate`
+    unset); **P**, the plain walk (`walk.stack` off, `lines`, `per_target`). F8, clusters and cardinality are off in
+    both. Search's own order and the oracle ceiling are free and shared.
+  - *Pairing:* both arms run each question on the same seeds, the same graph and the same commit, named before the
+    first walk. So the per-question difference S − P is the stack alone, and S − search is V0 against search.
+  - *Probe before the batch* (bill, 15:36Z): one walk of each arm runs alone first. The first probe ran arm S only,
+    and arm P then failed every walk on the 64 KB request cap. The run of record is image 42d61547 with the walk SQL
+    from 34f7c80a applied, both arms from scratch on that build. The 6 S walks from before the fix are kept and not
+    scored, so both arms are scored only on the build they share.
+  - *Endpoint:* coverage of the labelled evidence at 100 reads, oracle-scored, as a paired per-question difference
+    with a 95% bootstrap over questions (2,000 draws, seed 1251). 50 and 500 reads, and the burial strata by best
+    search rank (top 10, 11–50, 51–200, beyond), are descriptive.
+  - *S against search:* GO to 100K and 500K if the interval's lower end is above 0; stop, and report the walk as not
+    beating search at 1M, if its upper end is below +5; otherwise extend to 80 questions once and apply the same two
+    rules, and if neither holds, report "no difference detectable at 10 points" and stop.
+    The two rules overlap on an interval wholly inside (0, +5), settled before any data (mike, 15:58Z): the walk
+    read more of the evidence than search at 1M, by between the interval's lower and upper ends, in points at 100
+    reads (95% interval, 40 questions); the document says that, never 'beats search' alone, which claims more
+    than the interval allows (sally, 15:57Z). It does not go to 100K and 500K,
+    since that stage is powered for 10 points and would not resolve a gain under 5, and the document says so: no claim
+    about 100K or 500K, which were not run.
+  - *S against P, all three outcomes stated now:* (i) the interval lies wholly below +5: V0 ships with the stack off
+    by default, recorded as measured; (ii) its lower end is above 0: the stack stays on; (iii) it spans both: the
+    stack is **off** by default, as an opt-in the board still shows, since it costs more Jev with nothing measured for
+    it. (ii) and (i) can both hold (an interval inside (0, +5)); then (ii) wins (bill and sally, 14:50Z): an interval wholly inside (0, +5) is a measured gain, if smaller than
+    5 points, and keeping it costs about $0.006 a walk (about 40% more Jev), so the stack stays on by default.
+  - *Before scoring, not before running:* 1M:25 ku:0 is a knowledge-update question whose key was not among the 19
+    checked. Its key is checked against its conversation first (§10's key groups), and if it falls in group B or C it
+    is scored both ways.
+  - *Cost:* about 40 × ($0.020 + $0.014) = $1.40 at 500 reads, restated from the rows (§9's cost) before it starts.
+    The 100K and 500K stage runs only the arm or arms the pilot keeps. At most 10 walks at once.
+  - *Expectation, said up front:* on what is measured (walk − search from −8 to +7 points, sd 22–31), a null at 10
+    points is the likely outcome for S against search, and outcome (iii) for S against P.
+- **The pilot's result** (REM-1244, 29 Oct, 80 of 80 walks, image 42d61547 with 34f7c80a's walk SQL, the oracle and
+  walk_why read after 42a1a5ee and ed0caa58; oracle-scored; Jev $1.44: S $0.854, P $0.584). Coverage of the labelled
+  evidence, mean over 40 questions, with paired differences in points and 95% bootstraps:
+
+  | reads | S | P | search | oracle | S − search | S − P | P − search |
+  |---|---|---|---|---|---|---|---|
+  | 50 | 55.0% | 55.0% | 54.9% | 69.7% | +0.2 [−5.4, +6.0] | −0.0 [−0.2, +0.2] | +0.2 [−5.4, +6.1] |
+  | **100** | 65.2% | 66.2% | 60.8% | 93.6% | **+4.4 [−1.7, +11.7]** | **−1.1 [−3.1, +0.2]** | +5.5 [−0.1, +12.7] |
+  | 500 | 83.0% | 85.3% | 80.3% | 97.5% | +2.7 [−2.3, +7.0] | −2.3 [−5.3, +0.1] | +5.0 [+1.6, +8.7] |
+
+  - *S against P: outcome (i), registered.* The interval lies wholly below +5, so **V0 ships with `walk.stack` off by
+    default**, as an opt-in the board still shows, recorded as measured. Why the stack loses ground: it stops on its
+    own (7 of 40 S walks before 100 reads; 306 reads on average against P's 500), and on 1M:3 msr:0 it stopped at 50
+    reads with 2 of 3 pieces, where P and search held all 3. What the stop bought: at S's own stop, S holds 83.0% and
+    P at the same read count 82.4% (+0.6 [−0.2, +1.4]), for $0.0028 per labelled piece read against P's $0.0012. The
+    stack judges each lead against its open questions, so it costs more per read, and its stop saves less than that.
+  - *S against search: "extend to 80", registered.* The interval spans both rules. Where the gain sits, by burial
+    stratum at 100 reads (descriptive): top 10, n = 30, +3.3; 11–50, n = 4, −11.1; 51–200, n = 3, +29.7; beyond 200,
+    n = 3, +11.1. On 30 of the 40 questions search already holds the evidence in its top 10, and the walk ties
+    there. The walk's gains come from the buried few. S beats search on 8 questions, loses on 8 and ties on 24.
+  - *Room left:* the oracle reads 93.6% by 100 reads on the walk's own schedule, against the walk's 65%. On the
+    failures, the leading reason a labelled piece stays unread is `open`: a lead that cleared the gate and was
+    never opened within the budget (class 7). The gate accepts more than the budget opens, and P does not rank
+    among the accepted.
+  - *1M:25 ku:0's key, checked before this result was used:* group A. Exchange 488 states the key's 48 beta sign-ups
+    by 19 May, updating 386's 45. The later counts (518: 75 new beta users in the week after launch; 120 and 350
+    active users) count other things. It is scored once, and dropping it moves S − search by +0.4.
+- **The extension, registered before any of its walks runs** (bill, M-20261029-173346-4c41, amended after sally's
+  review). After outcome (i) the walk V0 ships is P, so the extension runs P only.
+  - *The confirmatory result is P against search on the new questions alone,* at 100 reads, under the same three
+    rules: GO (to 100K and 500K) if the 95% interval's lower end is above 0; NO-GO if its upper end is below +5; an
+    interval inside (0, +5) is reported in the small-gain wording; otherwise "no difference detectable at 10 points",
+    and it stops there. P's first 40 were seen before P was chosen, so choosing P and then pooling them would be a
+    forking path. The pooled 79 questions are **descriptive only**.
+  - *S against search is reported as stopped at n = 40,* with its interval: +4.4 [−1.7, +11.7].
+  - *Questions:* `random.Random(1253).sample(sorted(rest), 40)`, where `rest` is the 50 of the sweep's 1M draw of 90
+    left after the pilot's 40 (the pilot's 40 reproduce exactly from the same code). One drawn question, 1M:8 summ:1,
+    has no labelled evidence in BEAM, so it cannot be oracle-scored. It is dropped and not redrawn, which leaves 39. The drop selects on whether a question has labels at all, never
+    on an outcome (sally, 17:43Z). The 39 are:
+    1M:10 cr:0, 1M:10 eo:0, 1M:11 ku:1, 1M:11 tr:0, 1M:12 ie:1, 1M:12 if:1, 1M:13 msr:0, 1M:14 pf:0, 1M:15 ku:0, 1M:15 ku:1, 1M:16 cr:0, 1M:17 ie:0, 1M:18 ie:1, 1M:19 if:0, 1M:1 if:0, 1M:20 cr:1, 1M:20 eo:0, 1M:20 pf:1, 1M:21 if:0, 1M:21 tr:0, 1M:22 summ:1, 1M:26 ku:1, 1M:26 pf:1, 1M:27 eo:0, 1M:29 ku:1, 1M:2 ie:0, 1M:30 if:0, 1M:31 pf:1, 1M:32 pf:0, 1M:34 if:1, 1M:34 ku:0, 1M:34 ku:1, 1M:35 pf:1, 1M:35 summ:1, 1M:3 tr:1, 1M:5 ku:1, 1M:6 summ:1, 1M:7 ie:0, 1M:8 cr:0.
+  - *Build and arm:* the pilot's database and commit (image 42d61547 with 34f7c80a's walk SQL), not 0.2.35. P is set
+    explicitly: `walk.stack` false, `lines`, `per_target`, on the pilot's seeds. One walk runs alone as a probe, the
+    batch stops on its first failure, and the spend is read from `walk_cost`, about $0.015 a walk (about $0.58).
+  - *Conversations:* 16 of the 39 sit in 12 conversations the pilot did not load (1M:1, 6, 8, 10, 11, 14, 15, 16, 17,
+    18, 22, 29). They hold about 12,500 exchanges, so the database grows by about 0.7–0.8 GB (by the pilot's own
+    1,347 MB for 22,745 exchanges). Their pieces are embedded by the stack's worker, which costs no Jev.
+  - *Reported beside the result, not part of its rule* (sally and bill, 17:56Z). About half of every walk's reads
+    are search's order by design: from wave 2 each wave takes `walk.per_wave` of search's next documents first, and
+    the walk falls back on search when its accepted leads run out. So P − search is partly search against itself.
+    For each question at 100 reads: the labelled pieces P read through leads and through search's order (from
+    `walk_reads`' via), the same split for the oracle, and P − search counting the walk's lead reads only. If P's
+    lead over search comes mostly through the fill, the document says so. In the pilot's 40, P's labelled pieces by
+    100 reads came 86 through leads and 83 through search.
+  - *Keys:* 8 of the 39 are knowledge_update questions. Each key is checked against its conversation before
+    scoring, and one in group B or C is scored both ways.
+- **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
+  registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
+  search.
+
+## Appendix C. V0 limits, stated (unchanged)
 
 - **Recognition is capped by look-alikes** on questions whose evidence is the conversation's whole topic (§10).
 - **The board-state line, as built, adds nothing.** Re-judged on the same 3,215 leads, `lines` plus the state line
@@ -884,82 +1120,3 @@ Still open:
     `C|<q>|…`);
   - no judgement reads holistic state;
   - a parent's close is structure over its children, not a Jev call.
-
-## 16. Proposals (not V0)
-
-**Nothing in this section ships as V0 behaviour.** V0 is the plain walk with the original question (§10, outcome
-(i)). Each entry says what it is meant to solve, its status and evidence, and the test that would promote it into
-the decided spec (Sirsh, 29 Oct 18:29Z).
-
-### 16.1 Decomposition: a question stack with real sub-questions
-
-**Meant to solve:** a lead judged against the whole question cannot tell progress on one part from an echo of
-another. The V0 stack's parts did not help, because they are the root's own words plus a keyword
-(`stack.part_wording`): S − P was −1.1 [−3.1, +0.2] at 100 reads (§10).
-
-- **(a) The caller-supplied stack.** The asking agent supplies its own sub-questions, opened as `client:<n>` parts
-  (§6, move 3) from the start, with everything else as built.
-  - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as
-    `question.parts`, which is not built (today `walk_start` takes only the question), and would be refused if they
-    carried an answer, evidence or rubric.
-  - *Who writes them, in any test or example* (sally, 18:09Z): on BEAM the rubric's items are the answer key, and a
-    refusal at `walk_start` cannot catch a part copied from one. So a fresh client given only the question's words
-    writes the parts, its prompt is kept, and afterwards each part is checked against the rubric for repeated
-    distinctive words, with any repeat quoted.
-  - *Status: tested, no direction* (bill, 18:14Z, REM-1244). Jev re-judged recorded leads on 4 questions, against
-    blind sub-questions written under that rule and against the original. Best sub-question minus original, in AUC:
-    house sale −0.170 [−0.264, −0.077]; Japan trip −0.020 [−0.068, +0.029]; GPU issues +0.005 [−0.014, +0.027];
-    days between −0.098 [−0.159, −0.038]. Judging the original twice moves its AUC by at most 0.010. An earlier
-    hand-written set (written from the question text only) gave −0.036, +0.005, −0.030 and −0.068; its null held all
-    the more, since copying the rubric could only have helped (sally). Both checks cost $0.052.
-  - *Why no direction:* Jev already reads a multi-part question's parts in the question itself (sally), and taking
-    the best score over several parts adds false positives (bill's write-up).
-  - *The test that would promote it:* leads scoring better against blind parts than against the root on a
-    registered set of questions. On tonight's evidence it is not built for part three.
-- **(b) The slot-structured stack** (Sirsh, M-20261029-180634-2357; a project and a follow-up article, not part
-  three). Each open question is a slot built from closed lists: *subject* (an entity in the graph), *aspect* (a tag
-  or a relationship type), *time* (past, now, later, or before or after an event) and *ask* (a fact, a change, a
-  count or a list item; the ask also says when the slot is filled). Jev picks slots, judges leads against the open
-  ones, and closes a slot when evidence fills it.
-  - *Status:* untested.
-  - *The test that would promote it:* the closed lists cover most questions as they are evolved, and leads judged
-    against filled-in slots separate evidence better than against the root.
-
-### 16.2 Progress: telling new evidence from an echo of what was found
-
-**Meant to solve:** late in a walk the unread leads are mostly echoes of what has been read, and Jev cannot tell them
-from new information (AUC fell to 0.27–0.36 in later waves, REM-1240). The free replay tests (29 Oct, REM-1244) put
-the headroom here. Of the 194 labelled pieces the oracle read by 100 and P did not, 80% were behind leads P had
-accepted and not opened, 10% behind rejected leads only, and 10% had no lead pointing at them. Within the accepted
-set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source read is evidence", the 12x relation,
-raises it to 0.671 (an oracle ceiling, not deployable), and a keyless proxy ("the source read came by a lead") lowers
-it to 0.554. Cutting search's per-wave share changes nothing at 100 reads.
-
-- **Stack A: the walk's retrieval, kept out of Jev's context** (Sirsh, 18:26Z). After each read Jev judges "does
-  this message hold information needed to answer `question`?", and if yes the read's node id goes on A. A holds ids
-  only. It never enters Jev's context, and it is returned to the caller as the walk's retrieval. B, below, is the
-  separate working memory.
-  - *Evidence* (bill, step 2's first judgement, the same run as B's): relevance AUC is 0.686, 0.923, 0.517 and 0.564
-    on the four questions. At relevance ≥ 0.5, A holds 50, 35, 51 and 71 of 100 reads, and catches 1 of 2, 14 of 15,
-    2 of 3 and 4 of 5 of the labelled pieces read. High recall and low precision, so as a retrieval list it is
-    mostly cost to the caller.
-  - *The test that would promote it:* A at a top-k-per-wave cut against the walk's current evidence list on the
-    extension's questions, comparing the returned list's labelled recall and precision at equal list size. Under V0
-    the stack is off, so the walk keeps no `walk_answers` links. The comparison there is against the walk's reads in
-    order, or against S's links on the pilot.
-- **Stack B: the found evidence in Jev's state, the question unchanged** (bill).
-  - *Step 1, tested:* on 400 leads out of evidence reads (80 progress, 320 echo, four questions), adding the exact
-    found evidence to the decider's state lifts progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004,
-    +0.094]. Nearly all of it is one question, 1M:13, where the question alone ranked below chance
-    (0.464 → 0.687). A task worded as "not already in what was found" hurts (−0.07 to −0.17).
-  - *Step 2, tested* (bill, 18:36Z): when Jev builds B itself, by admitting reads it judges as found evidence, B
-    balloons to 42–72% of the reads, with precision 0.03–0.29 against the labels, and no gate fixes it. So step 1's
-    gain needs a small, exact B that Jev cannot yet build.
-  - *Stages 1 and 2 of Sirsh's design* (19:50Z; bill, 19:56Z).
-    - *Stage 1, a small exact B:* B holding only 3 exact pieces of found evidence works like the full one: +0.254 on
-      1M:13, and pooled +0.036 [−0.004, +0.080].
-    - *Stage 2, B admitted by Jev:* when B takes Jev's own top relevance per wave, it stays small (9–11 pieces), but
-      only about 9% of it is evidence. Judging with it pools −0.041 [−0.083, −0.001].
-    - *What is missing:* an admission signal that separates evidence from reads that are merely on topic.
-  - *The test that would promote it:* a keyless admission signal whose B is small and exact enough to keep stage 1's
-    gain, then replayed coverage at 100 above P's on the registered set.
