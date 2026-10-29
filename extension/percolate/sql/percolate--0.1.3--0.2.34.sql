@@ -41732,15 +41732,15 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it.'),
  ('walk.stack', 'walk', 'false', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). Off by default until a stack walk is measured against the memoryless one; the walkthrough''s published steps ran memoryless.'),
- ('stack.link_floor', 'stack', '0.7', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
+ ('stack.answers_gate', 'stack', '0.7', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
   'A floor under the rank rule (sally''s guard on F10, adopted by bill, M-20261029-114953-bb74): rank alone links something even where nothing read is evidence. 0.7 is the walk spec''s value (1ee004f1), set by mike on REM-1240''s recognition run, not on any walk.'),
  ('stack.link_share', 'stack', '0.02', 'A read links to a question only when its assessment ranks in this top share of the reads assessed against that question so far (at least one).', 'aiq.walk_stack_next',
   'F10, decided by bill (M-20261029-114822-4a81), Sirsh may overrule: at a fixed gate the links were mostly noise (evidence share of links 5.7% at 0.5, 6.6% at 0.7, against a 3.9% base), while by rank within the walk the top 2% were 19% evidence and the top 5% 14% (mike, REM-1240, on the gate''s run). Found on REM-1245''s ladder retest, where 232 of 443 other reads cleared 0.5.'),
- ('stack.close_min_links', 'stack', '2', 'A question is judged for closing only once at least this many reads are linked to it.', 'aiq.walk_stack_next',
+ ('stack.close_min', 'stack', '2', 'A question is judged for closing only once at least this many reads are linked to it.', 'aiq.walk_stack_next',
   'sally''s guard on F10 (adopted by bill): links by rank are about 19% evidence, so one link is too thin to close on.'),
  ('stack.stale_waves', 'stack', '2', 'A part that gains no link for this many waves leaves the open list as stale: not answered, and its leads keep their P.', 'aiq.walk_stack_next, aiq.walk_state',
   'F9, decided by bill with sally''s guard (M-20261029-114953-bb74): on REM-1245''s ladder retest nothing ever closed and the four slots taken by wave 3 were held to the end.'),
- ('stack.max_displace', 'stack', '1', 'At most this many open parts a wave are displaced by a candidate with higher P; only a part with no link of its own can be.', 'aiq.walk_stack_next',
+ ('stack.replacements', 'stack', '1', 'At most this many open parts a wave are displaced by a candidate with higher P; only a part with no link of its own can be.', 'aiq.walk_stack_next',
   'F11, decided by bill with sally''s guard: on the ladder retest ''ladder'' (P 0.78) and ''money'' (0.84) were judged parts after the slots were full and never opened.'),
  ('stack.close_gate', 'stack', '0.7', 'The P at or above which a question is answered by the reads linked to it, and leaves the open list.', 'aiq.walk_stack_next',
   'Above the link floor, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
@@ -43554,7 +43554,7 @@ begin
                               order by o.q, r.o), '[]'::jsonb)
       into assess
       from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
-    -- A read links to a question when its P clears stack.link_floor AND ranks in the top stack.link_share of the reads
+    -- A read links to a question when its P clears stack.answers_gate AND ranks in the top stack.link_share of the reads
     -- assessed against that question so far (walk.md §6 move 1, F10). Rank, because at a fixed gate the links were
     -- mostly noise (6% evidence at 0.5 against a 3.9% base; the top 2% by rank were 19%, REM-1240). It is relative, so
     -- a walk with no evidence still links its best reads; the close step is what must say no. "So far" is the reads of
@@ -43574,7 +43574,7 @@ begin
       into linked
       from jsonb_array_elements(assess) a
       join ranked rk on rk.q = a->>'q' and rk.doc = a->>'doc'
-     where (a->>'p')::real >= (sp->>'link_floor')::real
+     where (a->>'p')::real >= (sp->>'answers_gate')::real
        and rk.rk <= greatest(1, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
     -- 2. close: each open question that gained evidence, by its reads' lines; the root by every read linked to it or
@@ -43589,8 +43589,8 @@ begin
          where e->>'q' = gq.q or (gq.q = 'root')
          group by 1, 2
     ), counted as (
-        -- close judges a question's links only once it has stack.close_min_links of them
-        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
+        -- close judges a question's links only once it has stack.close_min of them
+        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min')::int
     ), shown as (
         select m.q, m.doc, m.p, row_number() over (partition by m.q order by m.p desc, m.doc) as k from mine m
     )
@@ -43660,8 +43660,8 @@ begin
               order by (x->>'p')::real desc, x->>'term' loop
         if nparts >= (sp->>'max_open')::int then
             -- the slot rule (F11): a candidate with higher P displaces the weakest open part that has no link of its
-            -- own, at most stack.max_displace a wave; the displaced part keeps its leads and its record
-            exit when swaps >= (sp->>'max_displace')::int;
+            -- own, at most stack.replacements a wave; the displaced part keeps its leads and its record
+            exit when swaps >= (sp->>'replacements')::int;
             select o as q, (qs->o->>'opened_p')::real as p into weak
               from jsonb_array_elements_text(open_) o
              where o <> 'root' and not exists (select 1 from jsonb_array_elements(ev) e where e->>'q' = o)
