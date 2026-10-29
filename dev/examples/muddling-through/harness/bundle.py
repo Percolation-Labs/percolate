@@ -67,6 +67,14 @@ def oracle_files(questions, items_by_qid, out):
         entries.append(e)
         (out / (q["qid"].replace(":", "_") + ".json")).write_text(json.dumps(e, indent=1))
     (out / "all.json").write_text(json.dumps({"oracle": True, "questions": entries}, indent=1))
+    (out / "README.md").write_text(
+        "# The answer keys\n\n"
+        "Each file here is a benchmark question's answer key: the messages BEAM cites as its evidence, and where BEAM's\n"
+        "rubric lists them, the items its answer needs. No walk ever sees them. Nothing in this bundle loads them into\n"
+        "the database: `percolate sample load` and the walks' start script leave this directory alone, so a default load\n"
+        "is keyless. They are read only when you ask for oracle mode on a walk in the Walks screen and choose a file here\n"
+        "(all.json holds every question; the screen takes the entry for the walk's question). The screen passes it to\n"
+        "aiq.walk_structure beside the run, and marks everything it adds as oracle-scored.\n")
     return len(entries)
 
 
@@ -164,6 +172,14 @@ def main():
     (root / "CONTENTS.json").write_text(json.dumps({
         "name": args.name, "conversations": channels, "questions": len(questions),
         "rule": args.rule or None, "text": args.text,
+        "rerun": {
+            "replay": "percolate sample load NAME/walks starts every listed walk offline from the verdicts Jev gave it, "
+                      "recorded in walks/replays.jsonl: no model key, no cost, and the same reads, the same stack and the "
+                      "same result as the original run. In the Walks screen, Start a walk with 'Replay' does the same for one "
+                      "question.",
+            "live": "With your own Jev key bound to the deployment, Start a walk with 'Live' (aiq.walk_launch(question, "
+                    "'live')) walks any question afresh: new verdicts, so the reads can differ from the original, and its "
+                    "spend is in the walk's Spend panel (walk_structure's cost part)."},
         "walks": [{"qid": w["qid"], "arm": w["arm"], "what": w["label"], "from_run": w["run"]} for w in walks],
         "arms": ARMS, "oracle": "oracle/ holds each question's answer key; it is never loaded"}, indent=1))
     (root / "LICENSE").write_text(
@@ -196,6 +212,12 @@ After installing Percolate:
 
 The walk index builds each conversation's walk graph, about a minute each. CONTENTS.json lists the walks: for each
 question, the V0 walk (with its question stack) and the plain walk beside it, and how the questions were chosen.
+
+Rerunning a walk means one of two things, and they differ:
+- Replay (the walks step above, or 'Replay' under Start a walk): from Jev's recorded verdicts, offline, no key, no
+  cost. It reproduces the original run: the same reads, stack and result.
+- Live ('Live' under Start a walk, with your own Jev key bound to the deployment): new verdicts, so the reads can
+  differ. Its spend is in the walk's Spend panel.
 
 Then open Percolate's UI, Walks. A walk starts from a question's words alone. Oracle mode is the benchmark's answer
 key, which no walk ever sees: in a walk, open 'oracle' and choose oracle/all.json ({oracle} questions), or the file for
