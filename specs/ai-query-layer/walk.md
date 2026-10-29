@@ -391,7 +391,7 @@ A handful of walks is never the verdict.
     rules, and if neither holds, report "no difference detectable at 10 points" and stop.
     The two rules overlap on an interval wholly inside (0, +5), settled before any data (mike, 15:58Z): the walk
     read more of the evidence than search at 1M, by between the interval's lower and upper ends, in points at 100
-    reads (95% interval, 40 questions); the document says that, never 'beats search' alone, which reads as larger
+    reads (95% interval, 40 questions); the document says that, never 'beats search' alone, which claims more
     than the interval allows (sally, 15:57Z). It does not go to 100K and 500K,
     since that stage is powered for 10 points and would not resolve a gain under 5, and the document says so: no claim
     about 100K or 500K, which were not run.
