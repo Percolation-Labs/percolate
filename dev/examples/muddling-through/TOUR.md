@@ -67,6 +67,16 @@ What it holds is cory's `harness/bundle.py` output: the two BEAM conversations w
 its words only (no answer key in the database), the answer key in `oracle/` for oracle mode, and the walks the
 article shows with Jev's verdicts, so they replay offline.
 
+Then two checks a reader's install has to pass before anything else means much (cory, 29 Oct: his bundle test ran
+against a CI fixture, so a fresh install is where they are proven):
+
+```sql
+-- one default embedding model, and it is the stack's bge-small: the sample's vectors were made with it
+select name, dim, provider, is_default from aiq.embedding_models;
+-- every walk the bundle started ran to the end: each one's question step embeds through the stack's own service
+select status, count(*) from aiq.walk_runs group by 1;
+```
+
 ## 4. See the walks in the app (to run)
 
 The Walks screen is core's own UI, which the compose stack does not start: the reader starts it.

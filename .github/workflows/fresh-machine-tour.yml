@@ -56,6 +56,20 @@ jobs:
           { percolate sample load beam-walks
             percolate walk index --source beam-1m22; percolate walk index --source beam-1m35
             percolate sample load beam-walks/walks; } 2>&1 | tee -a ../out/03-fetch.txt
+      - name: 3b. the default embedding model is bge-small, registered once (cory's test could not cover a fresh install)
+        run: |
+          psql "$P8_DSN" -c "select name, dim, provider, is_default from aiq.embedding_models order by name" | tee out/03b-models.txt
+          test "$(psql "$P8_DSN" -Atc "select name from aiq.embedding_models where is_default")" = bge-small-en-v1.5
+          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.embedding_models where is_default")" = 1
+      - name: 3c. every walk runs to the end (its question step embeds through the stack's own service)
+        run: |
+          for i in $(seq 1 360); do
+            n=$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs where status in ('running', 'pending', 'ready')")
+            [ "$n" = 0 ] && break; sleep 10
+          done
+          psql "$P8_DSN" -c "select status, count(*) from aiq.walk_runs group by 1 order by 1" | tee out/03c-walks.txt
+          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs where status <> 'succeeded'")" = 0
+          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs")" -gt 0
       - name: 4. the Walks screen answers
         run: |
           cd tour && . .venv/bin/activate
