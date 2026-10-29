@@ -19,8 +19,6 @@ on:
       bundle_url: {description: "where the bundle is published, if not the percolate release of this tag", required: false, default: ""}
       samples: {description: "sample directories to load before indexing, space-separated", required: true}
       walks: {description: "walk directories to load after indexing, space-separated", required: true}
-  push:
-    branches: ["tour/**"]
 jobs:
   tour:
     runs-on: ubuntu-latest
@@ -133,4 +131,6 @@ jobs:
       - name: keep what each step printed
         if: always()
         uses: actions/upload-artifact@v4
-        with: {name: tour-${{ github.run_id }}, path: out/}
+        with:
+          name: tour-${{ github.run_id }}
+          path: out/
