@@ -28,3 +28,23 @@ percolationlabs/percolate-postgres:19-integration built from this tree, core fro
 | 29 Oct 01:44Z–03:03Z | 863b914d / core befca31 | PASS, no OOM (VM to itself). Every block ok; setup, step-1 and step-5 checks pass; 20, 30, 40, 50 match expected. 45, 60, 70, 71 differ only where timmy's REM-1233 replaced ids and the budget regex with node summaries; numbers identical; regenerated. 79 min. |
 | 29 Oct 05:00Z–05:47Z | 33620e62 / core 746f83f | PASS, final: everything on REM-1237's list. run.sh exit 0, every block ok, every expected file matches, setup/step-1/step-5 checks pass, no OOM. 47 min. Stack 5801 left up as the one test database. |
 | 29 Oct (timmy, own project timmy-1238 on 5871) | 6569c45b / core 746f83f | PASS: run.sh exit 0, every block ok including 35, every expected file matches. The run from empty for REM-1238's merge. |
+| 29 Oct 13:31-14:13Z | 40dfbed1 / core 746f83f (cory's 9a9ddfb8 strip of pieces) | FAILED the expected files, not a block: 30, 50, 70, 71 differ by small shifts; step 1 and step 5 pass. Cause: the plan-index strip changed the stored text, so search's keyword half ranks differently (search's seeds 8-10 reorder on step 1). The keyless setup gate read 0. |
+| 29 Oct 14:17-14:58Z | 70a7d331 / core 746f83f (cory's full strip, 1c884952; the 1,858 changed pieces re-embedded from their stripped text) | Every block ok; the step-1 check FAILED as written: search's own top 500 on step 1 holds 12 of 27, not 15 (the walk still 21). Decided by bill (14:20Z), by principle: the stripped stack is the record, since the walk and search must not read a benchmark artifact. |
+
+## Regenerated from the 70a7d331 run (REM-1245), with the cause
+
+Cause for every line below: BEAM's plan index ('->-> n,m' and its rarer forms) left both halves of search, the stored
+text (keyword half) and the re-embedded vectors (vector half), so search's order moved, and every walk that starts from
+it moved a few reads. The walk's settings are pinned (memoryless, source) in every published block, so none of this is
+the question stack. Why search reads 3 fewer of step 1's 27 without the index is not yet measured (mike; timmy and
+sally proposed the checks), and the article says 'moved', not why, until it is.
+
+| file / check | before -> after |
+|---|---|
+| run.sh step-1 check | walk 21 / search 15 at 500 -> 21 / 12 |
+| expected/30-a-miss-explained.txt | per-wave leads and evidence shift by 1-3 (e.g. wave 3: 85 -> 87 leads) |
+| expected/50-tag-range.txt | lead counts by kind shift (next 213 -> 215; terms of 3-5 messages 4 -> 3) |
+| expected/70-wave-by-wave.txt | search's seeds 8-10 reorder, and the waves after follow |
+| expected/71-blind.txt | search ranks of the walk's off-search evidence shift by 1-25 |
+| expected/20, 40, 45, 60 | unchanged |
+
