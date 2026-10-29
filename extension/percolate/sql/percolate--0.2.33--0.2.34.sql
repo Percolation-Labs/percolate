@@ -41437,13 +41437,16 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
  ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
- ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them. Neither reads a target.', 'aiq.walk_state, aiq.walk_task',
-  'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source stays the default until the paper''s 122 are walked under both (bill).'),
+ ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them; or lines, what the user said in up to 3 of them (their stored lines, so nothing is read at walk time), how far each is from the source, and for a term how many messages hold it. Neither source nor targets reads a target.', 'aiq.walk_state, aiq.walk_task, aiq.walk_describe_clue',
+  'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source stays the default until the paper''s 122 are walked under both (bill). lines (REM-1240): on REM-1204''s A1 re-judge Jev given the targets'' own text separated them at 0.768, against 0.644 for the source and 0.634 to 0.641 for the question''s cosine to the same text; lines is that text, stored at ingest. Not yet walked.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
   'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
  ('decider.task_targets', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by the messages it leads to. Would following it likely reach information needed to answer `question`, or part of it?'),
   'The question Jev answers for every clue when walk.describe is targets. A verdict is kept with its wording, so verdicts given under one description never answer a clue described the other way.', 'aiq.walk_task',
   'REM-1204''s A1 re-judge and graded-set walks asked it in exactly these words.'),
+ ('decider.task_lines', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by what the user said in them and where they sit. Would following it likely reach information needed to answer `question`, or part of it?'),
+  'The question Jev answers for every clue when walk.describe is lines. A verdict is kept with its wording, so verdicts given under one description never answer a clue described another way.', 'aiq.walk_task',
+  'REM-1240: task_targets'' wording, naming what lines shows. Not yet measured on its own.'),
  ('search.hits', 'search', '2000', 'How many search hits a channel walk takes as its search order.', 'aiq.walk_start',
   'Enough to rank every document of a 1M BEAM conversation (about 1,100) by its best chunk.'),
  ('decider.task', 'decider', to_jsonb(text 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages share, or the messages beside or close in meaning to one already read. Would following it likely reach information needed to answer `question`, or part of it?'),
@@ -41498,13 +41501,15 @@ drop function if exists aiq.walk_task();
 create or replace function aiq.walk_task(p_describe text default null) returns text
 language plpgsql stable set search_path = pg_catalog, public as $$
 begin
-    -- walk.describe: source asks decider.task, targets decider.task_targets (REM-1204).
+    -- walk.describe: source asks decider.task, targets decider.task_targets (REM-1204), lines decider.task_lines (REM-1240).
     if coalesce(p_describe, 'source') = 'source' then
         return (select value #>> '{}' from aiq.parameters where name = 'decider.task');
     elsif p_describe = 'targets' then
         return (select value #>> '{}' from aiq.parameters where name = 'decider.task_targets');
+    elsif p_describe = 'lines' then
+        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_lines');
     end if;
-    raise invalid_parameter_value using message = format('walk.describe is source or targets, not %s', p_describe);
+    raise invalid_parameter_value using message = format('walk.describe is source, targets or lines, not %s', p_describe);
 end;
 $$;
 
@@ -41520,6 +41525,89 @@ language sql immutable set search_path = pg_catalog, public as $$
                                       order by 2, 1 limit 8) x), '(none)') as sign
               from jsonb_array_elements(p_targets) d
              order by 1 limit 3) t
+$$;
+
+-- A clue's description, as the decider reads it, under each walk.describe (REM-1240). aiq.walk_state calls it for the
+-- clues the next round judges, and aiq.walk_clue_text for any clue a run raised, so a re-judge asks in the walk's own
+-- words. p_text is the source's text (aiq.walk_texts); only source quotes it.
+--   lines: up to 3 targets, chosen as aiq.walk_signs chooses them, each by what the user said in it (its stored
+--   terms_text, or a node's summary) and how far it sits from the source: in the same sitting (the index's walk_next
+--   provenance), by exchanges; in another, by days (said_at), when known. A term also says how many messages hold
+--   it. Nothing is read at walk time.
+create or replace function aiq.walk_describe_clue(p_input jsonb, p_graph jsonb, p_describe text, p_key text,
+                                                  p_kind text, p_x text, p_source text, p_targets jsonb,
+                                                  p_text text default null)
+returns text
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    n     int := jsonb_array_length(coalesce(p_targets, '[]'::jsonb));
+    side  text := case p_kind when 'next' then 'just before and after a read one, in the same sitting'
+                              else 'closest in meaning to a read one' end;
+    lines text;
+begin
+    if coalesce(p_describe, 'source') = 'source' then
+        if p_kind = 'term' then
+            return format('the term ''%s'', which %s unread message(s) share with this read one: "%s"',
+                          p_x, n, aiq.walk_snippet(p_text, p_x));
+        end if;
+        return format('%s: "%s"', case p_kind when 'next' then 'the messages just before and after this read one, in the same sitting'
+                                            else 'the messages closest in meaning to this read one' end,
+                      aiq.walk_snippet(p_text));
+    elsif p_describe = 'targets' then
+        if p_kind = 'term' then
+            return format('the term ''%s'', shared by %s unread message(s). Their own key terms: %s',
+                          p_x, n, aiq.walk_signs(p_graph, p_key, p_targets));
+        end if;
+        return format('%s unread message(s) %s. Their own key terms: %s', n, side, aiq.walk_signs(p_graph, p_key, p_targets));
+    elsif p_describe <> 'lines' then
+        raise invalid_parameter_value using message = format('walk.describe is source, targets or lines, not %s', p_describe);
+    end if;
+    with at as (
+        select d.value #>> '{}' as doc, md5(p_key || ':' || (d.value #>> '{}')) as h
+          from jsonb_array_elements(coalesce(p_targets, '[]'::jsonb)) d
+         order by 2 limit 3
+    ), doc as (
+        select coalesce(r.uri, r.id::text) as doc, n.id as node, r.metadata->>'terms_text' as line,
+               (r.metadata->>'said_at')::timestamptz as said_at
+          from content.resources r join content.channels ch on ch.id = r.channel_id
+          join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
+         where p_input ? 'channel' and ch.name = p_input->>'channel'
+           and coalesce(r.uri, r.id::text) in (select doc from at union select p_source)
+        union all
+        select k.key, n.id, n.summary, null
+          from aiq.nodes n join aiq.node_keys k on k.node_id = n.id and k.kind = 'canonical'
+         where p_input ? 'nodes' and n.entity_type = p_input->>'nodes'
+           and k.key in (select doc from at union select p_source)
+    ), meta as (
+        -- A document's sitting and place are the index's walk_next provenance {sitting, pos}, pos being the edge's
+        -- source's place: the next edge out of it, or one past the edge into it for a sitting's last.
+        select d.doc, d.line, d.said_at,
+               coalesce(o.provenance->>'sitting', i.provenance->>'sitting') as sitting,
+               coalesce((o.provenance->>'pos')::int, (i.provenance->>'pos')::int + 1) as pos
+          from doc d
+          left join lateral (select e.provenance from aiq.edges e where e.src_id = d.node and e.relation = 'walk_next'
+                                and e.valid_to is null limit 1) o on true
+          left join lateral (select e.provenance from aiq.edges e where e.dst_id = d.node and e.relation = 'walk_next'
+                                and e.valid_to is null limit 1) i on true
+    )
+    select string_agg(format('"%s"%s', aiq.walk_snippet(coalesce(t.line, at.doc)),
+                             case when t.sitting is not null and t.sitting = s.sitting and t.pos is not null and s.pos is not null then
+                                      format(' (same sitting, %s exchange(s) %s)', abs(t.pos - s.pos),
+                                             case when t.pos < s.pos then 'earlier' else 'later' end)
+                                  when t.said_at is not null and s.said_at is not null then
+                                      case when t.said_at::date = s.said_at::date then ' (another sitting, the same day)'
+                                           else format(' (another sitting, %s day(s) %s)',
+                                                       abs(t.said_at::date - s.said_at::date),
+                                                       case when t.said_at < s.said_at then 'earlier' else 'later' end) end
+                                  else '' end), ' | ' order by at.h)
+      into lines
+      from at left join meta t on t.doc = at.doc left join meta s on s.doc = p_source;
+    if p_kind = 'term' then
+        return format('the term ''%s'', held by %s message(s) in all, %s of them unread. What the user said in them: %s',
+                      p_x, jsonb_array_length(coalesce(p_graph->'post'->p_x, '[]'::jsonb)), n, coalesce(lines, '(none)'));
+    end if;
+    return format('%s unread message(s) %s. What the user said in them: %s', n, side, coalesce(lines, '(none)'));
+end;
 $$;
 
 -- The settings: the walk's parameters, under what a run's input asks for.
@@ -41957,28 +42045,14 @@ begin
         select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) into nxt from (
             select k, jsonb_build_object(
                        'kind', 'term', 'x', t, 'source', src, 'targets', tg,
-                       'text', case when not last then null
-                                    when s->>'describe' = 'targets' then
-                                   format('the term ''%s'', shared by %s unread message(s). Their own key terms: %s',
-                                          t, jsonb_array_length(tg), aiq.walk_signs(g, k, tg))
-                                    else
-                                   format('the term ''%s'', which %s unread message(s) share with this read one: "%s"',
-                                          t, jsonb_array_length(tg), aiq.walk_snippet(txt->>src, t)) end) as c
+                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, 'term', t, src, tg,
+                                                                          txt->>src) end) as c
               from term_clue where tg is not null
             union all
             select distinct on (k) k, jsonb_build_object(
                        'kind', kind, 'x', src, 'source', src, 'targets', tg,
-                       'text', case when not last then null
-                                    when s->>'describe' = 'targets' then
-                                   format('%s unread message(s) %s. Their own key terms: %s', jsonb_array_length(tg),
-                                          case kind when 'next' then 'just before and after a read one, in the same sitting'
-                                                    else 'closest in meaning to a read one' end,
-                                          aiq.walk_signs(g, k, tg))
-                                    else
-                                   format('%s: "%s"',
-                                          case kind when 'next' then 'the messages just before and after this read one, in the same sitting'
-                                                    else 'the messages closest in meaning to this read one' end,
-                                          aiq.walk_snippet(txt->>src)) end)
+                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, kind, src, src, tg,
+                                                                          txt->>src) end)
               from side_clue where tg is not null
         ) z;
         stop := w->'stop';
@@ -42312,6 +42386,26 @@ returns table (key text, kind text, wave int, source text, targets text[], p rea
                travelled_wave int)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select * from aiq.walk_state_clues(aiq.walk_state(p_run))
+$$;
+
+-- The text the decider reads for one clue a run raised, under the run's own description or the one named, built by
+-- the same aiq.walk_describe_clue the walk uses (REM-1240): a re-judge asks in the walk's own words, with no second
+-- copy of them. A clue the run never raised is an error, not null.
+create or replace function aiq.walk_clue_text(p_run uuid, p_key text, p_describe text default null)
+returns text
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    st  jsonb := aiq.walk_state(p_run);
+    inp jsonb := (select input from workflow.runs where id = p_run);
+    c   jsonb := coalesce(st->'clues'->p_key, st->'next'->p_key);
+begin
+    if c is null then
+        raise no_data_found using message = format('run %s raised no clue %s', p_run, p_key);
+    end if;
+    return aiq.walk_describe_clue(inp, aiq.walk_run_graph(p_run), coalesce(p_describe, st->'settings'->>'describe'),
+                                  p_key, c->>'kind', c->>'x', c->>'source', c->'targets',
+                                  aiq.walk_texts(inp, array[c->>'source'])->>(c->>'source'));
+end;
 $$;
 
 drop function if exists aiq.walk_waves(uuid);
