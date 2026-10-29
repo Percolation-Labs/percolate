@@ -35,7 +35,7 @@ URL = f"https://huggingface.co/datasets/Mohammadta/BEAM/resolve/{REVISION}/data/
 SHA256 = "41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533"
 RUNS = {"22": "beam-1m22", "35": "beam-1m35"}
 CHUNK = 2000
-MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
+MARK = re.compile(r"\s*->->\s*\d+\s*,\s*(?:\d+|N/A)(?:\s*,\s*\d+)*\s*$")  # the same three forms, at a turn's end
 # The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
 # never read, since plan step predicts which exchanges BEAM's questions cite (REM-1240).
 # Every form BEAM writes, counted on 1M:22 and 1M:35: "n,m" (1,848), "n,N/A" (9) and "n,m, k" (1), always at a line end.
