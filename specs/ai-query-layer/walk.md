@@ -78,7 +78,9 @@ the full evidence (Stack A, §9), so the decider's context stays small however l
   accepted leads have run out.
 
 **The test that would show the rest:** a counter-process that cuts the evidence left behind accepted-but-unopened
-leads, with coverage at 100 above the plain walk's on a registered set. Stack B (§8) is the leading candidate.
+leads, with coverage at 100 above the plain walk's on a registered set. Stack B (§8) is the leading candidate. §8's theory note gives the
+mechanism: a direction memory that is a sufficient statistic of what was found lowers every remaining lead's
+residual value, and with it the branching ratio.
 
 ## 4. The graph
 
@@ -251,6 +253,25 @@ what is missing.
   small (9–11 pieces), but only about 9% of it is evidence, and judging with it pools −0.041 [−0.083, −0.001].
 
 **What is missing:** an admission signal that separates evidence from reads that are merely on topic.
+
+**Theory note: B as a sufficient statistic of A** (Sirsh, 20:06Z; TO BE SHOWN). Call Ω everything found (Stack A,
+§9) and κ the small list Jev carries (Stack B).
+- *What a lead is worth:* its residual value is its conditional information gain about the answer. Ideally that is
+  given Ω, I(lead; answer | Ω), but Jev can only compute it given κ.
+- *The design problem:* choose κ so that the gain given κ tracks the gain given Ω for the leads still to come. κ is
+  an approximate sufficient statistic of Ω for future lead value. That is an information-bottleneck problem
+  (Tishby, Pereira and Bialek, 1999), close to Crutchfield's causal states: the smallest summary of the past that
+  predicts the future as well as the whole past.
+- *The consequence:* an entry earns its place in κ by how well it predicts which future leads are redundant, not by
+  its own relevance. That is consistent with stage 2 above: a κ admitted by Jev's own relevance is on topic, and it
+  hurts.
+- *Related language:* conditional mutual information and explaining away; submodularity and greedy marginal gain
+  (Nemhauser, 1978); Maximal Marginal Relevance (Carbonell and Goldstein, 1998); the marginal value theorem as a
+  stop rule (Charnov, 1976).
+- *The link to criticality (§3):* as κ grows, residual value falls, fewer leads are worth opening, and the branching
+  ratio drops below one.
+- *The test that would show it:* an admission rule that picks κ's entries by predicted redundancy of future leads,
+  against one that picks by relevance, compared on progress-against-echo AUC and replayed coverage at 100.
 
 **The test that would show it:** a keyless admission signal whose B is small and exact enough to keep the exact-B
 gain, then replayed coverage at 100 above P's on a registered set.
