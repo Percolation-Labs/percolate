@@ -927,6 +927,19 @@ thing to find (REM-1244). Two forms come after it.
     18:12Z).
   - *Why it shows no direction:* Jev already reads a multi-part question's parts in the question itself (sally),
     and taking the best score over several parts adds false positives (bill's write-up).
+- **Proposals, measured but not built** (REM-1244, 29 Oct).
+  - *Stack B: the found evidence in Jev's state, the question unchanged* (bill). On 400 leads out of evidence reads
+    (80 progress, 320 echo, four questions), adding the exact found evidence to the decider's state lifts
+    progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004, +0.094]. Nearly all of it is one question,
+    1M:13, where the question alone ranked below chance (0.464 → 0.687). A task worded as "not already in what was
+    found" hurts (−0.07 to −0.17). Building B into the walk (step 2) is untested.
+  - *Where the headroom is* (the free replay tests). Of the 194 labelled pieces the oracle read by 100 and P did not,
+    80% were behind leads P had accepted and not opened, 10% behind rejected leads only, and 10% had no lead pointing
+    at them. Within the accepted set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source read is
+    evidence", the 12x relation, raises it to 0.671 (an oracle ceiling, not deployable), and a keyless proxy
+    ("the source read came by a lead") lowers it to 0.554. Cutting search's per-wave share changes nothing at 100
+    reads. So ranking the accepted leads is the open problem, and Stack B is the keyless candidate for carrying the
+    evidence relation into it.
 - **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
   structure.** Each open question is a slot built from closed lists:
   - *subject:* an entity in the graph;
