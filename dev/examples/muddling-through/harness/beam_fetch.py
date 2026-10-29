@@ -116,7 +116,8 @@ def main(sample):
             cs = []
             for n, c in enumerate(chunks(p["turns"])):
                 # The piece keeps its boundaries and loses the plan index; its vector is still matched by the text the
-                # study embedded, mark included, so search and the study's vectors are unchanged.
+                # study embedded, mark included, so the vectors are the study's. Search's keyword half reads the
+                # stripped text, so search's order moves a little (james's run from empty, 40dfbed1).
                 piece, v = {"content": MARK_IN_PIECE.sub("", c)}, vectors.get((uri, n))
                 pieces += 1
                 if v and v["sha256"] == hashlib.sha256(c.encode()).hexdigest():
