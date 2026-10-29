@@ -1,6 +1,6 @@
 -- A WALK SAYS WHY ITS ANSWER IS INCOMPLETE, FROM ITS OWN ROWS (REM-1211).
 --
--- aiq.walk_why(run, gold) gives each evidence document the walk did not read
+-- aiq.walk_why(run, nodes) gives each labelled node the walk did not read
 -- one reason: (a) never offered, (b) rejected with its P, (c) open with its
 -- rank, or queued, or unjudged when a lead held no P. aiq.walk_audit(run) needs
 -- no answer key. Three walks over query/33's sixteen-node graph, each with a
@@ -99,18 +99,18 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_fixture', 'prefix', 'wt/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'the ladder', 'gold', jsonb_build_array('wt/2', 'wt/5', 'wt/7')),
+        'question', jsonb_build_object('id', 'q1', 'text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
         'replay', 'walk-fixture:replay', 'offline', true,
         'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false,
                                        'span', 2));  -- the fixture's walk was laid out for next reaching 2
-    gold jsonb := '["wt/2", "wt/4", "wt/5", "wt/7", "wt/99"]';
+    gold text[] := array['wt/2', 'wt/4', 'wt/5', 'wt/7', 'wt/99'];
     eager uuid := workflow.start_workflow('walk_fixture_run', inp || jsonb_build_object('replay', 'walk-fixture:eager',
                       'settings', inp->'settings' || '{"wave": 2}'));
     noladder uuid := workflow.start_workflow('walk_fixture_run', inp || '{"replay": "walk-fixture:no-ladder"}');
     offline uuid := workflow.start_workflow('walk_fixture_run', inp);
-    keyless uuid := workflow.start_workflow('walk_fixture_run', inp #- '{question,gold}');
+    carrier uuid;
     got text;
     a jsonb;
 begin
@@ -144,7 +144,7 @@ begin
     end if;
 
     -- A lead with no P is unjudged, never rejected; and while one points at unread documents there is no certificate.
-    select string_agg(format('%s %s %s', doc, reason, key), '; ') into got from aiq.walk_why(offline, '["wt/4"]');
+    select string_agg(format('%s %s %s', doc, reason, key), '; ') into got from aiq.walk_why(offline, array['wt/4']);
     if got is distinct from 'wt/4 unjudged next:wt/2' then
         raise exception 'offline: why is %', got;
     end if;
@@ -152,21 +152,37 @@ begin
         raise exception 'offline: a walk with unjudged leads open claimed the certificate: %', aiq.walk_audit(offline)->>'state';
     end if;
 
-    -- The answer key the run was started with is the default: the offline walk read all of wt/2, wt/5 and wt/7.
-    if exists (select 1 from aiq.walk_why(offline)) then
-        raise exception 'the run''s own answer key was not used';
+    -- The labels come from the caller and nowhere else: the same set gives the same answer, and none is refused.
+    if exists (select 1 from aiq.walk_why(offline, array['wt/2', 'wt/5', 'wt/7'])) then
+        raise exception 'the offline walk read all of wt/2, wt/5 and wt/7, yet why lists %',
+            (select string_agg(doc, ', ') from aiq.walk_why(offline, array['wt/2', 'wt/5', 'wt/7']));
     end if;
-    if (select count(*) from aiq.walk_why(eager)) is distinct from 2 then
-        raise exception 'eager, own key: % unread where wt/5 and wt/7 are', (select count(*) from aiq.walk_why(eager));
-    end if;
-
-    -- No key anywhere: refused, with the call that passes one.
     begin
-        perform aiq.walk_why(keyless);
-        raise exception 'a walk with no answer key was explained';
+        perform aiq.walk_why(offline, null);
+        raise exception 'a walk was explained with no labelled nodes';
     exception when invalid_parameter_value then
         null;
     end;
+
+    -- Coverage takes its labels from the caller too: of wt/2, wt/5 and wt/7 (one named twice, counted once), the
+    -- walk's first read holds none, search's top 15 holds two (ranks 14 and 15) and every read the walk made holds all.
+    select string_agg(format('%s %s %s %s', k, walk, search, labelled), '; ') into got
+      from aiq.walk_coverage(offline, array['wt/2', 'wt/5', 'wt/7', 'wt/2'], array[1, 15, 1000]);
+    if got is distinct from '1 0 0 3; 15 ' || (select count(*) from (select doc from aiq.walk_reads(offline)
+                                                  order by wave, ord limit 15) x where doc in ('wt/2', 'wt/5', 'wt/7'))
+                            || ' 2 3; 1000 3 3 3' then
+        raise exception 'coverage of the offline walk is %', got;
+    end if;
+
+    -- A walk never carries its answer key: a question holding anything beside {id, text} fails at the start step.
+    carrier := workflow.start_workflow('walk_fixture_run',
+                   inp || jsonb_build_object('question', inp->'question' || '{"gold": ["wt/2"]}'));
+    if (select status from workflow.runs where id = carrier) is distinct from 'failed'
+       or not exists (select 1 from workflow.tasks where run_id = carrier and step_key = 'start'
+                         and error::text like '%this one also carries gold%') then
+        raise exception 'a walk whose question carried its answer key ended %, not failed at the start',
+            (select status from workflow.runs where id = carrier);
+    end if;
 
     -- A run the caller may not read is refused by the walk's own functions, not explained as empty.
     begin

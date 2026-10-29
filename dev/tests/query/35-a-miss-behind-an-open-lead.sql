@@ -73,8 +73,7 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_miss', 'prefix', 'wm/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'How should I sequence my budget, tools and ladder?',
-                                       'gold', jsonb_build_array('wm/7', 'wm/8')),
+        'question', jsonb_build_object('id', 'q1', 'text', 'How should I sequence my budget, tools and ladder?'),
         'search', to_jsonb(array['wm/1','wm/11','wm/12','wm/13','wm/14','wm/2','wm/3','wm/4','wm/5','wm/6','wm/7','wm/8']),
         'replay', 'walk-miss:replay', 'offline', true,
         'settings', jsonb_build_object('wave', 3, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
@@ -92,7 +91,7 @@ begin
             (select array_agg(doc order by wave, ord) from aiq.walk_reads(r));
     end if;
     select string_agg(doc || ' ' || letter || ' ' || reason || ' ' || key || ' ' || p, '; ' order by doc) into got
-      from aiq.walk_why(r);
+      from aiq.walk_why(r, array['wm/7', 'wm/8']);
     if got is distinct from 'wm/7 c open term:ladder 0.57; wm/8 c open term:ladder 0.57' then
         raise exception 'walk_why says % where the answer sits behind the open lead ladder', got;
     end if;

@@ -42001,6 +42001,13 @@ declare
 begin
     select * into r from workflow.runs where id = p_run;
     inp := r.input;
+    -- The question is {id, text} and nothing else, so a walk never carries its answer key: evaluation passes the
+    -- labelled nodes to aiq.walk_coverage and aiq.walk_why from outside the run (REM-1231).
+    if exists (select 1 from jsonb_object_keys(coalesce(inp->'question', '{}')) k where k not in ('id', 'text')) then
+        raise invalid_parameter_value using message = format('a walk''s question is {id, text}; this one also carries %s',
+                (select string_agg(k, ', ' order by k) from jsonb_object_keys(inp->'question') k where k not in ('id', 'text'))),
+            hint = 'start it with {"question": {"id": ..., "text": ...}}; pass any labels to the evaluation functions';
+    end if;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
     -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
@@ -42507,7 +42514,7 @@ revoke all on function aiq.install_walk_workflow(text, text, int, text) from pub
 --                            accepted leads still open, and the rejected leads
 --                            just under the gate that still point at unread
 --                            documents.
---   aiq.walk_why(run, gold)  for each evidence document the walk did not read,
+--   aiq.walk_why(run, nodes) for each labelled node the walk did not read,
 --                            the first of these that holds:
 --        queued         (c) a travelled lead landed it; the walk stopped first
 --        open           (c) an accepted lead pointing at it was open at the
@@ -42625,34 +42632,20 @@ comment on function aiq.walk_audit(uuid) is
     'A walk run''s audit with no answer key: the state at the stop, the accepted leads still open and the near misses (REM-1211).';
 
 
-create or replace function aiq.walk_why(p_run uuid, p_gold jsonb default null)
+drop function if exists aiq.walk_why(uuid, jsonb);
+create or replace function aiq.walk_why(p_run uuid, p_nodes text[])
 returns table (doc text, letter text, reason text, key text, p real, detail text)
 language plpgsql stable as $$
 declare
     v_summary jsonb := aiq.walk_summary(p_run);
     v_st      jsonb := aiq.walk_state(p_run);  -- built once, for both views below
     v_gate    real  := coalesce((v_summary #>> '{settings,gate}')::real, 0.5);
-    v_gold    jsonb := p_gold;
 begin
-    -- the answer key is a list of document keys, or {question id: list}; with none given, the one the sample put in
-    -- the run's start input (walk_summary -> question -> gold), which no step of the walk reads
-    if p_gold is null then
-        v_gold := v_summary #> '{question,gold}';
-        if v_gold is null then
-            raise exception 'no answer key: pass one, or start the walk with the question''s gold'
-                using errcode = 'invalid_parameter_value',
-                      hint = 'select * from aiq.walk_why(<run>, ''["<document key>", ...]'')';
-        end if;
-    elsif jsonb_typeof(p_gold) = 'object' then
-        v_gold := p_gold -> (v_summary #>> '{question,id}');
-        if v_gold is null then
-            raise exception 'the answer key holds no evidence for question %', v_summary #>> '{question,id}'
-                using errcode = 'invalid_parameter_value';
-        end if;
-    end if;
-    if jsonb_typeof(v_gold) is distinct from 'array' then
-        raise exception 'the answer key is a JSON list of document keys, or {question id: list}'
-            using errcode = 'invalid_parameter_value';
+    -- the labelled nodes come from the caller: a walk's question is {id, text} and never carries them (REM-1231)
+    if p_nodes is null then
+        raise exception 'no labelled nodes: pass the keys the walk should have read'
+            using errcode = 'invalid_parameter_value',
+                  hint = 'select * from aiq.walk_why(<run>, array[''<node key>'', ...])';
     end if;
 
     return query
@@ -42661,7 +42654,7 @@ begin
          c       as (select c.*, exists (select 1 from unnest(c.targets) t where t not in (select r.doc from r)) as live
                        from aiq.walk_state_clues(v_st) c),
          opn     as (select c.key, c.p, c.targets from c where c.state = 'open' and c.live),
-         gold    as (select distinct g #>> '{}' as doc from jsonb_array_elements(v_gold) g),
+         gold    as (select distinct g as doc from unnest(p_nodes) g),
          unread  as (select g.doc from gold g where g.doc not in (select r.doc from r))
     select u.doc,
            case w.reason when 'queued' then 'c' when 'open' then 'c' when 'rejected' then 'b'
@@ -42696,8 +42689,33 @@ begin
      order by u.doc;
 end $$;
 
-comment on function aiq.walk_why(uuid, jsonb) is
-    'For each evidence document a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211). With no answer key, the run''s own question gold.';
+comment on function aiq.walk_why(uuid, text[]) is
+    'For each labelled node a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211). The caller passes the labels; the run never holds them (REM-1231).';
+
+
+-- How much of a labelled node set a run had read by each budget k, beside how much of it search's own top k held.
+-- One function for every evaluation, so no query counts reads by hand (REM-1231). The labels come from the caller:
+-- the run is not asked what it should have found, and the same set compares any runs, one lateral call each:
+--     select r.id, c.* from runs r, aiq.walk_coverage(r.id, :'labelled', array[50, 100, 500]) c;
+-- A node read twice counts once, at its first read; k past the run's last read counts every read. With no budgets,
+-- one row at k = every read the run made.
+create or replace function aiq.walk_coverage(p_run uuid, p_nodes text[], p_budgets int[] default null)
+returns table (k int, walk int, search int, labelled int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with lab as (select distinct n from unnest(p_nodes) n),
+         r   as (select doc, row_number() over (order by wave, ord) as n from aiq.walk_reads(p_run)),
+         wr  as (select doc, min(n) as n from r where doc in (select n from lab) group by doc),
+         sr  as (select doc, min(rank) as n from aiq.walk_search_order(p_run) where doc in (select n from lab) group by doc)
+    select b.k,
+           (select count(*) from wr where wr.n <= b.k)::int,
+           (select count(*) from sr where sr.n <= b.k)::int,
+           (select count(*) from lab)::int
+      from unnest(coalesce(p_budgets, array[(select count(*) from r)::int])) with ordinality b(k, i)
+     order by b.i
+$$;
+
+comment on function aiq.walk_coverage(uuid, text[], int[]) is
+    'Of a labelled node set the caller passes, how many a walk run had read by each budget k, and how many search''s own top k held (REM-1231).';
 
 
 -- ============================================================

@@ -615,6 +615,13 @@ declare
 begin
     select * into r from workflow.runs where id = p_run;
     inp := r.input;
+    -- The question is {id, text} and nothing else, so a walk never carries its answer key: evaluation passes the
+    -- labelled nodes to aiq.walk_coverage and aiq.walk_why from outside the run (REM-1231).
+    if exists (select 1 from jsonb_object_keys(coalesce(inp->'question', '{}')) k where k not in ('id', 'text')) then
+        raise invalid_parameter_value using message = format('a walk''s question is {id, text}; this one also carries %s',
+                (select string_agg(k, ', ' order by k) from jsonb_object_keys(inp->'question') k where k not in ('id', 'text'))),
+            hint = 'start it with {"question": {"id": ..., "text": ...}}; pass any labels to the evaluation functions';
+    end if;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
     -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
