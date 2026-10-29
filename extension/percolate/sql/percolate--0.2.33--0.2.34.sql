@@ -42879,6 +42879,11 @@ begin
     if v is null then
         return jsonb_build_object('kept', 0, 'stack', aiq.walk_keep_stack(p_run));
     end if;
+    -- the channel is made on first use, as walk_index makes its own: a stack loaded without the walkthrough's sample
+    -- has none, and the calibration walks' keep step failed on 'no channel named walk-replays' (REM-1245)
+    if not exists (select 1 from content.channels where name = p_channel) then
+        insert into content.channels (name, kind, org_id, visibility) values (p_channel, 'manual', rbac.shared_org_id(), 'public');
+    end if;
     perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                 format('verdicts of run %s', p_run), uri, null,
                 jsonb_build_object('question', q->>'node_id', 'run', p_run, 'task', tk, 'verdicts', v));
