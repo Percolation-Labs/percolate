@@ -208,6 +208,14 @@ begin
             aiq.walk_state(m)->'board'->'questions'->'root'->>'closed_by';
     end if;
     update aiq.parameters set value = 'null' where name = 'stack.set_gate';
+    -- clusters (walk.split): 1 and 2, linked to the root and side by side in one sitting, are one cluster, and the term
+    -- they share names its part, so the clustered walk opens part:ceiling and ends as the term-shared one does
+    m := workflow.start_workflow('walk_fixture_stack', jsonb_set(inp, '{settings,split}', '"clusters"'));
+    if (select string_agg(format('%s:%s=%s', wave, question, state), ';' order by wave, question) from aiq.walk_stack(m))
+       is distinct from (select string_agg(format('%s:%s=%s', wave, question, state), ';' order by wave, question) from aiq.walk_stack(r)) then
+        raise exception 'the clustered walk''s board went %',
+            (select string_agg(format('%s:%s=%s', wave, question, state), ';' order by wave, question) from aiq.walk_stack(m));
+    end if;
     -- a parameter row the stack reads is missing: the walk fails, naming it, rather than silently linking nothing (bill)
     delete from aiq.parameters where name = 'stack.link_floor';
     m := workflow.start_workflow('walk_fixture_stack', inp);

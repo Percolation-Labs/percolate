@@ -326,6 +326,52 @@ begin
       into cands
       from top
      where jsonb_array_length(linked) > 0;
+    -- clusters (walk.split = clusters, spec 5f7bf1d4, off until it passes): the reads linked to the root are
+    -- clustered keylessly, two sharing a cluster when they sit within walk.span of each other in one sitting (the
+    -- graph's beside lists, built to the span) or, once stack.cluster_cos is set on the calibration set, when their
+    -- vectors' cosine reaches it. Each cluster of two or more reads that no question names yet proposes one part, the
+    -- most specific term its reads share; Jev judges it as move 2 asks. The root stays open for everything else. A
+    -- cluster is a part found, never presupposed.
+    if s->>'split' = 'clusters' and jsonb_array_length(linked) > 0 then
+        with recursive lr as (
+            select distinct x->>'doc' as doc from jsonb_array_elements(ev) x where x->>'q' = 'root'
+        ), vecs as (
+            select lr.doc, avg(e.embedding) as v
+              from lr
+              join content.resources r on coalesce(r.uri, r.id::text) = lr.doc
+              join content.resource_chunks ck on ck.resource_id = r.id
+              join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
+             where jsonb_typeof(sp->'cluster_cos') = 'number'
+             group by lr.doc
+        ), pairs as (
+            select a.doc as a, b.doc as b from lr a, lr b
+             where a.doc < b.doc
+               and (coalesce(g->'beside'->a.doc, '[]'::jsonb) ? b.doc
+                    or exists (select 1 from vecs va, vecs vb where va.doc = a.doc and vb.doc = b.doc
+                                 and 1 - (va.v <=> vb.v) >= (sp->>'cluster_cos')::real))
+        ), edges as (
+            select a, b from pairs union select b, a from pairs
+        ), reach (doc, root) as (
+            select doc, doc from lr
+            union
+            select e.b, r.root from reach r join edges e on e.a = r.doc
+        ), comp as (
+            select doc, min(root) as cid from reach group by doc
+        ), shared as (
+            select cm.cid, t, count(*) as holders, jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) as n
+              from comp cm, jsonb_array_elements_text(coalesce(g->'terms'->cm.doc, '[]'::jsonb)) t
+             where not board->'asked_terms' ? t and not qs ? ('part:' || t)
+             group by cm.cid, t having count(*) >= 2
+        ), best as (
+            select distinct on (cid) cid, t, holders, n from shared order by cid, n, holders desc, t
+        )
+        select coalesce(jsonb_agg(jsonb_build_object('key', 'S|root|' || b.t, 'parent', 'root', 'term', b.t,
+                                                     'holders', b.holders, 'cluster', b.cid,
+                                                     'text', format(sp->>'part_wording', qs->'root'->>'text', b.t),
+                                                     'p', ans->('S|root|' || b.t)) order by b.n, b.t), '[]'::jsonb)
+          into cands
+          from (select distinct on (t) * from best order by t, n) b;
+    end if;
     -- leaves the verdicts close: one line at or above state_gate answers the leaf; among the lines that clear, the
     -- newest is the answer and the older ones its history, so a contradiction keeps both sides. Unset, the gate closes
     -- nothing and the walk records the verdicts (the calibration's input).
@@ -475,7 +521,8 @@ begin
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
-    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'request_bytes']);
+    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'task_set_question',
+                                                 'request_bytes']);
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
@@ -489,9 +536,10 @@ begin
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
 
         union all
-        select x->>'key', 'N|root', st->'board'->'questions'->'root'->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'),
-               'the question: "' || (x->>'text') || '"'
+        -- the tested call shape, verbatim (spec 8ed4e1c2): the state's question is decider.task_set_question, the
+        -- option is the root question's own text; AUC 0.936 belongs to exactly this prompt
+        select x->>'key', 'N|root', (select value #>> '{}' from aiq.parameters where name = 'decider.task_set_question'),
+               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'), x->>'text'
           from jsonb_array_elements(nx->'cardinality') x where p_phase = 'shape'
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
