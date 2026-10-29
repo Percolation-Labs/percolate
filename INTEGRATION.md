@@ -38,8 +38,11 @@ percolationlabs/percolate-postgres:19-integration built from this tree, core fro
 Cause for every line below: BEAM's plan index ('->-> n,m' and its rarer forms) left both halves of search, the stored
 text (keyword half) and the re-embedded vectors (vector half), so search's order moved, and every walk that starts from
 it moved a few reads. The walk's settings are pinned (memoryless, source) in every published block, so none of this is
-the question stack. Why search reads 3 fewer of step 1's 27 without the index is not yet measured (mike; timmy and
-sally proposed the checks), and the article says 'moved', not why, until it is.
+the question stack. Why search reads 3 fewer of step 1's 27: measured by mike (29 Oct ~14:45Z, $0, his marker.txt; builds
+B = stripped text with the old vectors and C = marked text with the new vectors, on james's 5921/5931). Across 36
+questions, stripping the text changes nothing and re-embedding moves search by under 2 points; evidence in plan
+steps 1-12 lost no more rank. Step 1's 15 -> 12 is the re-embedding of its changed pieces on that one question and
+does not generalise, so the pre-strip search numbers stand.
 
 | file / check | before -> after |
 |---|---|
