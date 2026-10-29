@@ -107,10 +107,18 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it.'),
  ('walk.stack', 'walk', 'false', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). Off by default until a stack walk is measured against the memoryless one; the walkthrough''s published steps ran memoryless.'),
- ('stack.answers_gate', 'stack', '0.5', 'The P at or above which the decider''s judgement that a read answers a question, or part of it, links them (a walk_answers edge).', 'aiq.walk_stack_next',
-  'The walk''s own gate, read as a probability. On recorded walks Jev picks out labelled evidence among reads at AUC 0.745 [0.690, 0.799], oracle-scored (REM-1240); the gate itself is not tuned.'),
+ ('stack.link_floor', 'stack', '0.7', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
+  'A floor under the rank rule (sally''s guard on F10, adopted by bill, M-20261029-114953-bb74): rank alone links something even where nothing read is evidence. 0.7 is the walk spec''s value (1ee004f1), set by mike on REM-1240''s recognition run, not on any walk.'),
+ ('stack.link_share', 'stack', '0.02', 'A read links to a question only when its assessment ranks in this top share of the reads assessed against that question so far (at least one).', 'aiq.walk_stack_next',
+  'F10, decided by bill (M-20261029-114822-4a81), Sirsh may overrule: at a fixed gate the links were mostly noise (evidence share of links 5.7% at 0.5, 6.6% at 0.7, against a 3.9% base), while by rank within the walk the top 2% were 19% evidence and the top 5% 14% (mike, REM-1240, on the gate''s run). Found on REM-1245''s ladder retest, where 232 of 443 other reads cleared 0.5.'),
+ ('stack.close_min_links', 'stack', '2', 'A question is judged for closing only once at least this many reads are linked to it.', 'aiq.walk_stack_next',
+  'sally''s guard on F10 (adopted by bill): links by rank are about 19% evidence, so one link is too thin to close on.'),
+ ('stack.stale_waves', 'stack', '2', 'A part that gains no link for this many waves leaves the open list as stale: not answered, and its leads keep their P.', 'aiq.walk_stack_next, aiq.walk_state',
+  'F9, decided by bill with sally''s guard (M-20261029-114953-bb74): on REM-1245''s ladder retest nothing ever closed and the four slots taken by wave 3 were held to the end.'),
+ ('stack.max_displace', 'stack', '1', 'At most this many open parts a wave are displaced by a candidate with higher P; only a part with no link of its own can be.', 'aiq.walk_stack_next',
+  'F11, decided by bill with sally''s guard: on the ladder retest ''ladder'' (P 0.78) and ''money'' (0.84) were judged parts after the slots were full and never opened.'),
  ('stack.close_gate', 'stack', '0.7', 'The P at or above which a question is answered by the reads linked to it, and leaves the open list.', 'aiq.walk_stack_next',
-  'Above the answers gate, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
+  'Above the link floor, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
  ('stack.split_gate', 'stack', '0.5', 'The P at or above which a candidate part is opened as a question under its parent.', 'aiq.walk_stack_next',
   'The walk''s gate. Not measured.'),
  ('stack.max_open', 'stack', '4', 'At most this many parts are open at once (the root not counted). Every open question multiplies the leads judged.', 'aiq.walk_stack_next',
@@ -768,8 +776,9 @@ begin
         stop := w->'stop';
     end loop;
     -- The question stack (walk.stack, REM-1245): the board after the last recorded stack step. A lead's P is then the
-    -- highest the decider gave it against any question still open (verdict keys L|<question>|<lead>), and the
-    -- question it serves is that one, so a lead toward a question already answered falls away. The raw verdicts,
+    -- highest the decider gave it against any question not answered (verdict keys L|<question>|<lead>), and the
+    -- question it serves is that one, so a lead toward a question already answered falls away; a part closed stale or
+    -- displaced was not answered, and its leads keep their P (F9, F11). The raw verdicts,
     -- every kind, stay in `answers` for walk_verdicts and the stack's own steps.
     if coalesce((s->>'stack')::boolean, false) then
         -- the board: every recorded wave's moves folded onto the initial one (walk-stack.sql)
@@ -778,7 +787,8 @@ begin
           into lp, serves
           from (select distinct on (c.key) c.key, (pmap->>('L|' || o.q || '|' || c.key))::real as p, o.q
                   from (select key from jsonb_each(clues) union select key from jsonb_each(nxt)) c,
-                       jsonb_array_elements_text(board->'open') o(q)
+                       -- every question not answered: open, or closed stale or displaced, whose leads keep their P
+                       (select key as q from jsonb_each(board->'questions') where value->>'state' <> 'answered') o
                  where pmap ? ('L|' || o.q || '|' || c.key)
                  order by c.key, 2 desc, o.q) z;
         return jsonb_build_object('settings', s, 'question', q, 'order', coalesce(ord, '[]'::jsonb),

@@ -79,6 +79,18 @@ begin
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
                            || jsonb_build_object('state', 'answered', 'closed_wave', m->'wave', 'close_p', x->'p'));
         end loop;
+        for x in select value from jsonb_array_elements(coalesce(m->'stale', '[]'::jsonb)) loop
+            b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
+                           || jsonb_build_object('state', 'stale', 'closed_wave', m->'wave'));
+        end loop;
+        for x in select value from jsonb_array_elements(coalesce(m->'displaced', '[]'::jsonb)) loop
+            b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
+                           || jsonb_build_object('state', 'displaced', 'closed_wave', m->'wave', 'displaced_by', x->'by'));
+        end loop;
+        -- when each question last gained a link, which is what makes a part stale
+        for x in select distinct on (value->>'q') value from jsonb_array_elements(m->'linked') loop
+            b := jsonb_set(b, array['questions', x->>'q', 'last_linked_wave'], m->'wave');
+        end loop;
         b := b || jsonb_build_object('iteration', rec->'iteration', 'assessed', rec->'assessed',
                                      'evidence', (b->'evidence') || (m->'linked'), 'open', m->'open',
                                      'asked_terms', (b->'asked_terms') || (rec->'asked_terms'), 'moves', m);
@@ -159,8 +171,12 @@ declare
     open_   jsonb := board->'open';
     closed  jsonb := '[]'::jsonb;
     added   jsonb := '[]'::jsonb;
+    stale   jsonb := '[]'::jsonb;
+    gone    jsonb := '[]'::jsonb;   -- parts displaced by a candidate with higher P
     c       record;
+    weak    record;
     nparts  int;
+    swaps   int := 0;
 begin
     -- the reads of the wave after the last one assessed; none yet, and there is nothing to do
     select coalesce(jsonb_agg(r.value->>'doc' order by r.ordinality), '[]'::jsonb) into reads
@@ -171,7 +187,8 @@ begin
                                   'record', jsonb_build_object('iteration', (board->>'iteration')::int + 1,
                                                                'assessed', board->'assessed', 'asked_terms', '[]'::jsonb,
                                                                'moves', jsonb_build_object('wave', w, 'linked', '[]'::jsonb,
-                                                                   'answered', '[]'::jsonb, 'added', '[]'::jsonb, 'open', open_)));
+                                                                   'answered', '[]'::jsonb, 'added', '[]'::jsonb,
+                                                                   'stale', '[]'::jsonb, 'displaced', '[]'::jsonb, 'open', open_)));
     end if;
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
     -- 1. assess: each new read against each open question
@@ -183,11 +200,28 @@ begin
                               order by o.q, r.o), '[]'::jsonb)
       into assess
       from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
-    select coalesce(jsonb_agg(jsonb_build_object('doc', a->>'doc', 'q', a->>'q', 'p', (a->>'p')::real, 'wave', w)
+    -- A read links to a question when its P clears stack.link_floor AND ranks in the top stack.link_share of the reads
+    -- assessed against that question so far (walk.md §6 move 1, F10). Rank, because at a fixed gate the links were
+    -- mostly noise (6% evidence at 0.5 against a 3.9% base; the top 2% by rank were 19%, REM-1240). It is relative, so
+    -- a walk with no evidence still links its best reads; the close step is what must say no. "So far" is the reads of
+    -- waves up to this one, never later ones a replay may also hold.
+    with pool as (
+        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc, (x.value #>> '{}')::real as p
+          from jsonb_each(ans) x
+         where x.key like 'A|%'
+           and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
+                                                    jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
+    ), ranked as (
+        select q, doc, p, rank() over (partition by q order by p desc) as rk, count(*) over (partition by q) as n from pool
+    )
+    select coalesce(jsonb_agg(jsonb_build_object('doc', a->>'doc', 'q', a->>'q', 'p', (a->>'p')::real, 'wave', w,
+                                                 'rank', rk.rk, 'of', rk.n)
                               order by a->>'q', (a->>'p')::real desc), '[]'::jsonb)
       into linked
       from jsonb_array_elements(assess) a
-     where (a->>'p')::real >= (sp->>'answers_gate')::real;
+      join ranked rk on rk.q = a->>'q' and rk.doc = a->>'doc'
+     where (a->>'p')::real >= (sp->>'link_floor')::real
+       and rk.rk <= greatest(1, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
     -- 2. close: each open question that gained evidence, by its reads' lines; the root by every read linked to it or
     -- to any part. Keyed by how many reads it then has, so a question that gains more is asked again.
@@ -201,7 +235,8 @@ begin
          where e->>'q' = gq.q or (gq.q = 'root')
          group by 1, 2
     ), counted as (
-        select q, count(*) as n from mine group by q
+        -- close judges a question's links only once it has stack.close_min_links of them
+        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
     ), shown as (
         select m.q, m.doc, m.p, row_number() over (partition by m.q order by m.p desc, m.doc) as k from mine m
     )
@@ -254,12 +289,38 @@ begin
             open_ := open_ - 'root';
         end if;
     end loop;
+    -- stale (F9): a part that has gained no link for stack.stale_waves waves leaves the open list as 'stale'. It is
+    -- not answered, and its leads keep their P (aiq.walk_state), so a stale part never hides evidence behind it.
+    for c in select o as q from jsonb_array_elements_text(open_) o
+              where o <> 'root' and not exists (select 1 from jsonb_array_elements(linked) x where x->>'q' = o)
+                and w - coalesce((qs->o->>'last_linked_wave')::int, (qs->o->>'opened_wave')::int)
+                    >= (sp->>'stale_waves')::int loop
+        qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object('state', 'stale', 'closed_wave', w));
+        stale := stale || jsonb_build_array(jsonb_build_object('q', c.q));
+        open_ := open_ - c.q;
+    end loop;
     nparts := (select count(*) from jsonb_array_elements_text(open_) o where o <> 'root');
     for c in select x->>'parent' as parent, x->>'term' as term, x->>'text' as text, (x->>'p')::real as p
                from jsonb_array_elements(cands) x
               where (x->>'p')::real >= (sp->>'split_gate')::real and open_ ? (x->>'parent')
               order by (x->>'p')::real desc, x->>'term' loop
-        exit when nparts >= (sp->>'max_open')::int;
+        if nparts >= (sp->>'max_open')::int then
+            -- the slot rule (F11): a candidate with higher P displaces the weakest open part that has no link of its
+            -- own, at most stack.max_displace a wave; the displaced part keeps its leads and its record
+            exit when swaps >= (sp->>'max_displace')::int;
+            select o as q, (qs->o->>'opened_p')::real as p into weak
+              from jsonb_array_elements_text(open_) o
+             where o <> 'root' and not exists (select 1 from jsonb_array_elements(ev) e where e->>'q' = o)
+             order by (qs->o->>'opened_p')::real, o
+             limit 1;
+            exit when weak.q is null or coalesce(weak.p, 0) >= c.p;
+            qs := jsonb_set(qs, array[weak.q], qs->weak.q || jsonb_build_object('state', 'displaced', 'closed_wave', w,
+                                                                                 'displaced_by', 'part:' || c.term));
+            gone := gone || jsonb_build_array(jsonb_build_object('q', weak.q, 'p', weak.p, 'by', 'part:' || c.term));
+            open_ := open_ - weak.q;
+            nparts := nparts - 1;
+            swaps := swaps + 1;
+        end if;
         qs := qs || jsonb_build_object('part:' || c.term, jsonb_build_object(
                   'parent', c.parent, 'text', c.text, 'by', 'decider', 'term', c.term, 'opened_wave', w, 'opened_p', c.p,
                   'state', 'open', 'closed_wave', null, 'close_p', null));
@@ -275,7 +336,8 @@ begin
         'record', jsonb_build_object(
             'iteration', (board->>'iteration')::int + 1, 'assessed', w,
             'asked_terms', coalesce((select jsonb_agg(x->'term') from jsonb_array_elements(cands) x), '[]'::jsonb),
-            'moves', jsonb_build_object('wave', w, 'linked', linked, 'answered', closed, 'added', added, 'open', open_)));
+            'moves', jsonb_build_object('wave', w, 'linked', linked, 'answered', closed, 'added', added,
+                                        'stale', stale, 'displaced', gone, 'open', open_)));
 end;
 $$;
 
