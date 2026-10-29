@@ -899,6 +899,13 @@ thing to find (REM-1244). Two forms come after it.
   - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as the start's
     `question.parts` (not built; today `walk_start` takes only the question), and it would refuse any part that carries an answer, evidence or rubric, as it does for
     the question.
+  - *Who writes the parts, for any test or example* (sally, 18:09Z). On BEAM the easy source of sub-questions is the
+    rubric, whose items are the answer key, and a refusal at `walk_start` does not catch a part whose words were
+    copied from it. So a test's parts are written from the question's words alone, by a fresh client that never saw
+    the rubric or BEAM's answer, with its prompt recorded. The prompt and the parts are kept. Afterwards each part is
+    checked against the rubric for repeated distinctive words, and any that repeat are quoted. Otherwise a result
+    that leads score better against the parts measures the key, not the stack. The same rule holds for any example
+    the article shows.
   - *Status:* a candidate, pending bill's directional check (3–4 recorded questions, hand-written sub-questions, Jev
     re-judging the recorded leads). If the leads score no better against the parts than against the root, it is not
     built for part three.
