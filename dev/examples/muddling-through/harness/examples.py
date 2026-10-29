@@ -4,7 +4,8 @@ reference answer (oracle-given labels).
     python3 harness/examples.py DSN RUN QID OUT_PREFIX
 
 BEAM's question, reference answer and rubric for QID come from samples/beam/questions.jsonl, which
-harness/beam_fetch.py writes from the downloaded BEAM; harness/answer-items.json is our own grouping of the evidence
+harness/beam_fetch.py writes from the downloaded BEAM (a walk-0 question's evidence from samples/walk-0/questions.jsonl,
+one item to each piece); harness/answer-items.json is our own grouping of the evidence
 exchanges into the rubric's items (by its position in BEAM's rubric) or, where BEAM's rubric has no items, into
 threads we name. Everything else comes from the run: aiq.walk_reads (what it read, in order, and the lead that
 brought each read in), aiq.walk_clues (each lead's source, kind, P and decision), aiq.walk_search_order (search's own
@@ -14,7 +15,7 @@ Writes OUT_PREFIX-answer.txt (each rubric item, the exchange the walk read for i
 OUT_PREFIX-coverage.png (rubric items covered against reads, walk and search) and OUT_PREFIX-path.png (the compressed
 traversal: every path from a search read through the leads to an evidence exchange).
 """
-import json, subprocess, sys
+import json, re, subprocess, sys
 from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
@@ -23,15 +24,18 @@ from matplotlib.lines import Line2D
 
 dsn, run, qid, out = sys.argv[1:5]
 HERE = Path(__file__).resolve().parent
-beam = {q['qid']: q for q in map(json.loads, open(HERE.parent / 'samples/beam/questions.jsonl'))}[qid]
-grouping = json.load(open(HERE / 'answer-items.json'))[qid]
-ans = {'question': beam['question'], 'answer': beam['answer'], 'gold': beam['gold'],
-       'items': [{'item': g['item'] if 'item' in g else beam['rubric'][g['rubric']], 'docs': g['docs']} for g in grouping]}
+sample = 'walk-0' if qid.startswith('walk-0/') else 'beam'
+key = {q['qid']: q for q in map(json.loads, open(HERE.parent / f'samples/{sample}/questions.jsonl'))}[qid]
+# a question with no grouping (walk-0's) has one item per piece of evidence
+grouping = json.load(open(HERE / 'answer-items.json')).get(qid) or [{'item': f"evidence {d.rsplit('/', 1)[1]}", 'docs': [d]} for d in key['gold']]
+ans = {'question': key.get('question'), 'answer': key.get('answer'), 'gold': key['gold'],
+       'items': [{'item': g['item'] if 'item' in g else key['rubric'][g['rubric']], 'docs': g['docs']} for g in grouping]}
 
 def q(sql):
     r = subprocess.run(['psql', dsn, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql], capture_output=True, text=True, check=True)
     return json.loads(r.stdout or 'null')
 
+ans['question'] = ans['question'] or q(f"select to_json(question_text) from aiq.walk_runs where run = '{run}'")
 reads = q(f"select json_agg(json_build_object('doc', doc, 'wave', wave, 'ord', ord, 'via', via) order by wave, ord) "
           f"from aiq.walk_reads('{run}')")
 clues = {c['key']: c for c in q(f"select json_agg(json_build_object('key', key, 'kind', kind, 'source', source, 'p', p, "
@@ -44,11 +48,11 @@ said = {r['doc']: r['said'] for r in q("select json_agg(json_build_object('doc',
                                        "cross join lateral aiq.lookup(d) l join aiq.nodes n on n.id = l.node_id")}
 n_of = {r['doc']: i + 1 for i, r in enumerate(reads)}        # read number, 1-based, in the walk's order
 by_doc = {r['doc']: r for r in reads}
-num = lambda d: int(d.split('/')[1])
+num = lambda d: int(re.sub(r'\D', '', d.rsplit('/', 1)[1]))   # beam:1M:35/12 -> 12, walk-0/d12657 -> 12657
 labels = [i['item'] for i in ans['items']]
 
 # 1. The answer that came back: for each rubric item, the first of its exchanges the walk read.
-lines = [f"question: {ans['question']}", f"BEAM's reference answer: {ans['answer']}", ""]
+lines = [f"question: {ans['question']}"] + ([f"BEAM's reference answer: {ans['answer']}"] if ans['answer'] else []) + [""]
 first = []
 for lab, it in zip(labels, ans['items']):
     got = sorted((n_of[d], d) for d in it['docs'] if d in n_of)
@@ -134,7 +138,7 @@ for d in keep:
                     arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=1.2, ls=style.get(k['kind'], '-'), shrinkA=6, shrinkB=6))
         if k['kind'] == 'term' and k['key'] not in labelled:
             labelled.add(k['key'])
-            ax.text(dep(p) + 0.5, row[p] + (row[d] - row[p]) / 2, f"{k['key'][5:]} {k['p']:.2f}", fontsize=7.5, color=INK2,
+            ax.text(dep(p) + 0.5, row[p] + (row[d] - row[p]) / 2, f"{k['key'].split(':', 1)[1].rsplit('/', 1)[-1]} {k['p']:.2f}", fontsize=7.5, color=INK2,
                     ha='center', va='center', bbox=dict(boxstyle='round,pad=0.15', fc=SURFACE, ec='none'))
 for d in keep:
     ev = d in item_of
