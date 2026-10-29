@@ -85,13 +85,13 @@ jobs:
           psql "$P8_DSN" -c "select status, count(*) from aiq.walk_runs group by 1 order by 1" | tee out/03c-walks.txt
           test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs where status <> 'succeeded'")" = 0
           test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs")" -gt 0
-      - name: 3d. every replayed walk is the walk it replays (no lead left without a recorded verdict)
+      - name: 3d. what each replayed walk held (diagnostic; 3e is the test)
         run: |
-          psql "$P8_DSN" -c "select r.run, count(*) filter (where c.decision = 'unjudged') as unjudged
-                               from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
-                              where r.replays is not null group by 1 order by 2 desc" | tee out/03d-replays.txt
-          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
-                                        where r.replays is not null and c.decision = 'unjudged'")" = 0
+          # walk_clues says 'unjudged' when the plain verdict map has no P for a lead. A stack-on walk keeps its
+          # verdicts per open question (L| keys), so that count is not the replay's test: walk_summary's is (3e).
+          psql "$P8_DSN" -c "select r.run, (select count(*) filter (where c.decision = 'unjudged') from aiq.walk_clues(r.run) c) as clues_without_plain_p,
+                                    aiq.walk_summary(r.run)->'decider' as decider
+                               from aiq.walk_runs r where r.replays is not null order by r.created_at" | tee out/03d-replays.txt
       - name: 3e. every replayed walk says it is faithful (walk_summary's decider.faithful; absent is a failure, not a pass)
         run: |
           psql "$P8_DSN" -c "select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
