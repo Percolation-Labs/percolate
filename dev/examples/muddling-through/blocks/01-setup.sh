@@ -8,6 +8,10 @@ percolate sample load samples/walk-0
 # Every piece arrived with its vector, so the links can be built at once.
 percolate walk index --source beam-1m22
 percolate walk index --source beam-1m35
+# The replayed walks run at span 2 and cap 10, the settings their verdicts were recorded under, and a graph is kept per
+# settings: build that one now too, or the first such walk builds it inside its own step and can hit the statement timeout.
+psql "$P8_DSN" -Atc "select aiq.walk_index(jsonb_build_object('channel', c, 'settings', jsonb_build_object('span', 2, 'cap', 10)))->>'uri'
+                       from unnest(array['beam-1m22', 'beam-1m35']) c" > /dev/null
 
 # The walk itself is a workflow the extension ships: install it once, under the name the steps start.
 psql "$P8_DSN" -c "select aiq.install_walk_workflow()"
