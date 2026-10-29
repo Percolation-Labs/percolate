@@ -30,6 +30,8 @@
 /* `screen` is the name Surface prints, so it is the screen a failure breaks --
    not the module the call happens to live in. */
 export const READS = {
+  walkRuns: {screen:"Walks",schema:"aiq",view:"walk_runs",
+    q:"select=run,question_text,status,control_of,created_at&order=created_at.desc"},
   workflowPlugins: {screen:"Workflow design",schema:"agentic",view:"plugins_api",
     q:"select=name,description&order=name"},
   apiSourceState: {screen:"Data Sources",schema:"content",view:"source_state",
