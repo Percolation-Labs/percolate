@@ -33,5 +33,5 @@ select u.doc as evidence, c.key as lead, round(c.p::numeric, 2) as p
   from unread u
   join aiq.walk_clues(:'run') c on u.doc = any(c.targets)
  where c.decision = 'rejected' and c.p >= 0.4
- order by u.doc, c.p desc;
+ order by u.doc, c.p desc, c.key desc;
 SQL
