@@ -42586,13 +42586,22 @@ begin
          order by c.chunk;
         return;
     end if;
+    -- A request holds at most 60 options and decider.request_bytes of their text, as the stack's do: under
+    -- walk.describe lines an option is a few hundred bytes, and 60 of them overran the worker's 64 KB task cap (the
+    -- pilot's plain arm, 29 Oct; the task holds the body twice).
     return query
     with todo as (
-        select key, value->>'text' as text, row_number() over (order by key) - 1 as i
+        select key, value->>'text' as text, row_number() over (order by key) - 1 as i,
+               sum(octet_length(value->>'text') + octet_length(key) + 64) over (order by key) as cum
           from jsonb_each(st->'next')
          where not (st->'p') ? key
+    ), cut as (
+        select t.*, (t.cum / (aiq.parameter('decider.request_bytes', (select created_at from aiq.walk_run(p_run))) #>> '{}')::int)::int as by_bytes
+          from todo t
     ), chunks as (
-        select (i / 60)::int as chunk, key, text, (i % 60)::int as j from todo
+        select (dense_rank() over (order by by_bytes, i / 60) - 1)::int as chunk, key, text,
+               (row_number() over (partition by by_bytes, i / 60 order by key) - 1)::int as j
+          from cut
     )
     select c.chunk,
            jsonb_agg(c.key order by c.j),
