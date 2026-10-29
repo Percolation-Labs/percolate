@@ -176,7 +176,10 @@ begin
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
     -- 1. assess: each new read against each open question
     select coalesce(jsonb_agg(jsonb_build_object('key', 'A|' || o.q || '|' || r.doc, 'q', o.q, 'doc', r.doc,
-                                                 'text', coalesce(lines->>r.doc, r.doc), 'p', ans->('A|' || o.q || '|' || r.doc))
+                                                 -- worded as REM-1240's recognition test showed a read, so the wording
+                                                 -- that ships is the one measured
+                                                 'text', format('the user wrote: "%s"', coalesce(lines->>r.doc, r.doc)),
+                                                 'p', ans->('A|' || o.q || '|' || r.doc))
                               order by o.q, r.o), '[]'::jsonb)
       into assess
       from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
