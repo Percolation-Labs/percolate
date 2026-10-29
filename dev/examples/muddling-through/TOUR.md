@@ -49,7 +49,7 @@ viewer sees under row-level security?).
 The bundle is a release asset of this repository, checked by its sha256 before it is loaded:
 
 ```bash
-ASSET=beam-walks-v1.tar.gz        # the asset's name and sha256 are set at the release
+ASSET=<the bundle's name>         # set at the release, with its sha256; the full one is about 158 MB
 curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET"
 echo "<sha256>  $ASSET" | sha256sum -c -
 tar xzf "$ASSET"

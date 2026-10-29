@@ -11,23 +11,30 @@ on:
     inputs:
       tag: {description: "the release to tour (get-percolate and percolate tag)", required: true}
       core: {description: "percolate-core version on PyPI", required: true}
+      bundle: {description: "the bundle asset's file name on the release", required: true}
       bundle_sha256: {description: "the bundle asset's sha256", required: true}
   push:
     branches: ["tour/**"]
 jobs:
   tour:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180   # the full bundle's load is about an hour (cory, 29 Oct)
     env:
       TAG: ${{ inputs.tag }}
       CORE: ${{ inputs.core }}
+      BUNDLE: ${{ inputs.bundle }}
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
       P8_DSN: postgres://p8:p8@localhost:5432/percolate
     steps:
       - name: nothing is installed
         run: |
           mkdir -p out
-          { docker images; pip cache list 2>&1 | tail -2; ls ~; } | tee out/00-clean.txt
+          { docker images; pip cache list 2>&1 | tail -2; ls ~; df -h /; } | tee out/00-clean.txt
+      - name: room for the bundle (a reader's machine has it; this runner keeps toolchains the tour does not use)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tee -a out/00-clean.txt
+          test "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" -ge 12 || { echo "under 12 GB free for a ~2 GB load plus images"; exit 1; }
       - name: 1. install the release
         run: |
           mkdir tour && cd tour
@@ -42,7 +49,7 @@ jobs:
       - name: 3. fetch the example's data
         run: |
           cd tour && . .venv/bin/activate
-          ASSET=beam-walks-v1.tar.gz
+          ASSET="$BUNDLE"
           curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET"
           echo "$BUNDLE_SHA256  $ASSET" | sha256sum -c - | tee ../out/03-fetch.txt
           tar xzf "$ASSET"
