@@ -42500,7 +42500,19 @@ begin
     if inp ? 'replay' then
         perform aiq.walk_state(p_run);
     end if;
-    if inp ? 'search' then
+    -- A replay reads search's order as the recording had it (REM-1246): seeds and each wave's search fill come from an
+    -- approximate vector index whose near-tie order is not the same on another install, and a replay whose first
+    -- search read differs reads different messages from then on, meeting leads its verdicts never covered.
+    if inp ? 'replay' then
+        select (string_agg(c.content, '' order by c.ordinal))::jsonb->'order' into ord
+          from content.resource_chunks c where c.resource_id = (inp->>'replay')::uuid;
+        if jsonb_typeof(ord) <> 'array' then
+            ord := null;
+        end if;
+    end if;
+    if ord is not null then
+        null;  -- the recording's order
+    elsif inp ? 'search' then
         ord := inp->'search';
     elsif p_vector is not null and inp ? 'channel' then
         -- a hit stands for its document, at the rank of its best chunk
@@ -43091,6 +43103,9 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
                               'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
                               -- the kept graph the verdicts were given on, so a replay can walk that graph (REM-1246)
+                              -- search's order as the walk read it, so a replay reads the same documents (REM-1246)
+                              'order', (select tk.output->'result'->0->'state'->'order' from aiq.walk_tasks(p_run) tk
+                                         where tk.step_key = 'start' and tk.status = 'succeeded' limit 1),
                               'graph', (select tk.output->'result'->0->'state'->>'graph' from aiq.walk_tasks(p_run) tk
                                          where tk.step_key = 'start' and tk.status = 'succeeded' limit 1),
                               -- a stack walk's verdicts are every judgement it asked for (leads per question,
