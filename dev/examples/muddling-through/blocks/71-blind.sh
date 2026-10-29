@@ -41,7 +41,7 @@ for DOC in $(psql "$P8_DSN" -At -v walk="$WALK" <<< "select id from content.reso
 select workflow.start_workflow('walk', jsonb_build_object(
          'question', r.input->'question', 'channel', r.input->>'channel',
          'replay', :'doc', 'control_of', :'walk', 'offline', true,
-         'settings', jsonb_build_object('span', 2, 'cap', 10)))
+         'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'span', 2, 'cap', 10)))
   from workflow.runs r where r.id = :'walk';
 SQL
 done

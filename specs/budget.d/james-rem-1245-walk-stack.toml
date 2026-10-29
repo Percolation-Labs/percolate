@@ -1,0 +1,9 @@
+why = """REM-1245, the question stack (walk.md §6-§9): the walk keeps a board of questions and the reads that answer them,
+and Jev judges each lead against the questions still open. The board is the fold of each wave's recorded moves, so a
+walk writes only its task rows; walk_structure is the one object a UI reads (Sirsh, M-20261029-105852-65d0: the UI
+assembles nothing of its own); walk_keep_stack makes the board graph rows when a walk is kept."""
+
+[added]
+functions = ["aiq.walk_stack_initial", "aiq.walk_lines", "aiq.walk_stack_next", "aiq.walk_stack_requests",
+             "aiq.walk_stack_move", "aiq.walk_stack_boards", "aiq.walk_stack", "aiq.walk_graph_stats",
+             "aiq.walk_structure", "aiq.walk_keep_stack", "aiq.walk_places", "aiq.walk_clue_texts", "aiq.parameters_need", "aiq.walk_run", "aiq.walk_tasks", "aiq.walk_runs_visible", "aiq.walk_oracle", "aiq.walk_questions", "aiq.walk_launch", "aiq.walk_run_settings", "aiq.walk_target_requests"]

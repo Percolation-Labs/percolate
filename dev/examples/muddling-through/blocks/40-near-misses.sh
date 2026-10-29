@@ -23,7 +23,7 @@ select workflow.start_workflow('walk', jsonb_build_object(
          'replay', (select v.id from content.resources v join content.channels vc on vc.id = v.channel_id
                      where vc.name = 'walk-replays' and v.title = k.key),
          'offline', true,
-         'settings', jsonb_build_object('wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || (:'arm')::jsonb))
+         'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 160, 'waves', 10, 'span', 2, 'cap', 10) || (:'arm')::jsonb))
   from aiq.node_keys k join aiq.nodes n on n.id = k.node_id and n.entity_type = 'world_question'
  where k.kind = 'canonical' and k.key = :'q';
 SQL
