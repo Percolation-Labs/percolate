@@ -80,7 +80,9 @@ and from one graphical client (on the Mac; which one is chosen at the run), conn
 
 ## 6. Rerun the article's experiments (to run)
 
-Each experiment the article quotes, run as its block prints it, and its output compared with what the article says.
+Each experiment the article quotes, run as its block prints it. The tour diffs every number a block prints against
+the article's own figure for it and fails on a difference beyond the noise the article states (bill, 29 Oct). The
+data comes only from the release asset's public URL: the runner checks nothing out and reads no registry cache.
 Open question for the run: where a reader gets the blocks without a checkout (the bundle, or the release's source
 archive).
 
