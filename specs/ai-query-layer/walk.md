@@ -1138,7 +1138,10 @@ A handful of walks is never the verdict.
   - *Endpoint and rule, per size:* P − search at 100 reads, paired per question, 95% bootstrap (2,000 draws, seed
     1251), under the same three rules. The report gives the difference by size (100K, 500K, and 1M from the
     extension) with its interval, and the slope across sizes.
-  - *Checkpoint at 25, per size:* the first 25 in the order `random.Random(f'1255:{size}').shuffle` gives the 50.
+  - *Checkpoint at 25, per size:* the first 25 in the order `random.Random(f'1255:{size}').shuffle` gives the 50,
+    shuffling the list of BEAM's full qids (`100K:13:contradiction_resolution:0`, not the short forms above) in
+    sorted order. Fixed before any walk (james asked, 21:16Z), the first five are: at 100K, 14 if:1, 2 cr:1, 20 ie:1,
+    3 eo:1, 15 ie:0; at 500K, 6 if:0, 12 eo:0, 20 msr:1, 27 if:0, 10 msr:1.
     A size stops early if its 99% interval at 100 reads lies wholly above 0 (settled) or wholly below +5 (failing).
     Otherwise it runs to 50.
   - *Keys:* each knowledge_update key (5 at 100K, 7 at 500K) is classed against its conversation before scoring, and
