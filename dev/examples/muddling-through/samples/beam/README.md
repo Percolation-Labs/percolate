@@ -28,4 +28,6 @@ directory, as data derived from BEAM, carries the same licence; the code that lo
 > arXiv:2510.27246. Dataset: https://huggingface.co/datasets/Mohammadta/BEAM
 
 Changes from the original: each user turn's trailing `->-> n,m` plan index is removed from `terms_text`, the text a
-walk tags; the chunks keep it, as the study embedded them.
+walk tags, and from every piece. The index is BEAM's generator's (sitting, plan step), and plan step predicts which
+exchanges BEAM's questions cite, so no decider may read it (REM-1240). Each piece's vector is still matched by the
+text the study embedded, index included, so the vectors and search are the study's.

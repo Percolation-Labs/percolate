@@ -10,8 +10,8 @@ downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-S
 
   texts.jsonl           one line per exchange of 1M:22 and 1M:35 for `percolate sample load`: a user turn and the
                         replies after it, in pieces of at most 2,000 characters cut at turn boundaries, with the
-                        sitting, the place in the conversation and the date said. `terms_text` is the user's words
-                        with BEAM's trailing '->-> n,m' plan index removed: what the walk tags. Each piece gets its
+                        sitting, the place in the conversation and the date said. BEAM's trailing '->-> n,m' plan
+                        index is removed from every piece and from `terms_text`, the user's words the walk tags. Each piece gets its
                         vector from vectors.jsonl only if the piece's sha256 is the one that vector was made from.
   questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys, and
                         BEAM's reference answer and rubric, which harness/examples.py sets the walk's reads against.
@@ -36,9 +36,13 @@ SHA256 = "41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533"
 RUNS = {"22": "beam-1m22", "35": "beam-1m35"}
 CHUNK = 2000
 MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
+# The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
+# never read, since plan step predicts which exchanges BEAM's questions cite (REM-1240).
+MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*\d+[ \t]*(?=\n|$)")
 
 
 SAID = 160  # characters of the user's words a document's title carries
+KEY = ("gold", "answer", "rubric")  # what a question carries that only evaluation may read
 
 def ints(x):
     """Every integer in BEAM's source_chat_ids, which nest lists and dicts."""
@@ -110,7 +114,9 @@ def main(sample):
             uri = f"beam:{run}/{i}"
             cs = []
             for n, c in enumerate(chunks(p["turns"])):
-                piece, v = {"content": c}, vectors.get((uri, n))
+                # The piece keeps its boundaries and loses the plan index; its vector is still matched by the text the
+                # study embedded, mark included, so search and the study's vectors are unchanged.
+                piece, v = {"content": MARK_IN_PIECE.sub("", c)}, vectors.get((uri, n))
                 pieces += 1
                 if v and v["sha256"] == hashlib.sha256(c.encode()).hexdigest():
                     piece["vector_f32"] = v["vector_f32"]
@@ -150,7 +156,9 @@ def main(sample):
         f.writelines(json.dumps(q) + "\n" for q in qs)
     with (sample / "question-texts.jsonl").open("w") as f:
         for q in qs:
-            md = dict({k: v for k, v in q.items() if k != "gold"}, id=q["qid"], text=q["question"])
+            # The question goes into the database by its words alone: its evidence, BEAM's reference answer and its
+            # rubric are the answer key, which stays in questions.jsonl for the evaluation functions (REM-1231).
+            md = dict({k: v for k, v in q.items() if k not in KEY}, id=q["qid"], text=q["question"])
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")
