@@ -434,6 +434,26 @@ A handful of walks is never the verdict.
   - *1M:25 ku:0's key, checked before this result was used:* group A. Exchange 488 states the key's 48 beta sign-ups
     by 19 May, updating 386's 45. The later counts (518: 75 new beta users in the week after launch; 120 and 350
     active users) count other things. It is scored once, and dropping it moves S − search by +0.4.
+- **The extension, registered before any of its walks runs** (bill, M-20261029-173346-4c41, amended after sally's
+  review). After outcome (i) the walk V0 ships is P, so the extension runs P only.
+  - *The confirmatory result is P against search on the new questions alone,* at 100 reads, under the same three
+    rules: GO (to 100K and 500K) if the 95% interval's lower end is above 0; NO-GO if its upper end is below +5; an
+    interval inside (0, +5) is reported in the small-gain wording; otherwise "no difference detectable at 10 points",
+    and it stops there. P's first 40 were seen before P was chosen, so choosing P and then pooling them would be a
+    forking path. The pooled 79 questions are **descriptive only**.
+  - *S against search is reported as stopped at n = 40,* with its interval: +4.4 [−1.7, +11.7].
+  - *Questions:* `random.Random(1253).sample(sorted(rest), 40)`, where `rest` is the 50 of the sweep's 1M draw of 90
+    left after the pilot's 40 (the pilot's 40 reproduce exactly from the same code). One drawn question, 1M:8 summ:1,
+    has no labelled evidence in BEAM, so it cannot be oracle-scored. It is dropped and not redrawn, which leaves 39:
+    1M:10 cr:0, 1M:10 eo:0, 1M:11 ku:1, 1M:11 tr:0, 1M:12 ie:1, 1M:12 if:1, 1M:13 msr:0, 1M:14 pf:0, 1M:15 ku:0, 1M:15 ku:1, 1M:16 cr:0, 1M:17 ie:0, 1M:18 ie:1, 1M:19 if:0, 1M:1 if:0, 1M:20 cr:1, 1M:20 eo:0, 1M:20 pf:1, 1M:21 if:0, 1M:21 tr:0, 1M:22 summ:1, 1M:26 ku:1, 1M:26 pf:1, 1M:27 eo:0, 1M:29 ku:1, 1M:2 ie:0, 1M:30 if:0, 1M:31 pf:1, 1M:32 pf:0, 1M:34 if:1, 1M:34 ku:0, 1M:34 ku:1, 1M:35 pf:1, 1M:35 summ:1, 1M:3 tr:1, 1M:5 ku:1, 1M:6 summ:1, 1M:7 ie:0, 1M:8 cr:0.
+  - *Build and arm:* the pilot's database and commit (image 42d61547 with 34f7c80a's walk SQL), not 0.2.35. P is set
+    explicitly: `walk.stack` false, `lines`, `per_target`, on the pilot's seeds. One walk runs alone as a probe, the
+    batch stops on its first failure, and the spend is read from `walk_cost`, about $0.015 a walk (about $0.58).
+  - *Conversations:* 16 of the 39 sit in 12 conversations the pilot did not load (1M:1, 6, 8, 10, 11, 14, 15, 16, 17,
+    18, 22, 29). They hold about 12,500 exchanges, so the database grows by about 0.7–0.8 GB (by the pilot's own
+    1,347 MB for 22,745 exchanges). Their pieces are embedded by the stack's worker, which costs no Jev.
+  - *Keys:* 8 of the 39 are knowledge_update questions. Each key is checked against its conversation before
+    scoring, and one in group B or C is scored both ways.
 - **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
   registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
   search.
