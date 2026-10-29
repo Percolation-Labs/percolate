@@ -335,6 +335,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.parameters',null,'walk.sql: the walk''s, index''s, decider''s and explanations'' parameters, what each controls, where it is read and why'),
 ('ai-query-layer','function','aiq.parameters_of','text, timestamptz','walk.sql: one part''s parameters as {name: value}, as of a time'),
 ('ai-query-layer','function','aiq.parameter','text, timestamptz','walk.sql: one parameter''s value as of a time (REM-1245)'),
+('ai-query-layer','function','aiq.walk_cost','uuid, text[]','walk-stack.sql: what a walk cost, from its own request rows at the price as of its start: total, by wave, move and question, and a cost-against-discovery curve (REM-1245)'),
+('ai-query-layer','function','aiq.walk_cost_curve','uuid[], jsonb, int[]','walk-stack.sql: cost against discovery for a set of runs at read budgets, beside search and the oracle (REM-1245)'),
 ('ai-query-layer','function','aiq.parameters_append','','walk.sql: trigger keeping aiq.parameters append-only: a change or delete closes the current row (REM-1245)'),
 ('ai-query-layer','function','aiq.parameters_keep_old','','walk.sql: trigger adding the closed row a change to aiq.parameters replaces (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_graph','jsonb,timestamptz','walk.sql: a walk''s documents and by-construction links, as of the run''s start (REM-1210)'),

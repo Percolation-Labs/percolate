@@ -41852,6 +41852,10 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'About 12 lines of a user''s words fit the decider''s state at about 300 tokens a judgement. Since F13 the cap on every assessed line close sees, in either direction, highest P first. Not measured.'),
  ('stack.part_wording', 'stack', to_jsonb(text '%s (the part about ''%s'')'), 'How a candidate part is worded from its parent question and a term: format(wording, parent, term).', 'aiq.walk_stack_next',
   'No generative model is in the loop (Sirsh, M-20261029-105852-65d0), so a part is the parent narrowed to a term the evidence holds, and Jev chooses among them. A part written by a model comes through the walk''s input (parts), from a caller the walk asked.'),
+ ('decider.price_in', 'decider', '0.042', 'US dollars Jev bills per million input tokens; aiq.walk_cost prices a walk''s requests with it, as of the walk''s start.', 'aiq.walk_cost, aiq.walk_cost_curve',
+  'TypeSafe''s rate for jev-1.13.0 as recorded on the board (M-20261028-074450-d9d4, M-20261029-123524-edd1). A deployment on another rate sets its own.'),
+ ('decider.price_out', 'decider', '0', 'US dollars Jev bills per million output tokens.', 'aiq.walk_cost, aiq.walk_cost_curve',
+  'Output is not billed at jev-1.13.0''s rate (M-20261029-123524-edd1). Kept as a row so a rate that bills it needs no code change.'),
  ('decider.request_bytes', 'decider', '24000', 'The most option text one Jev request carries; a round''s options are cut into requests of at most 60 options and at most this many bytes.', 'aiq.walk_requests, aiq.walk_stack_requests',
   'The workflow caps a task''s input at 64 KB (workflow.max_payload_bytes). Sixty options fit when a lead is described by one snippet of its source; described by three targets'' lines and what its source answered (walk.describe lines, walk.stack) sixty came to 83 KB and the request was refused (REM-1245''s first live stack walk). A task''s input holds the body twice (the matrix row, and the REST body rendered from it), so 40,000 bytes of options still came to 78 KB; 24,000 keeps two copies, the state and the keys under the cap.'),
  ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message from the user''s earlier conversations that the search has already read. Does it hold information needed to answer `question`, or part of it?'),
@@ -44436,6 +44440,8 @@ begin
                       and jsonb_typeof(tk.output->'result'->0->'state') = 'object'),
         'reads', reads,
         'waves', (select coalesce(jsonb_agg(to_jsonb(w) order by w.wave), '[]'::jsonb) from aiq.walk_state_waves(st) w),
+        -- what it cost, from its own request rows (aiq.walk_cost); with an oracle, the curve carries labelled reads
+        'cost', aiq.walk_cost(p_run, p_oracle),
         'counts', jsonb_build_object(
             'questions_open', jsonb_array_length(board->'open'),
             'questions_answered', (select count(*) from jsonb_each(board->'questions') q where q.value->>'state' = 'answered'),
@@ -44630,6 +44636,132 @@ grant execute on function aiq.walk_state_reads(jsonb), aiq.walk_state_clues(json
                           aiq.walk_clue_text(uuid, text, text), aiq.walk_audit(uuid), aiq.walk_why(uuid, text[]),
                           aiq.walk_coverage(uuid, text[], integer[])
     to authenticated;
+
+-- WHAT A WALK COST (Sirsh, 14:43Z via bill, M-20261029-144434-538a): from the run's own rows, nothing stored. Every
+-- decider request a walk makes is a task row whose output carries Jev's usage; this prices them at the rate as of the
+-- walk's start (decider.price_in, decider.price_out) and splits them by wave, by move and by the question
+-- judged against. A request is counted in the wave whose reads it chose: step n's assess, shape, judge and target
+-- requests are spent before read_n reads wave n, so the cost to reach a read is everything up to its wave. The move is
+-- the step's (judge leads, assess reads, F8 targets) or, for a shape request, its wording as of the start (close,
+-- split candidates, cardinality); a shape request worded otherwise is 'shape'. curve gives, per wave, the cumulative
+-- cost beside the cumulative reads and reads judged to bear on (board evidence); given labelled pieces, also the
+-- cumulative labelled pieces read, marked oracle-scored.
+create or replace function aiq.walk_cost(p_run uuid, p_labelled text[] default null)
+returns jsonb
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with run as materialized (
+        select r.created_at as at, aiq.walk_state(r.id) as st from aiq.walk_run(p_run) r
+    ), price as materialized (
+        select coalesce((aiq.parameter('decider.price_in', at) #>> '{}')::numeric, 0) as pin,
+               coalesce((aiq.parameter('decider.price_out', at) #>> '{}')::numeric, 0) as pout,
+               aiq.parameter('decider.task_state', at) #>> '{}' as w_state,
+               aiq.parameter('decider.task_split', at) #>> '{}' as w_split,
+               aiq.parameter('decider.task_set_question', at) #>> '{}' as w_set
+          from run
+    ), req as materialized (
+        select substring(t.step_key from '^[a-z]+_([0-9]+)')::int as wave,
+               case split_part(t.step_key, '_', 1)
+                    when 'judge' then 'judge leads' when 'assess' then 'assess reads' when 'target' then 'F8 targets'
+                    when 'shape' then case t.input->'body'->'state'->>'task'
+                                           when pr.w_state then 'close' when pr.w_split then 'split candidates'
+                                           when pr.w_set then 'cardinality' else 'shape' end
+               end as move,
+               t.input->'body'->'state'->>'question' as question,
+               (select count(*) from jsonb_object_keys(coalesce(t.input->'body'->'questions', '{}'::jsonb)))::int as options,
+               coalesce((t.output->'result'->'usage'->>'input_tokens')::bigint, 0) as tin,
+               coalesce((t.output->'result'->'usage'->>'output_tokens')::bigint, 0) as tout
+          from aiq.walk_tasks(p_run) t cross join price pr
+         where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
+           and t.step_key ~ '^(judge|assess|shape|target)_[0-9]+\['
+    ), priced as (
+        select q.*, round((q.tin * pr.pin + q.tout * pr.pout) / 1e6, 6) as usd from req q cross join price pr
+    ), reads as (
+        select r.wave, r.doc from run, aiq.walk_state_reads(run.st) r
+    ), bearing as (
+        select distinct e->>'doc' as doc from run, jsonb_array_elements(coalesce(run.st->'board'->'evidence', '[]'::jsonb)) e
+    ), waves as (
+        select w, (select count(*) from reads r where r.wave = w)::int as reads,
+               (select count(*) from reads r where r.wave = w and r.doc in (select doc from bearing))::int as bearing,
+               (select count(*) from reads r where r.wave = w and r.doc = any(p_labelled))::int as labelled,
+               (select count(*) from priced p where p.wave = w)::int as requests,
+               (select coalesce(sum(p.options), 0) from priced p where p.wave = w)::int as judgements,
+               (select coalesce(sum(p.tin), 0) from priced p where p.wave = w)::bigint as tin,
+               (select coalesce(sum(p.tout), 0) from priced p where p.wave = w)::bigint as tout,
+               (select coalesce(sum(p.usd), 0) from priced p where p.wave = w) as usd
+          from generate_series(0, greatest((select max(wave) from reads), (select max(wave) from priced), 0)) w
+    )
+    select jsonb_build_object(
+        'price', (select jsonb_build_object('usd_per_m_input', pin, 'usd_per_m_output', pout, 'as_of', (select at from run)) from price),
+        'total', (select jsonb_build_object('requests', count(*), 'judgements', coalesce(sum(options), 0),
+                                            'input_tokens', coalesce(sum(tin), 0), 'output_tokens', coalesce(sum(tout), 0),
+                                            'usd', coalesce(sum(usd), 0)) from priced),
+        'by_wave', (select coalesce(jsonb_agg(jsonb_build_object('wave', w, 'requests', requests, 'judgements', judgements,
+                                                                 'input_tokens', tin, 'output_tokens', tout, 'usd', usd,
+                                                                 'reads', reads, 'reads_bearing', bearing)
+                                              || case when p_labelled is null then '{}'::jsonb
+                                                      else jsonb_build_object('labelled_read', labelled) end
+                                              order by w), '[]'::jsonb) from waves),
+        'by_move', (select coalesce(jsonb_agg(jsonb_build_object('move', move, 'requests', n, 'judgements', j,
+                                                                 'input_tokens', i, 'output_tokens', o, 'usd', u,
+                                                                 'tokens_per_judgement', round(i::numeric / nullif(j, 0)),
+                                                                 'share', round(i::numeric / nullif(all_i, 0), 3))
+                                              order by i desc), '[]'::jsonb)
+                      from (select move, count(*) as n, sum(options) as j, sum(tin) as i, sum(tout) as o, sum(usd) as u,
+                                   sum(sum(tin)) over () as all_i
+                              from priced group by move) m),
+        -- the judge's requests by the question each lead was judged against: an open question multiplies the cost
+        'by_question', (select coalesce(jsonb_agg(jsonb_build_object('question', question, 'id', qid, 'requests', n,
+                                                                     'judgements', j, 'input_tokens', i, 'usd', u)
+                                                  order by i desc), '[]'::jsonb)
+                          from (select p.question, count(*) as n, sum(p.options) as j, sum(p.tin) as i, sum(p.usd) as u,
+                                       (select q.key from run, jsonb_each(coalesce(run.st->'board'->'questions', '{}'::jsonb)) q
+                                         where q.value->>'text' = p.question limit 1) as qid
+                                  from priced p where p.move = 'judge leads' group by p.question) z),
+        'curve', (select coalesce(jsonb_agg(jsonb_build_object('wave', w, 'usd', cu, 'reads', cr, 'reads_bearing', cb)
+                                            || case when p_labelled is null then '{}'::jsonb
+                                                    else jsonb_build_object('labelled_read', cl, 'oracle', true) end
+                                            order by w), '[]'::jsonb)
+                    from (select w, sum(usd) over (order by w) as cu, sum(reads) over (order by w) as cr,
+                                 sum(bearing) over (order by w) as cb, sum(labelled) over (order by w) as cl from waves) c))
+$$;
+
+-- Cost against discovery for a set of runs, at read budgets: what each run had spent by its k-th read, beside what it
+-- had found by then -- reads judged to bear on, and, given each run's labelled pieces ({run: [doc, ...]}), the
+-- labelled pieces read, search's own top k and the oracle's (walk.md §11), oracle-scored. A run that read fewer than
+-- k reports its whole spend at the reads it made. Evidence per dollar is a division the reader makes.
+create or replace function aiq.walk_cost_curve(p_runs uuid[], p_labelled jsonb default null,
+                                               p_budgets int[] default array[50, 100, 500])
+returns table (run uuid, k int, reads int, usd numeric, input_tokens bigint, requests int, reads_bearing int,
+               walk int, search int, oracle int, labelled int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select r.id, b.k, least(b.k, kw.total)::int, spent.usd, spent.tin, spent.req, bear.n,
+           cov.walk, cov.search, orc.n, cov.labelled
+      from unnest(p_runs) r(id)
+     cross join lateral (select aiq.walk_cost(r.id) as c, aiq.walk_state(r.id) as st) cc
+     cross join lateral (select array(select jsonb_array_elements_text(p_labelled->(r.id::text))) as lab) l
+     cross join unnest(p_budgets) b(k)
+     -- the wave that holds the k-th read, or the last wave when the run read fewer
+     cross join lateral (select coalesce(min((e->>'wave')::int) filter (where (e->>'reads')::int >= b.k),
+                                         max((e->>'wave')::int)) as w,
+                                coalesce(max((e->>'reads')::int), 0) as total
+                           from jsonb_array_elements(cc.c->'curve') e) kw
+     cross join lateral (select coalesce(sum((x->>'usd')::numeric), 0) as usd,
+                                coalesce(sum((x->>'input_tokens')::bigint), 0)::bigint as tin,
+                                coalesce(sum((x->>'requests')::int), 0)::int as req
+                           from jsonb_array_elements(cc.c->'by_wave') x where (x->>'wave')::int <= kw.w) spent
+     cross join lateral (select count(*)::int as n
+                           from (select rd.doc, row_number() over (order by rd.wave, rd.ord) as n
+                                   from aiq.walk_state_reads(cc.st) rd) rr
+                          where rr.n <= b.k
+                            and rr.doc in (select e->>'doc' from jsonb_array_elements(coalesce(cc.st->'board'->'evidence', '[]'::jsonb)) e)) bear
+     left join lateral (select c.walk, c.search, c.labelled from aiq.walk_coverage(r.id, l.lab, array[b.k]) c
+                         where cardinality(l.lab) > 0) cov on true
+     left join lateral (select count(*)::int as n from aiq.walk_oracle(r.id, l.lab, b.k) o
+                         where cardinality(l.lab) > 0 and o.doc = any(l.lab)) orc on true
+     order by 1, 2
+$$;
+
+grant execute on function aiq.walk_cost(uuid, text[]), aiq.walk_cost_curve(uuid[], jsonb, int[]) to authenticated;
 
 -- The oracle decider (walk.md §11): the ceiling a walk is measured against, and the line between a data failure and an
 -- implementation one (§10). Same graph as the run (aiq.walk_run_graph), same seeds (the run's wave 0), same budget (the
