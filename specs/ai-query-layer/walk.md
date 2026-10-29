@@ -955,5 +955,11 @@ it to 0.554. Cutting search's per-wave share changes nothing at 100 reads.
   - *Step 2, tested* (bill, 18:36Z): when Jev builds B itself, by admitting reads it judges as found evidence, B
     balloons to 42–72% of the reads, with precision 0.03–0.29 against the labels, and no gate fixes it. So step 1's
     gain needs a small, exact B that Jev cannot yet build.
-  - *The test that would promote it:* a keyless admission rule (top-k is next) whose B is small and exact enough to
-    keep step 1's gain, then replayed coverage at 100 above P's on the registered set.
+  - *Stages 1 and 2 of Sirsh's design* (19:50Z; bill, 19:56Z).
+    - *Stage 1, a small exact B:* B holding only 3 exact pieces of found evidence works like the full one: +0.254 on
+      1M:13, and pooled +0.036 [−0.004, +0.080].
+    - *Stage 2, B admitted by Jev:* when B takes Jev's own top relevance per wave, it stays small (9–11 pieces), but
+      only about 9% of it is evidence. Judging with it pools −0.041 [−0.083, −0.001].
+    - *What is missing:* an admission signal that separates evidence from reads that are merely on topic.
+  - *The test that would promote it:* a keyless admission signal whose B is small and exact enough to keep stage 1's
+    gain, then replayed coverage at 100 above P's on the registered set.
