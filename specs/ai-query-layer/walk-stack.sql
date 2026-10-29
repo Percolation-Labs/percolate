@@ -706,9 +706,9 @@ begin
         'graph', aiq.walk_graph_stats(p_run),
         'questions', (select coalesce(jsonb_agg(q.value || jsonb_build_object('id', q.key,
                                           -- the lines the decider judged against this leaf, highest P first, each with
-                                          -- its date and what was said: 'judged to answer', unscored. stack.state_gate
+                                          -- its date and what was said: 'judged to bear on', unscored. stack.state_gate
                                           -- is unset (F12 failed its 90% bar), so none of them closes the question.
-                                          'judged_to_answer', (select coalesce(jsonb_agg(jsonb_build_object(
+                                          'judged_to_bear_on', (select coalesce(jsonb_agg(jsonb_build_object(
                                                    'doc', split_part(a.key, '|', 3), 'p', (a.value #>> '{}')::real,
                                                    'said_at', (aiq.walk_places(inp, array[split_part(a.key, '|', 3)]))
                                                               ->split_part(a.key, '|', 3)->>'said_at',
