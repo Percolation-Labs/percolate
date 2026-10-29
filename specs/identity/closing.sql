@@ -185,6 +185,9 @@ declare
         'aiq.semantic_ranks_exactly(text,jsonb,integer)',
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
+        -- A constant statement: EXECUTE only so a database with no bge-small embedding space can still plan the
+        -- function (REM-1245); the channel name and the document list are bound parameters, never interpolated.
+        'aiq.walk_doc_vectors(text,text[])',
         -- One identifier, and it is never a caller's. claims.candidates reads
         -- the embedding space of a registered model, whose table name it takes
         -- from aiq.embedding_space_name over a row in aiq.embedding_models and

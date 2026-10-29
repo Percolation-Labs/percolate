@@ -397,6 +397,7 @@
         "index",
         "search",
         "walk",
+        "stack",
         "decider",
         "explain",
         "dream"
