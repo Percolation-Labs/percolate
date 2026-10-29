@@ -40,7 +40,7 @@ from .. import __version__
 # rather than leaving it to whoever adds the next one to remember.
 ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js",
           "access.js", "chat-stream.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
-          "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "walks.js", "theme.css")
+          "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "walks.js", "theme.css", "favicon.svg")
 
 
 def _read(name: str) -> bytes:
