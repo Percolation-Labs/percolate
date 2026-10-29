@@ -545,6 +545,23 @@ begin
       from (select x.*, row_number() over (order by x.wave, x.ord) as k from aiq.walk_state_reads(st) x) r;
     result := jsonb_build_object(
         'run', p_run,
+        -- the run's real state, from its rows (bill, Sirsh's Walks test): initializing until the start step has
+        -- recorded its seeds, running with the wave in flight, failed with the first error, or stopped with its reason
+        'state', (select jsonb_build_object(
+                     'phase', case when r.status = 'failed' then 'failed'
+                                   when r.status in ('completed', 'succeeded', 'cancelled') then 'stopped'
+                                   when jsonb_array_length(st->'waves') = 0 then 'initializing'
+                                   else 'running' end,
+                     'run_status', r.status,
+                     'wave', case when jsonb_array_length(st->'waves') > 0 then jsonb_array_length(st->'waves') - 1 end,
+                     'step', (select t.step_key from aiq.walk_tasks(p_run) t
+                               where t.status in ('running', 'ready') and t.matrix_parent_id is null
+                               order by t.updated_at desc limit 1),
+                     'stop', aiq.walk_summary(p_run)->'stop',
+                     'error', (select t.error->>'error' from aiq.walk_tasks(p_run) t where t.status = 'failed'
+                                order by t.updated_at limit 1),
+                     'started_at', r.created_at, 'completed_at', r.completed_at)
+                    from aiq.walk_run(p_run) r),
         'question', inp->'question',
         'settings', st->'settings',
         'stack_kept', coalesce((st->'settings'->>'stack')::boolean, false),

@@ -1357,8 +1357,16 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline' from aiq.walk_run(p_run)),
         'reads', (select count(*) from aiq.walk_state_reads(st)),
         -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
+        -- the stop a finished run records, or the budget when a finished run recorded none; a run still going has no
+        -- stop, and a failed one says it failed (Sirsh's Walks test: a walk not yet started showed 'stopped at wave -1')
         'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
-                     else jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1) end,
+                     when (select status from aiq.walk_run(p_run)) = 'failed' then
+                          jsonb_build_object('reason', 'failed', 'error',
+                              (select t.error->>'error' from aiq.walk_tasks(p_run) t where t.status = 'failed'
+                                order by t.updated_at limit 1))
+                     when (select status from aiq.walk_run(p_run)) in ('completed', 'succeeded') then
+                          jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1)
+                end,
         'pending', st->'pending',
         'decider', jsonb_build_object('mode', case when (st->>'offline')::boolean then 'offline'
                                                    when jsonb_typeof(st->'replay') = 'string' then 'replay, then jev'

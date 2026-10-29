@@ -42865,8 +42865,16 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
         'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline' from aiq.walk_run(p_run)),
         'reads', (select count(*) from aiq.walk_state_reads(st)),
         -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
+        -- the stop a finished run records, or the budget when a finished run recorded none; a run still going has no
+        -- stop, and a failed one says it failed (Sirsh's Walks test: a walk not yet started showed 'stopped at wave -1')
         'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
-                     else jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1) end,
+                     when (select status from aiq.walk_run(p_run)) = 'failed' then
+                          jsonb_build_object('reason', 'failed', 'error',
+                              (select t.error->>'error' from aiq.walk_tasks(p_run) t where t.status = 'failed'
+                                order by t.updated_at limit 1))
+                     when (select status from aiq.walk_run(p_run)) in ('completed', 'succeeded') then
+                          jsonb_build_object('reason', 'waves', 'wave', jsonb_array_length(st->'waves') - 1)
+                end,
         'pending', st->'pending',
         'decider', jsonb_build_object('mode', case when (st->>'offline')::boolean then 'offline'
                                                    when jsonb_typeof(st->'replay') = 'string' then 'replay, then jev'
@@ -43839,6 +43847,23 @@ begin
       from (select x.*, row_number() over (order by x.wave, x.ord) as k from aiq.walk_state_reads(st) x) r;
     result := jsonb_build_object(
         'run', p_run,
+        -- the run's real state, from its rows (bill, Sirsh's Walks test): initializing until the start step has
+        -- recorded its seeds, running with the wave in flight, failed with the first error, or stopped with its reason
+        'state', (select jsonb_build_object(
+                     'phase', case when r.status = 'failed' then 'failed'
+                                   when r.status in ('completed', 'succeeded', 'cancelled') then 'stopped'
+                                   when jsonb_array_length(st->'waves') = 0 then 'initializing'
+                                   else 'running' end,
+                     'run_status', r.status,
+                     'wave', case when jsonb_array_length(st->'waves') > 0 then jsonb_array_length(st->'waves') - 1 end,
+                     'step', (select t.step_key from aiq.walk_tasks(p_run) t
+                               where t.status in ('running', 'ready') and t.matrix_parent_id is null
+                               order by t.updated_at desc limit 1),
+                     'stop', aiq.walk_summary(p_run)->'stop',
+                     'error', (select t.error->>'error' from aiq.walk_tasks(p_run) t where t.status = 'failed'
+                                order by t.updated_at limit 1),
+                     'started_at', r.created_at, 'completed_at', r.completed_at)
+                    from aiq.walk_run(p_run) r),
         'question', inp->'question',
         'settings', st->'settings',
         'stack_kept', coalesce((st->'settings'->>'stack')::boolean, false),
@@ -44045,6 +44070,127 @@ grant execute on function aiq.walk_state_reads(jsonb), aiq.walk_state_clues(json
                           aiq.walk_clue_text(uuid, text, text), aiq.walk_audit(uuid), aiq.walk_why(uuid, text[]),
                           aiq.walk_coverage(uuid, text[], integer[])
     to authenticated;
+
+-- The oracle decider (walk.md §11): the ceiling a walk is measured against, and the line between a data failure and an
+-- implementation one (§10). Same graph as the run (aiq.walk_run_graph), same seeds (the run's wave 0), same budget (the
+-- run's reads, unless given), the same leads a read raises (its terms under walk.cap, the exchanges beside it, its
+-- nearest). It knows the labelled set and nothing else, and opens, from the live leads, the one with the most unread
+-- evidence per unread target; when no live lead reaches unread evidence, the one whose targets lie fewest lead hops from
+-- it; with no live lead at all, search's next document. Opening a lead reads all its unread targets, as the walk does.
+-- Oracle-scored by construction: it is never inside a walk, and every figure it colours says so.
+create or replace function aiq.walk_oracle(p_run uuid, p_labelled text[], p_budget int default null)
+returns table (k int, doc text, via text)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    st      jsonb := aiq.walk_state(p_run);
+    s       jsonb := st->'settings';
+    g       jsonb := aiq.walk_run_graph(p_run);
+    budget  int := coalesce(p_budget, (select count(*) from aiq.walk_state_reads(st))::int);
+    leads   jsonb := '{}'::jsonb;   -- {lead key: [targets]} for every lead any document raises
+    raised  jsonb := '{}'::jsonb;   -- {doc: [lead keys it raises]}
+    ev      text[];
+    dist    jsonb := '{}'::jsonb;   -- {doc: {evidence: hops from doc to it}}
+    readset jsonb := '{}'::jsonb;
+    opened  jsonb := '{}'::jsonb;
+    live    jsonb := '{}'::jsonb;   -- {lead key: true}
+    out     jsonb := '[]'::jsonb;
+    ord     jsonb := st->'order';
+    si      int := 0;
+    best    text;
+    d       text;
+    n       int := 0;
+    e       text;
+    frontier text[];
+    nextf   text[];
+    hop     int;
+begin
+    -- the labelled pieces in the run's scope
+    ev := array(select x from unnest(p_labelled) x
+                 where exists (select 1 from jsonb_each_text(g->'keys') kv where kv.value = x));
+    -- the leads each document raises, as the walk raises them
+    select coalesce(jsonb_object_agg(key, tg), '{}'::jsonb) into leads from (
+        select 'term:' || t.key as key, t.value as tg from jsonb_each(g->'post') t
+         where jsonb_array_length(t.value) <= (s->>'cap')::int
+        union all
+        select 'next:' || b.key, b.value from jsonb_each(g->'beside') b
+        union all
+        select 'near:' || nr.key, nr.value from jsonb_each(g->'near') nr) z;
+    select coalesce(jsonb_object_agg(doc, ks), '{}'::jsonb) into raised from (
+        select doc, jsonb_agg(key) as ks from (
+            select dt.key as doc, 'term:' || t as key from jsonb_each(g->'terms') dt, jsonb_array_elements_text(dt.value) t
+             where leads ? ('term:' || t)
+            union all select b.key, 'next:' || b.key from jsonb_each(g->'beside') b
+            union all select nr.key, 'near:' || nr.key from jsonb_each(g->'near') nr) y group by doc) z;
+    -- hops from every document to each piece of evidence, over the reversed lead edges (breadth first from each piece)
+    foreach e in array ev loop
+        dist := jsonb_set(dist, array[e], jsonb_build_object(e, 0), true);
+        frontier := array[e];
+        hop := 0;
+        while cardinality(frontier) > 0 and hop < 6 loop
+            hop := hop + 1;
+            select array_agg(distinct src) into nextf from (
+                select r.key as src from jsonb_each(raised) r, jsonb_array_elements_text(r.value) lk,
+                       jsonb_array_elements_text(leads->lk) tgt
+                 where tgt = any(frontier) and r.key <> tgt) z
+             where not (coalesce(dist->src, '{}'::jsonb) ? e);
+            exit when nextf is null;
+            for d in select unnest(nextf) loop
+                dist := jsonb_set(dist, array[d], coalesce(dist->d, '{}'::jsonb) || jsonb_build_object(e, hop), true);
+            end loop;
+            frontier := nextf;
+        end loop;
+    end loop;
+    -- the seeds, as the run read them
+    for d in select r.doc from aiq.walk_state_reads(st) r where r.wave = 0 order by r.ord loop
+        exit when n >= budget;
+        if not readset ? d then
+            readset := readset || jsonb_build_object(d, true); n := n + 1;
+            out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
+            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                       where not opened ? lk), '{}'::jsonb);
+        end if;
+    end loop;
+    while n < budget loop
+        -- the best live lead: most unread evidence per unread target, else nearest unread evidence
+        select x.key into best from (
+            select l.key,
+                   count(*) filter (where t = any(ev)) ::real / count(*) as share,
+                   min((select min((dist->t->>u)::int) from unnest(ev) u where not readset ? u and dist->t ? u)) as near
+              from jsonb_each(live) l, jsonb_array_elements_text(leads->l.key) t
+             where not readset ? t
+             group by l.key) x
+         order by x.share desc, x.near nulls last, x.key
+         limit 1;
+        if best is null then
+            -- no live lead: search's next unread document
+            loop
+                exit when si >= jsonb_array_length(ord);
+                d := ord->>si; si := si + 1;
+                exit when not readset ? d;
+                d := null;
+            end loop;
+            exit when d is null;
+            readset := readset || jsonb_build_object(d, true); n := n + 1;
+            out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
+            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                       where not opened ? lk), '{}'::jsonb);
+            continue;
+        end if;
+        opened := opened || jsonb_build_object(best, true);
+        live := live - best;
+        for d in select t from jsonb_array_elements_text(leads->best) t where not readset ? t loop
+            exit when n >= budget;
+            readset := readset || jsonb_build_object(d, true); n := n + 1;
+            out := out || jsonb_build_array(jsonb_build_array(n, d, best));
+            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                       where not opened ? lk), '{}'::jsonb);
+        end loop;
+        best := null;
+    end loop;
+    return query select (x->>0)::int, x->>1, x->>2 from jsonb_array_elements(out) x;
+end;
+$$;
+grant execute on function aiq.walk_oracle(uuid, text[], int) to authenticated;
 
 
 -- ============================================================
