@@ -78,6 +78,19 @@ begin
         'A|root|wt/13', 0.1, 'A|part:ceiling|wt/13', 0.1,
         'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.3, 'A|part:ceiling|wt/7', 0.9,
         'T|part:ceiling|wt/5', 0.9, 'T|part:ceiling|wt/7', 0.2))::text);
+    -- the same, but one of the root's own lines answers it, and the root is judged a set question (N|root)
+    insert into content.resources (channel_id, uri, title, org_id, visibility)
+    values (ch, 'walk-fixture-48:replay-set', 'replay', org, 'public')
+    returning id into res;
+    insert into content.resource_chunks (resource_id, ordinal, content)
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
+        'A|root|wt/1', 0.9, 'A|root|wt/2', 0.9, 'A|root|wt/11', 0.1, 'A|root|wt/12', 0.1,
+        'L|root|term:ceiling', 0.9, 'L|root|term:hallway', 0.2, 'N|root', 0.9,
+        'S|root|ceiling', 0.8, 'T|root|wt/1', 0.3, 'T|root|wt/2', 0.9,
+        'L|root|term:ladder', 0.2, 'L|part:ceiling|term:ladder', 0.9,
+        'A|root|wt/13', 0.1, 'A|part:ceiling|wt/13', 0.1,
+        'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.3, 'A|part:ceiling|wt/7', 0.9,
+        'T|part:ceiling|wt/5', 0.9, 'T|part:ceiling|wt/7', 0.2))::text);
 end $$;
 
 select aiq.install_walk_workflow('walk_fixture_stack', 'jev', 6);
@@ -177,6 +190,24 @@ begin
         raise exception 'changing a default rewrote a past run: it now reads describe %',
             aiq.walk_state(r)->'settings'->>'describe';
     end if;
+    -- cardinality (walk.cardinality): a root whose own line answers it closes on that line as a leaf; judged a set
+    -- question at or above stack.set_gate it is no leaf, so no line closes it, only its part
+    m := workflow.start_workflow('walk_fixture_stack', jsonb_set(inp, '{replay}',
+             to_jsonb((select id from content.resources where uri = 'walk-fixture-48:replay-set'))));
+    if (select question || '=' || state || '/' || coalesce(opened_wave::text, '') from aiq.walk_stack(m)
+         where question = 'root' order by wave desc limit 1) not like 'root=answered%'
+       or exists (select 1 from aiq.walk_stack(m) where question = 'part:ceiling') then
+        raise exception 'cardinality off: the root did not close on its own line before any part opened';
+    end if;
+    update aiq.parameters set value = '0.5' where name = 'stack.set_gate';
+    m := workflow.start_workflow('walk_fixture_stack', jsonb_set(jsonb_set(inp, '{replay}',
+             to_jsonb((select id from content.resources where uri = 'walk-fixture-48:replay-set'))),
+             '{settings,cardinality}', 'true'));
+    if (aiq.walk_state(m)->'board'->'questions'->'root'->>'closed_by') is distinct from 'structure' then
+        raise exception 'a set root closed by %, where only its part may close it',
+            aiq.walk_state(m)->'board'->'questions'->'root'->>'closed_by';
+    end if;
+    update aiq.parameters set value = 'null' where name = 'stack.set_gate';
     -- a parameter row the stack reads is missing: the walk fails, naming it, rather than silently linking nothing (bill)
     delete from aiq.parameters where name = 'stack.link_floor';
     m := workflow.start_workflow('walk_fixture_stack', inp);

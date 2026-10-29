@@ -41451,6 +41451,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it. V0''s default (walk spec 68c02f68). Part three''s published walks pin p.'),
  ('walk.open_whole', 'walk', 'null', 'Off (null), or n: an accepted lead with more than n unread targets is not opened whole; each unread target is judged once on its own line (decider.task_target), and those clearing walk.gate are read as single-target leads.', 'aiq.walk_target_requests, aiq.walk_read',
   'F8, decided on principle (bill 13:42Z, walk spec 54619796): on the holiday stack walk 1,035 of 1,927 leads were accepted and 305 opened; 51 of the 89 accepted leads toward evidence were never opened, because ordering by P per target pushes wide leads out (median 7 targets against 3). A wide lead''s weak targets should not spend reads. Off until it passes on a fresh draw; the spec''s value is 3.'),
+ ('walk.cardinality', 'walk', 'false', 'Whether the walk judges once if its root asks for a set, a count, an order or a summary across messages (N|root against stack.set_gate); a set root is never a leaf, so only its parts can close it.', 'aiq.walk_stack_next',
+  'Sirsh''s test, recorded in walk spec b2fc3cb1 (bill confirmed 13:52Z): Jev on the question''s words separates set from single questions at AUC 0.94. Off until stack.set_gate is set on the held-out half of the 1M questions (Youden''s J, temporal left out), so ''not yet calibrated'' is a stated state.'),
  ('walk.stack', 'walk', 'true', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). The walkthrough''s published steps ran memoryless and pin it. V0 walks with the stack (walk spec 68c02f68, sally): a reader who starts a walk with the shipped defaults gets V0, and changes one row to see what it does. Part three''s published walks pin stack false, describe source and order p, which is what they ran.'),
  ('stack.link_floor', 'stack', '0.5', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
@@ -41488,6 +41490,11 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Jev is never asked whether a set of messages answers a question (Sirsh, 13:15Z): on the ten walks that holistic ask separated asks holding labelled evidence at AUC 0.622 and closed once in ten, wrongly. Jev judges one line well. Not measured in these words.'),
  ('stack.broad_after', 'stack', '2', 'A root still open with no parts at this wave has had no line answer it: the walk raises DECOMPOSITION_REQUIRED to the client, once, and keeps splitting in the loop.', 'aiq.walk_stack_next',
   'Breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a Jev call on the root''s words would add a gate nobody has measured. Two waves give the seeds and one wave of leads their chance to answer it. Not measured.'),
+ ('stack.set_gate', 'stack', 'null', 'The P at or above which the root is a set question (walk.cardinality); null until set.', 'aiq.walk_stack_next',
+  'Set on a held-out half of the 1M questions, excluding the 18 calibration and all fresh-test questions, by Youden''s J with temporal left out, the rule stated before the split (walk spec b2fc3cb1). Not yet set.'),
+ ('decider.task_set', 'decider', to_jsonb(text 'Does `question` ask for a set, a list, a count, an order or a summary of things across several messages, rather than one fact a single message could state?'),
+  'Asked once of a walk''s root when walk.cardinality is on: is it a set question (walk spec b2fc3cb1). Keyed N|root.', 'aiq.walk_stack_requests',
+  'Sirsh''s cardinality test: set = event ordering, summarization and multi-session reasoning, single = information extraction, knowledge update and contradiction; AUC 0.936 with temporal as single. The wording here is the build''s until the spec quotes the test''s own; it is measured before set_gate is set.'),
  ('stack.state_gate', 'stack', 'null', 'The P at or above which one line is judged to answer a leaf question, which closes it; unset, the walk records each line''s verdict and closes nothing.', 'aiq.walk_stack_next',
   'Set on the calibration set registered in walk spec 4fed4425 §14 (F12): the lowest P whose closes are at least 90% correct, a correct close being one whose lines state BEAM''s reference answer, then tested once on a fresh draw. Unset until then.'),
  ('decider.task_split', 'decider', to_jsonb(text 'For each option, a narrower question. Is it a part of `question` that a complete answer needs?'),
@@ -43435,7 +43442,7 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate']);
+                                                         'state_gate', 'set_gate']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -43458,6 +43465,7 @@ declare
     nparts  int;
     swaps   int := 0;
     live_q  jsonb;                   -- the questions reads are assessed against: open, and answered parts
+    is_set  boolean;                 -- the root asks for a set, a count or an order, so no one line answers it
     raised  jsonb := '[]'::jsonb;    -- semantic exceptions this wave raises to the client
 begin
     -- the reads of the wave after the last one assessed; none yet, and there is nothing to do
@@ -43473,6 +43481,12 @@ begin
                                                                    'stale', '[]'::jsonb, 'displaced', '[]'::jsonb, 'open', open_)));
     end if;
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
+    -- cardinality (walk spec b2fc3cb1, behind walk.cardinality, off): Jev judges once whether the root asks for a set,
+    -- a count, an order or a summary across messages (N|root, decider.task_set). At or above stack.set_gate it is a
+    -- set question: it is never a leaf, so no single line closes it, only its parts. With the gate not yet set the
+    -- verdict is recorded and nothing changes.
+    is_set := coalesce((s->>'cardinality')::boolean, false) and jsonb_typeof(sp->'set_gate') = 'number'
+              and coalesce((ans->>'N|root')::real >= (sp->>'set_gate')::real, false);
     -- 1. assess: each new read against each open question, and against each answered part, so a later statement that
     -- supersedes a part's answer can still be read and replace it (newest wins after closing; sally, mike ea7ceec3)
     live_q := open_ || coalesce((select jsonb_agg(x.key) from jsonb_each(qs) x
@@ -43525,7 +43539,7 @@ begin
         select 'root' where jsonb_array_length(linked) > 0
     ), leaves as (
         select o.q from jsonb_array_elements_text(live_q) o(q)
-         where o.q <> 'root' or not exists (select 1 from jsonb_each(qs) x where x.key <> 'root')
+         where o.q <> 'root' or (not exists (select 1 from jsonb_each(qs) x where x.key <> 'root') and not is_set)
     ), links as (
         select lv.q, e->>'doc' as doc, (e->>'p')::real as p
           from leaves lv, jsonb_array_elements(ev) e
@@ -43697,6 +43711,9 @@ begin
     -- outgrow a task's 64 KB, a wave's moves are bounded by its reads and the open questions
     return jsonb_build_object(
         'assess', assess, 'closes', closes, 'candidates', cands,
+        'cardinality', case when coalesce((s->>'cardinality')::boolean, false) and not ans ? 'N|root'
+                            then jsonb_build_array(jsonb_build_object('key', 'N|root', 'text', qs->'root'->>'text'))
+                            else '[]'::jsonb end,
 
         'record', jsonb_build_object(
             'iteration', (board->>'iteration')::int + 1, 'assessed', w,
@@ -43727,7 +43744,7 @@ begin
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
-    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'request_bytes']);
+    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'request_bytes']);
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
@@ -43740,6 +43757,11 @@ begin
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_state'), x->>'text'
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
 
+        union all
+        select x->>'key', 'N|root', st->'board'->'questions'->'root'->>'text',
+               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'),
+               'the question: "' || (x->>'text') || '"'
+          from jsonb_array_elements(nx->'cardinality') x where p_phase = 'shape'
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_split'), x->>'text'

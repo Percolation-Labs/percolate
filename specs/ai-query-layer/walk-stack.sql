@@ -173,7 +173,7 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate']);
+                                                         'state_gate', 'set_gate']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -196,6 +196,7 @@ declare
     nparts  int;
     swaps   int := 0;
     live_q  jsonb;                   -- the questions reads are assessed against: open, and answered parts
+    is_set  boolean;                 -- the root asks for a set, a count or an order, so no one line answers it
     raised  jsonb := '[]'::jsonb;    -- semantic exceptions this wave raises to the client
 begin
     -- the reads of the wave after the last one assessed; none yet, and there is nothing to do
@@ -211,6 +212,12 @@ begin
                                                                    'stale', '[]'::jsonb, 'displaced', '[]'::jsonb, 'open', open_)));
     end if;
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
+    -- cardinality (walk spec b2fc3cb1, behind walk.cardinality, off): Jev judges once whether the root asks for a set,
+    -- a count, an order or a summary across messages (N|root, decider.task_set). At or above stack.set_gate it is a
+    -- set question: it is never a leaf, so no single line closes it, only its parts. With the gate not yet set the
+    -- verdict is recorded and nothing changes.
+    is_set := coalesce((s->>'cardinality')::boolean, false) and jsonb_typeof(sp->'set_gate') = 'number'
+              and coalesce((ans->>'N|root')::real >= (sp->>'set_gate')::real, false);
     -- 1. assess: each new read against each open question, and against each answered part, so a later statement that
     -- supersedes a part's answer can still be read and replace it (newest wins after closing; sally, mike ea7ceec3)
     live_q := open_ || coalesce((select jsonb_agg(x.key) from jsonb_each(qs) x
@@ -263,7 +270,7 @@ begin
         select 'root' where jsonb_array_length(linked) > 0
     ), leaves as (
         select o.q from jsonb_array_elements_text(live_q) o(q)
-         where o.q <> 'root' or not exists (select 1 from jsonb_each(qs) x where x.key <> 'root')
+         where o.q <> 'root' or (not exists (select 1 from jsonb_each(qs) x where x.key <> 'root') and not is_set)
     ), links as (
         select lv.q, e->>'doc' as doc, (e->>'p')::real as p
           from leaves lv, jsonb_array_elements(ev) e
@@ -435,6 +442,9 @@ begin
     -- outgrow a task's 64 KB, a wave's moves are bounded by its reads and the open questions
     return jsonb_build_object(
         'assess', assess, 'closes', closes, 'candidates', cands,
+        'cardinality', case when coalesce((s->>'cardinality')::boolean, false) and not ans ? 'N|root'
+                            then jsonb_build_array(jsonb_build_object('key', 'N|root', 'text', qs->'root'->>'text'))
+                            else '[]'::jsonb end,
 
         'record', jsonb_build_object(
             'iteration', (board->>'iteration')::int + 1, 'assessed', w,
@@ -465,7 +475,7 @@ begin
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
-    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'request_bytes']);
+    perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'request_bytes']);
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
@@ -478,6 +488,11 @@ begin
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_state'), x->>'text'
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
 
+        union all
+        select x->>'key', 'N|root', st->'board'->'questions'->'root'->>'text',
+               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'),
+               'the question: "' || (x->>'text') || '"'
+          from jsonb_array_elements(nx->'cardinality') x where p_phase = 'shape'
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
                (select value #>> '{}' from aiq.parameters where name = 'decider.task_split'), x->>'text'
