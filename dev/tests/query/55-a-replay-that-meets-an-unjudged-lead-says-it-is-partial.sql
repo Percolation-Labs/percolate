@@ -1,13 +1,12 @@
--- A REPLAY WALKS THE GRAPH IT WAS RECORDED ON, OR SAYS IT DID NOT (REM-1246).
+-- A REPLAY THAT MEETS A LEAD IT HOLDS NO VERDICT FOR SAYS IT IS PARTIAL (REM-1246).
 --
--- A replay's verdicts are keyed by the leads of the graph they were given on. Links indexed again can differ -- a tag
--- renamed renames its leads -- and a replay read against them met leads it held no verdict for and showed them as
--- rejected, passing as the walk it replays (the article's step 70, 29 Oct). Now a replay document names its kept
--- graph (aiq.walk_verdicts), a replay walks that document when the database holds it, and walk_summary's decider says
--- faithful only when it did and every lead it met had a verdict; otherwise it says how far it is partial.
+-- A replay's verdicts are keyed by the leads of the walk they were recorded from. Over links that differ from the
+-- recording's -- text changed under the index, as the plan-marker strip did to the article's step 70 -- a replay meets
+-- leads it never judged and showed them as rejected, passing as the walk it replays. walk_summary's decider now says
+-- faithful only when the replay held a verdict for every lead it met, and otherwise 'partial: N leads unjudged'.
 --
--- query/45's graph, indexed. Walk A records the leads; a replay document holds a verdict for every one of them, on A's
--- graph. Then the seed wt/1 gains a tag and the scope is indexed again, which keeps a second graph document.
+-- query/45's graph, indexed. Walk A records its leads. A replay holding a verdict for every one of them is faithful; the
+-- same replay with one verdict taken out is partial, one lead unjudged.
 
 \set ON_ERROR_STOP on
 
@@ -62,7 +61,7 @@ begin
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2))::text);
 end $$;
 
-select aiq.install_walk_workflow('walk_fixture_rg', 'jev', 3);
+select aiq.install_walk_workflow('walk_fixture_partial', 'jev', 3);
 
 do $$
 declare
@@ -78,56 +77,35 @@ declare
     rep  uuid;
     doc  jsonb;
     d    jsonb;
+    gone text;
 begin
     perform aiq.walk_index(inp);
-    -- A: offline on the fixture's replay, so it raises its leads; then every lead it raised gets a verdict
-    a := workflow.start_workflow('walk_fixture_rg', inp || jsonb_build_object('offline', true,
+    a := workflow.start_workflow('walk_fixture_partial', inp || jsonb_build_object('offline', true,
             'replay', (select id from content.resources where uri = 'walk-fixture:replay')));
     perform workflow.drain_sql_steps(a);
-    doc := aiq.walk_verdicts(a);
-    if doc->>'graph' is null then
-        raise exception 'the replay document names no graph: %', doc - 'verdicts';
-    end if;
-    doc := jsonb_set(doc, '{verdicts}', (select jsonb_object_agg(c.key, 0.1) from aiq.walk_clues(a) c));
+    -- every lead A met, judged: low, so the replay walks as A did
+    doc := jsonb_set(aiq.walk_verdicts(a), '{verdicts}', (select jsonb_object_agg(c.key, 0.1) from aiq.walk_clues(a) c));
     insert into content.resources (channel_id, uri, title, org_id, visibility)
-    values (ch, 'walk-fixture:replay-rg', 'replay', org, 'public') returning id into rep;
+    values (ch, 'walk-fixture:replay-full', 'replay', org, 'public') returning id into rep;
     insert into content.resource_chunks (resource_id, ordinal, content) values (rep, 0, doc::text);
-
-    -- the links change after the recording: wt/1, the seed, is tagged 'risotto' too, and the scope indexed again,
-    -- which keeps a second graph document in which wt/1 raises a lead the replay never judged (term:risotto)
-    insert into aiq.edges (src_id, dst_id, relation, org_id, provenance)
-    select i.id, tg.id, 'walk_tagged', i.org_id, '{}'
-      from aiq.nodes i, aiq.nodes tg
-     where i.entity_type = 'walk_fixture' and i.summary = 'wt/1'
-       and tg.entity_type = 'walk_fixture_tag' and tg.summary = 'risotto';
-    perform aiq.walk_index(inp);
-    if (select count(distinct uri) from content.resources where uri like 'walk-graph:%' and metadata ? 'walk_graph') < 2 then
-        raise exception 'indexing again kept no second graph document';
-    end if;
-
-    -- B replays on the recorded graph, which this database holds: faithful
-    b := workflow.start_workflow('walk_fixture_rg', inp || jsonb_build_object('offline', true, 'replay', rep));
+    b := workflow.start_workflow('walk_fixture_partial', inp || jsonb_build_object('offline', true, 'replay', rep));
     perform workflow.drain_sql_steps(b);
     d := aiq.walk_summary(b)->'decider';
-    if (d->>'faithful')::boolean is distinct from true or (d->>'unjudged')::int <> 0 then
-        raise exception 'a replay on its recorded graph is not faithful: %', d;
-    end if;
-    if (select output->'result'->0->'state'->>'graph' from workflow.tasks where run_id = b and step_key = 'start')
-       is distinct from doc->>'graph' then
-        raise exception 'the replay did not walk its recorded graph';
+    if (d->>'faithful')::boolean is distinct from true or (d->>'unjudged')::int is distinct from 0 or d->>'partial' is not null then
+        raise exception 'a replay holding every verdict is not faithful: %', d;
     end if;
 
-    -- C names a graph this database does not hold: it walks today's links and says partial
-    update content.resource_chunks set content = jsonb_set(doc, '{graph}', to_jsonb(text 'walk-graph:not-here'))::text
-     where resource_id = rep;
-    b := workflow.start_workflow('walk_fixture_rg', inp || jsonb_build_object('offline', true, 'replay', rep));
+    -- the same replay, one verdict gone: the lead is met and unjudged, and the run says so
+    gone := (select min(c.key) from aiq.walk_clues(a) c);
+    update content.resource_chunks set content = (doc #- array['verdicts', gone])::text where resource_id = rep;
+    b := workflow.start_workflow('walk_fixture_partial', inp || jsonb_build_object('offline', true, 'replay', rep));
     perform workflow.drain_sql_steps(b);
     d := aiq.walk_summary(b)->'decider';
-    if (d->>'faithful')::boolean is distinct from false or d->>'partial' not like '%walked today''s links%'
-       or (d->>'unjudged')::int < 1 then
-        raise exception 'a replay off its recorded graph did not say it was partial: %', d;
+    if (d->>'faithful')::boolean is distinct from false or (d->>'unjudged')::int is distinct from 1
+       or d->>'partial' is distinct from 'partial: 1 leads unjudged' then
+        raise exception 'a replay missing the verdict on % did not say it was partial: %', gone, d;
     end if;
-    raise notice 'query/55: a replay walks its recorded graph, or says it is partial (%)', d->>'partial';
+    raise notice 'query/55: a replay is faithful only when it held a verdict for every lead it met (% gone: %)', gone, d->>'partial';
 end $$;
 
 rollback;
