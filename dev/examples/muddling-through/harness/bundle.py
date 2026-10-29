@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Evaluation harness, not product: build the 'try it first' bundle a reader fetches after installing Percolate (REM-1246).
 
-    python3 harness/bundle.py samples/beam OUT [--text shipped|fetch] [--walks walks.json --dsn DSN]
+    python3 harness/bundle.py SAMPLE OUT --name walks-starter [--text shipped|fetch]
+        [--runs runs.jsonl --dsn DSN [--questions q1,q2,...] [--rule "how the questions were chosen"]]
 
-samples/beam must already hold what harness/beam_fetch.py writes (texts.jsonl, questions.jsonl). OUT/beam-walks/ is
-then a directory `percolate sample load` reads:
+SAMPLE must already hold what harness/beam_fetch.py writes for the conversations the walks need (texts.jsonl,
+questions.jsonl, sources.yaml, manifest.yaml). OUT/NAME/ is then a directory `percolate sample load` reads:
 
-  manifest.yaml, sources.yaml   the two BEAM conversations' channels
+  manifest.yaml, sources.yaml   one channel per BEAM conversation the walks need
   texts.jsonl                   --text shipped: one exchange per line, each piece with its vector (BEAM's text, CC BY-SA)
   fetch/                        --text fetch: beam_fetch.py and vectors.jsonl instead; the reader downloads BEAM's text
   question-texts.jsonl          each question by its words; no evidence, answer or rubric (REM-1231)
@@ -16,8 +17,9 @@ then a directory `percolate sample load` reads:
                                 aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0
   README.md, LICENSE, SHA256SUMS
 
---walks names the runs to ship, [{"run": uuid, "label": "stack walk"}], read from --dsn read-only. The walks are built
-last, on the V0 rules (bill, 29 Oct); without --walks the bundle has no walks/ yet.
+--runs is a walk list as the pilot writes it, one {qid, arm, run} a line (arm S: V0, with the question stack; arm P:
+the plain walk), read from --dsn read-only; --questions keeps only those qids, and --rule says in CONTENTS.json how they
+were chosen. The walks are built last, on the V0 rules (bill, 29 Oct); without --runs the bundle has no walks/.
 """
 import argparse
 import hashlib
@@ -120,9 +122,10 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument("sample"); a.add_argument("out")
     a.add_argument("--text", choices=("shipped", "fetch"), default="shipped")
-    a.add_argument("--walks"); a.add_argument("--dsn")
+    a.add_argument("--name", required=True)
+    a.add_argument("--runs"); a.add_argument("--dsn"); a.add_argument("--questions"); a.add_argument("--rule", default="")
     args = a.parse_args()
-    sample, root = Path(args.sample), Path(args.out) / "beam-walks"
+    sample, root = Path(args.sample), Path(args.out) / args.name
     if not (sample / "questions.jsonl").exists() or (args.text == "shipped" and not (sample / "texts.jsonl").exists()):
         sys.exit(f"{sample}: run harness/beam_fetch.py {sample} first")
     if root.exists():
@@ -141,41 +144,58 @@ def main():
         load.append("  - texts: texts.jsonl   # written by: python3 fetch/beam_fetch.py .")
     write_jsonl(root / "question-texts.jsonl", question_texts(questions))
     load.append("  - texts: question-texts.jsonl")
+    channels = [l.split("name:", 1)[1].strip() for l in (sample / "sources.yaml").read_text().splitlines()
+                if l.strip().startswith("- name: beam-")]
+    convs = ", ".join(c.replace("beam-", "").upper().replace("M", "M:", 1) for c in channels)
     (root / "manifest.yaml").write_text(
-        "name: beam-walks\nversion: 1.0.0\n"
-        "description: |-\n  Two BEAM conversations, 1M:22 (1,101 exchanges) and 1M:35 (1,058), and their 36 questions without their\n"
-        f"  answers. Licence CC BY-SA 4.0, as stated in {LICENCE_SOURCE}.\n"
+        f"name: {args.name}\nversion: 1.0.0\n"
+        f"description: |-\n  BEAM conversations {convs}, and their {len(questions)} questions without their answers.\n"
+        f"  Licence CC BY-SA 4.0, as stated in {LICENCE_SOURCE}.\n"
         "load:\n" + "\n".join(load) + "\n")
     items = json.loads((HERE / "answer-items.json").read_text())
     n_oracle = oracle_files(questions, items, root / "oracle")
-    n_walks = export_walks(args.dsn, json.loads(Path(args.walks).read_text()), root / "walks") if args.walks else 0
+    ARMS = {"S": "V0 walk (question stack)", "P": "plain walk"}
+    keep = set(q.strip() for q in args.questions.split(",")) if args.questions else None
+    walks = [{"run": r["run"], "label": ARMS.get(r.get("arm"), r.get("arm") or "walk"), "qid": r["qid"], "arm": r.get("arm")}
+             for r in jsonl(args.runs) if keep is None or r["qid"] in keep] if args.runs else []
+    if keep is not None and {w["qid"] for w in walks} != keep:
+        sys.exit(f"--questions names qids with no run: {sorted(keep - {w['qid'] for w in walks})}")
+    n_walks = export_walks(args.dsn, walks, root / "walks") if walks else 0
+    (root / "CONTENTS.json").write_text(json.dumps({
+        "name": args.name, "conversations": channels, "questions": len(questions),
+        "rule": args.rule or None, "text": args.text,
+        "walks": [{"qid": w["qid"], "arm": w["arm"], "what": w["label"], "from_run": w["run"]} for w in walks],
+        "arms": ARMS, "oracle": "oracle/ holds each question's answer key; it is never loaded"}, indent=1))
     (root / "LICENSE").write_text(
         "The data in this directory is derived from BEAM and is licensed CC BY-SA 4.0:\n"
         "https://creativecommons.org/licenses/by-sa/4.0/legalcode\n\n"
         f"Where BEAM states it: {LICENCE_SOURCE}.\n\n{CREDIT}\n\n"
-        "Changes from the original: the two conversations are cut into exchanges (a user turn and the replies after it),\n"
+        "Changes from the original: the conversations are cut into exchanges (a user turn and the replies after it),\n"
         "BEAM's '->-> n,m' plan index is removed from every piece, and each question's evidence, reference answer and\n"
         "rubric are kept apart from the question, in oracle/. The vectors and the recorded verdicts are ours.\n")
-    (root / "README.md").write_text(README.format(walks=n_walks, oracle=n_oracle,
-                                                  text=("shipped" if args.text == "shipped" else "fetched")))
+    (root / "README.md").write_text(README.format(name=args.name, walks=n_walks, oracle=n_oracle,
+                                                  text=("shipped" if args.text == "shipped" else "fetched"),
+                                                  index="\n".join(f"    percolate walk index --source {c}" for c in channels)))
     sums = []
     for p in sorted(root.rglob("*")):
         if p.is_file() and p.name != "SHA256SUMS":
             sums.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(root)}")
     (root / "SHA256SUMS").write_text("\n".join(sums) + "\n")
     size = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
-    print(f"{root}: {len(questions)} questions, {n_oracle} oracle files, {n_walks} walks, text {args.text}, "
+    print(f"{root}: {len(channels)} conversations, {len(questions)} questions, {n_oracle} oracle files, {n_walks} walks, text {args.text}, "
           f"{size / 1e6:.1f} MB")
 
 
-README = """# Try it first: two BEAM conversations, and walks across them
+README = """# {name}: BEAM conversations, and walks across them
 
 After installing Percolate:
 
-    percolate sample load beam-walks                    # the conversations ({text}) and the questions, without answers
-    percolate walk index --source beam-1m22             # the walk graph, about a minute each
-    percolate walk index --source beam-1m35
-    percolate sample load beam-walks/walks              # {walks} walk(s), replayed offline from Jev's verdicts: no key, $0
+    percolate sample load {name}                        # the conversations ({text}) and the questions, without answers
+{index}
+    percolate sample load {name}/walks                  # {walks} walk(s), replayed offline from Jev's verdicts: no key, $0
+
+The walk index builds each conversation's walk graph, about a minute each. CONTENTS.json lists the walks: for each
+question, the V0 walk (with its question stack) and the plain walk beside it, and how the questions were chosen.
 
 Then open Percolate's UI, Walks. A walk starts from a question's words alone. Oracle mode is the benchmark's answer
 key, which no walk ever sees: in a walk, open 'oracle' and choose oracle/all.json ({oracle} questions), or the file for
