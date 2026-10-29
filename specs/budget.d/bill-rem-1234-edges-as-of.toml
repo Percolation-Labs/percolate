@@ -1,0 +1,4 @@
+why = "aiq.edges_as_of reads a fact at a valid time and a record time from the edge's own columns, over aiq.edge_periods. The walkthrough's two-clocks step built the record clock by hand from created_at and the close's provenance; aiq.edge_is_current takes valid time only, and nothing existing takes both."
+
+[added]
+functions = ["aiq.edges_as_of"]

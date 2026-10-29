@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>percolate</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -68,6 +69,7 @@ import * as A from "./access.js";
 import { query } from "./workbench.js";
 import { files } from "./files.js";
 import { sources } from "./sources.js";
+import * as WK from "./walks.js";
 import { token, setToken, claims, config, setEndpoint, loadConfig, sessionState, canRenewSession, renewSession, ensureSession, devToken } from "./api.js";
 
 /* Top-level navigation also registers its screens. Child screens are added
@@ -77,7 +79,8 @@ const NAV = [
   ["Work", [["workflows", "Workflows", "flow", W.workflows],
             ["runs", "Runs", "runs", W.runs],
             ["schedules", "Schedules", "clock", W.schedules],
-            ["query", "Query", "grid", query], ["sources", "Data Sources", "flow", sources], ["files", "Files", "book", files]]],
+            ["query", "Query", "grid", query], ["sources", "Data Sources", "flow", sources], ["files", "Files", "book", files],
+            ["walks", "Walks", "flow", WK.walks]]],
   ["Fleet", [["queues", "Queues & pools", "pools", W.queues],
              ["scale", "Load & limits", "scale", W.scale],
              ["events", "Events", "events", W.events]]],
@@ -90,7 +93,8 @@ const NAV = [
 ];
 const ROUTES = new Map(NAV.flatMap(([, items]) => items.map((i) => [i[0], i])));
 ROUTES.set("draft", ["draft", "Draft", "book", W.draft]);
-const ALIAS = { run: "runs", draft: "workflows" };
+ROUTES.set("walk", ["walk", "Investigation", "flow", WK.walk]);
+const ALIAS = { run: "runs", draft: "workflows", walk: "walks" };
 
 
 function drawNav(active) {
@@ -141,7 +145,7 @@ function signin() {
   const active = sessionState() === "active" && !authRequired;
   const dev = canRenewSession();
   const sub = h("input", {class:"control mono", "aria-label":"Development user ID",
-    value:claims()?.sub || localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111"});
+    value:claims()?.sub || localStorage.getItem("p8-sub") || config().devUser || "11111111-1111-1111-1111-111111111111"});
   const paste = h("textarea", {class:"control mono", rows:4, "aria-label":"Access token", placeholder:"Paste your access token", autocomplete:"off", spellcheck:"false"});
   const out = h("div", {role:"status"});
   const destination = () => {
@@ -227,7 +231,7 @@ drawWho();
     const secret = config().devSecret;
     if (secret) {
       setToken(await devToken(
-        localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111", secret));
+        localStorage.getItem("p8-sub") || config().devUser || "11111111-1111-1111-1111-111111111111", secret));
       drawWho();
     }
   }

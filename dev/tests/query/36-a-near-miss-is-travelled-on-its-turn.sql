@@ -61,8 +61,7 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility)
     values (ch, 'walk-fixture:replay', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-        'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2)))::text);
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2))::text);
 end $$;
 
 select aiq.install_walk_workflow('walk_fixture_run', 'jev', 3);
@@ -70,11 +69,11 @@ select aiq.install_walk_workflow('walk_fixture_run', 'jev', 3);
 do $$
 declare
     inp jsonb := jsonb_build_object(
-        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('id', 'q1', 'text', 'the ladder'),
+        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
-        'replay', 'walk-fixture:replay', 'offline', true,
-        'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
+        'replay', (select id from content.resources where uri = 'walk-fixture:replay'), 'offline', true,
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     r     uuid;
     reads text[];
     got   text;

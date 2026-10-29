@@ -40,7 +40,7 @@ from .. import __version__
 # rather than leaving it to whoever adds the next one to remember.
 ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js",
           "access.js", "chat-stream.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
-          "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "theme.css")
+          "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "walks.js", "theme.css", "favicon.svg")
 
 
 def _read(name: str) -> bytes:
@@ -70,6 +70,10 @@ def config() -> dict:
         "workflow_queue": os.environ.get("P8_UI_WORKFLOW_QUEUE", "http"),
         "ingest_queue": os.environ.get("P8_UI_INGEST_QUEUE", "ingest"),
         "dev_token": dev,
+        # The user the development sign-in starts as. A deployment with demo data names the account its walks and
+        # runs belong to; the page used to start as 11111111-..., which exists in no database, so a fresh browser
+        # read nothing and could start nothing (REM-1246).
+        "dev_user": os.environ.get("P8_UI_DEV_USER", "") if dev else "",
         # The signing secret comes from the DEPLOYMENT, and only when that
         # deployment has asked for browser-side minting. It used to be a default
         # in the page -- which meant a published wheel carried a string shaped

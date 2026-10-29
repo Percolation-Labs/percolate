@@ -1,0 +1,21 @@
+
+ reads | search | walk | blind_mean | blind_min | blind_max | blind_as_good | blind_walks 
+-------+--------+------+------------+-----------+-----------+---------------+-------------
+    50 |      4 |    9 |        3.1 |         1 |         7 |             0 |          20
+   100 |      6 |   12 |        5.7 |         2 |        11 |             0 |          20
+   500 |     12 |   21 |       15.1 |         9 |        19 |             0 |          20
+(3 rows)
+
+         via         | search_rank |                                            said                                            
+---------------------+-------------+--------------------------------------------------------------------------------------------
+ next:beam:1M:35/385 |             | BEAM 1M:35, exchange 387: Can you help me come up with a good way to explain our moment of
+ next:beam:1M:35/898 |         801 | BEAM 1M:35, exchange 900: I'm planning to serve Turkish coffee and baklava on December 25t
+ term:memories       |         564 | BEAM 1M:35, exchange 702: I've scheduled a storytelling session at 7 PM, but how can I mak
+ next:beam:1M:35/392 |         518 | BEAM 1M:35, exchange 394: How can I make our moment of silence at 9 PM a meaningful and re
+ next:beam:1M:35/180 |         619 | BEAM 1M:35, exchange 178: I'm planning to order 2 kg of baklava for $50, is that a good de
+ next:beam:1M:35/179 |         706 | BEAM 1M:35, exchange 177: What's the best way to share Turkish baklava from “Güllüoğlu” ba
+ next:beam:1M:35/23  |         592 | BEAM 1M:35, exchange 21: I'm thinking of having the Secret Santa gift exchange before or a
+ next:beam:1M:35/386 |         867 | BEAM 1M:35, exchange 388: That sounds perfect! Thanks for the tips and the sample explanat
+ next:beam:1M:35/18  |         727 | BEAM 1M:35, exchange 16: We're doing a Secret Santa gift exchange, how do I make sure ever
+(9 rows)
+

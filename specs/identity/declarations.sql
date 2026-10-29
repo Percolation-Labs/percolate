@@ -138,6 +138,7 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
 on conflict (schema_name, table_name) do update
     set kind = excluded.kind, why = excluded.why;
 
+
 -- ------------------------------------------------------------
 -- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.
 --
