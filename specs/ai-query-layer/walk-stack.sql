@@ -962,3 +962,65 @@ begin
 end;
 $$;
 grant execute on function aiq.walk_oracle(uuid, text[], int) to authenticated;
+
+-- The questions a signed-in caller may walk (cory, REM-1246: a UI starts a walk without assembling its input): each
+-- question resource of the walk-questions channel the caller can read, its node, its words, the channel its
+-- conversation is in, and the replay recorded for it, if any (a walk-replays document under the same words).
+create or replace function aiq.walk_questions()
+returns table (node_id uuid, text text, channel text, has_replay boolean, replay_uri text)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select n.id, r.title, r.metadata->>'channel', v.id is not null, v.uri
+      from content.resources r
+      join content.channels c on c.id = r.channel_id and c.name = 'walk-questions'
+      join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
+      left join lateral (select v.id, v.uri from content.resources v join content.channels vc on vc.id = v.channel_id
+                          where vc.name = 'walk-replays' and v.title = r.title limit 1) v on true
+     where r.metadata ? 'channel'
+     order by r.title
+$$;
+
+-- Start a walk of one of those questions, as the caller, and return its run. 'replay' walks offline from the
+-- question's recorded verdicts, at $0, under the description they were recorded in (read from the replay's own task
+-- wording) and memoryless, since recorded verdicts are per lead, not per question; 'live' asks Jev, under V0's
+-- defaults. p_settings overrides either. A replay mode with no recorded replay is refused. A live walk with no Jev key
+-- bound to the worker cannot be refused here (the key is the worker's, not the database's): its first request fails
+-- with the provider's error, and walk_structure's state says so.
+create or replace function aiq.walk_launch(p_question uuid, p_mode text default 'replay', p_settings jsonb default null)
+returns uuid
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    q   record;
+    rep jsonb;
+    describe text;
+    inp jsonb;
+begin
+    select * into q from aiq.walk_questions() w where w.node_id = p_question;
+    if not found then
+        raise no_data_found using message = format('no question %s that you may walk', p_question),
+            hint = 'aiq.walk_questions() lists them';
+    end if;
+    if p_mode not in ('replay', 'live') then
+        raise invalid_parameter_value using message = format('a walk starts as replay or live, not %s', p_mode);
+    end if;
+    inp := jsonb_build_object('question', jsonb_build_object('node_id', q.node_id, 'text', q.text), 'channel', q.channel);
+    if p_mode = 'replay' then
+        if not q.has_replay then
+            raise no_data_found using message = format('no replay is recorded for "%s"', q.text),
+                hint = 'start it live, which asks Jev';
+        end if;
+        select (string_agg(c.content, '' order by c.ordinal))::jsonb into rep
+          from content.resources r join content.resource_chunks c on c.resource_id = r.id
+         where r.uri = q.replay_uri group by r.id;
+        select d into describe from unnest(array['source', 'targets', 'lines', 'lines_nocount']) d
+         where aiq.walk_task(d) = rep->>'task' limit 1;
+        inp := inp || jsonb_build_object('replay', (select id from content.resources where uri = q.replay_uri),
+                                         'offline', true,
+                                         'settings', jsonb_build_object('stack', false, 'describe', coalesce(describe, 'source'))
+                                                     || coalesce(p_settings, '{}'::jsonb));
+    else
+        inp := inp || jsonb_build_object('settings', coalesce(p_settings, '{}'::jsonb));
+    end if;
+    return workflow.start_workflow('walk', inp);
+end;
+$$;
+grant execute on function aiq.walk_questions(), aiq.walk_launch(uuid, text, jsonb) to authenticated;
