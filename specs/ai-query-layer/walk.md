@@ -925,8 +925,8 @@ thing to find (REM-1244). Two forms come after it.
   - *Why the earlier set's null held anyway:* copying the rubric could only have helped the parts, so a null holds
     all the more under possible contamination, and a positive result run that way would not have counted (sally,
     18:12Z).
-  - *Why it shows no direction* (sally): Jev already reads a multi-part question's parts in the question itself, and
-    taking the best score over several parts adds false positives.
+  - *Why it shows no direction:* Jev already reads a multi-part question's parts in the question itself (sally),
+    and taking the best score over several parts adds false positives (bill's write-up).
 - **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
   structure.** Each open question is a slot built from closed lists:
   - *subject:* an entity in the graph;
