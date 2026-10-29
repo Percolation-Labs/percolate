@@ -1,9 +1,9 @@
 CREATE VIEW
- wave |      doc       |        said_at         |                                                                                   said                                                                                   
-------+----------------+------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    0 | beam:1M:22/671 | 2024-08-12 00:11:11+00 | How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
-    0 | beam:1M:22/675 | 2024-08-12 00:11:15+00 | I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
-    0 | beam:1M:22/688 | 2024-08-12 00:11:28+00 | I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that extra money?
+ wave |      doc       |        said_at         |                                                                                            said                                                                                            
+------+----------------+------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    0 | beam:1M:22/671 | 2024-08-12 00:11:11+00 | BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
+    0 | beam:1M:22/675 | 2024-08-12 00:11:15+00 | BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
+    0 | beam:1M:22/688 | 2024-08-12 00:11:28+00 | BEAM 1M:22, exchange 688: I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that ext…
 (3 rows)
 
   relation   
@@ -35,27 +35,27 @@ CREATE VIEW
 (2 rows)
 
 CREATE VIEW
-         document         | budget |       held_from        |       held_until       |  recorded_in   | end_recorded_in 
---------------------------+--------+------------------------+------------------------+----------------+-----------------
- BEAM 1M:22, exchange 671 | $150   | 2024-08-12 00:11:11+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
- BEAM 1M:22, exchange 675 | $150   | 2024-08-12 00:11:15+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
- BEAM 1M:22, exchange 688 | $160   | 2024-08-12 00:11:28+00 |                        | second landing | 
+                                                                                          document                                                                                          |       held_from        |       held_until       |  recorded_in   | end_recorded_in 
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------+------------------------+----------------+-----------------
+ BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?                                                          | 2024-08-12 00:11:11+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
+ BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?                                                                  | 2024-08-12 00:11:15+00 | 2024-08-12 00:11:28+00 | first landing  | second landing
+ BEAM 1M:22, exchange 688: I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that ext… | 2024-08-12 00:11:28+00 |                        | second landing | 
 (3 rows)
 
-          known          |        held         |         document         | budget 
--------------------------+---------------------+--------------------------+--------
- after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
- after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
- after the first landing | now                 | BEAM 1M:22, exchange 671 | $150
- after the first landing | now                 | BEAM 1M:22, exchange 675 | $150
- now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671 | $150
- now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675 | $150
- now                     | now                 | BEAM 1M:22, exchange 688 | $160
+          known          |        held         |                                                                                          document                                                                                          
+-------------------------+---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
+ after the first landing | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
+ after the first landing | now                 | BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
+ after the first landing | now                 | BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
+ now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results?
+ now                     | 2024-08-12 00:11:20 | BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?
+ now                     | now                 | BEAM 1M:22, exchange 688: I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that ext…
 (7 rows)
 
-        held_wrong        | said | actually |       wrong_from       | corrected_later 
---------------------------+------+----------+------------------------+-----------------
- BEAM 1M:22, exchange 671 | $150 | $160     | 2024-08-12 00:11:28+00 | t
- BEAM 1M:22, exchange 675 | $150 | $160     | 2024-08-12 00:11:28+00 | t
+                                                            held_wrong                                                             |                                                                                          actually                                                                                          |       wrong_from       | corrected_later 
+-----------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------+-----------------
+ BEAM 1M:22, exchange 671: How can I effectively allocate my $150 budget for the hallway lighting project to get the best results? | BEAM 1M:22, exchange 688: I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that ext… | 2024-08-12 00:11:28+00 | t
+ BEAM 1M:22, exchange 675: I've allocated $150 for the hallway lighting project, how can I make sure I stay within budget?         | BEAM 1M:22, exchange 688: I'm planning to work on my hallway lighting and I've increased the budget to $160, what are some good additional mounting accessories I could get with that ext… | 2024-08-12 00:11:28+00 | t
 (2 rows)
 

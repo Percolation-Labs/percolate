@@ -19,13 +19,13 @@ channels:
     visibility: public
     config: {description: "BEAM 1M:35, one document per exchange"}
 
-# Replay documents: each question's verdicts, which a run reads back by uri. Stored, never embedded, so the channel
+# Replay documents: each question's verdicts, which a run reads back by the document's id. Stored, never embedded, so the channel
 # names no workflow.
   - name: walk-replays
     kind: manual
     visibility: public
-    config: {description: "walk verdicts, one document per question, read back by a run's {replay: uri}"}
+    config: {description: "walk verdicts, one document per question, read back by a run's {replay: document id}"}
   - name: walk-questions
     kind: manual
     visibility: public
-    config: {description: "each question and its answer key, by uri question:<qid>; never embedded"}
+    config: {description: "each question, by uri question:<qid>, without its answer key; never embedded"}

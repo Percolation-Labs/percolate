@@ -59,10 +59,9 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility)
     values (ch, 'walk-range:replay', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    select res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('q1',
-             (select jsonb_object_agg(k, 0.2) from fx, lateral (values ('next:wr/' || n), ('near:wr/' || n)) v(k))
+    select res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', (select jsonb_object_agg(k, 0.2) from fx, lateral (values ('next:wr/' || n), ('near:wr/' || n)) v(k))
              || (select jsonb_object_agg('term:' || t, 0.2) from fx, unnest(terms) t)
-             || jsonb_build_object('term:room', 0.95, 'term:ladder', 0.9, 'near:wr/1', 0.8, 'term:tiles', 0.7)))::text;
+             || jsonb_build_object('term:room', 0.95, 'term:ladder', 0.9, 'near:wr/1', 0.8, 'term:tiles', 0.7))::text;
 end $$;
 
 select aiq.install_walk_workflow('walk_range_3', 'jev', 3);
@@ -71,10 +70,9 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_range', 'prefix', 'wr/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'Which of my renovation jobs need a ladder or new tiles?',
-                                       'gold', jsonb_build_array('wr/7', 'wr/8')),
+        'question', jsonb_build_object('text', 'Which of my renovation jobs need a ladder or new tiles?'),
         'search', to_jsonb(array['wr/1','wr/11','wr/12','wr/13','wr/14','wr/2','wr/3','wr/4','wr/5','wr/6','wr/7','wr/8']),
-        'replay', 'walk-range:replay', 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-range:replay'), 'offline', true,
         'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1, 'cap', 3));
     r uuid;
     got text;

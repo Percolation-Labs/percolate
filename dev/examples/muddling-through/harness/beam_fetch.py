@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Download BEAM from its public release and cut the walkthrough's two conversations from it (Sirsh, 28 Oct).
+"""Evaluation harness, not product: download BEAM from its public release and cut the walkthrough's two conversations from it (Sirsh, 28 Oct).
 
     pip install pyarrow
-    python3 build/beam_fetch.py samples/beam
+    python3 harness/beam_fetch.py samples/beam
 
 A reader runs this: the sample ships no BEAM text, only the vectors the stack's own bge-small gave each piece. It
 downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-SA 4.0, Tavakoli et al., arXiv
@@ -14,7 +14,8 @@ downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-S
                         with BEAM's trailing '->-> n,m' plan index removed: what the walk tags. Each piece gets its
                         vector from vectors.jsonl only if the piece's sha256 is the one that vector was made from.
   questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys.
-  question-texts.jsonl  each question stored by uri question:<qid>, so SQL finds it and its answer key.
+  question-texts.jsonl  each question stored by uri question:<qid>, so SQL finds it. Not its answer key: that stays
+                        in questions.jsonl, which harness/labels.py hands to the evaluation functions (REM-1231).
 
 These are the rules the walk study used on the same file, so the documents, keys and pieces are the study's.
 """
@@ -35,6 +36,8 @@ RUNS = {"22": "beam-1m22", "35": "beam-1m35"}
 CHUNK = 2000
 MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
 
+
+SAID = 160  # characters of the user's words a document's title carries
 
 def ints(x):
     """Every integer in BEAM's source_chat_ids, which nest lists and dicts."""
@@ -113,7 +116,10 @@ def main(sample):
                     matched += 1
                 cs.append(piece)
             user = "\n".join(MARK.sub("", t["content"]) for t in p["turns"] if t["role"] == "user")
-            texts.append({"channel": channel, "external_id": f"{run}/{i}", "title": f"BEAM {run}, exchange {i}",
+            # The title is the document node's summary, so a step shows what was said by reading the node (REM-1233).
+            said = " ".join(user.split())
+            said = said if len(said) <= SAID else said[:SAID - 1].rstrip() + "…"
+            texts.append({"channel": channel, "external_id": f"{run}/{i}", "title": f"BEAM {run}, exchange {i}: {said}",
                           "uri": uri, "chunks": cs,
                           "metadata": {"sitting": p["session"], "position": i, "said_at": p["said_at"],
                                        "terms_text": user}})
@@ -138,7 +144,7 @@ def main(sample):
         f.writelines(json.dumps(q) + "\n" for q in qs)
     with (sample / "question-texts.jsonl").open("w") as f:
         for q in qs:
-            md = dict(q, id=q["qid"], text=q["question"])
+            md = dict({k: v for k, v in q.items() if k != "gold"}, id=q["qid"], text=q["question"])
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")

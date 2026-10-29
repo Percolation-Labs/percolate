@@ -61,22 +61,21 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility)
     values (ch, 'walk-fixture:replay', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
-        'q1', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2)))::text);
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:ceiling', 0.9, 'term:ladder', 0.4, 'term:hallway', 0.2))::text);
 end $$;
 
 do $$
 declare
-    u1 text := 'verdicts:q1:' || gen_random_uuid();
-    u2 text := 'verdicts:q1:' || gen_random_uuid();
+    u1 text := 'verdicts:' || gen_random_uuid();
+    u2 text := 'verdicts:' || gen_random_uuid();
 begin
     insert into content.channels (name, kind, org_id, visibility)
     values ('walk-fixture-kept', 'manual', rbac.shared_org_id(), 'public');
     perform content.register_text('walk-fixture-kept', u1, '[{"content": "-"}]'::jsonb, 'a run two days ago', u1, null,
-        jsonb_build_object('question', 'q1', 'task', aiq.walk_task(), 'verdicts',
+        jsonb_build_object('question', (select id from aiq.nodes where entity_type = 'walk_fixture' and summary = 'wt/1')::text, 'task', aiq.walk_task(), 'verdicts',
             jsonb_build_object('term:ladder', jsonb_build_object('p', 0.9, 'at', now() - interval '2 days'))));
     perform content.register_text('walk-fixture-kept', u2, '[{"content": "-"}]'::jsonb, 'a run an hour ago', u2, null,
-        jsonb_build_object('question', 'q1', 'task', aiq.walk_task(), 'verdicts',
+        jsonb_build_object('question', (select id from aiq.nodes where entity_type = 'walk_fixture' and summary = 'wt/1')::text, 'task', aiq.walk_task(), 'verdicts',
             jsonb_build_object('term:ladder', jsonb_build_object('p', 0.0, 'at', now() - interval '1 hour'),
                                'term:hallway', jsonb_build_object('p', 0.95, 'at', now() + interval '1 hour'))));
 end $$;
@@ -86,10 +85,10 @@ select aiq.install_walk_workflow('walk_fixture_run', 'jev', 3);
 do $$
 declare
     inp jsonb := jsonb_build_object(
-        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('id', 'q1', 'text', 'the ladder'),
+        'nodes', 'walk_fixture', 'prefix', 'wt/', 'question', jsonb_build_object('node_id', (select id from aiq.nodes where entity_type = 'walk_fixture' and summary = 'wt/1'), 'text', 'the ladder'),
         'search', to_jsonb(array['wt/1','wt/11','wt/12','wt/13','wt/14','wt/15','wt/16','wt/17','wt/18',
                                  'wt/3','wt/4','wt/6','wt/8','wt/2','wt/5','wt/7']),
-        'replay', 'walk-fixture:replay', 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-fixture:replay'), 'offline', true,
         'settings', jsonb_build_object('wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false, 'memory', 1));
     r     uuid;
     old   uuid;

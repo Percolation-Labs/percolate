@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Ship BEAM's vectors without its text, so setup loads them instead of embedding 7,339 pieces (Sirsh, 26 Oct).
+"""Evaluation harness, not product: ship BEAM's vectors without its text, so setup loads them instead of embedding 7,339 pieces (Sirsh, 26 Oct).
 
-    python3 build/vectors.py <dsn of a stack that embedded the sample> samples/beam
+    python3 harness/vectors.py <dsn of a stack that embedded the sample> samples/beam
 
-Reads every piece's vector from a stack whose worker embedded samples/beam's texts.jsonl (as build/beam_fetch.py
+Reads every piece's vector from a stack whose worker embedded samples/beam's texts.jsonl (as harness/beam_fetch.py
 writes it) with bge-small-en-v1.5 -- the model a reader's stack runs -- and writes vectors.jsonl: one line per piece,
 {uri, piece, sha256 of its text, vector_f32 (base64 little-endian float32)}. beam_fetch.py gives a downloaded piece
 its vector only when the sha256 matches. Refuses if any piece is missing a vector, or if a stored piece's text is

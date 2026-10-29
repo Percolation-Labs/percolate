@@ -41925,7 +41925,7 @@ $$;
 create or replace function aiq.walk_graph_uri(p_input jsonb, p_version jsonb)
 returns text
 language sql stable set search_path = pg_catalog, public as $$
-    select 'walk-graph:' || md5(((p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')
+    select 'walk-graph:' || md5(((p_input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline')
                                  || jsonb_build_object('span', aiq.walk_settings(p_input)->'span',
                                                        'near', aiq.walk_settings(p_input)->'near'))::text)
            || ':' || md5(p_version::text)
@@ -41975,7 +41975,7 @@ begin
     end if;
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
     return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
-               'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'offline')::text, uri,
+               'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline')::text, uri,
                null, jsonb_build_object('walk_graph', g, 'version', v))
            || jsonb_build_object('uri', uri, 'version', v);
 end;
@@ -42176,8 +42176,8 @@ begin
     if inp ? 'replay' then
         select (string_agg(c.content, '' order by c.ordinal))::jsonb into rep
           from content.resources res join content.resource_chunks c on c.resource_id = res.id
-         where res.uri = inp->>'replay'
-         group by res.id limit 1;
+         where res.id = (inp->>'replay')::uuid
+         group by res.id;
         if rep is null then
             raise no_data_found using message = format('no replay document %s', inp->>'replay');
         end if;
@@ -42185,7 +42185,7 @@ begin
             raise invalid_parameter_value using message = 'the replay was judged under another task wording',
                 hint = 'a verdict belongs to its wording; walk again live, or replay a document made under this one';
         end if;
-        pmap := coalesce(rep->'verdicts'->(q->>'id'), '{}'::jsonb);
+        pmap := coalesce(rep->'verdicts', '{}'::jsonb);
     end if;
     select pmap || coalesce(jsonb_object_agg(a.key, a.p), '{}'::jsonb) into pmap from aiq.walk_answers(p_run) a;
     -- Memory (settings.memory, 0 to 1, default 0): how far this run leans on the verdicts earlier runs kept for the
@@ -42205,15 +42205,15 @@ begin
             asof := least(asof, (s->>'memory_as_of')::timestamptz);
         end if;
     end if;
-    if mem > 0 then
+    if mem > 0 and q ? 'node_id' then
         select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
                                                    else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
                || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
-                    where not exists (select 1 from aiq.walk_kept(q->>'id', asof, aiq.walk_task(s->>'describe')) k
+                    where not exists (select 1 from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
                                        where k.key = n.key))
           into pmap
           from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
-                  from aiq.walk_kept(q->>'id', asof, aiq.walk_task(s->>'describe')) k
+                  from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
                  group by k.key) z;
     end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
@@ -42335,6 +42335,13 @@ declare
 begin
     select * into r from workflow.runs where id = p_run;
     inp := r.input;
+    -- The question is {node_id, text} and nothing else, so a walk never carries its answer key: evaluation passes the
+    -- labelled nodes to aiq.walk_coverage and aiq.walk_why from outside the run (REM-1231).
+    if exists (select 1 from jsonb_object_keys(coalesce(inp->'question', '{}')) k where k not in ('node_id', 'text')) then
+        raise invalid_parameter_value using message = format('a walk''s question is {node_id, text}; this one also carries %s',
+                (select string_agg(k, ', ' order by k) from jsonb_object_keys(inp->'question') k where k not in ('node_id', 'text'))),
+            hint = 'start it with {"question": {"node_id": ..., "text": ...}}; pass any labels to the evaluation functions';
+    end if;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
     -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
@@ -42361,10 +42368,10 @@ begin
           from aiq.node_keys k1
           join aiq.edges e on e.src_id = k1.node_id and e.relation = 'walk_seed'
           join aiq.node_keys k2 on k2.node_id = e.dst_id and k2.kind = 'canonical'
-         where k1.kind = 'canonical' and k1.key = inp->'question'->>'id';
+         where k1.node_id = (inp->'question'->>'node_id')::uuid and k1.kind = 'canonical';
     end if;
     if ord is null or jsonb_array_length(ord) = 0 then
-        raise no_data_found using message = format('search returned nothing for %s', inp->'question'->>'id'),
+        raise no_data_found using message = format('search returned nothing for %s', coalesce(inp->'question'->>'node_id', inp->'question'->>'text')),
             hint = 'a channel walk needs the question embedded (the q step); a graph walk needs walk_seed edges or "search"';
     end if;
     select jsonb_agg(jsonb_build_object('doc', value #>> '{}', 'via', 'search', 'expanded', true) order by ordinality)
@@ -42680,7 +42687,7 @@ returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object(
         'question', st->'question', 'settings', st->'settings',
-        'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'offline' from workflow.runs where id = p_run),
+        'scope', (select input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline' from workflow.runs where id = p_run),
         'reads', (select count(*) from aiq.walk_state_reads(st)),
         -- a read step that did not stop the walk records "stop": null, which is JSON, not SQL NULL
         'stop', case when jsonb_typeof(st->'stop') = 'object' then st->'stop'
@@ -42699,30 +42706,32 @@ returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
                               'task', aiq.walk_task(st->'settings'->>'describe'),
-                              'verdicts', jsonb_build_object(st->'question'->>'id',
-                                  (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
-                                     from jsonb_each(st->'p') where (st->'clues') ? key)))
+                              'verdicts', (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
+                                             from jsonb_each(st->'p') where (st->'clues') ? key))
       from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
 
 -- The verdicts earlier runs kept for a question under one wording (the source description's unless named), each
--- answered before p_before.
+-- answered before p_before. The question is its node: a kept document names the node it was asked about, not a
+-- string the benchmark gave it (REM-1232).
 drop function if exists aiq.walk_kept(text, timestamptz);
-create or replace function aiq.walk_kept(p_question text, p_before timestamptz default null, p_task text default null)
+drop function if exists aiq.walk_kept(text, timestamptz, text);
+drop function if exists aiq.walk_kept(uuid, timestamptz);
+create or replace function aiq.walk_kept(p_question uuid, p_before timestamptz default null, p_task text default null)
 returns table (key text, p real, at timestamptz, model text, run uuid)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select v.key, (v.value->>'p')::real, (v.value->>'at')::timestamptz, v.value->>'model', (res.metadata->>'run')::uuid
       from content.resources res, jsonb_each(res.metadata->'verdicts') v
-     where left(res.uri, length('verdicts:' || p_question || ':')) = 'verdicts:' || p_question || ':'
-       and res.metadata->>'question' = p_question
+     where res.metadata->>'question' = p_question::text
        and res.metadata->>'task' = coalesce(p_task, aiq.walk_task())
        and (p_before is null or (v.value->>'at')::timestamptz < p_before)
 $$;
 
--- Keep a run's verdicts: one document a run, verdicts:<question>:<run>, written once and never changed, each verdict
--- with its P, when it was answered and the model. The log is append-only because a run is: a later run keeps its own
--- document beside this one. The verdicts are the document's metadata and its one chunk is '-', so search never
--- finds them. A run that asked nobody keeps nothing.
+-- Keep a run's verdicts: one document a run, written once and never changed, each verdict with its P, when it was
+-- answered and the model. The log is append-only because a run is: a later run keeps its own document beside this
+-- one. The verdicts are the document's metadata and its one chunk is '-', so search never finds them. The document
+-- names the question's node and the run, so aiq.walk_kept finds it by the node. A run that asked nobody keeps
+-- nothing, and neither does one whose question has no node: there is nothing a later run could find it by.
 create or replace function aiq.walk_keep(p_run uuid, p_channel text default 'walk-replays')
 returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
@@ -42730,19 +42739,39 @@ declare
     q   jsonb := (select input->'question' from workflow.runs where id = p_run);
     tk  text := aiq.walk_task(aiq.walk_settings((select input from workflow.runs where id = p_run))->>'describe');
     v   jsonb;
-    uri text := 'verdicts:' || (q->>'id') || ':' || p_run;
+    uri text := 'verdicts:' || p_run;
 begin
+    if not q ? 'node_id' then
+        return jsonb_build_object('kept', 0, 'why', 'the question has no node');
+    end if;
     select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
       from aiq.walk_answers(p_run) a;
     if v is null then
         return jsonb_build_object('kept', 0);
     end if;
     perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
-                format('verdicts for %s, run %s', q->>'id', p_run), uri, null,
-                jsonb_build_object('question', q->>'id', 'run', p_run, 'task', tk, 'verdicts', v));
+                format('verdicts of run %s', p_run), uri, null,
+                jsonb_build_object('question', q->>'node_id', 'run', p_run, 'task', tk, 'verdicts', v));
     return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri);
 end;
 $$;
+
+-- How walks relate, read from what each run was started with, by id (REM-1232): the question's node it asks, the
+-- verdict document it replays and the run it is a control of. A query finds "the walks of this question" or "the
+-- controls of that run" here, never by matching a benchmark's id or a uri pattern in a run's input.
+create or replace view aiq.walk_runs with (security_invoker = true) as
+select r.id as run,
+       (r.input->'question'->>'node_id')::uuid as question,
+       r.input->'question'->>'text' as question_text,
+       (r.input->>'replay')::uuid as replays,
+       (r.input->>'control_of')::uuid as control_of,
+       r.status,
+       r.created_at
+  from workflow.runs r
+ where r.input ? 'question';
+comment on view aiq.walk_runs is
+    'Each walk with what it asks and what it is to other runs: its question''s node, the verdict document it replays and the run it is a control of.';
+grant select on aiq.walk_runs to authenticated;
 
 -- ---------------------------------------------------------------- the workflow
 drop function if exists aiq.install_walk_workflow(text, text, int);
@@ -42818,7 +42847,7 @@ $$;
 grant execute on function aiq.walk_task(text), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
-                          aiq.walk_answers(uuid), aiq.walk_kept(text, timestamptz, text), aiq.walk_keep(uuid, text),
+                          aiq.walk_answers(uuid), aiq.walk_kept(uuid, timestamptz, text), aiq.walk_keep(uuid, text),
                           aiq.walk_signs(jsonb, text, jsonb),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
                           aiq.walk_run_graph(uuid),
@@ -42847,7 +42876,7 @@ revoke all on function aiq.install_walk_workflow(text, text, int, text) from pub
 --                            accepted leads still open, and the rejected leads
 --                            just under the gate that still point at unread
 --                            documents.
---   aiq.walk_why(run, gold)  for each evidence document the walk did not read,
+--   aiq.walk_why(run, nodes) for each labelled node the walk did not read,
 --                            the first of these that holds:
 --        queued         (c) a travelled lead landed it; the walk stopped first
 --        open           (c) an accepted lead pointing at it was open at the
@@ -42965,34 +42994,20 @@ comment on function aiq.walk_audit(uuid) is
     'A walk run''s audit with no answer key: the state at the stop, the accepted leads still open and the near misses (REM-1211).';
 
 
-create or replace function aiq.walk_why(p_run uuid, p_gold jsonb default null)
+drop function if exists aiq.walk_why(uuid, jsonb);
+create or replace function aiq.walk_why(p_run uuid, p_nodes text[])
 returns table (doc text, letter text, reason text, key text, p real, detail text)
 language plpgsql stable as $$
 declare
     v_summary jsonb := aiq.walk_summary(p_run);
     v_st      jsonb := aiq.walk_state(p_run);  -- built once, for both views below
     v_gate    real  := coalesce((v_summary #>> '{settings,gate}')::real, 0.5);
-    v_gold    jsonb := p_gold;
 begin
-    -- the answer key is a list of document keys, or {question id: list}; with none given, the one the sample put in
-    -- the run's start input (walk_summary -> question -> gold), which no step of the walk reads
-    if p_gold is null then
-        v_gold := v_summary #> '{question,gold}';
-        if v_gold is null then
-            raise exception 'no answer key: pass one, or start the walk with the question''s gold'
-                using errcode = 'invalid_parameter_value',
-                      hint = 'select * from aiq.walk_why(<run>, ''["<document key>", ...]'')';
-        end if;
-    elsif jsonb_typeof(p_gold) = 'object' then
-        v_gold := p_gold -> (v_summary #>> '{question,id}');
-        if v_gold is null then
-            raise exception 'the answer key holds no evidence for question %', v_summary #>> '{question,id}'
-                using errcode = 'invalid_parameter_value';
-        end if;
-    end if;
-    if jsonb_typeof(v_gold) is distinct from 'array' then
-        raise exception 'the answer key is a JSON list of document keys, or {question id: list}'
-            using errcode = 'invalid_parameter_value';
+    -- the labelled nodes come from the caller: a walk's question is {node_id, text} and never carries them (REM-1231)
+    if p_nodes is null then
+        raise exception 'no labelled nodes: pass the keys the walk should have read'
+            using errcode = 'invalid_parameter_value',
+                  hint = 'select * from aiq.walk_why(<run>, array[''<node key>'', ...])';
     end if;
 
     return query
@@ -43001,7 +43016,7 @@ begin
          c       as (select c.*, exists (select 1 from unnest(c.targets) t where t not in (select r.doc from r)) as live
                        from aiq.walk_state_clues(v_st) c),
          opn     as (select c.key, c.p, c.targets from c where c.state = 'open' and c.live),
-         gold    as (select distinct g #>> '{}' as doc from jsonb_array_elements(v_gold) g),
+         gold    as (select distinct g as doc from unnest(p_nodes) g),
          unread  as (select g.doc from gold g where g.doc not in (select r.doc from r))
     select u.doc,
            case w.reason when 'queued' then 'c' when 'open' then 'c' when 'rejected' then 'b'
@@ -43036,8 +43051,33 @@ begin
      order by u.doc;
 end $$;
 
-comment on function aiq.walk_why(uuid, jsonb) is
-    'For each evidence document a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211). With no answer key, the run''s own question gold.';
+comment on function aiq.walk_why(uuid, text[]) is
+    'For each labelled node a walk run did not read: (a) never offered, (b) rejected with its P, (c) open or queued at the stop (REM-1211). The caller passes the labels; the run never holds them (REM-1231).';
+
+
+-- How much of a labelled node set a run had read by each budget k, beside how much of it search's own top k held.
+-- One function for every evaluation, so no query counts reads by hand (REM-1231). The labels come from the caller:
+-- the run is not asked what it should have found, and the same set compares any runs, one lateral call each:
+--     select r.id, c.* from runs r, aiq.walk_coverage(r.id, :'labelled', array[50, 100, 500]) c;
+-- A node read twice counts once, at its first read; k past the run's last read counts every read. With no budgets,
+-- one row at k = every read the run made.
+create or replace function aiq.walk_coverage(p_run uuid, p_nodes text[], p_budgets int[] default null)
+returns table (k int, walk int, search int, labelled int)
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    with lab as (select distinct n from unnest(p_nodes) n),
+         r   as (select doc, row_number() over (order by wave, ord) as n from aiq.walk_reads(p_run)),
+         wr  as (select doc, min(n) as n from r where doc in (select n from lab) group by doc),
+         sr  as (select doc, min(rank) as n from aiq.walk_search_order(p_run) where doc in (select n from lab) group by doc)
+    select b.k,
+           (select count(*) from wr where wr.n <= b.k)::int,
+           (select count(*) from sr where sr.n <= b.k)::int,
+           (select count(*) from lab)::int
+      from unnest(coalesce(p_budgets, array[(select count(*) from r)::int])) with ordinality b(k, i)
+     order by b.i
+$$;
+
+comment on function aiq.walk_coverage(uuid, text[], int[]) is
+    'Of a labelled node set the caller passes, how many a walk run had read by each budget k, and how many search''s own top k held (REM-1231).';
 
 
 -- ============================================================

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Complete replay documents for walk-0's step questions: a P for every clue the world can raise.
+"""Evaluation harness, not product: complete replay documents for walk-0's step questions: a P for every clue the world can raise.
 
-    python3 build/world_replay.py <reachability spike dir> samples/walk-0/replay
+    python3 harness/world_replay.py <reachability spike dir> samples/walk-0/replay
 
 The walk on Percolate judges one round a wave (REM-1199), so it raises clues the study's walk never asked about, and
 walk-0 has no words for Jev to read. The world's own decider (reach.decide) is deterministic -- its noise is a hash of
