@@ -906,18 +906,25 @@ thing to find (REM-1244). Two forms come after it.
     checked against the rubric for repeated distinctive words, and any that repeat are quoted. Otherwise a result
     that leads score better against the parts measures the key, not the stack. The same rule holds for any example
     the article shows.
-  - *Status: not built for part three* (bill's directional check, 29 Oct 18:11Z, REM-1244). Jev re-judged recorded
-    leads on 4 questions, against sub-questions and against the original question. The best sub-question's score
-    minus the original's came to −0.036, +0.005, −0.030 and −0.068, so there is no direction, and by this section's
-    rule it is not built. Part three's V0 is the plain walk with the original question. The stack appears in the
-    document only as measured: the template parts and this check. This rules out the caller-supplied stack as it
-    was tested here, not real sub-questions in general. Those belong to the structured form below.
-  - *How its parts were written:* the check ran before the rule above landed. bill wrote the sub-questions by hand
-    after printing only the question text (no rubric, no answer). A check afterwards found no sub-question sharing a
-    rubric item's distinctive words beyond the question's own; the only overlaps are 'before', 'listing' and 'cost'.
-    A null holds all the more under possible contamination, since copying the rubric could only have helped the
-    parts. A positive result run this way would not have counted (sally, 18:12Z). A fresh subagent given only the
-    four question texts, its prompt recorded, is writing the parts again to meet the rule as written.
+  - *Status: not built for part three* (bill's directional check, 29 Oct 18:14Z, REM-1244). Jev re-judged recorded
+    leads on 4 questions, against sub-questions and against the original question. **The result is the blind set**,
+    written under the rule above: a fresh subagent given only the four question texts, with its prompt kept
+    verbatim, and the rubric overlap checked afterwards (only generic words overlap). Best sub-question minus the
+    original, in AUC with 95% intervals:
+    - house sale: −0.170 [−0.264, −0.077];
+    - Japan trip: −0.020 [−0.068, +0.029];
+    - GPU issues: +0.005 [−0.014, +0.027];
+    - days between: −0.098 [−0.159, −0.038].
+
+    No question gains, and two lose. Judging the original twice moved its AUC by at most 0.010, which is Jev's
+    run-to-run noise. The earlier, hand-written set (written from the question text only, before this rule) gave
+    −0.036, +0.005, −0.030 and −0.068. Both checks cost $0.052 together. By this section's rule it is not built.
+    Part three's V0 is the plain walk with the original question, and the stack appears in the document only as
+    measured: the template parts (−1.1 against P) and this check. This rules out the caller-supplied stack as tested
+    here, not real sub-questions in general; those belong to the structured form below.
+  - *Why the earlier set's null held anyway:* copying the rubric could only have helped the parts, so a null holds
+    all the more under possible contamination, and a positive result run that way would not have counted (sally,
+    18:12Z).
   - *Why it shows no direction* (sally): Jev already reads a multi-part question's parts in the question itself, and
     taking the best score over several parts adds false positives.
 - **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
