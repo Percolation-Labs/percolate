@@ -93,6 +93,19 @@ select wave, reads, judged, accepted, open_leads from aiq.walk_waves(:'run');
 
 and from one graphical client (on the Mac; which one is chosen at the run), connected to the same `P8_DSN`.
 
+## 5b. Ask Claude, over MCP (to run, Mac leg)
+
+Sirsh's addition (29 Oct): connect Claude to Percolate the way a reader would, then use it the way a reader would. The
+stack's query MCP server listens on 127.0.0.1 only, and takes the reader's own token:
+
+```bash
+claude mcp add --transport http percolate http://localhost:8090 --header "Authorization: Bearer $TOKEN"
+```
+
+Then, in Claude: ask what walks there are, open one and ask why it missed a piece of evidence. To fill in on the run:
+the questions asked, what Claude called, and whether the answers match the rows psql returns. This needs Claude, so it
+runs on the Mac against a stack started the same way, not on the runner.
+
 ## 6. Rerun the article's experiments (to run)
 
 Each experiment the article quotes, run as its block prints it. The tour diffs every number a block prints against
@@ -100,6 +113,23 @@ the article's own figure for it and fails on a difference beyond the noise the a
 data comes only from the release asset's public URL: the runner checks nothing out and reads no registry cache.
 Open question for the run: where a reader gets the blocks without a checkout (the bundle, or the release's source
 archive).
+
+## Every surface a reader touches
+
+Each is checked on the run, and a stuck reader at any of them becomes a board card with its owner.
+
+| surface | where | leg |
+|---|---|---|
+| the release page and its assets | github.com/Percolation-Labs/percolate/releases | runner |
+| the install | get-percolate's compose at the tag, pip | runner |
+| the docs links the article and the install guide cite | percolation-labs.github.io/get-percolate | runner (every link fetched) |
+| sign-in: the first user and a token | `rbac.bootstrap_admin`, `percolate auth token` | runner |
+| the CLI | `percolate sample load`, `walk index`, `auth token`, `ui serve` | runner |
+| the Walks screen | localhost:8082/#/walks | runner (headless), Mac (by eye) |
+| psql | `P8_DSN` | runner |
+| a graphical Postgres client | the same `P8_DSN` | Mac |
+| Claude over MCP | localhost:8090 with the token | Mac |
+| the article's experiment blocks | each block's output against the article | runner |
 
 ## Where a reader got stuck
 
