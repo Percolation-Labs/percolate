@@ -17,8 +17,9 @@ questions.jsonl, sources.yaml, manifest.yaml). OUT/NAME/ is then a directory `pe
                                 aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0
   README.md, LICENSE, SHA256SUMS
 
---runs is a walk list as the pilot writes it, one {qid, arm, run} a line (arm S: V0, with the question stack; arm P:
-the plain walk), read from --dsn read-only; --questions keeps only those qids, and --rule says in CONTENTS.json how they
+--runs is a walk list as the pilot writes it, one {qid, arm, run} a line (arm P: V0's walk, the question stack off,
+as V0 ships; arm S: the same walk with the question stack on, measured in the pilot and not V0's default), read from
+--dsn read-only; --questions keeps only those qids, and --rule says in CONTENTS.json how they
 were chosen. The walks are built last, on the V0 rules (bill, 29 Oct); without --runs the bundle has no walks/.
 """
 import argparse
@@ -182,7 +183,9 @@ def main():
         "load:\n" + "\n".join(load) + "\n")
     items = json.loads((HERE / "answer-items.json").read_text())
     n_oracle = oracle_files(questions, items, root / "oracle")
-    ARMS = {"S": "V0 walk (question stack)", "P": "plain walk"}
+    # V0 ships with the question stack off: the pilot's registered rule found S-P at 100 reads of -1.1 [-3.1, +0.2],
+    # wholly below its +5 bar (bill, 29 Oct 17:33Z). The stack walk ships beside it as measured, not as the default.
+    ARMS = {"P": "V0 walk (question stack off, V0's default)", "S": "walk with the question stack on (measured; not V0's default)"}
     keep = keep_q
     walks = [{"run": r["run"], "label": ARMS.get(r.get("arm"), r.get("arm") or "walk"), "qid": r["qid"], "arm": r.get("arm")}
              for r in jsonl(args.runs) if keep is None or r["qid"] in keep] if args.runs else []
@@ -231,7 +234,8 @@ After installing Percolate:
     percolate sample load {name}/walks                  # {walks} walk(s), replayed offline from Jev's verdicts: no key, $0
 
 The walk index builds each conversation's walk graph, about a minute each. CONTENTS.json lists the walks: for each
-question, the V0 walk (with its question stack) and the plain walk beside it, and how the questions were chosen.
+question, V0's walk (the question stack off, as V0 ships) and the same walk with the question stack on beside it, which
+the pilot measured and V0 did not adopt, and how the questions were chosen.
 
 Rerunning a walk means one of two things, and they differ:
 - Replay (the walks step above, or 'Replay' under Start a walk): from Jev's recorded verdicts, offline, no key, no
