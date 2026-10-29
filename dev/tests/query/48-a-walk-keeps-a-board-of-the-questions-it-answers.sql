@@ -8,11 +8,13 @@
 --     nothing, so no part is offered. The leads out of 1 are judged against the root: term:ceiling accepted.
 --   wave 1 travels ceiling to 2 and fills from search (11, 12). Iteration 2 links 2 to the root; 1 and 2 share
 --     'ceiling', the one term two root-linked reads hold, so S|root|ceiling is asked and opens part:ceiling. The
---     root's close is asked (C|root|2/2: two links, two lines above the floor) and refused. The leads out of 2 are judged against both open questions:
+--     root's two lines are each judged (W|root|wt/1, W|root|wt/2) and neither states the whole answer. The leads out of 2 are judged against both open questions:
 --     term:ladder is low for the root and high for the part, so it is accepted and serves part:ceiling.
 --   wave 2 reads search's next (13), travels ladder to 5 and 7, and fills its fourth read from search (14, which the
---     replay never assessed, so it is linked to nothing). Iteration 3 links 5 and 7 to the part; the
---     part closes (C|part:ceiling|2/2), and the root, with no part left open, closes on its four links, judged on the two lines assessed against it (C|root|4/2).
+--     replay never assessed, so it is linked to nothing). Iteration 3 links 5 and 7 to the part; 5 states
+--     the part's whole answer (W|part:ceiling|wt/5), so the part closes, with 7 recorded as partial (P); 7, assessed against the root above the floor but
+--     outside its two link slots, is one of the root's candidate lines (F13) and states its whole answer (W|root|wt/7), so the
+--     root, with no part left open, closes.
 --   wave 3 reads nothing: the root is answered, and the walk stops `answered`.
 -- What is held: the board is the fold of each wave's recorded moves; walk_stack, walk_clues' serves and
 -- walk_structure read it; a verdict the replay lacks decides nothing; walk_keep makes it graph rows.
@@ -71,14 +73,16 @@ begin
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
         'A|root|wt/1', 0.9, 'A|root|wt/2', 0.9, 'A|root|wt/11', 0.1, 'A|root|wt/12', 0.1,
         'L|root|term:ceiling', 0.9, 'L|root|term:hallway', 0.2,
-        'S|root|ceiling', 0.8, 'C|root|2/2', 0.4,
+        'S|root|ceiling', 0.8, 'W|root|wt/1', 0.3, 'W|root|wt/2', 0.3,
         'L|root|term:ladder', 0.2, 'L|part:ceiling|term:ladder', 0.9,
         'A|root|wt/13', 0.1, 'A|part:ceiling|wt/13', 0.1,
-        'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.3, 'A|part:ceiling|wt/7', 0.9,
-        'C|part:ceiling|2/2', 0.9, 'C|root|4/2', 0.95))::text);
+        'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.6, 'A|part:ceiling|wt/7', 0.9,
+        'W|part:ceiling|wt/5', 0.9, 'W|part:ceiling|wt/7', 0.2, 'P|part:ceiling|wt/7', 0.8, 'W|root|wt/7', 0.9))::text);
 end $$;
 
 select aiq.install_walk_workflow('walk_fixture_stack', 'jev', 6);
+-- the state gate is calibrated in a deployment (F12); this walk is hand-worked against 0.7
+update aiq.parameters set value = '0.7' where name = 'stack.state_gate';
 
 do $$
 declare
@@ -113,6 +117,12 @@ begin
        '0:root=open[wt/1]; 1:part:ceiling=open[]; 1:root=open[wt/1 wt/2]; '
        '2:part:ceiling=answered[wt/5 wt/7]; 2:root=answered[wt/1 wt/2]' then
         raise exception 'the board went %', got;
+    end if;
+    -- what answered each question, newest first, and what only stated part of it
+    if (select st0->'board'->'questions'->'root'->>'answer' || ' ' || (st0->'board'->'questions'->'part:ceiling'->>'answer')
+              || ' ' || (st0->'board'->'questions'->'part:ceiling'->'partial')::text
+          from (select aiq.walk_state(r) as st0) z) is distinct from 'wt/7 wt/5 ["wt/7"]' then
+        raise exception 'the answers recorded are %', (select aiq.walk_state(r)->'board'->'questions');
     end if;
     if (select parent || '/' || by || '/' || opened_wave from aiq.walk_stack(r) where wave = 2 and question = 'part:ceiling')
        is distinct from 'root/decider/1' then
