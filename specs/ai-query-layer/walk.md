@@ -912,6 +912,14 @@ thing to find (REM-1244). Two forms come after it.
     rule it is not built. Part three's V0 is the plain walk with the original question. The stack appears in the
     document only as measured: the template parts and this check. This rules out the caller-supplied stack as it
     was tested here, not real sub-questions in general. Those belong to the structured form below.
+  - *How its parts were written:* the check ran before the rule above landed. bill wrote the sub-questions by hand
+    after printing only the question text (no rubric, no answer). A check afterwards found no sub-question sharing a
+    rubric item's distinctive words beyond the question's own; the only overlaps are 'before', 'listing' and 'cost'.
+    A null holds all the more under possible contamination, since copying the rubric could only have helped the
+    parts. A positive result run this way would not have counted (sally, 18:12Z). A fresh subagent given only the
+    four question texts, its prompt recorded, is writing the parts again to meet the rule as written.
+  - *Why it shows no direction* (sally): Jev already reads a multi-part question's parts in the question itself, and
+    taking the best score over several parts adds false positives.
 - **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
   structure.** Each open question is a slot built from closed lists:
   - *subject:* an entity in the graph;
