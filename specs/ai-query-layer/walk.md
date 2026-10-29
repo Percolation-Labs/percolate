@@ -390,8 +390,11 @@ A handful of walks is never the verdict.
     beating search at 1M, if its upper end is below +5; otherwise extend to 80 questions once and apply the same two
     rules, and if neither holds, report "no difference detectable at 10 points" and stop.
     The two rules overlap on an interval wholly inside (0, +5), settled before any data (mike, 15:58Z): the walk
-    beats search at 1M, by less than 5 points, and the document says exactly that. It does not go to 100K and 500K,
-    since that stage is powered for 10 points and would not resolve a gain under 5.
+    read more of the evidence than search at 1M, by between the interval's lower and upper ends, in points at 100
+    reads (95% interval, 40 questions); the document says that, never 'beats search' alone, which reads as larger
+    than the interval allows (sally, 15:57Z). It does not go to 100K and 500K,
+    since that stage is powered for 10 points and would not resolve a gain under 5, and the document says so: no claim
+    about 100K or 500K, which were not run.
   - *S against P, all three outcomes stated now:* (i) the interval lies wholly below +5: V0 ships with the stack off
     by default, recorded as measured; (ii) its lower end is above 0: the stack stays on; (iii) it spans both: the
     stack is **off** by default, as an opt-in the board still shows, since it costs more Jev with nothing measured for
