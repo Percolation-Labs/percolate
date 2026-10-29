@@ -27,7 +27,7 @@ TAG=v0.2.XX                       # the release this tour proves; filled in when
 curl -fsSL "https://raw.githubusercontent.com/Percolation-Labs/get-percolate/$TAG/compose/docker-compose.yml" -o docker-compose.yml
 docker compose up -d --wait
 python3 -m venv .venv && . .venv/bin/activate
-pip install "percolate-core[sample]==0.2.XX"
+pip install "percolate-core[sample,ui]==0.2.XX"
 ```
 
 No key is needed: the embeddings come from bge-small in the stack's own worker, and the walks replay Jev's recorded
@@ -49,14 +49,19 @@ viewer sees under row-level security?).
 The bundle is a release asset of this repository, checked by its sha256 before it is loaded:
 
 ```bash
-curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/beam-walks.tar.gz"
-echo "<sha256>  beam-walks.tar.gz" | sha256sum -c -
-tar xzf beam-walks.tar.gz
+ASSET=beam-walks-v1.tar.gz        # the asset's name and sha256 are set at the release
+curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET"
+echo "<sha256>  $ASSET" | sha256sum -c -
+tar xzf "$ASSET"
 percolate sample load beam-walks
-percolate sample load beam-walks/walks
 percolate walk index --source beam-1m22
 percolate walk index --source beam-1m35
+percolate sample load beam-walks/walks
 ```
+
+The walks load last: their SQL installs the walk workflow, builds each walk's graph for its settings and starts each
+walk offline from Jev's recorded verdicts, so the links must be indexed first (`walk index` is the Python indexer,
+so it is the reader's step, not the bundle's).
 
 What it holds is cory's `harness/bundle.py` output: the two BEAM conversations with their vectors, each question by
 its words only (no answer key in the database), the answer key in `oracle/` for oracle mode, and the walks the
@@ -64,8 +69,18 @@ article shows with Jev's verdicts, so they replay offline.
 
 ## 4. See the walks in the app (to run)
 
-The Walks screen is part of core's UI. To fill in on the run: the address it is served on, how a reader opens it, and
-one screenshot each of a question, its stack, its graph and a finished walk with oracle mode on and off.
+The Walks screen is core's own UI, which the compose stack does not start: the reader starts it.
+
+```bash
+pip install "percolate-core[ui]==0.2.XX"
+export P8_UI_REST_URL=http://localhost:3000 P8_UI_CORE_URL=http://localhost:8080 P8_UI_CONTENT_URL=http://localhost:8081
+percolate ui serve --host 127.0.0.1 --port 8082
+```
+
+Open <http://localhost:8082/#/walks> ('Walks' in the sidebar) and sign in with the token from step 2. A walk is
+readable by the account that ran it, its org and operators; the bundle's walks are started as the first user, so that
+one account sees them. Oracle mode: in a walk, open 'oracle' and choose `beam-walks/oracle/all.json`. To fill in on the
+run: one screenshot each of a question, its stack, its graph and a finished walk with oracle mode off and on.
 
 ## 5. Query it from your own client (to run)
 
