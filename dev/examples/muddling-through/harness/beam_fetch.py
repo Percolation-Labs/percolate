@@ -3,6 +3,12 @@
 
     pip install pyarrow
     python3 harness/beam_fetch.py samples/beam
+    python3 harness/beam_fetch.py samples/beam-cal --split 1M --conversations 2,4,5 --vectors exported.jsonl
+
+With no options it cuts the walkthrough's two conversations, 1M:22 and 1M:35. --split picks BEAM's 100K, 500K, 1M or
+10M release and --conversations any of its conversations (REM-1245: the calibration walks and the sweep need others);
+each file is pinned by revision and sha256 below. --vectors adds files of vectors to match pieces against, as
+vectors.jsonl is matched; a piece with no vector made from its exact text stops the fetch, as before.
 
 A reader runs this: the sample ships no BEAM text, only the vectors the stack's own bge-small gave each piece. It
 downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-SA 4.0, Tavakoli et al., arXiv
@@ -31,9 +37,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03"
-URL = f"https://huggingface.co/datasets/Mohammadta/BEAM/resolve/{REVISION}/data/1M-00000-of-00001.parquet"
-SHA256 = "41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533"
-RUNS = {"22": "beam-1m22", "35": "beam-1m35"}
+# Each split's files at a pinned revision, with their sha256 (Hugging Face's LFS oid). 10M is its own dataset.
+SPLITS = {
+    "100K": ("Mohammadta/BEAM", REVISION, [("100K-00000-of-00001.parquet", "c0519be25907005ba873c927c50877471d550873039d96c041554d0075a78ace")]),
+    "500K": ("Mohammadta/BEAM", REVISION, [("500K-00000-of-00001.parquet", "af05921c979355038e1761b7cde3d2dd713200dd3071b278de0200f6c7f30122")]),
+    "1M": ("Mohammadta/BEAM", REVISION, [("1M-00000-of-00001.parquet", "41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533")]),
+    "10M": ("Mohammadta/BEAM-10M", "9b2096193fe74e2837e4713e483351e19817773c",
+            [("10M-00000-of-00002.parquet", "31d96fd47ec56221d202e68792f26c00e49467dd4b36ee105c36ebd19ef78ad5"),
+             ("10M-00001-of-00002.parquet", "a4f13fe25af51d57405ae41008689c31d1421377f3efde56a024b441deb2ee65")]),
+}
+DEFAULT_SPLIT, DEFAULT_CONVERSATIONS = "1M", ("22", "35")
 CHUNK = 2000
 MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
 # The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
@@ -92,23 +105,40 @@ def exchanges(sessions):
     return pairs, pair_of
 
 
-def main(sample):
-    import ast
+def fetch(split):
+    """The split's rows, every file checked against its pinned sha256."""
     import pyarrow.parquet as pq
+    dataset, revision, files = SPLITS[split]
+    rows = []
+    for name, sha in files:
+        url = f"https://huggingface.co/datasets/{dataset}/resolve/{revision}/data/{name}"
+        with urllib.request.urlopen(url) as r:
+            data = r.read()
+        if hashlib.sha256(data).hexdigest() != sha:
+            sys.exit(f"{url}: sha256 is not {sha}; the release changed under this revision")
+        rows += pq.read_table(io.BytesIO(data)).to_pylist()
+    return rows
+
+
+def main(sample, split=DEFAULT_SPLIT, conversations=DEFAULT_CONVERSATIONS, extra_vectors=()):
+    import ast
     sample = Path(sample)
-    with urllib.request.urlopen(URL) as r:
-        data = r.read()
-    if hashlib.sha256(data).hexdigest() != SHA256:
-        sys.exit(f"{URL}: sha256 is not {SHA256}; the release changed under this revision")
+    if split not in SPLITS:
+        sys.exit(f"--split is one of {', '.join(SPLITS)}, not {split}")
+    runs = {c: f"beam-{split.lower()}{c}" for c in conversations}
     vectors = {}
-    for v in map(json.loads, (sample / "vectors.jsonl").open()):
-        vectors[(v["uri"], v["piece"])] = v
+    for f in [sample / "vectors.jsonl", *map(Path, extra_vectors)]:
+        if f.exists():
+            for v in map(json.loads, f.open()):
+                vectors[(v["uri"], v["piece"])] = v
     texts, qs, matched, pieces = [], [], 0, 0
-    for row in pq.read_table(io.BytesIO(data)).to_pylist():
+    found = set()
+    for row in fetch(split):
         conv = str(row["conversation_id"])
-        if conv not in RUNS:
+        if conv not in runs:
             continue
-        run, channel = f"1M:{conv}", RUNS[conv]
+        found.add(conv)
+        run, channel = f"{split}:{conv}", runs[conv]
         pairs, pair_of = exchanges(row["chat"])
         for i, p in enumerate(pairs):
             uri = f"beam:{run}/{i}"
@@ -141,6 +171,8 @@ def main(sample):
                                "question": q["question"], "gold": [f"beam:{run}/{g}" for g in gold],
                                "answer": q.get("answer") or q.get("ideal_response") or q.get("ideal_answer") or "",
                                "rubric": ast.literal_eval(rubric) if isinstance(rubric, str) else rubric or []})
+    if found != set(runs):
+        sys.exit(f"BEAM {split} has no conversation {', '.join(sorted(set(runs) - found))}")
     if matched == pieces:
         for t in texts:
             t["model"] = "bge-small-en-v1.5"
@@ -162,9 +194,16 @@ def main(sample):
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")
-    print(f"BEAM {REVISION[:12]}, sha256 {SHA256[:12]} checked: {len(texts)} exchanges, {pieces} pieces, "
-          f"{matched} with their vectors, {len(qs)} questions")
+    print(f"BEAM {split} at {SPLITS[split][1][:12]}, sha256 checked: {len(texts)} exchanges in {len(runs)} "
+          f"conversation(s), {pieces} pieces, {matched} with their vectors, {len(qs)} questions")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("sample")
+    ap.add_argument("--split", default=DEFAULT_SPLIT)
+    ap.add_argument("--conversations", default=",".join(DEFAULT_CONVERSATIONS))
+    ap.add_argument("--vectors", nargs="*", default=())
+    a = ap.parse_args()
+    main(a.sample, a.split, tuple(c.strip() for c in a.conversations.split(",") if c.strip()), a.vectors)
