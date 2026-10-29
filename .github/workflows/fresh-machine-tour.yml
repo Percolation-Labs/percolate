@@ -1,8 +1,11 @@
 # The article's fresh-machine tour (dev/examples/muddling-through/TOUR.md), on a runner with nothing installed.
 # Runs the tour's commands in order and keeps each step's output as an artifact. Started by hand for a release:
 #
-#     gh workflow run fresh-machine-tour.yml -R Percolation-Labs/percolate --ref <branch> \
-#         -f tag=v0.2.XX -f core=0.2.XX -f bundle_sha256=<sha>
+#     gh workflow run fresh-machine-tour.yml -R Percolation-Labs/percolate \
+#         -f tag=v0.2.XX -f core=0.2.XX -f bundle=walks-starter.tar.gz -f bundle_sha256=<sha> \
+#         -f samples=walks-starter/smoke -f walks=walks-starter/smoke/walks        # the 5-minute smoke first
+#
+# then the full tour, with samples and walks naming the bundle's own directories.
 #
 # GitHub-hosted on purpose: a new VM each run, so no image, cache or checkout from an earlier one can help.
 name: fresh-machine tour
@@ -13,6 +16,8 @@ on:
       core: {description: "percolate-core version on PyPI", required: true}
       bundle: {description: "the bundle asset's file name on the release", required: true}
       bundle_sha256: {description: "the bundle asset's sha256", required: true}
+      samples: {description: "sample directories to load before indexing, space-separated", required: true}
+      walks: {description: "walk directories to load after indexing, space-separated", required: true}
   push:
     branches: ["tour/**"]
 jobs:
@@ -24,6 +29,8 @@ jobs:
       CORE: ${{ inputs.core }}
       BUNDLE: ${{ inputs.bundle }}
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      SAMPLES: ${{ inputs.samples }}
+      WALKS: ${{ inputs.walks }}
       P8_DSN: postgres://p8:p8@localhost:5432/percolate
     steps:
       - name: nothing is installed
@@ -53,9 +60,12 @@ jobs:
           curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET"
           echo "$BUNDLE_SHA256  $ASSET" | sha256sum -c - | tee ../out/03-fetch.txt
           tar xzf "$ASSET"
-          { percolate sample load beam-walks
-            percolate walk index --source beam-1m22; percolate walk index --source beam-1m35
-            percolate sample load beam-walks/walks; } 2>&1 | tee -a ../out/03-fetch.txt
+          { for d in $SAMPLES; do percolate sample load "$d"; done
+            # the walks index every conversation channel the samples registered, then the walks load (they start
+            # each walk offline from its recorded verdicts, so the links must exist first)
+            for c in $(psql "$P8_DSN" -Atc "select name from content.channels where name like 'beam-%' order by 1"); do
+              percolate walk index --source "$c"; done
+            for d in $WALKS; do percolate sample load "$d"; done; } 2>&1 | tee -a ../out/03-fetch.txt
       - name: 3b. the default embedding model is bge-small, registered once (cory's test could not cover a fresh install)
         run: |
           psql "$P8_DSN" -c "select name, dim, provider, is_default from aiq.embedding_models order by name" | tee out/03b-models.txt
@@ -77,12 +87,12 @@ jobs:
                               where r.replays is not null group by 1 order by 2 desc" | tee out/03d-replays.txt
           test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
                                         where r.replays is not null and c.decision = 'unjudged'")" = 0
-      - name: 3e. every replayed walk says it is faithful (walk_structure's decider.faithful; absent is a failure, not a pass)
+      - name: 3e. every replayed walk says it is faithful (walk_summary's decider.faithful; absent is a failure, not a pass)
         run: |
-          psql "$P8_DSN" -c "select r.run, aiq.walk_structure(r.run)->'decider'->'faithful' as faithful
+          psql "$P8_DSN" -c "select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
                                from aiq.walk_runs r where r.replays is not null order by r.created_at" | tee out/03e-faithful.txt
           test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r where r.replays is not null
-                                        and (aiq.walk_structure(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")" = 0
+                                        and (aiq.walk_summary(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")" = 0
       - name: 4. the Walks screen answers
         run: |
           cd tour && . .venv/bin/activate

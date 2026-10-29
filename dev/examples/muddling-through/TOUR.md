@@ -79,9 +79,9 @@ select status, count(*) from aiq.walk_runs group by 1;
 -- recording, and the replay is partial (bill, 29 Oct); this must be 0
 select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
  where r.replays is not null and c.decision = 'unjudged';
--- and each replayed walk says so itself: walk_structure labels a replay that met leads with no verdict as not
+-- and each replayed walk says so itself: walk_summary labels a replay that met leads with no verdict as not
 -- faithful (bill, 29 Oct); every row here must read true
-select r.run, aiq.walk_structure(r.run)->'decider'->'faithful' as faithful
+select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
   from aiq.walk_runs r where r.replays is not null;
 ```
 
