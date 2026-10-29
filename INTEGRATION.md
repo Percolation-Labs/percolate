@@ -19,6 +19,7 @@ percolationlabs/percolate-postgres:19-integration built from this tree, core fro
 | 29 Oct 04:58Z | percolate#305 tagger + #306 describe via mike's c8/rem-1204-integration (walk_kept(uuid, timestamptz, text) joins timmy's node keying and the describe task) | c1f475ba → 33620e62 | core#145 at 06e084db → 746f83f |
 | 29 Oct 09:25Z | REM-1238 worked examples from the stack's runs: harness/examples.py, blocks/35-examples.sh (timmy). Fast-forward. No expected/35: its output quotes BEAM's answer text, which the repo must not hold, so run.sh checks 35 runs, not its numbers | 6569c45b | |
 | 29 Oct 03:05Z | expected 45/60/70/71 regenerated from run 2: text columns became node summaries; every number unchanged | this commit | |
+| 29 Oct 14:30Z | REM-1245 the walk keeps a board (walk-stack.sql, F8–F14 to mike's spec, settings recorded per run, walk_structure with oracle), plan-index strip with 1,858 pieces re-embedded, step 1 now 21/12 (james) | cfb1ce8d → 5065145a | |
 
 ## Runs from empty
 
@@ -28,6 +29,7 @@ percolationlabs/percolate-postgres:19-integration built from this tree, core fro
 | 29 Oct 01:44Z–03:03Z | 863b914d / core befca31 | PASS, no OOM (VM to itself). Every block ok; setup, step-1 and step-5 checks pass; 20, 30, 40, 50 match expected. 45, 60, 70, 71 differ only where timmy's REM-1233 replaced ids and the budget regex with node summaries; numbers identical; regenerated. 79 min. |
 | 29 Oct 05:00Z–05:47Z | 33620e62 / core 746f83f | PASS, final: everything on REM-1237's list. run.sh exit 0, every block ok, every expected file matches, setup/step-1/step-5 checks pass, no OOM. 47 min. Stack 5801 left up as the one test database. |
 | 29 Oct (timmy, own project timmy-1238 on 5871) | 6569c45b / core 746f83f | PASS: run.sh exit 0, every block ok including 35, every expected file matches. The run from empty for REM-1238's merge. |
+| 29 Oct, ended 14:28Z (james, own project james-land on 5911) | 33e752fb / core 746f83f | PASS: build and run.sh exit 0, every block ok including 35, every expected file matches. The run from empty for REM-1245's merge. cfb1ce8d, merged on top, adds only walk_structure's judged_to_answer, which no block reads; test 48 covers it. |
 | 29 Oct 13:31-14:13Z | 40dfbed1 / core 746f83f (cory's 9a9ddfb8 strip of pieces) | FAILED the expected files, not a block: 30, 50, 70, 71 differ by small shifts; step 1 and step 5 pass. Cause: the plan-index strip changed the stored text, so search's keyword half ranks differently (search's seeds 8-10 reorder on step 1). The keyless setup gate read 0. |
 | 29 Oct 14:17-14:58Z | 70a7d331 / core 746f83f (cory's full strip, 1c884952; the 1,858 changed pieces re-embedded from their stripped text) | Every block ok; the step-1 check FAILED as written: search's own top 500 on step 1 holds 12 of 27, not 15 (the walk still 21). Decided by bill (14:20Z), by principle: the stripped stack is the record, since the walk and search must not read a benchmark artifact. |
 
