@@ -932,7 +932,10 @@ thing to find (REM-1244). Two forms come after it.
     (80 progress, 320 echo, four questions), adding the exact found evidence to the decider's state lifts
     progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004, +0.094]. Nearly all of it is one question,
     1M:13, where the question alone ranked below chance (0.464 → 0.687). A task worded as "not already in what was
-    found" hurts (−0.07 to −0.17). Building B into the walk (step 2) is untested.
+    found" hurts (−0.07 to −0.17). *Step 2, tested* (bill, 18:36Z): when Jev builds B itself, by admitting reads it
+    judges as found evidence, B balloons to 42–72% of the reads, with precision 0.03–0.29 against the labels, and no
+    gate fixes it. So step 1's gain needs a small, exact B that Jev cannot yet build. The next test is a top-k
+    admission rule.
   - *Where the headroom is* (the free replay tests). Of the 194 labelled pieces the oracle read by 100 and P did not,
     80% were behind leads P had accepted and not opened, 10% behind rejected leads only, and 10% had no lead pointing
     at them. Within the accepted set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source read is
