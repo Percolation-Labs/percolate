@@ -44529,7 +44529,8 @@ grant execute on function aiq.walk_cost(uuid, text[]), aiq.walk_cost_curve(uuid[
 -- run's reads, unless given), the same leads a read raises (its terms under walk.cap, the exchanges beside it, its
 -- nearest). It knows the labelled set and nothing else, and opens, from the live leads, the one with the most unread
 -- evidence per unread target; when no live lead reaches unread evidence, the one whose targets lie fewest lead hops from
--- it; with no live lead at all, search's next document. Opening a lead reads all its unread targets, as the walk does.
+-- it; with no live lead at all, search's next document. It reads wave by wave as the walk does: walk.per_wave of
+-- search first in each wave from the second, and a lead live only from the wave after the read that raised it.
 -- Oracle-scored by construction: it is never inside a walk, and every figure it colours says so.
 create or replace function aiq.walk_oracle(p_run uuid, p_labelled text[], p_budget int default null)
 returns table (k int, doc text, via text)
@@ -44557,6 +44558,12 @@ declare
     frontier text[];
     nextf   text[];
     hop     int;
+    wsize   int := coalesce((s->>'wave')::int, 0);
+    pw      int := coalesce((s->>'per_wave')::int, 0);
+    pending jsonb := '{}'::jsonb;   -- {lead key: true} raised this wave, live from the next
+    wn      int := 0;
+    wend    int;
+    fill    int;
 begin
     -- the labelled pieces in the run's scope
     ev := array(select x from unnest(p_labelled) x
@@ -44600,47 +44607,81 @@ begin
         if not readset ? d then
             readset := readset || jsonb_build_object(d, true); n := n + 1;
             out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
-            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
-                                       where not opened ? lk), '{}'::jsonb);
+            pending := pending || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                             where not opened ? lk), '{}'::jsonb);
         end if;
     end loop;
+    -- Wave by wave, as the walk reads (mike, M-20261029-143357-85f1: a ceiling that skips the walk's own search fill
+    -- fell below search): cumulative reads reach wave x walk.wave, wave 0's seeds counting toward wave 1; from wave 2,
+    -- walk.per_wave of search's next unread documents come first; a lead a read raises is live from the next wave, as
+    -- the walk judges a wave's leads before the next reads. Then the oracle's choice among the live leads, reading a
+    -- lead's unread targets until the wave is full; a lead with targets left stays live.
     while n < budget loop
-        -- the best live lead: most unread evidence per unread target, else nearest unread evidence
-        select x.key into best from (
-            select l.key,
-                   count(*) filter (where t = any(ev)) ::real / count(*) as share,
-                   min((select min((dist->t->>u)::int) from unnest(ev) u where not readset ? u and dist->t ? u)) as near
-              from jsonb_each(live) l, jsonb_array_elements_text(leads->l.key) t
-             where not readset ? t
-             group by l.key) x
-         order by x.share desc, x.near nulls last, x.key
-         limit 1;
-        if best is null then
-            -- no live lead: search's next unread document
-            loop
-                exit when si >= jsonb_array_length(ord);
-                d := ord->>si; si := si + 1;
-                exit when not readset ? d;
+        wn := wn + 1;
+        wend := least(budget, case when wsize > 0 then wn * wsize else budget end);
+        live := live || (select coalesce(jsonb_object_agg(pk.key, true), '{}'::jsonb) from jsonb_each(pending) pk
+                          where not opened ? pk.key);
+        pending := '{}'::jsonb;
+        if wn > 1 then
+            fill := 0;
+            while fill < pw and n < wend loop
                 d := null;
+                loop
+                    exit when si >= jsonb_array_length(ord);
+                    d := ord->>si; si := si + 1;
+                    exit when not readset ? d;
+                    d := null;
+                end loop;
+                exit when d is null;
+                readset := readset || jsonb_build_object(d, true); n := n + 1; fill := fill + 1;
+                out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
+                pending := pending || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                                 where not opened ? lk), '{}'::jsonb);
             end loop;
-            exit when d is null;
-            readset := readset || jsonb_build_object(d, true); n := n + 1;
-            out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
-            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
-                                       where not opened ? lk), '{}'::jsonb);
-            continue;
         end if;
-        opened := opened || jsonb_build_object(best, true);
-        live := live - best;
-        for d in select t from jsonb_array_elements_text(leads->best) t where not readset ? t loop
-            exit when n >= budget;
-            continue when readset ? d;   -- a target a lead lists twice is read once
-            readset := readset || jsonb_build_object(d, true); n := n + 1;
-            out := out || jsonb_build_array(jsonb_build_array(n, d, best));
-            live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
-                                       where not opened ? lk), '{}'::jsonb);
+        while n < wend loop
+            -- the best live lead: most unread evidence per unread target, else nearest unread evidence
+            best := null;
+            select x.key into best from (
+                select l.key,
+                       count(*) filter (where t = any(ev)) ::real / count(*) as share,
+                       min((select min((dist->t->>u)::int) from unnest(ev) u where not readset ? u and dist->t ? u)) as near
+                  from jsonb_each(live) l, jsonb_array_elements_text(leads->l.key) t
+                 where not readset ? t
+                 group by l.key) x
+             order by x.share desc, x.near nulls last, x.key
+             limit 1;
+            if best is null then
+                -- no live lead with an unread target: search's next unread document
+                d := null;
+                loop
+                    exit when si >= jsonb_array_length(ord);
+                    d := ord->>si; si := si + 1;
+                    exit when not readset ? d;
+                    d := null;
+                end loop;
+                exit when d is null;
+                readset := readset || jsonb_build_object(d, true); n := n + 1;
+                out := out || jsonb_build_array(jsonb_build_array(n, d, 'search'));
+                pending := pending || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                                 where not opened ? lk), '{}'::jsonb);
+                continue;
+            end if;
+            opened := opened || jsonb_build_object(best, true);
+            for d in select t from jsonb_array_elements_text(leads->best) t loop
+                exit when n >= wend;
+                continue when readset ? d;   -- a target a lead lists twice is read once
+                readset := readset || jsonb_build_object(d, true); n := n + 1;
+                out := out || jsonb_build_array(jsonb_build_array(n, d, best));
+                pending := pending || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
+                                                 where not opened ? lk), '{}'::jsonb);
+            end loop;
+            if not exists (select 1 from jsonb_array_elements_text(leads->best) t where not readset ? t) then
+                live := live - best;
+            end if;
         end loop;
-        best := null;
+        -- nothing left to read anywhere
+        exit when n < wend and best is null and d is null;
     end loop;
     return query select (x->>0)::int, x->>1, x->>2 from jsonb_array_elements(out) x;
 end;
