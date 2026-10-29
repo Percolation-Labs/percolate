@@ -34,6 +34,7 @@ const CONFIG = {
   content: localStorage.getItem("p8-content") || "",
   devToken: true,          // until the server says otherwise; see loadConfig
   devSecret: "",           // never a default: the deployment supplies it or nobody does
+  devUser: "",             // the development sign-in's user, when the deployment names one
   served: false,
 };
 
@@ -48,6 +49,7 @@ export async function loadConfig() {
     CONFIG.served = true;
     CONFIG.devToken = !!c.dev_token;
     CONFIG.devSecret = c.dev_secret || "";
+    CONFIG.devUser = c.dev_user || "";
     // A stored override is a decision somebody made in this browser and wins.
     /* Served, the server's answer is authoritative EVEN WHEN EMPTY. An earlier
        version only took `c.core` when it was truthy, so a deployment saying

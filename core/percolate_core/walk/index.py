@@ -5,12 +5,15 @@ search and then follows clues between documents: a word run two documents
 share, the document said just after this one, the documents nearest in
 meaning. This writes those clues as edges, once per source, BY CONSTRUCTION:
 each one is a fact about the stored text or its vectors, never a model's
-verdict, so the weight is 1 and the provenance says how it was derived.
+verdict, so the weight is 1 and the provenance says how it was derived. A
+tagging strategy may run a fixed model over the text (spaCy's entities), but
+it never sees a question, and the term says which strategy found it.
 
     walk_term     document -> document   both hold a term (terms.py); provenance
-                                         {"terms": [{"term", "n", "rank"}]}, n
-                                         documents hold it and rank is its place
-                                         in the source's term list
+                                         {"terms": [{"term", "n", "rank", "by"}]},
+                                         n documents hold it, rank is its place
+                                         in the source's term list and by names
+                                         the tagging strategies that found it
     walk_next     document -> document   the next one said in the same sitting;
                                          provenance {"sitting", "pos"}
     walk_nearest  document -> document   one of the source's k nearest by
@@ -35,6 +38,11 @@ from metadata {"sitting", "position"}; a document without them has no
 walk_next edge. Its vector is the unit mean of its chunks' vectors in the
 default embedding space -- the study's mean vectors.
 
+WHAT IT READS FROM aiq.parameters (part `index`): which tagging strategies run
+(index.strategies), each one's limits (terms.limits_from), and how many
+nearest documents to link (index.nearest). The report names the strategies
+that ran, so a walk's result can say which tagger built its store.
+
 IDEMPOTENT, AND RETRACTS RATHER THAN DELETES. A second run upserts what it
 derives and sets valid_to on any walk edge among these documents that it no
 longer derives, as aiq.edges asks of a derivation.
@@ -43,6 +51,7 @@ longer derives, as aiq.edges asks of a derivation.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from . import terms as T
@@ -53,6 +62,8 @@ RELATIONS = [
     ("walk_nearest", "one of the source document's nearest in meaning; provenance {rank, sim} (REM-1201)"),
 ]
 NEAREST = 10
+
+log = logging.getLogger(__name__)
 
 
 async def documents(conn: Any, channel: str) -> list[dict[str, Any]]:
@@ -79,9 +90,16 @@ async def documents(conn: Any, channel: str) -> list[dict[str, Any]]:
     return out
 
 
-def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR,
-               df_share: float = T.DF_SHARE) -> dict[tuple, dict]:
-    postings = T.fit([d["text"] for d in docs], df_floor=df_floor, df_share=df_share)
+def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR, df_share: float = T.DF_SHARE,
+               strategies: tuple[str, ...] = ("frequency",), limits: dict[str, dict[str, Any]] | None = None
+               ) -> dict[tuple, dict]:
+    """walk_term edges from the strategies named. df_floor and df_share are the frequency strategy's cap; `limits`
+    (terms.limits_from) carries every strategy's, and wins."""
+    lim = {"frequency": {"df_floor": df_floor, "df_share": df_share}}
+    for s, v in (limits or {}).items():
+        lim[s] = {**lim.get(s, {}), **v}
+    tags = T.tag([d["text"] for d in docs], strategies, lim)
+    postings = {t: v["docs"] for t, v in tags.items()}
     rank = {i: {t: r for r, t in enumerate(ts)} for i, ts in T.terms_of(postings).items()}
     out: dict[tuple, dict] = {}
     for t, ix in postings.items():
@@ -89,7 +107,7 @@ def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR,
             for b in ix:
                 if a != b:
                     e = out.setdefault((docs[a]["node"], docs[b]["node"]), {"terms": []})
-                    e["terms"].append({"term": t, "n": len(ix), "rank": rank[a][t]})
+                    e["terms"].append({"term": t, "n": len(ix), "rank": rank[a][t], "by": tags[t]["by"]})
     for e in out.values():
         e["terms"].sort(key=lambda x: x["rank"])
     return out
@@ -192,12 +210,27 @@ async def parameters(conn: Any) -> dict[str, Any]:
     return json.loads(p) if isinstance(p, str) else (p or {})
 
 
+async def keep_graph(conn: Any, channel: str) -> str | None:
+    """Keep the channel's walk graph as a document (aiq.walk_index), so a walk started over these links records it and
+    is read from it afterwards, whatever the links later become (percolate#316). Its uri, or None on a database that
+    predates aiq.walk_index. The document is for the walk's default settings; a walk that sets its own span or near
+    count reads a graph of its own."""
+    if not await conn.fetchval("select to_regprocedure('aiq.walk_index(jsonb,text)') is not null"):
+        return None
+    try:
+        return await conn.fetchval("select aiq.walk_index(jsonb_build_object('channel', $1::text))->>'uri'", channel)
+    except Exception as e:  # an extension before percolate#316 has no walk-graphs channel; the links are written
+        log.warning("walk index: the graph was not kept for %s: %s", channel, e)
+        return None
+
+
 async def index(conn: Any, channel: str, k: int | None = None) -> dict[str, Any]:
     """Build every walk relation for one channel's documents, in one transaction. k, the nearest count and the term
     fit's cap come from aiq.parameters' index rows; an explicit k wins over the table."""
     p = await parameters(conn)
     k = int(p.get("nearest", NEAREST)) if k is None else k
     df_floor, df_share = int(p.get("df_floor", T.DF_FLOOR)), float(p.get("df_share", T.DF_SHARE))
+    strategies = T.strategies_from(p.get("strategies"))
     docs = await documents(conn, channel)
     if not docs:
         raise RuntimeError(f"channel {channel!r} has no ingested documents -- load them, wait for ingestion, then index")
@@ -210,11 +243,15 @@ async def index(conn: Any, channel: str, k: int | None = None) -> dict[str, Any]
                 " on conflict (src_type, relation, dst_type) do update set description = excluded.description",
                 relation, description)
         built = {
-            "walk_term": term_edges(docs, df_floor, df_share),
+            "walk_term": term_edges(docs, df_floor, df_share, strategies, limits := T.limits_from(p)),
             "walk_next": next_edges(docs),
             "walk_nearest": await nearest_edges(conn, docs, k),
         }
-        report = {"documents": len(docs), "nearest": k, "df_floor": df_floor, "df_share": df_share}
+        report = {"documents": len(docs), "nearest": k, "strategies": list(strategies), "df_floor": df_floor,
+                  "df_share": df_share}
+        if (made_by := T.provenance(strategies, limits)) is not None:
+            report["spacy"] = made_by
         for relation, edges in built.items():
             report[relation] = await write(conn, relation, edges, nodes)
+    report["graph"] = await keep_graph(conn, channel)
     return report
