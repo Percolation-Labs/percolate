@@ -251,6 +251,15 @@ The first of these, recorded by the run's `stop` (Sirsh, F1):
 - **cold:** the last wave accepted none of the leads it raised **and** no accepted lead is still open: `walk_audit`'s
   certificate (REM-1211) as a stop. A walk with accepted leads still unopened keeps going.
 
+**As built, two limits** (REM-1244, from the code, 29 Oct):
+- **Cold stops only a stack walk.** The code applies it only under `walk.stack`. A plain walk has no cold stop and
+  reads on to its budget, through its open leads and search's order. In the pilot that is where S − P comes from.
+  Past S's own stop, P found 16 more labelled pieces, 14 of them through its leads.
+- **A root with no parts never closes in V0.** It is a leaf, and with `stack.state_gate` unset no line closes it.
+  So "stack empty" cannot stop a walk that opened no part, and such a walk ends at the budget, dry, or cold.
+- `stack.close_gate` (0.7) belongs to the holistic close this section retired. `walk_stack_next` fetches it and no
+  code reads it. Its row is marked unused, or removed, in the first percolate change after tonight's release.
+
 ## 9. The walk structure: a first-class queryable object
 
 Everything a person, a UI or an LLM sees of a walk comes from these functions over the run's rows, through the query
@@ -453,6 +462,13 @@ A handful of walks is never the verdict.
   - *Conversations:* 16 of the 39 sit in 12 conversations the pilot did not load (1M:1, 6, 8, 10, 11, 14, 15, 16, 17,
     18, 22, 29). They hold about 12,500 exchanges, so the database grows by about 0.7–0.8 GB (by the pilot's own
     1,347 MB for 22,745 exchanges). Their pieces are embedded by the stack's worker, which costs no Jev.
+  - *Reported beside the result, not part of its rule* (sally and bill, 17:56Z). About half of every walk's reads
+    are search's order by design: from wave 2 each wave takes `walk.per_wave` of search's next documents first, and
+    the walk falls back on search when its accepted leads run out. So P − search is partly search against itself.
+    For each question at 100 reads: the labelled pieces P read through leads and through search's order (from
+    `walk_reads`' via), the same split for the oracle, and P − search counting the walk's lead reads only. If P's
+    lead over search comes mostly through the fill, the document says so. In the pilot's 40, P's labelled pieces by
+    100 reads came 86 through leads and 83 through search.
   - *Keys:* 8 of the 39 are knowledge_update questions. Each key is checked against its conversation before
     scoring, and one in group B or C is scored both ways.
 - **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
