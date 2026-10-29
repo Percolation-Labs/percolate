@@ -59,13 +59,13 @@ create or replace function aiq.walk_stack_boards(p_run uuid)
 returns setof jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    b   jsonb := aiq.walk_stack_initial((select input from workflow.runs where id = p_run));
+    b   jsonb := aiq.walk_stack_initial((select input from aiq.walk_run(p_run)));
     rec jsonb;
     m   jsonb;
     x   jsonb;
 begin
     for rec in select tk.output->'result'->0->'state'
-                 from workflow.tasks tk
+                 from aiq.walk_tasks(p_run) tk
                 where tk.run_id = p_run and tk.step_key like 'stack\_%' and tk.status = 'succeeded'
                   and jsonb_typeof(tk.output->'result'->0->'state') = 'object'
                 order by (tk.output->'result'->0->'state'->>'iteration')::int loop
@@ -153,9 +153,11 @@ create or replace function aiq.walk_stack_next(p_run uuid, p_state jsonb)
 returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    inp     jsonb := (select input from workflow.runs where id = p_run);
+    inp     jsonb := (select input from aiq.walk_run(p_run));
     s       jsonb := p_state->'settings';
-    sp      jsonb := aiq.parameters_of('stack');
+    sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
+                                                         'stale_waves', 'max_open', 'max_displace', 'candidates',
+                                                         'evidence_lines', 'part_wording', 'split_gate']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -347,7 +349,7 @@ create or replace function aiq.walk_stack_requests(p_run uuid, p_phase text, p_d
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    inp jsonb := (select input from workflow.runs where id = p_run);
+    inp jsonb := (select input from aiq.walk_run(p_run));
     st  jsonb;
     nx  jsonb;
     d   claims.deciders;
@@ -362,6 +364,7 @@ begin
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
+    perform aiq.parameters_need('decider', array['task_assess', 'task_close', 'task_split', 'request_bytes']);
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
@@ -406,7 +409,7 @@ create or replace function aiq.walk_stack_move(p_run uuid)
 returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    inp jsonb := (select input from workflow.runs where id = p_run);
+    inp jsonb := (select input from aiq.walk_run(p_run));
 begin
     if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) then
         return null;
@@ -441,7 +444,7 @@ returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with gr as materialized (
         select aiq.walk_run_graph(p_run) as g, (aiq.walk_settings(r.input)->>'cap')::int as cap
-          from workflow.runs r where r.id = p_run
+          from aiq.walk_run(p_run) r
     ), hops as materialized (
         -- what one lead out of a document reaches: its terms' postings under the cap, its sitting, its nearest
         select d.key as doc, o #>> '{}' as other
@@ -489,7 +492,7 @@ create or replace function aiq.walk_structure(p_run uuid, p_oracle text[] defaul
 returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    inp     jsonb := (select input from workflow.runs where id = p_run);
+    inp     jsonb := (select input from aiq.walk_run(p_run));
     st      jsonb := aiq.walk_state(p_run);
     board   jsonb;
     lines   jsonb;
@@ -528,7 +531,7 @@ begin
         'evidence', board->'evidence',
         'boards', (select coalesce(jsonb_agg(tk.output->'result'->0->'state'->'moves'
                                              order by (tk.output->'result'->0->'state'->>'iteration')::int), '[]'::jsonb)
-                     from workflow.tasks tk
+                     from aiq.walk_tasks(p_run) tk
                     where tk.run_id = p_run and tk.step_key like 'stack\_%' and tk.status = 'succeeded'
                       and jsonb_typeof(tk.output->'result'->0->'state') = 'object'),
         'reads', reads,
@@ -552,7 +555,7 @@ begin
             'jev', (select jsonb_build_object('requests', count(*), 'model', min(t.output->'result'->>'model'),
                                               'input_tokens', coalesce(sum((t.output->'result'->'usage'->>'input_tokens')::bigint), 0),
                                               'output_tokens', coalesce(sum((t.output->'result'->'usage'->>'output_tokens')::bigint), 0))
-                      from workflow.tasks t
+                      from aiq.walk_tasks(p_run) t
                      where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
                        and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'))));
     if p_oracle is not null then
@@ -598,7 +601,7 @@ create or replace function aiq.walk_keep_stack(p_run uuid)
 returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
 declare
-    inp   jsonb := (select input from workflow.runs where id = p_run);
+    inp   jsonb := (select input from aiq.walk_run(p_run));
     st    jsonb;
     board jsonb;
     g     jsonb;
@@ -670,7 +673,7 @@ create or replace function aiq.walk_clue_texts(p_run uuid, p_describe text defau
 returns table (key text, text text, state_line text)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with st as materialized (select aiq.walk_state(p_run) as st),
-    inp as materialized (select input from workflow.runs where id = p_run),
+    inp as materialized (select input from aiq.walk_run(p_run)),
     g as materialized (select aiq.walk_run_graph(p_run) as g),
     c as materialized (select x.key, x.value from st, jsonb_each(st.st->'clues') x
                        union all
@@ -689,3 +692,15 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by c.key
 $$;
 grant execute on function aiq.walk_clue_texts(uuid, text) to authenticated;
+
+-- A walk's readers, executable by whoever may read the run (walk.md §9: everything a person or UI sees comes through
+-- these, signed in as themselves). Each reads the run through aiq.walk_run / aiq.walk_tasks, so the grant gives no
+-- run the caller could not already read. Named here, after walk.sql and walk-why.sql, because some had no grant and
+-- worked only while PUBLIC kept execute, which the build revokes at the end: cory's UI, signed in on 5801, was
+-- refused walk_state_reads, walk_state_waves and parameters_of. walk_coverage, walk_why and walk_audit serve oracle
+-- mode, whose labels the caller passes in.
+grant execute on function aiq.walk_state_reads(jsonb), aiq.walk_state_clues(jsonb), aiq.walk_state_waves(jsonb),
+                          aiq.walk_describe_clue(jsonb, jsonb, text, text, text, text, text, jsonb, text),
+                          aiq.walk_clue_text(uuid, text, text), aiq.walk_audit(uuid), aiq.walk_why(uuid, text[]),
+                          aiq.walk_coverage(uuid, text[], integer[])
+    to authenticated;

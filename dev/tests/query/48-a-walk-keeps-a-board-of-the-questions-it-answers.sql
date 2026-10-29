@@ -157,7 +157,40 @@ begin
        or (select count(*) from aiq.walk_stack(m)) <> 1 then
         raise exception 'a walk with the stack off kept a board';
     end if;
+    -- a parameter row the stack reads is missing: the walk fails, naming it, rather than silently linking nothing (bill)
+    delete from aiq.parameters where name = 'stack.link_floor';
+    m := workflow.start_workflow('walk_fixture_stack', inp);
+    if (select status from workflow.runs where id = m) is distinct from 'failed'
+       or not exists (select 1 from workflow.tasks where run_id = m and status = 'failed'
+                                                    and error::text like '%stack.link_floor%') then
+        raise exception 'a stack walk with no stack.link_floor row did not fail naming it: %',
+            (select string_agg(step_key || ' ' || status || ' ' || coalesce(error::text, ''), '; ')
+               from workflow.tasks where run_id = m and status not in ('succeeded', 'skipped'));
+    end if;
     raise notice 'query/48: a stack walk links, opens, closes and stops answered, and its board is rows a reader queries';
 end $$;
+
+-- A walk's readers run as the signed-in caller: one whom the run's policy admits reads it, a stranger is refused.
+update workflow.runs set owner_id = (select id from rbac.users order by id limit 1), visibility = 'private'
+ where workflow_def_id in (select id from workflow.definitions where name = 'walk_fixture_stack');
+select set_config('request.jwt.claims', json_build_object('sub', (select id from rbac.users order by id limit 1), 'role', 'authenticated')::text, true);
+set local role authenticated;
+do $$
+begin
+    if (select count(*) from aiq.walk_stack((select run from aiq.walk_runs where question_text = 'the ladder' order by created_at limit 1))) = 0 then
+        raise exception 'the run''s owner, signed in, cannot read its board';
+    end if;
+end $$;
+reset role;
+select set_config('request.jwt.claims', '{"sub": "00000000-0000-4000-8000-000000000001", "role": "authenticated"}', true);
+set local role authenticated;
+do $$
+begin
+    if exists (select 1 from aiq.walk_runs where question_text = 'the ladder') then
+        raise exception 'a stranger, signed in, lists a walk that is not theirs';
+    end if;
+    raise notice 'query/48: a walk''s owner reads it signed in, and a stranger sees none of it';
+end $$;
+reset role;
 
 rollback;
