@@ -17,6 +17,7 @@ on:
       bundle: {description: "the bundle asset's file name on the release", required: true}
       bundle_sha256: {description: "the bundle asset's sha256", required: true}
       bundle_url: {description: "where the bundle is published, if not the percolate release of this tag", required: false, default: ""}
+      expect_partial: {description: "replays (external ids, space-separated) known to report partial because the recording itself left leads unjudged", required: false, default: ""}
       samples: {description: "sample directories to load before indexing, space-separated", required: true}
       walks: {description: "walk directories to load after indexing, space-separated", required: true}
 jobs:
@@ -29,6 +30,7 @@ jobs:
       BUNDLE: ${{ inputs.bundle }}
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
       BUNDLE_URL: ${{ inputs.bundle_url }}
+      EXPECT_PARTIAL: ${{ inputs.expect_partial }}
       SAMPLES: ${{ inputs.samples }}
       WALKS: ${{ inputs.walks }}
       P8_DSN: postgres://p8:p8@localhost:5432/percolate
@@ -108,10 +110,19 @@ jobs:
                               group by r.run, c.wave order by r.run, c.wave" | tee out/03d-unjudged-by-wave.txt
       - name: 3e. every replayed walk says it is faithful (walk_summary's decider.faithful; absent is a failure, not a pass)
         run: |
-          psql "$P8_DSN" -c "select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
-                               from aiq.walk_runs r where r.replays is not null order by r.created_at" | tee out/03e-faithful.txt
-          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r where r.replays is not null
-                                        and (aiq.walk_summary(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")" = 0
+          # A replay of a walk whose stop fired before it judged its last raised leads (the stack's stale stop)
+          # reports partial although it reproduces the recording exactly (cory, 29 Oct: 1M:20's two S walks).
+          # Those are named in expect_partial and printed apart; any other replay that is not faithful fails.
+          q="select v.external_id as replay, r.run, s->'faithful' as faithful, s->'unjudged' as unjudged
+               from aiq.walk_runs r cross join lateral (select aiq.walk_summary(r.run)->'decider' as s) d
+               join content.resources v on v.id::text = r.replays::text
+              where r.replays is not null"
+          psql "$P8_DSN" -c "$q order by v.external_id" | tee out/03e-faithful.txt
+          bad=$(psql "$P8_DSN" -Atc "select v.external_id from aiq.walk_runs r join content.resources v on v.id::text = r.replays::text
+                                      where r.replays is not null
+                                        and (aiq.walk_summary(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")
+          unexpected=""; for x in $bad; do case " $EXPECT_PARTIAL " in *" $x "*) echo "partial, expected: $x" | tee -a out/03e-faithful.txt;; *) unexpected="$unexpected $x";; esac; done
+          [ -z "$unexpected" ] || { echo "not faithful, and not expected:$unexpected" | tee -a out/03e-faithful.txt; exit 1; }
       - name: 4. the Walks screen answers
         run: |
           cd tour && . .venv/bin/activate
