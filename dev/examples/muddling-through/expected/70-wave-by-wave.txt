@@ -1,15 +1,15 @@
- rank |      doc       | ev |                             said                             
-------+----------------+----+--------------------------------------------------------------
-    1 | beam:1M:35/249 |    | Can you help me come up with some conversation starters for 
-    2 | beam:1M:35/250 |    | These conversation starters sound great! I'll definitely use
-    3 | beam:1M:35/871 |    | What are some tips for enjoying heartfelt conversations with
-    4 | beam:1M:35/385 |    | Sure, let's focus on incorporating Steven's grandmother's tr
-    5 | beam:1M:35/763 |    | What are some good stories to share during meal prep like I 
-    6 | beam:1M:35/872 |    | What are some tips for enjoying heartfelt conversations with
-    7 | beam:1M:35/237 |    | Can you give me some advice on how to manage holiday stress,
-    8 | beam:1M:35/94  |    | Are there any other ways I can make the Christmas Eve dinner
-    9 | beam:1M:35/82  |    | I'm kinda worried about sharing stories about my mother's Ch
-   10 | beam:1M:35/986 |    | How can I incorporate more Turkish holiday customs, like "No
+ rank | ev |                                            said                                            
+------+----+--------------------------------------------------------------------------------------------
+    1 |    | BEAM 1M:35, exchange 249: Can you help me come up with some conversation starters for the 
+    2 |    | BEAM 1M:35, exchange 250: These conversation starters sound great! I'll definitely use the
+    3 |    | BEAM 1M:35, exchange 871: What are some tips for enjoying heartfelt conversations with fam
+    4 |    | BEAM 1M:35, exchange 385: Sure, let's focus on incorporating Steven's grandmother's tradit
+    5 |    | BEAM 1M:35, exchange 763: What are some good stories to share during meal prep like I enjo
+    6 |    | BEAM 1M:35, exchange 872: What are some tips for enjoying heartfelt conversations with fam
+    7 |    | BEAM 1M:35, exchange 237: Can you give me some advice on how to manage holiday stress, I f
+    8 |    | BEAM 1M:35, exchange 94: Are there any other ways I can make the Christmas Eve dinner more
+    9 |    | BEAM 1M:35, exchange 82: I'm kinda worried about sharing stories about my mother's Christm
+   10 |    | BEAM 1M:35, exchange 986: How can I incorporate more Turkish holiday customs, like "Noel B
 (10 rows)
 
              key             | kind | leads_to |  p   | decision 
