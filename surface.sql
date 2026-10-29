@@ -357,6 +357,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_reads','uuid','walk.sql: a walk''s reads, one row each (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_search_order','uuid','walk.sql: search''s own order for a walk''s question (REM-1210)'),
 ('ai-query-layer','function','aiq.walk_clues','uuid','walk.sql: a walk''s clues with P, decision and state at the stop (REM-1210)'),
+('ai-query-layer','function','aiq.walk_oracle','uuid, text[], integer','walk-stack.sql: the oracle decider''s reads on a run''s own graph, seeds and budget, the ceiling of walk.md §11 (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_run','uuid','walk.sql: a walk''s run row, for an operator or a caller workflow.may_access_run admits (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_tasks','uuid','walk.sql: a walk''s task rows, under the same predicate as walk_run (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_runs_visible','','walk.sql: every walk the caller may read, behind aiq.walk_runs (REM-1245)'),
