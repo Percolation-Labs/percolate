@@ -117,9 +117,11 @@ V0 walks documents. Claims are nodes of the graph, but no lead runs through them
 
 A decider judges only what it is shown. Under `walk.describe = source`, a lead is described by the read it comes out
 of. Every lead out of one read then shows the same text, and Jev is blind within a read: within-source AUC 0.549
-(REM-1240). Shown the targets' own text, Jev's AUC rises from 0.644 to 0.768. That is the mean per-question AUC, waves 1–3, over
-2,464 clues of 156 buried questions, each re-judged by Jev under several descriptions (REM-1204's recorded re-judge,
-re-scored in REM-1240). REM-1240's step 3, the paired within-source re-judge of `lines`, is not yet in.
+on the 122 questions (2,952 mixed groups, 21,438 leads; REM-1240's interim). Step 3's within-source result for
+`lines`, on its own 300 mixed sources, is below. Across sources as well as within them, shown the targets' own text,
+Jev's mean per-question AUC rises from 0.644 to 0.768 (waves 1–3, 2,464 clues of 156 buried questions, each
+re-judged under several descriptions; REM-1204's recorded re-judge, re-scored in REM-1240). That figure is the
+easier, between-source one, so it is not comparable with the within-source 0.657 below.
 
 So a lead's description is assembled from information attached **at graph construction**, never computed per walk:
 
@@ -145,6 +147,9 @@ stored, and about 40 tokens a target at judge time.
 - **Place in its sitting.** Free, and on BEAM it separates evidence (AUC 0.74 / 0.70, inverted), but it measures
   BEAM's generator. BEAM's chunks keep a plan index (sitting n, step m), which tracks position at r = 0.86–0.99, and
   evidence falls in plan steps 1–12 (21–27%) against 6–8% after. No unplanned conversation has that schedule.
+  The plan index is no longer in what ships: the BEAM fetcher strips all three forms of it from chunk text (percolate
+  main), and before the strip Jev showed no use of it, a P difference of −0.005 [−0.015, +0.006] (Appendix C). The
+  point stands as the reason place is left out of the description.
 - **A model-written gist per exchange.** About $0.19 per 1M conversation. Not needed for V0: on 1M:35 eo:0, 27 of 27
   evidence exchanges name their aspect in the user's own line, none only in the reply.
 - **The term in its target's context.** The term is already in the targets' lines for 46 of 49 term leads toward
