@@ -189,7 +189,7 @@ def main():
     keep = keep_q
     walks = [{"run": r["run"], "label": ARMS.get(r.get("arm"), r.get("arm") or "walk"), "qid": r["qid"], "arm": r.get("arm")}
              for r in jsonl(args.runs) if keep is None or r["qid"] in keep] if args.runs else []
-    if keep is not None and {w["qid"] for w in walks} != keep:
+    if keep is not None and args.runs and {w["qid"] for w in walks} != keep:
         sys.exit(f"--questions names qids with no run: {sorted(keep - {w['qid'] for w in walks})}")
     n_walks = export_walks(args.dsn, walks, root / "walks") if walks else 0
     (root / "CONTENTS.json").write_text(json.dumps({
