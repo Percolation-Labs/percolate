@@ -36,7 +36,7 @@ docker compose down -v --remove-orphans > /dev/null 2>&1
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
 # No pip cache: a core installed from a local path keeps its version number between builds, and a cached wheel of
 # that version would be installed in place of the tree it names (cory, 27 Oct).
-python3 -m venv .venv > /dev/null && . .venv/bin/activate && PIP_NO_CACHE_DIR=1 pip -q install "$CORE" > /dev/null 2>&1
+python3 -m venv .venv > /dev/null && . .venv/bin/activate && PIP_NO_CACHE_DIR=1 pip -q install "$CORE" matplotlib > /dev/null 2>&1
 export P8_ADMIN_DSN=postgres://p8:p8@localhost:$PG/percolate P8_DSN=postgres://p8:p8@localhost:$PG/percolate
 export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
 # A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.

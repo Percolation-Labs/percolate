@@ -1,0 +1,92 @@
+{
+ "1M:22:multi_session_reasoning:1": [
+  {
+   "item": "Tools and budget (sitting 1)",
+   "docs": [
+    "beam:1M:22/73",
+    "beam:1M:22/78",
+    "beam:1M:22/82",
+    "beam:1M:22/83"
+   ]
+  },
+  {
+   "item": "The 3-metre ladder (sitting 2)",
+   "docs": [
+    "beam:1M:22/147",
+    "beam:1M:22/151"
+   ]
+  },
+  {
+   "item": "Moving the vanity with Don (sitting 3)",
+   "docs": [
+    "beam:1M:22/266",
+    "beam:1M:22/271",
+    "beam:1M:22/278"
+   ]
+  }
+ ],
+ "1M:35:event_ordering:0": [
+  {
+   "rubric": 0,
+   "docs": [
+    "beam:1M:35/15"
+   ]
+  },
+  {
+   "rubric": 1,
+   "docs": [
+    "beam:1M:35/16",
+    "beam:1M:35/21"
+   ]
+  },
+  {
+   "rubric": 2,
+   "docs": [
+    "beam:1M:35/177",
+    "beam:1M:35/178",
+    "beam:1M:35/188",
+    "beam:1M:35/279",
+    "beam:1M:35/281",
+    "beam:1M:35/284"
+   ]
+  },
+  {
+   "rubric": 3,
+   "docs": [
+    "beam:1M:35/383",
+    "beam:1M:35/387",
+    "beam:1M:35/388",
+    "beam:1M:35/389",
+    "beam:1M:35/394"
+   ]
+  },
+  {
+   "rubric": 4,
+   "docs": [
+    "beam:1M:35/490",
+    "beam:1M:35/496",
+    "beam:1M:35/497",
+    "beam:1M:35/498"
+   ]
+  },
+  {
+   "rubric": 5,
+   "docs": [
+    "beam:1M:35/591",
+    "beam:1M:35/594",
+    "beam:1M:35/597",
+    "beam:1M:35/702",
+    "beam:1M:35/708",
+    "beam:1M:35/810"
+   ]
+  },
+  {
+   "rubric": 6,
+   "docs": [
+    "beam:1M:35/895",
+    "beam:1M:35/898",
+    "beam:1M:35/900"
+   ]
+  }
+ ]
+}

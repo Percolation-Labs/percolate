@@ -13,7 +13,8 @@ downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-S
                         sitting, the place in the conversation and the date said. `terms_text` is the user's words
                         with BEAM's trailing '->-> n,m' plan index removed: what the walk tags. Each piece gets its
                         vector from vectors.jsonl only if the piece's sha256 is the one that vector was made from.
-  questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys.
+  questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys, and
+                        BEAM's reference answer and rubric, which harness/examples.py sets the walk's reads against.
   question-texts.jsonl  each question stored by uri question:<qid>, so SQL finds it. Not its answer key: that stays
                         in questions.jsonl, which harness/labels.py hands to the evaluation functions (REM-1231).
 
@@ -127,8 +128,13 @@ def main(sample):
             for n, q in enumerate(items):
                 gold = sorted({pair_of[i] for i in ints(q.get("source_chat_ids")) if i in pair_of})
                 if gold:
+                    # BEAM's reference answer and rubric ride with the answer key, for harness/examples.py: like
+                    # the key, they stay in this file and never enter the database (questions.py does not copy them).
+                    rubric = q.get("rubric")
                     qs.append({"qid": f"{run}:{qtype}:{n}", "channel": channel, "type": qtype,
-                               "question": q["question"], "gold": [f"beam:{run}/{g}" for g in gold]})
+                               "question": q["question"], "gold": [f"beam:{run}/{g}" for g in gold],
+                               "answer": q.get("answer") or q.get("ideal_response") or q.get("ideal_answer") or "",
+                               "rubric": ast.literal_eval(rubric) if isinstance(rubric, str) else rubric or []})
     if matched == pieces:
         for t in texts:
             t["model"] = "bge-small-en-v1.5"
