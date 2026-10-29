@@ -42788,6 +42788,7 @@ declare
     -- content.resources, which has no index on uri; at 2,281 rows walk_start took over two minutes, past run_sql's
     -- 30 s statement_timeout (timmy, REM-1249)
     guri  text;
+    rguri text;
 begin
     select * into r from aiq.walk_run(p_run);
     inp := r.input;
@@ -42801,6 +42802,21 @@ begin
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
     guri := aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)));
+    -- A replay walks the graph it was recorded on when this database holds it (REM-1246): a replay document names its
+    -- kept graph, and the walk takes its graph from that document. Otherwise it rebuilds from today's links, which on
+    -- another install are the same edges under another uri (the uri hashes install-local ids). walk_summary's decider
+    -- reports which ('recorded' or 'rebuilt'), and judges faithfulness by content, not by graph: a replay is faithful
+    -- when it held a verdict for every lead it met.
+    if inp ? 'replay' then
+        select (string_agg(c.content, '' order by c.ordinal))::jsonb->>'graph' into rguri
+          from content.resource_chunks c where c.resource_id = (inp->>'replay')::uuid;
+        if rguri is not null and exists (select 1 from content.resources res where res.uri = rguri and res.metadata ? 'walk_graph') then
+            select res.metadata->'walk_graph' into g
+              from content.resources res where res.uri = rguri and res.metadata ? 'walk_graph'
+             order by res.updated_at desc limit 1;
+            guri := rguri;
+        end if;
+    end if;
     -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
     -- matrix expansion: walk_state raises if it is missing or was judged under another wording.
     if inp ? 'replay' then
@@ -42839,7 +42855,8 @@ begin
     -- the settings, resolved now and recorded, so the run is read back under them whatever the defaults become
     return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds, 'settings', s,
                               'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
-                              'graph', (select res.uri from content.resources res where res.uri = guri limit 1));
+                              'graph', (select res.uri from content.resources res where res.uri = guri limit 1),
+                              'replay_graph', rguri);
 end;
 $$;
 
@@ -43376,10 +43393,15 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                     -- rather than show them as rejected (the article's step 70)
                     || case when (st->>'offline')::boolean and jsonb_typeof(st->'replay') = 'string' then
                            (select jsonb_build_object('faithful', u.n = 0, 'unjudged', u.n,
-                                                      'partial', case when u.n > 0 then format('partial: %s leads unjudged', u.n) end)
+                                                      'partial', case when u.n > 0 then format('partial: %s leads unjudged', u.n) end,
+                                                      'graph', case when g.rg is not null and g.rg = g.walked then 'recorded' else 'rebuilt' end)
                               from (select count(*)::int as n from jsonb_each(coalesce(st->'clues', '{}'::jsonb)) c
                                      where not exists (select 1 from jsonb_object_keys(coalesce(st->'answers', st->'p', '{}'::jsonb)) a
-                                                        where a = c.key or (a like 'L|%' and split_part(a, '|', 3) = c.key))) u)
+                                                        where a = c.key or (a like 'L|%' and split_part(a, '|', 3) = c.key))) u
+                              left join (select tk.output->'result'->0->'state'->>'replay_graph' as rg,
+                                                tk.output->'result'->0->'state'->>'graph' as walked
+                                           from aiq.walk_tasks(p_run) tk
+                                          where tk.step_key = 'start' and tk.status = 'succeeded' limit 1) g on true)
                          else '{}'::jsonb end)
       from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
@@ -43390,6 +43412,9 @@ returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
                               'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
+                              -- the kept graph the verdicts were given on, so a replay can walk that graph (REM-1246)
+                              'graph', (select tk.output->'result'->0->'state'->>'graph' from aiq.walk_tasks(p_run) tk
+                                         where tk.step_key = 'start' and tk.status = 'succeeded' limit 1),
                               -- a stack walk's verdicts are every judgement it asked for (leads per question,
                               -- assessments, parts, closes), so a replay replays its board too
                               'verdicts', case when st ? 'answers' then st->'answers'
