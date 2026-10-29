@@ -91,23 +91,11 @@ def psql(dsn, sql):
 def export_walks(dsn, walks, out):
     """Jev's verdicts for each run, as replay documents, and the SQL that starts each walk offline from them."""
     out.mkdir(parents=True, exist_ok=True)
-    replays, starts, graphs, kept = [], [], set(), {}
+    replays, starts, graphs = [], [], set()
     for i, w in enumerate(walks):
         run = w["run"]
         inp = json.loads(psql(dsn, f"select input from workflow.runs where id = '{run}'"))
         doc = json.loads(psql(dsn, f"select aiq.walk_verdicts('{run}'::uuid)"))
-        # The graph the walk walked, by the uri its replay document names (#326): shipped as its kept walk-graphs row,
-        # so a replay walks its recorded graph on any install and walk_summary's decider says faithful.
-        g = doc.get("graph")
-        if g and g not in kept:
-            row = psql(dsn, "select jsonb_build_object('uri', r.uri, 'title', r.title, 'metadata', r.metadata, 'chunks', "
-                            "(select jsonb_agg(jsonb_build_object('content', c.content) order by c.ordinal) "
-                            "from content.resource_chunks c where c.resource_id = r.id)) "
-                            "from content.resources r join content.channels ch on ch.id = r.channel_id "
-                            f"where ch.name = 'walk-graphs' and r.uri = {sql_text(g)}")
-            if not row:
-                sys.exit(f"run {run}: its replay names graph {g}, which the database does not hold")
-            kept[g] = json.loads(row)
         q = inp["question"]["text"]
         uri = f"replay:bundle:{i + 1}"
         replays.append({"channel": "walk-replays", "external_id": uri, "title": f"{w['label']}: {q}", "uri": uri,
@@ -123,9 +111,6 @@ def export_walks(dsn, walks, out):
             "  from content.resources r join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id\n"
             f" where r.uri like 'question:%' and r.title = {sql_text(q)};")
     write_jsonl(out / "replays.jsonl", replays)
-    write_jsonl(out / "graphs.jsonl", [{"channel": "walk-graphs", "external_id": k["uri"], "title": k["title"], "uri": k["uri"],
-                                        "chunks": k["chunks"] or [{"content": "-"}], "metadata": k["metadata"]}
-                                       for k in kept.values()])
     # A graph is kept per channel and settings; build each walk's first, as the setup block does, or the walk builds
     # it inside its own step and can hit the statement timeout.
     index = [f"select aiq.walk_index(jsonb_build_object('channel', {sql_text(c)}, 'settings', {sql_text(st)}::jsonb))->>'uri';"
@@ -136,12 +121,10 @@ def export_walks(dsn, walks, out):
     # The replays live in their own channel, which the conversations' sources do not declare.
     (out / "sources.yaml").write_text(
         "channels:\n  - name: walk-replays\n    kind: manual\n    visibility: public\n"
-        "    config: {description: \"Jev's recorded verdicts for each shipped walk, one document a walk\"}\n"
-        "  - name: walk-graphs\n    kind: manual\n    visibility: public\n"
-        "    config: {description: \"the graph each shipped walk walked, kept as recorded\"}\n")
+        "    config: {description: \"Jev's recorded verdicts for each shipped walk, one document a walk\"}\n")
     (out / "manifest.yaml").write_text(
         "name: beam-walks-walks\nversion: 1.0.0\ndescription: The shipped walks, replayed offline from Jev's recorded verdicts.\n"
-        "load:\n  - sources: sources.yaml\n  - texts: graphs.jsonl\n  - texts: replays.jsonl\n  - sql: start.sql\n")
+        "load:\n  - sources: sources.yaml\n  - texts: replays.jsonl\n  - sql: start.sql\n")
     return len(replays)
 
 
@@ -217,9 +200,11 @@ def main():
                       "recorded in walks/replays.jsonl: no model key, no cost, and the same reads, the same stack and the "
                       "same result as the original run. In the Walks screen, Start a walk with 'Replay' does the same for one "
                       "question.",
-            "faithful": "Each replay walks the graph it was recorded on (walks/graphs.jsonl), and its walk_summary's "
-                        "decider says faithful: true when it held a verdict for every lead it met. A replay whose graph is "
-                        "missing walks today's links instead and says partial, with the count of unjudged leads.",
+            "faithful": "A replay walks the graph your walk index builds. That graph equals the one the walk was "
+                        "recorded on for any index built by percolate-core 0.2.14 or later with the default index "
+                        "parameters (measured on 1M:12: all 64,473 walk_term, walk_next and walk_nearest edges equal). "
+                        "Check it on each walk: walk_summary(run)->'decider' says faithful: true when every lead the "
+                        "replay met had a recorded verdict, and otherwise partial, with the count of unjudged leads.",
             "live": "With your own Jev key bound to the deployment, Start a walk with 'Live' (aiq.walk_launch(question, "
                     "'live')) walks any question afresh: new verdicts, so the reads can differ from the original, and its "
                     "spend is in the walk's Spend panel (walk_structure's cost part)."},
