@@ -173,7 +173,7 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate', 'set_gate']);
+                                                         'state_gate', 'set_gate', 'cluster_quantile']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -328,8 +328,8 @@ begin
      where jsonb_array_length(linked) > 0;
     -- clusters (walk.split = clusters, spec 5f7bf1d4, off until it passes): the reads linked to the root are
     -- clustered keylessly, two sharing a cluster when they sit within walk.span of each other in one sitting (the
-    -- graph's beside lists, built to the span) or, once stack.cluster_cos is set on the calibration set, when their
-    -- vectors' cosine reaches it. Each cluster of two or more reads that no question names yet proposes one part, the
+    -- graph's beside lists, built to the span) or when their vectors' cosine reaches the stack.cluster_quantile
+    -- quantile of random-pair cosines in this history, which the index keeps with the graph. Each cluster of two or more reads that no question names yet proposes one part, the
     -- most specific term its reads share; Jev judges it as move 2 asks. The root stays open for everything else. A
     -- cluster is a part found, never presupposed.
     if s->>'split' = 'clusters' and jsonb_array_length(linked) > 0 then
@@ -341,14 +341,15 @@ begin
               join content.resources r on coalesce(r.uri, r.id::text) = lr.doc
               join content.resource_chunks ck on ck.resource_id = r.id
               join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
-             where jsonb_typeof(sp->'cluster_cos') = 'number'
+             -- the graph's cosine for this quantile; a graph kept before it, or for another quantile, has none
+             where (g->'cos_quantile'->>'q')::float8 = (sp->>'cluster_quantile')::float8
              group by lr.doc
         ), pairs as (
             select a.doc as a, b.doc as b from lr a, lr b
              where a.doc < b.doc
                and (coalesce(g->'beside'->a.doc, '[]'::jsonb) ? b.doc
                     or exists (select 1 from vecs va, vecs vb where va.doc = a.doc and vb.doc = b.doc
-                                 and 1 - (va.v <=> vb.v) >= (sp->>'cluster_cos')::real))
+                                 and 1 - (va.v <=> vb.v) >= (g->'cos_quantile'->>'value')::float8))
         ), edges as (
             select a, b from pairs union select b, a from pairs
         ), reach (doc, root) as (

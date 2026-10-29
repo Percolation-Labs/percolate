@@ -41453,7 +41453,7 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'F8, decided on principle (bill 13:42Z, walk spec 54619796): on the holiday stack walk 1,035 of 1,927 leads were accepted and 305 opened; 51 of the 89 accepted leads toward evidence were never opened, because ordering by P per target pushes wide leads out (median 7 targets against 3). A wide lead''s weak targets should not spend reads. Off until it passes on a fresh draw; the spec''s value is 3.'),
  ('walk.cardinality', 'walk', 'false', 'Whether the walk judges once if its root asks for a set, a count, an order or a summary across messages (N|root against stack.set_gate); a set root is never a leaf, so only its parts can close it.', 'aiq.walk_stack_next',
   'Sirsh''s test, recorded in walk spec b2fc3cb1 (bill confirmed 13:52Z): Jev on the question''s words separates set from single questions at AUC 0.94. Off until stack.set_gate is set on the held-out half of the 1M questions (Youden''s J, temporal left out), so ''not yet calibrated'' is a stated state.'),
- ('walk.split', 'walk', '"terms"', 'Where candidate parts come from: terms, the terms the most reads linked to the root share; or clusters, one part per cluster of linked reads (within walk.span in one sitting, or stack.cluster_cos), named by the most specific term its reads share.', 'aiq.walk_stack_next',
+ ('walk.split', 'walk', '"terms"', 'Where candidate parts come from: terms, the terms the most reads linked to the root share; or clusters, one part per cluster of linked reads (within walk.span in one sitting, or at or above the history''s stack.cluster_quantile cosine), named by the most specific term its reads share.', 'aiq.walk_stack_next',
   'clusters is Sirsh''s first split proxy (walk spec 5f7bf1d4): set questions are phrased in meta-words, so their parts are not in their words, and a term hub holds only 5-7% of their evidence. Off until it passes paired against the unpartitioned walk and the oracle on a fresh draw.'),
  ('walk.stack', 'walk', 'true', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). The walkthrough''s published steps ran memoryless and pin it. V0 walks with the stack (walk spec 68c02f68, sally): a reader who starts a walk with the shipped defaults gets V0, and changes one row to see what it does. Part three''s published walks pin stack false, describe source and order p, which is what they ran.'),
@@ -41492,8 +41492,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Jev is never asked whether a set of messages answers a question (Sirsh, 13:15Z): on the ten walks that holistic ask separated asks holding labelled evidence at AUC 0.622 and closed once in ten, wrongly. Jev judges one line well. Not measured in these words.'),
  ('stack.broad_after', 'stack', '2', 'A root still open with no parts at this wave has had no line answer it: the walk raises DECOMPOSITION_REQUIRED to the client, once, and keeps splitting in the loop.', 'aiq.walk_stack_next',
   'Breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a Jev call on the root''s words would add a gate nobody has measured. Two waves give the seeds and one wave of leads their chance to answer it. Not measured.'),
- ('stack.cluster_cos', 'stack', 'null', 'With walk.split = clusters, the cosine at or above which two linked reads share a cluster beside sitting within walk.span; null until set.', 'aiq.walk_stack_next',
-  'Set on the calibration set (walk spec 5f7bf1d4). Until then reads cluster only by their place in a sitting.'),
+ ('stack.cluster_quantile', 'stack', '0.9', 'With walk.split = clusters, two linked reads share a cluster when their cosine reaches this quantile of random-pair cosines among the scope''s messages (kept with the graph at index time), or when they sit within walk.span in one sitting.', 'aiq.walk_graph_build, aiq.walk_stack_next',
+  'A rule, not a calibrated value: the calibration walks do not cluster, so no cosine can be set from them (mike, spec d824212a). Measured on the 35 BEAM 1M histories ($0): neighbours 0.790 and random pairs 0.741 at the median, and the 0.9 quantile 0.757 to 0.896 (median 0.822), so a fixed cosine would be wrong per history.'),
  ('stack.set_gate', 'stack', 'null', 'The P at or above which the root is a set question (walk.cardinality); null until set.', 'aiq.walk_stack_next',
   'Set on a held-out half of the 1M questions, excluding the 18 calibration and all fresh-test questions, by Youden''s J with temporal left out, the rule stated before the split (walk spec b2fc3cb1). Not yet set.'),
  ('decider.task_set', 'decider', to_jsonb(text 'For each option, a question a user asked about their own earlier conversations. Does answering it need several separate items found across many messages (a list, a count, a sequence of events, or a summary), rather than one fact that a single message could state?'),
@@ -41938,6 +41938,7 @@ declare
     post   jsonb;
     beside jsonb;
     near   jsonb;
+    cosq   jsonb;
 begin
     docs := aiq.walk_keys(p_input);
     -- Terms: walk_term between two documents (provenance terms[]), and
@@ -42002,9 +42003,34 @@ begin
     )
     select jsonb_object_agg(doc, ks) into near
       from (select doc, jsonb_agg(other order by dir, rank, other) as ks from lists group by doc) z;
+    -- The cosine two linked reads must reach to share a cluster (walk.split = clusters): the stack.cluster_quantile
+    -- quantile of random-pair cosines among this scope's messages, kept with the graph, because a fixed cosine is
+    -- wrong per history (the 0.9 quantile runs 0.757 to 0.896 over BEAM's 35 1M histories; mike, spec d824212a).
+    -- 2,000 pairs, chosen by a fixed hash order so the same history always gives the same value. Channel scopes only.
+    if p_input ? 'channel' then
+        with v as (
+            select coalesce(r.uri, r.id::text) as doc, avg(e.embedding) as vec
+              from content.resources r join content.channels ch on ch.id = r.channel_id and ch.name = p_input->>'channel'
+              join content.resource_chunks ck on ck.resource_id = r.id
+              join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
+             group by 1
+        ), n as (
+            select doc, vec, row_number() over (order by md5(doc)) as rn, count(*) over () as cnt from v
+        )
+        select jsonb_build_object('q', (select value from aiq.parameters where name = 'stack.cluster_quantile'),
+                                  'value', round(percentile_cont((select (value #>> '{}')::float8 from aiq.parameters
+                                                                    where name = 'stack.cluster_quantile'))
+                                                 within group (order by 1 - (a.vec <=> b.vec))::numeric, 4),
+                                  'pairs', count(*))
+          into cosq
+          from n a join n b on b.rn = 1 + ((a.rn * 7919 + 13) % a.cnt)
+         where a.rn <= 2000 and a.doc <> b.doc;
+    end if;
     return jsonb_build_object('keys', docs, 'terms', terms,
                               'post', coalesce(post, '{}'::jsonb), 'beside', coalesce(beside, '{}'::jsonb),
-                              'near', coalesce(near, '{}'::jsonb));
+                              'near', coalesce(near, '{}'::jsonb))
+           || case when cosq is not null and (cosq->>'pairs')::int > 0 then jsonb_build_object('cos_quantile', cosq)
+                   else '{}'::jsonb end;
 end;
 $$;
 
@@ -43449,7 +43475,7 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate', 'set_gate']);
+                                                         'state_gate', 'set_gate', 'cluster_quantile']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -43604,8 +43630,8 @@ begin
      where jsonb_array_length(linked) > 0;
     -- clusters (walk.split = clusters, spec 5f7bf1d4, off until it passes): the reads linked to the root are
     -- clustered keylessly, two sharing a cluster when they sit within walk.span of each other in one sitting (the
-    -- graph's beside lists, built to the span) or, once stack.cluster_cos is set on the calibration set, when their
-    -- vectors' cosine reaches it. Each cluster of two or more reads that no question names yet proposes one part, the
+    -- graph's beside lists, built to the span) or when their vectors' cosine reaches the stack.cluster_quantile
+    -- quantile of random-pair cosines in this history, which the index keeps with the graph. Each cluster of two or more reads that no question names yet proposes one part, the
     -- most specific term its reads share; Jev judges it as move 2 asks. The root stays open for everything else. A
     -- cluster is a part found, never presupposed.
     if s->>'split' = 'clusters' and jsonb_array_length(linked) > 0 then
@@ -43617,14 +43643,15 @@ begin
               join content.resources r on coalesce(r.uri, r.id::text) = lr.doc
               join content.resource_chunks ck on ck.resource_id = r.id
               join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = ck.id
-             where jsonb_typeof(sp->'cluster_cos') = 'number'
+             -- the graph's cosine for this quantile; a graph kept before it, or for another quantile, has none
+             where (g->'cos_quantile'->>'q')::float8 = (sp->>'cluster_quantile')::float8
              group by lr.doc
         ), pairs as (
             select a.doc as a, b.doc as b from lr a, lr b
              where a.doc < b.doc
                and (coalesce(g->'beside'->a.doc, '[]'::jsonb) ? b.doc
                     or exists (select 1 from vecs va, vecs vb where va.doc = a.doc and vb.doc = b.doc
-                                 and 1 - (va.v <=> vb.v) >= (sp->>'cluster_cos')::real))
+                                 and 1 - (va.v <=> vb.v) >= (g->'cos_quantile'->>'value')::float8))
         ), edges as (
             select a, b from pairs union select b, a from pairs
         ), reach (doc, root) as (
