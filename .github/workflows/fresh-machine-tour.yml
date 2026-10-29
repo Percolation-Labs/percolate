@@ -106,12 +106,22 @@ jobs:
                                from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
                               where r.replays is not null and c.decision = 'unjudged'
                               group by r.run, c.wave order by r.run, c.wave" | tee out/03d-unjudged-by-wave.txt
-      - name: 3e. every replayed walk says it is faithful (walk_summary's decider.faithful; absent is a failure, not a pass)
+      - name: 3e. every replayed walk matches its recording (the bundle's walks/check.sql; a row that is not a pass fails)
         run: |
-          psql "$P8_DSN" -c "select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
-                               from aiq.walk_runs r where r.replays is not null order by r.created_at" | tee out/03e-faithful.txt
-          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r where r.replays is not null
-                                        and (aiq.walk_summary(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")" = 0
+          # check.sql compares each replay's reads and clues with the recording's digests the bundle ships, and says
+          # which kind of pass: 'faithful', or 'exact replay of a partial recording' (a walk that stopped before judging
+          # its last wave is partial in the recording and the replay alike, bill 29 Oct). Anything else fails.
+          cd tour
+          : > ../out/03e-check.txt
+          for d in $WALKS; do
+            [ -f "$d/check.sql" ] || { echo "no check.sql in $d" | tee -a ../out/03e-check.txt; exit 1; }
+            psql "$P8_DSN" -f "$d/check.sql" | tee -a ../out/03e-check.txt
+            psql "$P8_DSN" -At -F '|' -f "$d/check.sql" >> ../out/03e-rows.txt
+          done
+          test -s ../out/03e-rows.txt || { echo "check.sql returned no rows"; exit 1; }
+          bad=$(awk -F'|' '$5 !~ /^pass/' ../out/03e-rows.txt)
+          [ -z "$bad" ] || { echo "not a pass:"; echo "$bad"; exit 1; }
+          awk -F'|' '{print $5}' ../out/03e-rows.txt | sort | uniq -c | tee -a ../out/03e-check.txt
       - name: 4. the Walks screen answers
         run: |
           cd tour && . .venv/bin/activate
