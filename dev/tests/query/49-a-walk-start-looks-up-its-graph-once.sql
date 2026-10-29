@@ -99,7 +99,7 @@ begin
     r := workflow.start_workflow('walk_fixture_run', inp);
     perform workflow.drain_sql_steps(r);
     calls := coalesce(pg_stat_get_xact_function_calls(fn), 0) - before;
-    if (select status from workflow.tasks where run_id = r and step_key = 'start') <> 'succeeded' then
+    if (select status from workflow.tasks where run_id = r and step_key = 'start') is distinct from 'succeeded' then
         raise exception 'the fixture walk''s start step did not succeed: %',
             (select error from workflow.tasks where run_id = r and step_key = 'start');
     end if;

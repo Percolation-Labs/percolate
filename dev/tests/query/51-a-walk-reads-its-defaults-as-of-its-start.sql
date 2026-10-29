@@ -22,7 +22,7 @@ begin
     insert into aiq.parameters (name, part, value, controls, read_by, why)
     values ('walk.query_fiftyone', 'walk', '1', 'query/51', 'query/51', 'query/51');
     -- a row from before this transaction (as every row is, once committed): from -infinity
-    if (select valid_from from aiq.parameters where name = 'walk.query_fiftyone') <> '-infinity' then
+    if (select valid_from from aiq.parameters where name = 'walk.query_fiftyone') is distinct from '-infinity' then
         raise exception 'a new name did not start from -infinity';
     end if;
     -- seeding again what is there adds no row, as every upgrade does
