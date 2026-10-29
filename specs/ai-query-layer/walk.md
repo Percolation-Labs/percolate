@@ -35,7 +35,7 @@ telling it to do something, or the walk returns a result it can interrogate.
 | 5 | A lead shows Jev what its targets say and where they sit, built at ingest | SHOWN | `lines` raises within-source AUC to 0.657 [0.611, 0.703] from `source`'s 0.548 (REM-1240). |
 | 6 | Waves: the decider acts before the read; leads are raised, judged, then opened by P per unread target | PARTLY SHOWN | Opening by P per unread target landed +1.04 fresh evidence per walk [+0.23, +1.98] in a one-step replay that matched the walk's picks 36–46% (REM-1240). |
 | 7 | Jev judges each lead once, against the open questions | SHOWN (as built); the state line SHOWN not to help | The one-line board state scores −0.018 [−0.048, +0.016] against `lines` alone (REM-1240). |
-| 8 | Stack B, Jev's direction memory: the small per-wave set of finds that added the most evidence, used to judge which new leads add more | PARTLY SHOWN | It helps when it is exact: a small exact B lifts progress against echo by +0.254 on the echo case, pooled +0.036 [−0.004, +0.080]. Jev cannot yet build it: a Jev-built B pools −0.041 [−0.083, −0.001] (bill, REM-1244). |
+| 8 | Stack B, Jev's direction memory: the small per-wave set of finds that added the most evidence, used to judge which new leads add more | PARTLY SHOWN | It helps when it is exact: a small exact B lifts progress against echo by +0.254 on the echo case, pooled +0.036 [−0.004, +0.080]. Jev cannot yet build it: a Jev-built B pools −0.041 [−0.083, −0.001]. The oracle single-entry ceiling is +0.14; there is no label-free admission yet (bill, REM-1244). |
 | 9 | Stack A, the full evidence streamed to the caller, which Jev never holds | TO BE SHOWN | The test: A at a top-k-per-wave cut against V0's reads in order, and against S's links on the pilot, on recall and precision at equal list size (§9). |
 | 10 | The question stack: parts, splitting, and closing by structure | PARTLY SHOWN | Template parts do not help: S − P −1.1 [−3.1, +0.2] at 100 reads (§17). Caller-supplied parts show no direction on two blind sets (§10). Expected cardinality separates set from single questions at AUC 0.936. The per-line close failed its calibration (Appendix A, F12). The slot-structured stack is TO BE SHOWN. |
 | 11 | Stops: stack empty, budget, dry, cold | PARTLY SHOWN | Built. The cold stop runs only under the stack, and it cost S evidence: past S's own stop P found 16 more labelled pieces, 14 through leads (§11). |
@@ -232,7 +232,9 @@ about 8,000 lead judgements and 2,000 read assessments, at about 150 input token
 **Mark: PARTLY SHOWN.** It helps when it is accurate, and Jev cannot yet build it.
 
 **Meant to solve:** late in a walk the unread leads are mostly echoes of what has been read, and Jev cannot tell
-them from new information. Its AUC on leads fell to 0.27–0.36 in later waves (REM-1240). A lead out of a read that
+them from new information. On one walk, 1M:35 eo:0 on its test database, its late-wave AUC fell to 0.27–0.36;
+across the 122 questions the per-question median stays 0.60–0.64 in every wave, and the same question re-walked
+gives 0.53 and 0.57 late (REM-1240). So the echo problem is a question-by-question one, sharp on some questions. A lead out of a read that
 is itself evidence is about 12 times as likely to lead to more, yet Jev gives it about 0.04 more P, because nothing
 it is shown says which reads were evidence.
 
@@ -253,9 +255,18 @@ what is missing.
   precision 0.03–0.29 against the labels, and no gate fixes it. Taking Jev's own top relevance per wave keeps B
   small (9–11 pieces), but only about 9% of it is evidence, and judging with it pools −0.041 [−0.083, −0.001].
 
+- *The oracle ceiling for one entry* (bill, REM-1244). Each earlier read was tried alone as B. One well-chosen entry
+  lifts progress against echo by up to +0.14 where Jev prefers echoes (1M:13 +0.143, 1M:19 +0.148; an off-topic
+  control gives −0.065 and +0.029), and has no content effect where Jev is already good (1M:23). The best entries
+  are specific dated decisions or events the user returns to.
+- *No label-free signal predicts the best entries yet.* Relevance correlates −0.10 and −0.07 with an entry's value,
+  graph degree not at all, and Jev's "adds" judgement +0.50 and +0.19, but B admitted by "adds" pools −0.023
+  [−0.062, +0.012].
+
 **What is missing:** an admission signal that separates evidence from reads that are merely on topic.
 
-**Theory note: B as a sufficient statistic of A** (Sirsh, 20:06Z; TO BE SHOWN). Call Ω everything found (Stack A,
+**Theory note: B as a sufficient statistic of A** (Sirsh, 20:06Z; PARTLY SHOWN: the ceiling is measured, the
+admission rule is not). Call Ω everything found (Stack A,
 §9) and κ the small list Jev carries (Stack B).
 - *What a lead is worth:* its residual value is its conditional information gain about the answer. Ideally that is
   given Ω, I(lead; answer | Ω), but Jev can only compute it given κ.
@@ -271,8 +282,12 @@ what is missing.
   stop rule (Charnov, 1976).
 - *The link to criticality (§3):* as κ grows, residual value falls, fewer leads are worth opening, and the branching
   ratio drops below one.
-- *The test that would show it:* an admission rule that picks κ's entries by predicted redundancy of future leads,
-  against one that picks by relevance, compared on progress-against-echo AUC and replayed coverage at 100.
+- *First measurement:* the single-entry oracle above measures the note's quantity, an entry's value as the
+  redundancy it predicts among future leads, and it supports the note: the best entries are specific decisions and
+  events the user returns to, not the most relevant reads, and relevance predicts value slightly negatively.
+- *The test that would show the rest:* a keyless admission judgement, "a specific decision, plan or event the user
+  will refer back to", scored against the oracle's picks, then against relevance-admitted κ on progress-against-echo
+  AUC and replayed coverage at 100.
 
 **The test that would show it:** a keyless admission signal whose B is small and exact enough to keep the exact-B
 gain, then replayed coverage at 100 above P's on a registered set.
@@ -521,7 +536,10 @@ task rows (each decider task records the model and its input and output tokens a
 
 ## 14. Evaluation, outside the walk (with sally)
 
-**Mark: PARTLY SHOWN.** The measures and classes are built and used. Whether the walk beats search is decided by
+**Mark: PARTLY SHOWN.** The measures and classes are built and used. The first measured class split is the replay
+of the pilot's 40 P walks (REM-1244, directional, n = 40; the replay shares 71% of documents with the runs): of the
+194 labelled pieces the oracle read by 100 reads and P did not, 155 were class 7 (accepted, not opened), 20 class 6
+(rejected) and 19 class 5 or 1 (no lead raised by 100 pointed at them). Whether the walk beats search is decided by
 the registered extension (Appendix B).
 
 There is no answer key in the walk. The key enters only here, and every figure it colours says *oracle-scored*:
@@ -586,8 +604,10 @@ For each piece, the first class that holds is its class:
   knowledge_update result is reported beside its key's class. **A walk result without this breakdown is not
   reported as a result.**
 
-Measured so far: on BEAM 1M:22 and 1M:35, the oracle reaches 94/100/100% of the evidence by 50/100/500 reads, and
-search's own order 52/67/88% (REM-1204).
+Measured so far: on the pilot's 40 BEAM 1M questions, on the walk's own schedule, the oracle reaches 69.7 / 93.6 /
+97.5% of the labelled evidence by 50 / 100 / 500 reads, and search's own order 54.9 / 60.8 / 80.3% (§17). The
+earlier 94/100/100% against 52/67/88% (REM-1204, 1M:22 and 1M:35) ran with BEAM's plan marker in search's inputs
+and before the oracle followed the walk's schedule.
 
 ## 15. Oracle mode
 
