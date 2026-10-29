@@ -41,7 +41,7 @@ telling it to do something, or the walk returns a result it can interrogate.
 | 11 | Stops: stack empty, budget, dry, cold | PARTLY SHOWN | Built. The cold stop runs only under the stack, and it cost S evidence: past S's own stop P found 16 more labelled pieces, 14 through leads (§11). |
 | 12 | Durable, keyless, append-only, replayable, every parameter a dated row | SHOWN | A crashed walk resumes and redoes nothing (REM-1236). `walk_start` refuses more than the question (REM-1231). An old run reads its original defaults (query/51, REM-1245). A changed default reaches an upgraded database (query/54, upgrade-converges). |
 | 13 | The walk is a queryable object, with cost as an observable | SHOWN | Built: `walk_structure`, `walk_cost`. The pilot's spend, $1.44, was read from its own rows. |
-| 14 | Evaluation outside the walk, by eight classes and statistically against search | PARTLY SHOWN | Built: `walk_coverage`, `walk_why`. The pilot ran under its registration. Walk against search is TO BE SHOWN: P − search at 100 is +5.5 [−0.1, +12.7], and the extension decides it (Appendix B). |
+| 14 | Evaluation outside the walk, by eight classes and statistically against search | SHOWN at 1M; TO BE SHOWN across sizes | Built: `walk_coverage`, `walk_why`. The registered extension: P − search at 100 reads +15.6 [+5.2, +27.5] on 39 new 1M questions, GO; at 500 reads +1.2, so the gain is speed within a budget (§17). 100K and 500K are registered (Appendix B). |
 | 15 | Oracle mode: a ceiling on the walk's own schedule | SHOWN | Built: `walk_oracle` reads wave by wave as the walk does (REM-1245). |
 | 16 | The LLM interface: semantic exceptions and interrogable results | PARTLY SHOWN | `DECOMPOSITION_REQUIRED` is raised structurally, and results carry the run's handle. No client has yet split a question in a walk. |
 
@@ -686,9 +686,11 @@ the labelled evidence:
 - *S against P fell in outcome (i):* the interval lies wholly below +5, so the stack is off by default. The stack
   stops early (7 of 40 before 100 reads; 306 reads on average) and costs $0.0028 per labelled piece read against
   P's $0.0012. At the same read count S and P are level (+0.6 [−0.2, +1.4]).
-- *Walk against search is not yet settled.* The gains sit in the buried few: by burial stratum at 100 reads, top 10
-  (n = 30) +3.3, 11–50 (n = 4) −11.1, 51–200 (n = 3) +29.7, beyond 200 (n = 3) +11.1. The registered extension, P
-  only on 39 new questions, decides it, with P's evidence split by leads and by search's fill (Appendix B).
+- *The walk beats search at 1M, within a budget* (the registered extension, P on 39 new questions, Appendix B). At
+  100 reads P read 23 labelled pieces that search's top 100 lacks and missed 3 that it holds, a net +15.6 [+5.2,
+  +27.5] (GO), or +7.5 [+0.2, +16.2] without the eleven single-piece questions. The gain sits in buried evidence
+  (best search rank 51–200: +66.7, n = 6). At 500 reads search nearly catches up (+1.2), so the claim is speed
+  within a budget, not reach. 100K and 500K are registered and running (Appendix B).
 - *Room left:* the oracle reads 93.6% by 100 reads, and 80% of the gap is accepted leads never opened (§3).
 
 **V0's limits** are listed in Appendix C.
@@ -1110,6 +1112,40 @@ A handful of walks is never the verdict.
     100 reads came 86 through leads and 83 through search.
   - *Keys:* 8 of the 39 are knowledge_update questions. Each key is checked against its conversation before
     scoring, and one in group B or C is scored both ways.
+- **The extension's result** (REM-1244, 29 Oct, 39 of 39 P walks on the pilot's build, oracle-scored, Jev $0.546).
+  - *Confirmatory, as registered:* at 100 reads P read 85.8% of the labelled evidence and search's own order 70.1%.
+    P − search is **+15.6 [+5.2, +27.5]**: the lower end is above 0, so the outcome is **GO**. Scoring the four B and
+    C knowledge_update keys by the conversation's latest value gives the same, since P and search score alike on all
+    four under either key. The keys were classed before any result: A 4, B 2, C 2.
+  - *What the gain is:* P read 23 labelled pieces that search's top 100 lacks, and missed 3 that it holds, a net 20
+    of 179 (+11.2 points weighted by piece). 9 questions gain, 1 loses and 29 tie. By the best search rank of a
+    question's evidence: top 10 (n = 24) +6.5, 11–50 (n = 8) +6.6, 51–200 (n = 6) +66.7, beyond (n = 1) 0. Eleven of
+    the 39 have a single labelled piece, and four of the largest gains are those going from 0 to 1. Without all
+    eleven it is +7.5 [+0.2, +16.2].
+  - *Speed within a budget, not reach:* at 500 reads the gap nearly closes (+1.2 [+0.1, +2.6]; P 92.9%, search
+    91.7%). The walk reaches buried evidence sooner, and search reaches it later.
+  - *Descriptive:* at 50 reads +0.5 [−8.5, +9.6]. Pooled with the pilot's 40, +10.5 [+4.8, +17.2] at 100 reads. P's
+    labelled pieces by 100 came 35.0% through leads and 50.8% through search's order, and the oracle held 70.1% in
+    search's top 100 and 27.9% beyond it.
+- **The scaling stage, registered before any of its walks runs** (bill, 21:11Z, on the GO above).
+  - *Questions:* at each of 100K and 500K, 50 of that size's sweep draw of 90 (above), by
+    `random.Random(f'1254:{size}').sample(sorted(draw), 50)`. Every one has labelled evidence, so none is dropped.
+    - 100K (20 conversations): 100K:10 ku:1, 100K:11 cr:0, 100K:11 ku:1, 100K:11 msr:1, 100K:12 ku:1, 100K:12 tr:0, 100K:13 cr:0, 100K:13 ie:1, 100K:14 if:1, 100K:15 ie:0, 100K:16 if:0, 100K:17 cr:0, 100K:17 eo:0, 100K:17 eo:1, 100K:17 tr:1, 100K:18 eo:1, 100K:18 ie:1, 100K:18 if:0, 100K:18 msr:0, 100K:19 if:0, 100K:19 summ:1, 100K:1 ku:0, 100K:1 pf:0, 100K:20 ie:1, 100K:20 tr:1, 100K:2 cr:0, 100K:2 cr:1, 100K:2 ie:0, 100K:2 pf:0, 100K:2 summ:0, 100K:3 cr:0, 100K:3 eo:1, 100K:3 ie:1, 100K:3 if:0, 100K:4 cr:0, 100K:4 eo:0, 100K:4 ie:0, 100K:5 ie:1, 100K:5 pf:1, 100K:5 summ:1, 100K:6 if:0, 100K:6 ku:1, 100K:6 tr:1, 100K:7 msr:0, 100K:7 pf:1, 100K:7 summ:1, 100K:8 pf:1, 100K:8 summ:0, 100K:8 tr:0, 100K:9 summ:0.
+    - 500K (26 conversations): 500K:10 ie:1, 500K:10 msr:1, 500K:11 if:0, 500K:12 eo:0, 500K:12 eo:1, 500K:12 pf:1, 500K:13 summ:0, 500K:14 pf:0, 500K:15 cr:1, 500K:15 ku:1, 500K:16 ku:0, 500K:16 summ:0, 500K:17 eo:1, 500K:18 cr:0, 500K:18 summ:0, 500K:20 ie:0, 500K:20 msr:1, 500K:20 pf:0, 500K:21 msr:1, 500K:21 tr:1, 500K:22 eo:0, 500K:24 ie:1, 500K:24 ku:0, 500K:26 cr:1, 500K:26 tr:1, 500K:27 if:0, 500K:28 eo:0, 500K:28 ie:1, 500K:28 ku:0, 500K:2 summ:0, 500K:30 msr:0, 500K:30 pf:1, 500K:30 summ:0, 500K:31 ku:1, 500K:31 msr:1, 500K:33 ku:1, 500K:35 summ:1, 500K:5 eo:0, 500K:6 if:0, 500K:6 if:1, 500K:7 cr:1, 500K:7 msr:0, 500K:7 pf:1, 500K:7 tr:0, 500K:8 ie:0, 500K:8 if:1, 500K:8 ku:0, 500K:8 pf:1, 500K:8 tr:0, 500K:9 if:0.
+  - *Arm and build:* P only, set explicitly (`walk.stack` false, `lines`, `per_target`), on the pilot's build (image
+    42d61547 with 34f7c80a's walk SQL), with each size's conversations loaded as the pilot's were. One walk per size
+    runs alone as a probe, and the batch stops on its first failure.
+  - *Endpoint and rule, per size:* P − search at 100 reads, paired per question, 95% bootstrap (2,000 draws, seed
+    1251), under the same three rules. The report gives the difference by size (100K, 500K, and 1M from the
+    extension) with its interval, and the slope across sizes.
+  - *Checkpoint at 25, per size:* the first 25 in the order `random.Random(f'1255:{size}').shuffle` gives the 50.
+    A size stops early if its 99% interval at 100 reads lies wholly above 0 (settled) or wholly below +5 (failing).
+    Otherwise it runs to 50.
+  - *Keys:* each knowledge_update key (5 at 100K, 7 at 500K) is classed against its conversation before scoring, and
+    one in group B or C is scored twice.
+  - *Reporting order* (bill): the gained/lost split first, then the speed-within-a-budget reading at 500, then the
+    figure without single-piece questions beside the headline.
+  - *Cost:* about 100 × $0.014 = $1.40.
 - **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
   registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
   search.
