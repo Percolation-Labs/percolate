@@ -1,0 +1,56 @@
+# The article's fresh-machine tour (dev/examples/muddling-through/TOUR.md), on a runner with nothing installed.
+# Runs the tour's commands in order and keeps each step's output as an artifact. Started by hand for a release:
+#
+#     gh workflow run fresh-machine-tour.yml -R Percolation-Labs/percolate --ref <branch> \
+#         -f tag=v0.2.XX -f core=0.2.XX -f bundle_sha256=<sha>
+#
+# GitHub-hosted on purpose: a new VM each run, so no image, cache or checkout from an earlier one can help.
+name: fresh-machine tour
+on:
+  workflow_dispatch:
+    inputs:
+      tag: {description: "the release to tour (get-percolate and percolate tag)", required: true}
+      core: {description: "percolate-core version on PyPI", required: true}
+      bundle_sha256: {description: "the bundle asset's sha256", required: true}
+  push:
+    branches: ["tour/**"]
+jobs:
+  tour:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag }}
+      CORE: ${{ inputs.core }}
+      BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      P8_DSN: postgres://p8:p8@localhost:5432/percolate
+    steps:
+      - name: nothing is installed
+        run: |
+          mkdir -p out
+          { docker images; pip cache list 2>&1 | tail -2; ls ~; } | tee out/00-clean.txt
+      - name: 1. install the release
+        run: |
+          mkdir tour && cd tour
+          curl -fsSL "https://raw.githubusercontent.com/Percolation-Labs/get-percolate/$TAG/compose/docker-compose.yml" -o docker-compose.yml
+          docker compose up -d --wait 2>&1 | tee ../out/01-install.txt
+          python3 -m venv .venv && . .venv/bin/activate && pip install "percolate-core[sample]==$CORE" | tail -3 | tee -a ../out/01-install.txt
+      - name: 2. sign in
+        run: |
+          cd tour && . .venv/bin/activate
+          psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" | tee ../out/02-sign-in.txt
+          percolate auth token --email me@example.com > ../out/token
+      - name: 3. fetch the example's data
+        run: |
+          cd tour && . .venv/bin/activate
+          curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/beam-walks.tar.gz"
+          echo "$BUNDLE_SHA256  beam-walks.tar.gz" | sha256sum -c - | tee ../out/03-fetch.txt
+          tar xzf beam-walks.tar.gz
+          { percolate sample load beam-walks; percolate sample load beam-walks/walks
+            percolate walk index --source beam-1m22; percolate walk index --source beam-1m35; } 2>&1 | tee -a ../out/03-fetch.txt
+      - name: 5. query it from psql
+        run: |
+          psql "$P8_DSN" -c "select run, question_text, status from aiq.walk_runs order by created_at" | tee out/05-psql.txt
+      - name: keep what each step printed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: tour-${{ github.run_id }}, path: out/}
