@@ -14,7 +14,8 @@ questions.jsonl, sources.yaml, manifest.yaml). OUT/NAME/ is then a directory `pe
   oracle/<qid>.json, all.json   the answer key, for oracle mode only: {question, labelled, items}. Never loaded: the
                                 Walks screen passes a file to aiq.walk_structure beside a run
   walks/                        a second sample: Jev's verdicts for each shipped walk (replays.jsonl, exported with
-                                aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0
+                                aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0,
+                                under the run's resolved settings and its recorded search order
   README.md, LICENSE, SHA256SUMS
 
 --runs is a walk list as the pilot writes it, one {qid, arm, run} a line (arm P: V0's walk, the question stack off,
@@ -100,14 +101,22 @@ def export_walks(dsn, walks, out):
         uri = f"replay:bundle:{i + 1}"
         replays.append({"channel": "walk-replays", "external_id": uri, "title": f"{w['label']}: {q}", "uri": uri,
                         "chunks": [{"content": json.dumps(doc)}], "metadata": {"label": w["label"], "from_run": run}})
-        settings = inp.get("settings") or {}
+        # A replay holds only Jev's verdicts, so the walk must not meet anything Jev was never asked about. Ship the
+        # run's settings as resolved when it started, not its overrides, or a changed default (walk.stack, 0.2.35)
+        # walks it differently; and search's order as the run recorded it, or the reader's search (another install's
+        # vector index and question embedding) reads other messages from wave 0 (timmy's smoke 3, 29 Oct).
+        settings = json.loads(psql(dsn, f"select aiq.walk_run_settings('{run}'::uuid)"))
+        order = json.loads(psql(dsn, f"select coalesce(jsonb_agg(doc order by rank), '[]') from aiq.walk_search_order('{run}'::uuid)"))
+        if not order:
+            sys.exit(f"run {run} recorded no search order to ship")
         graphs.add((inp["channel"], json.dumps(settings, sort_keys=True)))
         starts.append(
             "select workflow.start_workflow('walk', jsonb_build_object(\n"
             "  'question', jsonb_build_object('node_id', n.id, 'text', r.title),\n"
             f"  'channel', {sql_text(inp['channel'])}, 'offline', true,\n"
             f"  'replay', (select id from content.resources where uri = {sql_text(uri)}),\n"
-            f"  'settings', {sql_text(json.dumps(settings))}::jsonb))\n"
+            f"  'settings', {sql_text(json.dumps(settings, sort_keys=True))}::jsonb,\n"
+            f"  'search', {sql_text(json.dumps(order))}::jsonb))\n"
             "  from content.resources r join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id\n"
             f" where r.uri like 'question:%' and r.title = {sql_text(q)};")
     write_jsonl(out / "replays.jsonl", replays)
