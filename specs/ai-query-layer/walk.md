@@ -935,7 +935,18 @@ set Jev's P separates leads toward evidence at AUC 0.607. Adding "the source rea
 raises it to 0.671 (an oracle ceiling, not deployable), and a keyless proxy ("the source read came by a lead") lowers
 it to 0.554. Cutting search's per-wave share changes nothing at 100 reads.
 
-- **Stack A** (bill's progress design). *Status:* untested. Its definition and promotion test are bill's to supply.
+- **Stack A: the walk's retrieval, kept out of Jev's context** (Sirsh, 18:26Z). After each read Jev judges "does
+  this message hold information needed to answer `question`?", and if yes the read's node id goes on A. A holds ids
+  only. It never enters Jev's context, and it is returned to the caller as the walk's retrieval. B, below, is the
+  separate working memory.
+  - *Evidence* (bill, step 2's first judgement, the same run as B's): relevance AUC is 0.686, 0.923, 0.517 and 0.564
+    on the four questions. At relevance ≥ 0.5, A holds 50, 35, 51 and 71 of 100 reads, and catches 1 of 2, 14 of 15,
+    2 of 3 and 4 of 5 of the labelled pieces read. High recall and low precision, so as a retrieval list it is
+    mostly cost to the caller.
+  - *The test that would promote it:* A at a top-k-per-wave cut against the walk's current evidence list on the
+    extension's questions, comparing the returned list's labelled recall and precision at equal list size. Under V0
+    the stack is off, so the walk keeps no `walk_answers` links. The comparison there is against the walk's reads in
+    order, or against S's links on the pilot.
 - **Stack B: the found evidence in Jev's state, the question unchanged** (bill).
   - *Step 1, tested:* on 400 leads out of evidence reads (80 progress, 320 echo, four questions), adding the exact
     found evidence to the decider's state lifts progress-against-echo AUC from 0.653 to 0.701, +0.047 [+0.004,
