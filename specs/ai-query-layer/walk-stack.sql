@@ -1,5 +1,5 @@
 -- ============================================================================
--- THE QUESTION STACK: A WALK'S BOARD (REM-1245, specs/ai-query-layer/walk.md §6-§9)
+-- THE QUESTION STACK: A WALK'S BOARD (REM-1245, the walk spec, percolate#319 §6-§9)
 -- ============================================================================
 -- A memoryless walk judges every lead against the user's question alone and fixes each P when the lead is raised.
 -- Early on, resembling the question is a good signal; later the evidence that resembles it is already read, and the

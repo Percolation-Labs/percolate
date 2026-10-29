@@ -1,4 +1,4 @@
--- A WALK KEEPS A BOARD OF THE QUESTIONS IT ANSWERS (REM-1245, specs/ai-query-layer/walk.md §6-§9).
+-- A WALK KEEPS A BOARD OF THE QUESTIONS IT ANSWERS (REM-1245, the walk spec, percolate#319 §6-§9).
 --
 -- Under walk.stack the decider links reads to the questions they answer, opens a part when the root's linked reads
 -- share a term, closes a question its linked reads answer, and judges each lead against the questions still open.
@@ -296,7 +296,7 @@ begin
                                                       where e->>'doc' = rd.doc) then
         raise exception 'the cost curve is %', c->'curve';
     end if;
-    if (select usd from aiq.walk_cost_curve(array[r], null, array[2]) where k = 2) <> 0.042 then
+    if (select usd from aiq.walk_cost_curve(array[r], null, array[2]) where k = 2) is distinct from 0.042 then
         raise exception 'walk_cost_curve does not price the reads up to k';
     end if;
     raise notice 'query/48: a walk''s cost is read from its own request rows, at the price as of its start';
