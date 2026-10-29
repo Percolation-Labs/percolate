@@ -1,0 +1,17 @@
+           killed_at           
+-------------------------------
+ 2026-10-29 23:32:14.734136+00
+(1 row)
+
+  status   | tasks 
+-----------+-------
+ pending   |    58
+ running   |     1
+ succeeded |     9
+(3 rows)
+
+ reads_held 
+------------
+         10
+(1 row)
+

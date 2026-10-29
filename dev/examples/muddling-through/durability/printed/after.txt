@@ -1,0 +1,25 @@
+  status   
+-----------
+ succeeded
+(1 row)
+
+ finished_before_crash | redone | changed_since 
+-----------------------+--------+---------------
+                     9 |      0 |             0
+(1 row)
+
+  step_key  | attempts 
+------------+----------
+ judge_1[3] |        2
+(1 row)
+
+ reads 
+-------
+   500
+(1 row)
+
+                                                  jev                                                  
+-------------------------------------------------------------------------------------------------------
+ {"usd": 0.011690, "requests": 74, "judgements": 1893, "input_tokens": 278307, "output_tokens": 33690}
+(1 row)
+
