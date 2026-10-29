@@ -44057,6 +44057,19 @@ begin
         'summary', aiq.walk_summary(p_run),
         'graph', aiq.walk_graph_stats(p_run),
         'questions', (select coalesce(jsonb_agg(q.value || jsonb_build_object('id', q.key,
+                                          -- the lines the decider judged against this leaf, highest P first, each with
+                                          -- its date and what was said: 'judged to answer', unscored. stack.state_gate
+                                          -- is unset (F12 failed its 90% bar), so none of them closes the question.
+                                          'judged_to_answer', (select coalesce(jsonb_agg(jsonb_build_object(
+                                                   'doc', split_part(a.key, '|', 3), 'p', (a.value #>> '{}')::real,
+                                                   'said_at', (aiq.walk_places(inp, array[split_part(a.key, '|', 3)]))
+                                                              ->split_part(a.key, '|', 3)->>'said_at',
+                                                   'line', (aiq.walk_lines(inp, array[split_part(a.key, '|', 3)]))
+                                                              ->>split_part(a.key, '|', 3))
+                                                   order by (a.value #>> '{}')::real desc), '[]'::jsonb)
+                                              from (select key, value from jsonb_each(coalesce(st->'answers', '{}'::jsonb))
+                                                     where key like 'T|' || q.key || '|%'
+                                                     order by (value #>> '{}')::real desc limit 5) a),
                                           'evidence', (select coalesce(jsonb_agg(jsonb_build_object('doc', e->>'doc', 'p', e->'p',
                                                                                                    'wave', e->'wave', 'line', lines->>(e->>'doc'))
                                                                                 order by (e->>'p')::real desc), '[]'::jsonb)
