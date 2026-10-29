@@ -1,4 +1,4 @@
-# BEAM's own text: build/beam_fetch.py downloads it from Hugging Face, so the repository carries none of it.
+# BEAM's own text: harness/beam_fetch.py downloads it from Hugging Face, so the repository carries none of it.
 texts.jsonl
 questions.jsonl
 question-texts.jsonl

@@ -6,17 +6,25 @@
 # it, with JEV_API_KEY bound to the worker, to judge new clues live.
 # The recorded verdicts were given under span 2 and cap 10, the defaults before 0.2.33, so the walk is pinned to them:
 # under wider settings it would raise leads its replay never judged.
-RUN=$(psql "$P8_DSN" -Atc "
-  select workflow.start_workflow('walk', jsonb_build_object(
-           'question', jsonb_build_object('id', r.metadata->>'id', 'text', r.metadata->>'text'), 'channel', r.metadata->>'channel',
-           'replay', 'replay:' || (r.metadata->>'id'), 'offline', true,
-           'settings', jsonb_build_object('span', 2, 'cap', 10)))
-    from content.resources r where r.uri = 'question:1M:35:event_ordering:0'")
+# The question is named by its words, and walked as its document's node. The replay is the sample's recorded verdicts
+# for it, stored under the same words.
+Q='How did my focus on different aspects of the holiday celebration evolve throughout our conversations in order? Mention ONLY and ONLY seven items.'
+RUN=$(psql "$P8_DSN" -At -v q="$Q" <<'SQL'
+select workflow.start_workflow('walk', jsonb_build_object(
+         'question', jsonb_build_object('node_id', n.id, 'text', r.title), 'channel', 'beam-1m35',
+         'replay', (select v.id from content.resources v join content.channels vc on vc.id = v.channel_id
+                     where vc.name = 'walk-replays' and v.title = r.title),
+         'offline', true, 'settings', jsonb_build_object('span', 2, 'cap', 10)))
+  from content.resources r
+  join content.channels c on c.id = r.channel_id and c.name = 'walk-questions'
+  join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
+ where r.title = :'q';
+SQL
+)
 until [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$RUN'")" != running ]; do sleep 2; done
 
-# The answer key is the benchmark's: the harness reads it from the sample's file and passes it in, and the walk never
-# holds it.
-psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 build/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" <<'SQL'
+# Evaluation harness, not product: the benchmark's answer key, read from the sample's file and passed in.
+psql "$P8_DSN" -v run="$RUN" -v labelled="$(python3 harness/labels.py samples/beam/questions.jsonl 1M:35:event_ordering:0)" <<'SQL'
 -- Each step of the run is a task row; each wave judged its clues, then read.
 select step_key, status from workflow.tasks where run_id = :'run' and status <> 'skipped' order by created_at;
 
