@@ -76,10 +76,10 @@ against a CI fixture, so a fresh install is where they are proven):
 select name, dim, provider, is_default from aiq.embedding_models;
 -- every walk the bundle started ran to the end: each one's question step embeds through the stack's own service
 select status, count(*) from aiq.walk_runs group by 1;
--- every replayed walk is the walk it replays: walk_summary labels a replay that met a lead with no recorded
--- verdict as not faithful, with the count (bill, 29 Oct); every row here must read true
-select r.run, aiq.walk_summary(r.run)->'decider'->'faithful' as faithful
-  from aiq.walk_runs r where r.replays is not null;
+-- and every replayed walk matches its recording, by content: the bundle's check.sql compares each replay's reads
+-- and clues with the recording's digests, and every row must say 'pass' (faithful, or an exact replay of a partial
+-- recording, for a walk that stopped before judging its last wave)
+\i walks-starter/walks/check.sql
 ```
 
 ## 4. See the walks in the app (to run)
