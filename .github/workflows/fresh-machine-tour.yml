@@ -93,6 +93,13 @@ jobs:
       - name: 5. query it from psql
         run: |
           psql "$P8_DSN" -c "select run, question_text, status from aiq.walk_runs order by created_at" | tee out/05-psql.txt
+      - name: 5b. the query MCP server answers the reader's token (Claude itself is the Mac leg)
+        run: |
+          T=$(cat out/token)
+          H=(-H "Authorization: Bearer $T" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
+          curl -fsS http://127.0.0.1:8090 "${H[@]}" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"tour","version":"0"}}}' | tee out/05b-mcp-init.txt
+          curl -fsS http://127.0.0.1:8090 "${H[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | tee out/05b-mcp-tools.txt | head -c 2000
+          grep -q '"tools"' out/05b-mcp-tools.txt
       - name: keep what each step printed
         if: always()
         uses: actions/upload-artifact@v4
