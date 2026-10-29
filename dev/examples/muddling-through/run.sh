@@ -49,6 +49,10 @@ fail=0
 for f in $(ls "$HERE/blocks" | sort); do
   out=$CAP/${f%.*}.txt
   bash -eu "$HERE/blocks/$f" > "$out" 2>&1 || { echo "FAILED $f"; tail -20 "$out"; fail=1; break; }
+  # A psql inside a pipe can lose its server and the block still exit 0; an OOM kill of Postgres did that to 30-71 on a
+  # crowded Docker VM (REM-1237), so a block whose output shows the connection lost has failed whatever it exited.
+  if grep -qE 'server closed the connection|terminating connection because of crash|could not connect to server|connection to server .* failed' "$out"; then
+    echo "FAILED $f: the database went away mid-block (out of memory? docker stats)"; fail=1; break; fi
   echo "ok $f"
 done
 [ $fail = 0 ] || exit 1
