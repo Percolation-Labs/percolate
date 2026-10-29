@@ -194,8 +194,47 @@ def main(sample, split=DEFAULT_SPLIT, conversations=DEFAULT_CONVERSATIONS, extra
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")
+    if not (sample / "manifest.yaml").exists():
+        write_manifest(sample, split, runs, len(texts), len(qs))
     print(f"BEAM {split} at {SPLITS[split][1][:12]}, sha256 checked: {len(texts)} exchanges in {len(runs)} "
           f"conversation(s), {pieces} pieces, {matched} with their vectors, {len(qs)} questions")
+
+
+def write_manifest(sample, split, runs, exchanges, questions):
+    """A sample directory with no manifest gets one, and its sources: one channel per conversation (a person's memory;
+    terms are fitted per channel), the walk-questions channel, and the walk study's embedding model. The walkthrough's
+    own sample keeps the manifest it ships."""
+    dataset, revision, _ = SPLITS[split]
+    channels = "".join(f"""  - name: {ch}
+    kind: manual
+    visibility: public
+    config: {{description: "BEAM {split}:{conv}, one document per exchange"}}
+""" for conv, ch in sorted(runs.items(), key=lambda kv: int(kv[0])))
+    (sample / "sources.yaml").write_text(f"""# Written by harness/beam_fetch.py for BEAM {split}, conversations {", ".join(sorted(runs, key=int))}.
+embedding_models:
+  - name: bge-small-en-v1.5
+    dim: 384
+    provider: fastembed
+    endpoint: BAAI/bge-small-en-v1.5
+    credential_ref: null
+    is_default: true
+channels:
+{channels}  - name: walk-questions
+    kind: manual
+    visibility: public
+    config: {{description: "the walk's questions, one document each, by their words alone"}}
+""")
+    (sample / "manifest.yaml").write_text(f"""# Written by harness/beam_fetch.py: BEAM {split} at {dataset}@{revision[:12]}, {len(runs)} conversation(s).
+name: beam-{split.lower()}-{len(runs)}
+version: 1.0.0
+description: |-
+  BEAM {split} conversations {", ".join(sorted(runs, key=int))} ({exchanges} exchanges), with their {questions} questions.
+  CC BY-SA 4.0, from Tavakoli et al., "Beyond a Million Tokens", ICLR 2026 (arXiv 2510.27246).
+load:
+  - sources: sources.yaml
+  - texts: texts.jsonl
+  - texts: question-texts.jsonl
+""")
 
 
 if __name__ == "__main__":
