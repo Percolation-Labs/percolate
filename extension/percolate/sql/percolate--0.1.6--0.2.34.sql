@@ -41577,10 +41577,18 @@ create table if not exists aiq.parameters (
     updated_at timestamptz not null default now(),
     check (split_part(name, '.', 1) = part)
 );
--- A table made before the question stack (REM-1245) has the old list of parts; converge it.
-alter table aiq.parameters drop constraint if exists parameters_part_check;
-alter table aiq.parameters add constraint parameters_part_check
-    check (part in ('index', 'search', 'walk', 'stack', 'decider', 'explain', 'dream'));
+-- A table made before the question stack (REM-1245) has the old list of parts; converge it. Only when it lacks
+-- 'stack': the ALTER takes an exclusive lock on a table every running walk reads, and an unconditional one on each
+-- apply stalled ten live walks on 5801 until it was cancelled.
+do $$
+begin
+    if not exists (select 1 from pg_constraint where conrelid = 'aiq.parameters'::regclass
+                      and conname = 'parameters_part_check' and pg_get_constraintdef(oid) like '%''stack''%') then
+        alter table aiq.parameters drop constraint if exists parameters_part_check;
+        alter table aiq.parameters add constraint parameters_part_check
+            check (part in ('index', 'search', 'walk', 'stack', 'decider', 'explain', 'dream'));
+    end if;
+end $$;
 comment on table aiq.parameters is
     'The walk''s, its index''s, its decider''s, its explanations'' and dreaming''s parameters: value, what it controls, where it is read and why.';
 alter table aiq.parameters enable row level security;
