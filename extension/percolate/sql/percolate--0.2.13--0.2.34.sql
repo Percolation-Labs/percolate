@@ -41493,10 +41493,18 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it.'),
  ('walk.stack', 'walk', 'false', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). Off by default until a stack walk is measured against the memoryless one; the walkthrough''s published steps ran memoryless.'),
- ('stack.answers_gate', 'stack', '0.5', 'The P at or above which the decider''s judgement that a read answers a question, or part of it, links them (a walk_answers edge).', 'aiq.walk_stack_next',
-  'The walk''s own gate, read as a probability. On recorded walks Jev picks out labelled evidence among reads at AUC 0.745 [0.690, 0.799], oracle-scored (REM-1240); the gate itself is not tuned.'),
+ ('stack.link_floor', 'stack', '0.7', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
+  'A floor under the rank rule (sally''s guard on F10, adopted by bill, M-20261029-114953-bb74): rank alone links something even where nothing read is evidence. 0.7 is the walk spec''s value (1ee004f1), set by mike on REM-1240''s recognition run, not on any walk.'),
+ ('stack.link_share', 'stack', '0.02', 'A read links to a question only when its assessment ranks in this top share of the reads assessed against that question so far (at least one).', 'aiq.walk_stack_next',
+  'F10, decided by bill (M-20261029-114822-4a81), Sirsh may overrule: at a fixed gate the links were mostly noise (evidence share of links 5.7% at 0.5, 6.6% at 0.7, against a 3.9% base), while by rank within the walk the top 2% were 19% evidence and the top 5% 14% (mike, REM-1240, on the gate''s run). Found on REM-1245''s ladder retest, where 232 of 443 other reads cleared 0.5.'),
+ ('stack.close_min_links', 'stack', '2', 'A question is judged for closing only once at least this many reads are linked to it.', 'aiq.walk_stack_next',
+  'sally''s guard on F10 (adopted by bill): links by rank are about 19% evidence, so one link is too thin to close on.'),
+ ('stack.stale_waves', 'stack', '2', 'A part that gains no link for this many waves leaves the open list as stale: not answered, and its leads keep their P.', 'aiq.walk_stack_next, aiq.walk_state',
+  'F9, decided by bill with sally''s guard (M-20261029-114953-bb74): on REM-1245''s ladder retest nothing ever closed and the four slots taken by wave 3 were held to the end.'),
+ ('stack.max_displace', 'stack', '1', 'At most this many open parts a wave are displaced by a candidate with higher P; only a part with no link of its own can be.', 'aiq.walk_stack_next',
+  'F11, decided by bill with sally''s guard: on the ladder retest ''ladder'' (P 0.78) and ''money'' (0.84) were judged parts after the slots were full and never opened.'),
  ('stack.close_gate', 'stack', '0.7', 'The P at or above which a question is answered by the reads linked to it, and leaves the open list.', 'aiq.walk_stack_next',
-  'Above the answers gate, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
+  'Above the link floor, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
  ('stack.split_gate', 'stack', '0.5', 'The P at or above which a candidate part is opened as a question under its parent.', 'aiq.walk_stack_next',
   'The walk''s gate. Not measured.'),
  ('stack.max_open', 'stack', '4', 'At most this many parts are open at once (the root not counted). Every open question multiplies the leads judged.', 'aiq.walk_stack_next',
@@ -42154,8 +42162,9 @@ begin
         stop := w->'stop';
     end loop;
     -- The question stack (walk.stack, REM-1245): the board after the last recorded stack step. A lead's P is then the
-    -- highest the decider gave it against any question still open (verdict keys L|<question>|<lead>), and the
-    -- question it serves is that one, so a lead toward a question already answered falls away. The raw verdicts,
+    -- highest the decider gave it against any question not answered (verdict keys L|<question>|<lead>), and the
+    -- question it serves is that one, so a lead toward a question already answered falls away; a part closed stale or
+    -- displaced was not answered, and its leads keep their P (F9, F11). The raw verdicts,
     -- every kind, stay in `answers` for walk_verdicts and the stack's own steps.
     if coalesce((s->>'stack')::boolean, false) then
         -- the board: every recorded wave's moves folded onto the initial one (walk-stack.sql)
@@ -42164,7 +42173,8 @@ begin
           into lp, serves
           from (select distinct on (c.key) c.key, (pmap->>('L|' || o.q || '|' || c.key))::real as p, o.q
                   from (select key from jsonb_each(clues) union select key from jsonb_each(nxt)) c,
-                       jsonb_array_elements_text(board->'open') o(q)
+                       -- every question not answered: open, or closed stale or displaced, whose leads keep their P
+                       (select key as q from jsonb_each(board->'questions') where value->>'state' <> 'answered') o
                  where pmap ? ('L|' || o.q || '|' || c.key)
                  order by c.key, 2 desc, o.q) z;
         return jsonb_build_object('settings', s, 'question', q, 'order', coalesce(ord, '[]'::jsonb),
@@ -42730,7 +42740,8 @@ declare
     uri text := 'verdicts:' || p_run;
 begin
     if not q ? 'node_id' then
-        return jsonb_build_object('kept', 0, 'why', 'the question has no node');
+        -- the board needs no question node: its root is a walk_question of its own
+        return jsonb_build_object('kept', 0, 'why', 'the question has no node', 'stack', aiq.walk_keep_stack(p_run));
     end if;
     select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
       from aiq.walk_answers(p_run) a;
@@ -43183,6 +43194,18 @@ begin
             b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
                            || jsonb_build_object('state', 'answered', 'closed_wave', m->'wave', 'close_p', x->'p'));
         end loop;
+        for x in select value from jsonb_array_elements(coalesce(m->'stale', '[]'::jsonb)) loop
+            b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
+                           || jsonb_build_object('state', 'stale', 'closed_wave', m->'wave'));
+        end loop;
+        for x in select value from jsonb_array_elements(coalesce(m->'displaced', '[]'::jsonb)) loop
+            b := jsonb_set(b, array['questions', x->>'q'], b->'questions'->(x->>'q')
+                           || jsonb_build_object('state', 'displaced', 'closed_wave', m->'wave', 'displaced_by', x->'by'));
+        end loop;
+        -- when each question last gained a link, which is what makes a part stale
+        for x in select distinct on (value->>'q') value from jsonb_array_elements(m->'linked') loop
+            b := jsonb_set(b, array['questions', x->>'q', 'last_linked_wave'], m->'wave');
+        end loop;
         b := b || jsonb_build_object('iteration', rec->'iteration', 'assessed', rec->'assessed',
                                      'evidence', (b->'evidence') || (m->'linked'), 'open', m->'open',
                                      'asked_terms', (b->'asked_terms') || (rec->'asked_terms'), 'moves', m);
@@ -43263,8 +43286,12 @@ declare
     open_   jsonb := board->'open';
     closed  jsonb := '[]'::jsonb;
     added   jsonb := '[]'::jsonb;
+    stale   jsonb := '[]'::jsonb;
+    gone    jsonb := '[]'::jsonb;   -- parts displaced by a candidate with higher P
     c       record;
+    weak    record;
     nparts  int;
+    swaps   int := 0;
 begin
     -- the reads of the wave after the last one assessed; none yet, and there is nothing to do
     select coalesce(jsonb_agg(r.value->>'doc' order by r.ordinality), '[]'::jsonb) into reads
@@ -43275,7 +43302,8 @@ begin
                                   'record', jsonb_build_object('iteration', (board->>'iteration')::int + 1,
                                                                'assessed', board->'assessed', 'asked_terms', '[]'::jsonb,
                                                                'moves', jsonb_build_object('wave', w, 'linked', '[]'::jsonb,
-                                                                   'answered', '[]'::jsonb, 'added', '[]'::jsonb, 'open', open_)));
+                                                                   'answered', '[]'::jsonb, 'added', '[]'::jsonb,
+                                                                   'stale', '[]'::jsonb, 'displaced', '[]'::jsonb, 'open', open_)));
     end if;
     lines := aiq.walk_lines(inp, array(select jsonb_array_elements_text(reads)));
     -- 1. assess: each new read against each open question
@@ -43287,11 +43315,28 @@ begin
                               order by o.q, r.o), '[]'::jsonb)
       into assess
       from jsonb_array_elements_text(reads) with ordinality r(doc, o), jsonb_array_elements_text(open_) o(q);
-    select coalesce(jsonb_agg(jsonb_build_object('doc', a->>'doc', 'q', a->>'q', 'p', (a->>'p')::real, 'wave', w)
+    -- A read links to a question when its P clears stack.link_floor AND ranks in the top stack.link_share of the reads
+    -- assessed against that question so far (walk.md §6 move 1, F10). Rank, because at a fixed gate the links were
+    -- mostly noise (6% evidence at 0.5 against a 3.9% base; the top 2% by rank were 19%, REM-1240). It is relative, so
+    -- a walk with no evidence still links its best reads; the close step is what must say no. "So far" is the reads of
+    -- waves up to this one, never later ones a replay may also hold.
+    with pool as (
+        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc, (x.value #>> '{}')::real as p
+          from jsonb_each(ans) x
+         where x.key like 'A|%'
+           and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
+                                                    jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
+    ), ranked as (
+        select q, doc, p, rank() over (partition by q order by p desc) as rk, count(*) over (partition by q) as n from pool
+    )
+    select coalesce(jsonb_agg(jsonb_build_object('doc', a->>'doc', 'q', a->>'q', 'p', (a->>'p')::real, 'wave', w,
+                                                 'rank', rk.rk, 'of', rk.n)
                               order by a->>'q', (a->>'p')::real desc), '[]'::jsonb)
       into linked
       from jsonb_array_elements(assess) a
-     where (a->>'p')::real >= (sp->>'answers_gate')::real;
+      join ranked rk on rk.q = a->>'q' and rk.doc = a->>'doc'
+     where (a->>'p')::real >= (sp->>'link_floor')::real
+       and rk.rk <= greatest(1, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
     -- 2. close: each open question that gained evidence, by its reads' lines; the root by every read linked to it or
     -- to any part. Keyed by how many reads it then has, so a question that gains more is asked again.
@@ -43305,7 +43350,8 @@ begin
          where e->>'q' = gq.q or (gq.q = 'root')
          group by 1, 2
     ), counted as (
-        select q, count(*) as n from mine group by q
+        -- close judges a question's links only once it has stack.close_min_links of them
+        select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
     ), shown as (
         select m.q, m.doc, m.p, row_number() over (partition by m.q order by m.p desc, m.doc) as k from mine m
     )
@@ -43358,12 +43404,38 @@ begin
             open_ := open_ - 'root';
         end if;
     end loop;
+    -- stale (F9): a part that has gained no link for stack.stale_waves waves leaves the open list as 'stale'. It is
+    -- not answered, and its leads keep their P (aiq.walk_state), so a stale part never hides evidence behind it.
+    for c in select o as q from jsonb_array_elements_text(open_) o
+              where o <> 'root' and not exists (select 1 from jsonb_array_elements(linked) x where x->>'q' = o)
+                and w - coalesce((qs->o->>'last_linked_wave')::int, (qs->o->>'opened_wave')::int)
+                    >= (sp->>'stale_waves')::int loop
+        qs := jsonb_set(qs, array[c.q], qs->c.q || jsonb_build_object('state', 'stale', 'closed_wave', w));
+        stale := stale || jsonb_build_array(jsonb_build_object('q', c.q));
+        open_ := open_ - c.q;
+    end loop;
     nparts := (select count(*) from jsonb_array_elements_text(open_) o where o <> 'root');
     for c in select x->>'parent' as parent, x->>'term' as term, x->>'text' as text, (x->>'p')::real as p
                from jsonb_array_elements(cands) x
               where (x->>'p')::real >= (sp->>'split_gate')::real and open_ ? (x->>'parent')
               order by (x->>'p')::real desc, x->>'term' loop
-        exit when nparts >= (sp->>'max_open')::int;
+        if nparts >= (sp->>'max_open')::int then
+            -- the slot rule (F11): a candidate with higher P displaces the weakest open part that has no link of its
+            -- own, at most stack.max_displace a wave; the displaced part keeps its leads and its record
+            exit when swaps >= (sp->>'max_displace')::int;
+            select o as q, (qs->o->>'opened_p')::real as p into weak
+              from jsonb_array_elements_text(open_) o
+             where o <> 'root' and not exists (select 1 from jsonb_array_elements(ev) e where e->>'q' = o)
+             order by (qs->o->>'opened_p')::real, o
+             limit 1;
+            exit when weak.q is null or coalesce(weak.p, 0) >= c.p;
+            qs := jsonb_set(qs, array[weak.q], qs->weak.q || jsonb_build_object('state', 'displaced', 'closed_wave', w,
+                                                                                 'displaced_by', 'part:' || c.term));
+            gone := gone || jsonb_build_array(jsonb_build_object('q', weak.q, 'p', weak.p, 'by', 'part:' || c.term));
+            open_ := open_ - weak.q;
+            nparts := nparts - 1;
+            swaps := swaps + 1;
+        end if;
         qs := qs || jsonb_build_object('part:' || c.term, jsonb_build_object(
                   'parent', c.parent, 'text', c.text, 'by', 'decider', 'term', c.term, 'opened_wave', w, 'opened_p', c.p,
                   'state', 'open', 'closed_wave', null, 'close_p', null));
@@ -43379,7 +43451,8 @@ begin
         'record', jsonb_build_object(
             'iteration', (board->>'iteration')::int + 1, 'assessed', w,
             'asked_terms', coalesce((select jsonb_agg(x->'term') from jsonb_array_elements(cands) x), '[]'::jsonb),
-            'moves', jsonb_build_object('wave', w, 'linked', linked, 'answered', closed, 'added', added, 'open', open_)));
+            'moves', jsonb_build_object('wave', w, 'linked', linked, 'answered', closed, 'added', added,
+                                        'stale', stale, 'displaced', gone, 'open', open_)));
 end;
 $$;
 
