@@ -15,7 +15,7 @@
 --
 -- A WAVE, after the previous wave's reads (wave 0's are search's seeds):
 --     assess  matrix  each new read x each open question: does the read answer it, or part of it?   A|<q>|<read>
---     shape   matrix  each candidate part: is it a part its parent's answer needs?                 S|<parent>|<term>
+--     shape   matrix  each candidate part: is it a part the root's answer needs?                   S|root|<term>
 --                     each open question that gained evidence: do its reads answer it?              C|<q>|<n reads>
 --     stack   sql     the moves those verdicts decide, recorded: linked, answered, added, open
 --     judge   matrix  each live lead x each open question it has not been judged against           L|<q>|<lead>
@@ -216,25 +216,29 @@ begin
       into closes
       from counted ct
      where open_ ? ct.q;
-    -- 3. candidate parts: the most specific terms (fewest documents holding them) of the reads linked this wave, not
-    -- yet asked about, each under the question its read answered best
+    -- 3. candidate parts (walk.md §6 move 2): parts open only under the root, so they never nest. The candidates are
+    -- the terms the most reads linked to the root share (at least two), ties by specificity (fewest documents holding
+    -- them), not yet asked about. The rarest term of each linked read is not used: on REM-1245's live ladder walk it
+    -- filled every slot with variants of one aspect by wave 3, and the question's other aspects never got one.
     g := aiq.walk_run_graph(p_run);
-    with src as (
-        select distinct on (x->>'doc') x->>'doc' as doc, x->>'q' as q
-          from jsonb_array_elements(linked) x order by x->>'doc', (x->>'p')::real desc, x->>'q'
-    ), terms as (
-        select distinct on (t) t, src.q, jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) as n
-          from src, jsonb_array_elements_text(coalesce(g->'terms'->src.doc, '[]'::jsonb)) t
+    with linked_root as (
+        select distinct x->>'doc' as doc from jsonb_array_elements(ev) x where x->>'q' = 'root'
+    ), shared as (
+        select t, count(*) as holders, jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) as n
+          from linked_root lr, jsonb_array_elements_text(coalesce(g->'terms'->lr.doc, '[]'::jsonb)) t
          where not board->'asked_terms' ? t and not qs ? ('part:' || t)
-         order by t, 3, src.q
+         group by t
+        having count(*) >= 2
     ), top as (
-        select * from terms order by n, t limit (sp->>'candidates')::int
+        select * from shared order by holders desc, n, t limit (sp->>'candidates')::int
     )
-    select coalesce(jsonb_agg(jsonb_build_object('key', 'S|' || top.q || '|' || top.t, 'parent', top.q, 'term', top.t,
-                                                 'text', format(sp->>'part_wording', qs->top.q->>'text', top.t),
-                                                 'p', ans->('S|' || top.q || '|' || top.t)) order by top.n, top.t), '[]'::jsonb)
+    select coalesce(jsonb_agg(jsonb_build_object('key', 'S|root|' || top.t, 'parent', 'root', 'term', top.t,
+                                                 'holders', top.holders,
+                                                 'text', format(sp->>'part_wording', qs->'root'->>'text', top.t),
+                                                 'p', ans->('S|root|' || top.t)) order by top.holders desc, top.n, top.t), '[]'::jsonb)
       into cands
-      from top;
+      from top
+     where jsonb_array_length(linked) > 0;
     -- the moves the verdicts decide: closes first, the root only with no part of it left open, then parts
     for c in select x->>'q' as q, (x->>'p')::real as p from jsonb_array_elements(closes) x
               where x->>'q' <> 'root' and (x->>'p')::real >= (sp->>'close_gate')::real loop
