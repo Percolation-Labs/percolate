@@ -167,6 +167,16 @@ begin
        or (select count(*) from aiq.walk_stack(m)) <> 1 then
         raise exception 'a walk with the stack off kept a board';
     end if;
+    -- a run is read back under the settings it started with: a default changed afterwards rewrites nothing
+    got := (select string_agg(format('%s:%s=%s', wave, question, state), ';' order by wave, question) from aiq.walk_stack(r));
+    update aiq.parameters set value = '"targets"' where name = 'walk.describe';
+    update aiq.parameters set value = '"p"' where name = 'walk.order';
+    if aiq.walk_state(r)->'settings'->>'describe' is distinct from 'source'
+       or (select string_agg(format('%s:%s=%s', wave, question, state), ';' order by wave, question) from aiq.walk_stack(r))
+          is distinct from got then
+        raise exception 'changing a default rewrote a past run: it now reads describe %',
+            aiq.walk_state(r)->'settings'->>'describe';
+    end if;
     -- a parameter row the stack reads is missing: the walk fails, naming it, rather than silently linking nothing (bill)
     delete from aiq.parameters where name = 'stack.link_floor';
     m := workflow.start_workflow('walk_fixture_stack', inp);

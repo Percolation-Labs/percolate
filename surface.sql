@@ -360,6 +360,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_questions','','walk-stack.sql: the questions the caller may walk, with any recorded replay (REM-1246)'),
 ('ai-query-layer','function','aiq.walk_launch','uuid, text, jsonb','walk-stack.sql: start a walk of one, replay at $0 or live, as the caller (REM-1246)'),
 ('ai-query-layer','function','aiq.walk_oracle','uuid, text[], integer','walk-stack.sql: the oracle decider''s reads on a run''s own graph, seeds and budget, the ceiling of walk.md §11 (REM-1245)'),
+('ai-query-layer','function','aiq.walk_run_settings','uuid','walk.sql: a run''s settings as recorded when it started, so later defaults never rewrite it (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_run','uuid','walk.sql: a walk''s run row, for an operator or a caller workflow.may_access_run admits (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_tasks','uuid','walk.sql: a walk''s task rows, under the same predicate as walk_run (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_runs_visible','','walk.sql: every walk the caller may read, behind aiq.walk_runs (REM-1245)'),

@@ -454,7 +454,7 @@ declare
     nx  jsonb;
     d   claims.deciders;
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) or coalesce((inp->>'offline')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) or coalesce((inp->>'offline')::boolean, false) then
         return;
     end if;
     if p_phase not in ('assess', 'shape') then
@@ -512,7 +512,7 @@ language plpgsql stable security invoker set search_path = pg_catalog, public as
 declare
     inp jsonb := (select input from aiq.walk_run(p_run));
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) then
         return null;
     end if;
     return aiq.walk_stack_next(p_run, aiq.walk_state(p_run))->'record';
@@ -544,7 +544,7 @@ create or replace function aiq.walk_graph_stats(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with gr as materialized (
-        select aiq.walk_run_graph(p_run) as g, (aiq.walk_settings(r.input)->>'cap')::int as cap
+        select aiq.walk_run_graph(p_run) as g, (aiq.walk_run_settings(p_run)->>'cap')::int as cap
           from aiq.walk_run(p_run) r
     ), hops as materialized (
         -- what one lead out of a document reaches: its terms' postings under the cap, its sitting, its nearest
@@ -757,7 +757,7 @@ declare
     nid   uuid;
     n_ans int;
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) then
         return jsonb_build_object('kept', 0, 'why', 'the walk kept no stack');
     end if;
     st := aiq.walk_state(p_run);

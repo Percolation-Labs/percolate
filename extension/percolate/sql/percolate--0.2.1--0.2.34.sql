@@ -41780,6 +41780,19 @@ select aiq.parameters_of('walk') || jsonb_build_object('hits', aiq.parameters_of
        || coalesce(p_input->'settings', '{}'::jsonb)
 $$;
 
+-- A run's settings as they were when it started: the walk_start step records them, so a default changed later never
+-- rewrites what a past run did. A run started before the record existed is resolved as before, from its input and
+-- today's defaults: on 5801, changing walk.describe's default to lines turned past memoryless runs into lines walks,
+-- and their source-worded replays were refused on reading back (REM-1245).
+create or replace function aiq.walk_run_settings(p_run uuid) returns jsonb
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    select coalesce((select tk.output->'result'->0->'state'->'settings' from aiq.walk_tasks(p_run) tk
+                      where tk.step_key = 'start' and tk.status = 'succeeded'
+                        and jsonb_typeof(tk.output->'result'->0->'state'->'settings') = 'object' limit 1),
+                    aiq.walk_settings((select input from aiq.walk_run(p_run))))
+$$;
+grant execute on function aiq.walk_run_settings(uuid) to authenticated;
+
 -- A run's scope, {node uuid: key}: the `document` nodes of a channel's resources by uri, or the nodes of an entity
 -- type by canonical key.
 create or replace function aiq.walk_keys(p_input jsonb)
@@ -41868,11 +41881,13 @@ language plpgsql stable security invoker set search_path = pg_catalog, public as
 declare
     v_at timestamptz := coalesce(p_at, now());
     v    jsonb := aiq.walk_graph_version(aiq.walk_keys(p_input));
+    -- computed once: as a predicate it is evaluated for every row, and content.resources has no index on uri
+    kept_uri text := aiq.walk_graph_uri(p_input, v);
     kept jsonb;
 begin
     select res.metadata->'walk_graph' into kept
       from content.resources res
-     where res.uri = aiq.walk_graph_uri(p_input, v)
+     where res.uri = kept_uri
      order by res.updated_at desc
      limit 1;
     if kept is not null and v_at >= (v->>'as_of')::timestamptz then
@@ -42097,7 +42112,7 @@ begin
         raise no_data_found using message = format('no run %s that you may read', p_run);
     end if;
     inp := r.input;
-    s := aiq.walk_settings(inp);
+    s := aiq.walk_run_settings(p_run);
     q := inp->'question';
     g := aiq.walk_run_graph(p_run);
     -- Search's order: the start step's record of it.
@@ -42271,6 +42286,10 @@ declare
     g     jsonb;
     ord   jsonb;
     seeds jsonb;
+    -- the kept graph's uri, computed once: as a predicate, walk_graph_version (about 55 ms) ran for every row of
+    -- content.resources, which has no index on uri; at 2,281 rows walk_start took over two minutes, past run_sql's
+    -- 30 s statement_timeout (timmy, REM-1249)
+    guri  text;
 begin
     select * into r from aiq.walk_run(p_run);
     inp := r.input;
@@ -42283,6 +42302,7 @@ begin
     end if;
     s := aiq.walk_settings(inp);
     g := aiq.walk_graph(inp, r.created_at);
+    guri := aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)));
     -- A replay is checked here, at the first step, so a wrong one fails the walk once rather than every retry of a
     -- matrix expansion: walk_state raises if it is missing or was judged under another wording.
     if inp ? 'replay' then
@@ -42318,11 +42338,10 @@ begin
       from jsonb_array_elements(ord) with ordinality
      where ordinality <= (s->>'seeds')::int
        and (value #>> '{}') in (select k.v from jsonb_each_text(g->'keys') k(n, v));
-    return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds,
+    -- the settings, resolved now and recorded, so the run is read back under them whatever the defaults become
+    return jsonb_build_object('wave', 0, 'order', ord, 'si', (s->>'seeds')::int, 'reads', seeds, 'settings', s,
                               'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
-                              'graph', (select res.uri from content.resources res
-                                         where res.uri = aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)))
-                                         limit 1));
+                              'graph', (select res.uri from content.resources res where res.uri = guri limit 1));
 end;
 $$;
 
@@ -42806,7 +42825,7 @@ returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
 declare
     q   jsonb := (select input->'question' from aiq.walk_run(p_run));
-    tk  text := aiq.walk_task(aiq.walk_settings((select input from aiq.walk_run(p_run)))->>'describe');
+    tk  text := aiq.walk_task(aiq.walk_run_settings(p_run)->>'describe');
     v   jsonb;
     uri text := 'verdicts:' || p_run;
 begin
@@ -43639,7 +43658,7 @@ declare
     nx  jsonb;
     d   claims.deciders;
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) or coalesce((inp->>'offline')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) or coalesce((inp->>'offline')::boolean, false) then
         return;
     end if;
     if p_phase not in ('assess', 'shape') then
@@ -43697,7 +43716,7 @@ language plpgsql stable security invoker set search_path = pg_catalog, public as
 declare
     inp jsonb := (select input from aiq.walk_run(p_run));
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) then
         return null;
     end if;
     return aiq.walk_stack_next(p_run, aiq.walk_state(p_run))->'record';
@@ -43729,7 +43748,7 @@ create or replace function aiq.walk_graph_stats(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     with gr as materialized (
-        select aiq.walk_run_graph(p_run) as g, (aiq.walk_settings(r.input)->>'cap')::int as cap
+        select aiq.walk_run_graph(p_run) as g, (aiq.walk_run_settings(p_run)->>'cap')::int as cap
           from aiq.walk_run(p_run) r
     ), hops as materialized (
         -- what one lead out of a document reaches: its terms' postings under the cap, its sitting, its nearest
@@ -43942,7 +43961,7 @@ declare
     nid   uuid;
     n_ans int;
 begin
-    if not coalesce((aiq.walk_settings(inp)->>'stack')::boolean, false) then
+    if not coalesce((aiq.walk_run_settings(p_run)->>'stack')::boolean, false) then
         return jsonb_build_object('kept', 0, 'why', 'the walk kept no stack');
     end if;
     st := aiq.walk_state(p_run);
