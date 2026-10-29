@@ -75,6 +75,10 @@ against a CI fixture, so a fresh install is where they are proven):
 select name, dim, provider, is_default from aiq.embedding_models;
 -- every walk the bundle started ran to the end: each one's question step embeds through the stack's own service
 select status, count(*) from aiq.walk_runs group by 1;
+-- every replayed walk is the walk it replays: a lead with no recorded verdict means the graph changed since the
+-- recording, and the replay is partial (bill, 29 Oct); this must be 0
+select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
+ where r.replays is not null and c.decision = 'unjudged';
 ```
 
 ## 4. See the walks in the app (to run)
