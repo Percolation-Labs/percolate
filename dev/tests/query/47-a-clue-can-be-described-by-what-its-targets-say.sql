@@ -7,7 +7,8 @@
 --   4. a term says how many messages hold it;
 --   5. lines asks in its own wording, so a replay given under another is refused, and a clue the run never raised
 --      is an error, not null;
---   6. a channel's documents are described by their stored terms_text, and one in another sitting by days apart.
+--   6. a channel's documents are described by their stored terms_text, and one in another sitting by days apart;
+--   7. lines_nocount says the same with no count of messages, in a wording of its own.
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -60,7 +61,7 @@ begin
     insert into content.channels (name, kind, org_id, visibility) values ('walk-lines', 'manual', org, 'public')
     returning id into ch;
     -- One replay per wording, each liking ladder, so every walk reads the same messages.
-    foreach w in array array['source', 'targets', 'lines'] loop
+    foreach w in array array['source', 'targets', 'lines', 'lines_nocount'] loop
         insert into content.resources (channel_id, uri, title, org_id, visibility)
         values (ch, 'walk-lines:' || w, 'replay', org, 'public') returning id into res;
         insert into content.resource_chunks (resource_id, ordinal, content)
@@ -87,7 +88,7 @@ declare
     st   jsonb;
     bad  text;
 begin
-    foreach w in array array['source', 'targets', 'lines'] loop
+    foreach w in array array['source', 'targets', 'lines', 'lines_nocount'] loop
         r := workflow.start_workflow('walk_lines_1',
                  jsonb_set(jsonb_set(base, '{settings,describe}', to_jsonb(w)), '{replay}',
                            to_jsonb((select id from content.resources where uri = 'walk-lines:' || w))));
@@ -118,7 +119,7 @@ begin
     end if;
 
     -- 2. The clue text function gives the walk's own words, under every description.
-    foreach w in array array['source', 'targets', 'lines'] loop
+    foreach w in array array['source', 'targets', 'lines', 'lines_nocount'] loop
         st := aiq.walk_state((runs->>w)::uuid);
         select string_agg(key, ', ') into bad
           from jsonb_each(st->'next')
@@ -191,6 +192,17 @@ begin
             raise exception 'a channel''s documents were not described by their stored lines and distance: %', txt;
         end if;
     end;
+    -- 7. lines_nocount: the same lines, no count, its own wording.
+    select string_agg(key || ' = ' || coalesce(value->>'text', 'null'), '; ') into bad
+      from jsonb_each(aiq.walk_state((runs->>'lines_nocount')::uuid)->'next')
+     where value->>'text' is null or value->>'text' ~ '[0-9]+ (unread )?message' or value->>'text' like '%held by%'
+        or value->>'text' not like '%What the user said in %: "%';
+    if bad is not null then
+        raise exception 'under lines_nocount a clue stated a count or no lines: %', bad;
+    end if;
+    if aiq.walk_task('lines_nocount') in (aiq.walk_task('source'), aiq.walk_task('targets'), aiq.walk_task('lines')) then
+        raise exception 'lines_nocount shares a wording with another description';
+    end if;
     raise notice 'query/47: a clue can be described by what its targets say, in the walk''s own words';
 end $$;
 

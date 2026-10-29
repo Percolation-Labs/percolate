@@ -41726,7 +41726,7 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
  ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
- ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them; or lines, what the user said in up to 3 of them (their stored lines, so nothing is read at walk time), how far each is from the source, and for a term how many messages hold it. Neither source nor targets reads a target.', 'aiq.walk_state, aiq.walk_task, aiq.walk_describe_clue',
+ ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them; or lines, what the user said in up to 3 of them (their stored lines, so nothing is read at walk time), how far each is from the source, and for a term how many messages hold it; or lines_nocount, the same with no count of messages, since a count can lift P on wide bundles (REM-1240). Neither source nor targets reads a target.', 'aiq.walk_state, aiq.walk_task, aiq.walk_describe_clue',
   'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source stays the default until the paper''s 122 are walked under both (bill). lines (REM-1240): on REM-1204''s A1 re-judge Jev given the targets'' own text separated them at 0.768, against 0.644 for the source and 0.634 to 0.641 for the question''s cosine to the same text; lines is that text, stored at ingest. Not yet walked.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
   'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
@@ -41736,6 +41736,9 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('decider.task_lines', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by what the user said in them and where they sit. Would following it likely reach information needed to answer `question`, or part of it?'),
   'The question Jev answers for every clue when walk.describe is lines. A verdict is kept with its wording, so verdicts given under one description never answer a clue described another way.', 'aiq.walk_task',
   'REM-1240: task_targets'' wording, naming what lines shows. Not yet measured on its own.'),
+ ('decider.task_lines_nocount', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by what the user said in some of them and where they sit. Would following it likely reach information needed to answer `question`, or part of it?'),
+  'The question Jev answers for every clue when walk.describe is lines_nocount. Its own wording, so its verdicts are never mixed with lines''.', 'aiq.walk_task',
+  'REM-1240: bill found P rising with bundle size under targets (median 0.23 at 1 target, 0.30 at 11+; flat 0.31 under source), which the walk''s P order spends reads on; lines_nocount tests whether stating the count does that. Not yet measured.'),
  ('search.hits', 'search', '2000', 'How many search hits a channel walk takes as its search order.', 'aiq.walk_start',
   'Enough to rank every document of a 1M BEAM conversation (about 1,100) by its best chunk.'),
  ('decider.task', 'decider', to_jsonb(text 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages share, or the messages beside or close in meaning to one already read. Would following it likely reach information needed to answer `question`, or part of it?'),
@@ -41797,8 +41800,10 @@ begin
         return (select value #>> '{}' from aiq.parameters where name = 'decider.task_targets');
     elsif p_describe = 'lines' then
         return (select value #>> '{}' from aiq.parameters where name = 'decider.task_lines');
+    elsif p_describe = 'lines_nocount' then
+        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_lines_nocount');
     end if;
-    raise invalid_parameter_value using message = format('walk.describe is source, targets or lines, not %s', p_describe);
+    raise invalid_parameter_value using message = format('walk.describe is source, targets, lines or lines_nocount, not %s', p_describe);
 end;
 $$;
 
@@ -41822,7 +41827,7 @@ $$;
 --   lines: up to 3 targets, chosen as aiq.walk_signs chooses them, each by what the user said in it (its stored
 --   terms_text, or a node's summary) and how far it sits from the source: in the same sitting (the index's walk_next
 --   provenance), by exchanges; in another, by days (said_at), when known. A term also says how many messages hold
---   it. Nothing is read at walk time.
+--   it. lines_nocount is lines without any count. Nothing is read at walk time.
 create or replace function aiq.walk_describe_clue(p_input jsonb, p_graph jsonb, p_describe text, p_key text,
                                                   p_kind text, p_x text, p_source text, p_targets jsonb,
                                                   p_text text default null)
@@ -41848,8 +41853,8 @@ begin
                           p_x, n, aiq.walk_signs(p_graph, p_key, p_targets));
         end if;
         return format('%s unread message(s) %s. Their own key terms: %s', n, side, aiq.walk_signs(p_graph, p_key, p_targets));
-    elsif p_describe <> 'lines' then
-        raise invalid_parameter_value using message = format('walk.describe is source, targets or lines, not %s', p_describe);
+    elsif p_describe not in ('lines', 'lines_nocount') then
+        raise invalid_parameter_value using message = format('walk.describe is source, targets, lines or lines_nocount, not %s', p_describe);
     end if;
     with at as (
         select d.value #>> '{}' as doc, md5(p_key || ':' || (d.value #>> '{}')) as h
@@ -41891,6 +41896,13 @@ begin
                                   else '' end), ' | ' order by at.h)
       into lines
       from at left join meta t on t.doc = at.doc left join meta s on s.doc = p_source;
+    if p_describe = 'lines_nocount' then
+        -- No count of messages: how wide a bundle is stays out of the decider's sight.
+        if p_kind = 'term' then
+            return format('the term ''%s''. What the user said in unread messages that hold it: %s', p_x, coalesce(lines, '(none)'));
+        end if;
+        return format('unread messages %s. What the user said in them: %s', side, coalesce(lines, '(none)'));
+    end if;
     if p_kind = 'term' then
         return format('the term ''%s'', held by %s message(s) in all, %s of them unread. What the user said in them: %s',
                       p_x, jsonb_array_length(coalesce(p_graph->'post'->p_x, '[]'::jsonb)), n, coalesce(lines, '(none)'));
