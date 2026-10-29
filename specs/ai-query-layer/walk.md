@@ -884,3 +884,30 @@ Still open:
     `C|<q>|…`);
   - no judgement reads holistic state;
   - a parent's close is structure over its children, not a Jev call.
+
+## 16. The stack's next form (Sirsh, M-20261029-180634-2357)
+
+The pilot turned the stack off by default (§10, outcome i), and the definition behind that decision found why it
+added nothing: its parts are the root's own words plus a keyword (`stack.part_wording`), so they name no narrower
+thing to find (REM-1244). Two forms come after it.
+
+- **Part three's candidate: the caller-supplied stack.** The agent that asks the question also supplies its
+  sub-questions, written by the agent in its own words, and the walk opens them as `client:<n>` parts (§6, move 3)
+  from the start, instead of templating parts from shared terms.
+  - *What it changes:* the parts are real questions, so a lead is judged against something narrower than the root.
+    Everything else stays as built: judging, linking, stale and displaced, and the structural close of a parent.
+  - *Keyless:* sub-questions are the caller's words about what to find, never an answer. They would enter as the start's
+    `question.parts` (not built; today `walk_start` takes only the question), and it would refuse any part that carries an answer, evidence or rubric, as it does for
+    the question.
+  - *Status:* a candidate, pending bill's directional check (3–4 recorded questions, hand-written sub-questions, Jev
+    re-judging the recorded leads). If the leads score no better against the parts than against the root, it is not
+    built for part three.
+- **Future investigation, a project and a follow-up article, not part three: a dynamic stack on a fixed
+  structure.** Each open question is a slot built from closed lists:
+  - *subject:* an entity in the graph;
+  - *aspect:* a tag or a relationship type;
+  - *time:* past, now, later, or before or after an event;
+  - *ask:* a fact, a change, a count or a list item. The ask also says when the slot is filled.
+
+  Jev picks slots, judges leads against the open ones, and closes a slot when evidence fills it. The closed lists
+  are evolved over time, which tests whether a closed set of types covers most questions.
