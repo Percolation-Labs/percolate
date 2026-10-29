@@ -138,6 +138,7 @@ def main():
     a.add_argument("--text", choices=("shipped", "fetch"), default="shipped")
     a.add_argument("--name", required=True)
     a.add_argument("--runs"); a.add_argument("--dsn"); a.add_argument("--questions"); a.add_argument("--rule", default="")
+    a.add_argument("--smoke", help="one qid: also build smoke/, a one-conversation bundle with that question's walks")
     args = a.parse_args()
     sample, root = Path(args.sample), Path(args.out) / args.name
     if not (sample / "questions.jsonl").exists() or (args.text == "shipped" and not (sample / "texts.jsonl").exists()):
@@ -220,6 +221,13 @@ def main():
     (root / "README.md").write_text(README.format(name=args.name, walks=n_walks, oracle=n_oracle,
                                                   text=("shipped" if args.text == "shipped" else "fetched"),
                                                   index="\n".join(f"    percolate walk index --source {c}" for c in channels)))
+    if args.smoke:
+        # The tour's smoke test (timmy): one conversation and one question's two walks, loadable on its own in minutes.
+        r = subprocess.run([sys.executable, __file__, str(sample), str(root), "--name", "smoke", "--text", args.text,
+                            "--runs", args.runs, "--dsn", args.dsn, "--questions", args.smoke,
+                            "--rule", f"The smoke test: {args.smoke}, both arms, and its conversation alone."])
+        if r.returncode:
+            sys.exit("smoke/ failed to build")
     sums = []
     for p in sorted(root.rglob("*")):
         if p.is_file() and p.name != "SHA256SUMS":
