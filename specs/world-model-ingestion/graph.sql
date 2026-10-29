@@ -1374,6 +1374,77 @@ end;
 $$;
 
 -- ------------------------------------------------------------
+-- 6c. An edge is closed, never deleted (Sirsh, M-20261028-200720-890b).
+--
+-- A fact that stops holding is closed: aiq.close_edge, or valid_to set by the
+-- writer that retracts it (percolate walk index, aiq.retract_derived). The row
+-- stays, so a past walk, a past answer and the record clock still read what
+-- held then. A DELETE or TRUNCATE issued against aiq.edges is refused, with
+-- two exceptions. A delete that follows something leaving (a node removed by
+-- cascade, or a deleted memory's sole-sourced edges, trg_forget_deleted_sources)
+-- runs one trigger level down, and the edge goes with the thing it was about.
+-- And an identity merge (aiq.promote_soft_node) deletes the candidate's edges
+-- after moving them onto the node that now carries the identity: the fact did
+-- not stop holding, it moved, so a closed duplicate would assert what did not
+-- happen. The merge marks its transaction (aiq.merging_nodes) and only then is
+-- a direct delete let through.
+-- ------------------------------------------------------------
+create or replace function aiq.edges_close_never_delete() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    if pg_trigger_depth() = 1 and coalesce(current_setting('aiq.merging_nodes', true), '') <> 'on' then
+        raise exception 'aiq.edges are closed, never deleted (% refused)', tg_op
+            using hint = 'end a fact by setting valid_to (aiq.close_edge); removing a node removes its edges';
+    end if;
+    return null;
+end;
+$$;
+
+create or replace trigger edges_close_never_delete
+    before delete or truncate on aiq.edges
+    for each statement execute function aiq.edges_close_never_delete();
+-- 6d. A fact read on both clocks (REM-1234).
+--
+-- Valid time is when a fact held: valid_from to valid_to. Record time is when
+-- the store learned it: created_at for the edge, and for its end the moment
+-- aiq.close_edge recorded it (provenance closed.at), or valid_to itself when a
+-- writer closed the edge without a record (a retraction closes at the moment
+-- it is made). aiq.edges_as_of(valid_at, known_at) is the edges that, as the
+-- store knew things at known_at, held at valid_at: recorded by then, begun by
+-- valid_at, and not ended by valid_at unless that end had been recorded by
+-- known_at. So "what did the agent believe the budget was at 00:11:20, as it
+-- knew things after the first landing" is one call, read from the edge's own
+-- columns. aiq.edge_is_current is the valid-time half; this adds the record
+-- clock. Intervals come from aiq.edge_periods, so a retraction and a revival
+-- leave a gap; an edge keeps one provenance, so what changed in it is not
+-- read back (REM-1229 keeps every interval with its own provenance).
+-- ------------------------------------------------------------
+create or replace function aiq.edges_as_of(p_valid_at timestamptz, p_known_at timestamptz default now())
+returns setof aiq.edges
+language sql stable security invoker set search_path = pg_catalog, public as $$
+    -- Over aiq.edge_periods, one row per interval an edge held (a retraction and its revival cut a gap). A period
+    -- counts at known_at if the edge was recorded by then and, for a revived period, the revival was too; its end
+    -- counts only if recorded by then: close_edge's closed.at for the edge's latest end, the retraction itself for
+    -- an earlier one.
+    select e.*
+      from aiq.edges e
+     where e.created_at <= p_known_at
+       and exists (
+           select 1
+             from aiq.edge_periods p
+            where p.edge_id = e.id
+              and (p.valid_from = e.valid_from or p.valid_from <= p_known_at)
+              and aiq.edge_is_current(
+                      p.valid_from,
+                      case when coalesce(case when p.valid_to is not distinct from e.valid_to
+                                              then (e.provenance->'closed'->>'at')::timestamptz end,
+                                         p.valid_to) <= p_known_at
+                           then p.valid_to end,
+                      p_valid_at))
+$$;
+grant execute on function aiq.edges_as_of(timestamptz, timestamptz) to authenticated;
+
+-- ------------------------------------------------------------
 -- A DELETED MEMORY TAKES THE FACTS IT ALONE SUPPORTED WITH IT (REM-964).
 --
 -- An owner deletes their resource; its chunks go by foreign key, their
@@ -1628,6 +1699,7 @@ begin
     -- and the surviving edge on the target keeps the merged provenance. A
     -- retracted duplicate would assert that the relationship stopped being
     -- true, which is exactly what did not happen.
+    perform set_config('aiq.merging_nodes', 'on', true);  -- the one direct delete aiq.edges lets through (6c)
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
@@ -1658,6 +1730,7 @@ begin
     -- 3. An edge the repoint made self-referential.
     delete from aiq.edges where src_id = p_target_node_id and dst_id = p_target_node_id;
     get diagnostics v_self = row_count;
+    perform set_config('aiq.merging_nodes', 'off', true);
 
     -- 4a. The target answers to the candidate's name, as an alias -- graph-identity.md
     --     invariant 8, which aiq.resolve_nodes already keeps: a merge deletes no key. The

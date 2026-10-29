@@ -59,12 +59,11 @@ begin
     insert into content.resources (channel_id, uri, title, org_id, visibility)
     values (ch, 'walk-miss:replay', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
-    select res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('q1',
-             jsonb_build_object('term:budget', 0.6, 'term:drill', 0.6, 'term:checklist', 0.59, 'term:safety', 0.59,
+    select res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object('term:budget', 0.6, 'term:drill', 0.6, 'term:checklist', 0.59, 'term:safety', 0.59,
                                 'term:spent', 0.58, 'term:precautions', 0.58, 'term:ladder', 0.57, 'term:moving', 0.42)
              || (select jsonb_object_agg(k, 0.2) from fx, lateral (values ('next:wm/' || n), ('near:wm/' || n)) v(k))
              || (select jsonb_object_agg('term:' || t, 0.2) from fx, unnest(terms) t
-                  where t in ('risotto', 'stock', 'parmesan', 'bowls', 'vanity'))))::text;
+                  where t in ('risotto', 'stock', 'parmesan', 'bowls', 'vanity')))::text;
 end $$;
 
 select aiq.install_walk_workflow('walk_miss_2', 'jev', 2), aiq.install_walk_workflow('walk_miss_3', 'jev', 3);
@@ -73,11 +72,10 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_miss', 'prefix', 'wm/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'How should I sequence my budget, tools and ladder?',
-                                       'gold', jsonb_build_array('wm/7', 'wm/8')),
+        'question', jsonb_build_object('text', 'How should I sequence my budget, tools and ladder?'),
         'search', to_jsonb(array['wm/1','wm/11','wm/12','wm/13','wm/14','wm/2','wm/3','wm/4','wm/5','wm/6','wm/7','wm/8']),
-        'replay', 'walk-miss:replay', 'offline', true,
-        'settings', jsonb_build_object('wave', 3, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
+        'replay', (select id from content.resources where uri = 'walk-miss:replay'), 'offline', true,
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 3, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     r uuid;
     got text;
 begin
@@ -92,7 +90,7 @@ begin
             (select array_agg(doc order by wave, ord) from aiq.walk_reads(r));
     end if;
     select string_agg(doc || ' ' || letter || ' ' || reason || ' ' || key || ' ' || p, '; ' order by doc) into got
-      from aiq.walk_why(r);
+      from aiq.walk_why(r, array['wm/7', 'wm/8']);
     if got is distinct from 'wm/7 c open term:ladder 0.57; wm/8 c open term:ladder 0.57' then
         raise exception 'walk_why says % where the answer sits behind the open lead ladder', got;
     end if;

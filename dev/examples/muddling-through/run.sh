@@ -15,18 +15,20 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d)}; CAP=$W/captures
 IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.33}
 CORE=${CORE:-percolate-core[sample]>=0.2.13}
+# PROJECT and PG_PORT let a second run from empty stand beside this one: the stack takes PG_PORT and the six after it.
+PROJECT=${PROJECT:-muddling-through}; PG=${PG_PORT:-5801}
 mkdir -p $W $CAP; cd $W
 curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
 cat > .env <<ENV
-COMPOSE_PROJECT_NAME=muddling-through
+COMPOSE_PROJECT_NAME=$PROJECT
 P8_DB_IMAGE=$IMG
-P8_PG_PORT=5801
-P8_REST_PORT=5802
-P8_AGENT_PORT=5803
-P8_CONTENT_PORT=5804
-P8_MINIO_PORT=5805
-P8_MINIO_CONSOLE_PORT=5806
-P8_QUERY_MCP_PORT=5807
+P8_PG_PORT=$PG
+P8_REST_PORT=$((PG + 1))
+P8_AGENT_PORT=$((PG + 2))
+P8_CONTENT_PORT=$((PG + 3))
+P8_MINIO_PORT=$((PG + 4))
+P8_MINIO_CONSOLE_PORT=$((PG + 5))
+P8_QUERY_MCP_PORT=$((PG + 6))
 ENV
 # From empty means from empty: a stack left by an earlier run would add its rows to this one's, and every count
 # doubles. The project is this walkthrough's own, so `down -v` removes nothing else.
@@ -34,19 +36,23 @@ docker compose down -v --remove-orphans > /dev/null 2>&1
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
 # No pip cache: a core installed from a local path keeps its version number between builds, and a cached wheel of
 # that version would be installed in place of the tree it names (cory, 27 Oct).
-python3 -m venv .venv > /dev/null && . .venv/bin/activate && PIP_NO_CACHE_DIR=1 pip -q install "$CORE" > /dev/null 2>&1
-export P8_ADMIN_DSN=postgres://p8:p8@localhost:5801/percolate P8_DSN=postgres://p8:p8@localhost:5801/percolate
+python3 -m venv .venv > /dev/null && . .venv/bin/activate && PIP_NO_CACHE_DIR=1 pip -q install "$CORE" matplotlib > /dev/null 2>&1
+export P8_ADMIN_DSN=postgres://p8:p8@localhost:$PG/percolate P8_DSN=postgres://p8:p8@localhost:$PG/percolate
 export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
 # A signed-in reader: the walk embeds its question through the Content Server's /embed, which needs a token.
 psql "$P8_ADMIN_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
 export TOKEN=$(percolate auth token --email me@example.com)
-cp -R "$HERE/samples" "$HERE/build" .
+cp -R "$HERE/samples" "$HERE/harness" .
 
 # Each block runs in order from this directory, as a reader pastes it; its output is captures/<block>.txt.
 fail=0
 for f in $(ls "$HERE/blocks" | sort); do
   out=$CAP/${f%.*}.txt
   bash -eu "$HERE/blocks/$f" > "$out" 2>&1 || { echo "FAILED $f"; tail -20 "$out"; fail=1; break; }
+  # A psql inside a pipe can lose its server and the block still exit 0; an OOM kill of Postgres did that to 30-71 on a
+  # crowded Docker VM (REM-1237), so a block whose output shows the connection lost has failed whatever it exited.
+  if grep -qE 'server closed the connection|terminating connection because of crash|could not connect to server|connection to server .* failed' "$out"; then
+    echo "FAILED $f: the database went away mid-block (out of memory? docker stats)"; fail=1; break; fi
   echo "ok $f"
 done
 [ $fail = 0 ] || exit 1
@@ -55,9 +61,10 @@ done
 S=$CAP/01-setup.txt
 grep -q '"documents": 1101' $S && grep -q '"documents": 1058' $S && grep -q 'walk_tagged  *| *45156' $S \
   || { echo "setup did not leave what the article says"; cat $S; exit 1; }
-# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 15 (REM-1204; 16 before 0.2.33 scoped
-# a walk's search to its own channel, REM-1214).
-grep -Eq '^ +10 \| +500 \| +21 \| +15 \| +27$' $CAP/10-walk-vs-search.txt \
+# Step 1: by read 500 the walk has 21 of the 27, and search's own top 500 holds 12 (REM-1245: 15 while BEAM's plan
+# index was in search's text and vectors, which the walk and search must not read; 16 before 0.2.33 scoped a walk's
+# search to its own channel, REM-1214).
+grep -Eq '^ +10 \| +500 \| +21 \| +12 \| +27$' $CAP/10-walk-vs-search.txt \
   || { echo "step 1 did not find what the article says"; cat $CAP/10-walk-vs-search.txt; exit 1; }
 # Step 5, on both clocks (REM-1213): known now, the budget now is the raised one and at 00:11:20 the earlier one;
 # known after the first landing, the budget now is still the earlier one, which is the memory being wrong.

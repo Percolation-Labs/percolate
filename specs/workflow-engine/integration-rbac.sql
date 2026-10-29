@@ -765,6 +765,36 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- WHOLE RUN AND TASK ROWS FOR A CALLER WHO MAY READ THE RUN (REM-1245). The views
+-- runs_api and tasks_api leave out what a run's own reader needs -- a task's
+-- input (the request it sent) and matrix_parent_id (which request belongs to
+-- which step) -- and authenticated holds no SELECT on the base tables, so an
+-- INVOKER reader raised `permission denied for table runs`. These filter on
+-- workflow.may_access_run, with rbac.is_operator() as the leading arm, in
+-- plan_status's shape: a run the caller may not read returns no rows, never an
+-- error naming it. aiq's walk readers are INVOKER wrappers over them.
+create or replace function workflow.readable_run(p_run uuid)
+returns setof workflow.runs
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select r.* from workflow.runs r
+     where r.id = p_run and (rbac.is_operator() or workflow.may_access_run(r.id, 'select'))
+$$;
+create or replace function workflow.readable_run_tasks(p_run uuid)
+returns setof workflow.tasks
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select t.* from workflow.tasks t
+     where t.run_id = p_run and (rbac.is_operator() or workflow.may_access_run(p_run, 'select'))
+$$;
+create or replace function workflow.readable_runs()
+returns setof workflow.runs
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select r.* from workflow.runs r
+     where rbac.is_operator() or workflow.may_access_run(r.id, 'select')
+$$;
+revoke all on function workflow.readable_run(uuid), workflow.readable_run_tasks(uuid), workflow.readable_runs() from public;
+grant execute on function workflow.readable_run(uuid), workflow.readable_run_tasks(uuid), workflow.readable_runs()
+    to authenticated, worker;
+
 -- WHOSE RUN AN IDEMPOTENCY KEY RESOLVES TO -- schema.sql §9's stub, with the
 -- identity model installed.
 --

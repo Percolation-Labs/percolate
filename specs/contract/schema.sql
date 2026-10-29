@@ -560,6 +560,12 @@ declare
         'aiq.schema_examples',
         'aiq.semantic_sources',
         'aiq.soft_nodes',
+        -- THE WALK'S PARAMETERS (REM-1245): the spec seeds every row and CREATE EXTENSION recreates the current
+        -- ones, so only a row a deployment set (set_by not 'spec') is its own, and only those are dumped. History is
+        -- kept beside each name (valid_from/valid_to), and a fresh install cannot know an upgraded one's past values,
+        -- so it is no vocabulary. A deployment that tunes a value has a current row a restore will meet beside the
+        -- seeded one; nobody tunes one today, and that restore needs its own step before anybody does.
+        'aiq.parameters',
         'content.dataset_files',
         'content.datasets',
         'content.files',
@@ -647,6 +653,7 @@ begin
             perform pg_catalog.pg_extension_config_dump(
                 t, case when t = any(seeded_tables) then 'WHERE NOT shipped'
                         when t = 'rbac.permission_kinds' then 'WHERE checked_by LIKE ''application %'''
+                        when t = 'aiq.parameters' then 'WHERE set_by <> ''spec'''
                         else '' end);
         end if;
     end loop;
