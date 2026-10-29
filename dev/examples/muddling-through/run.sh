@@ -1,8 +1,17 @@
 #!/bin/bash
 # The Muddling Through walkthrough's setup block, from an empty directory, on the published images (REM-1203):
 #
-#     IMG=percolationlabs/percolate-postgres:19-0.2.33 CORE='percolate-core[sample]>=0.2.13' \
-#         dev/examples/muddling-through/run.sh [workdir]
+#     dev/examples/muddling-through/run.sh [workdir]        # the release this tree ships, as published
+#     dev/examples/muddling-through/run.sh --versions       # print what it would install, and stop (first argument only)
+#
+# THE VERSIONS COME FROM ONE PLACE. This tree's extension version (extension/percolate/percolate.control) names its
+# release, and get-percolate's versions.toml at that tag says what that release published: the extension, so the
+# :19-<v> image, and percolate-core. The compose file comes from the same tag. A tree between releases (its control
+# file already names the next one, which has no tag yet) has no published image to test its own blocks against, so
+# run.sh refuses there unless IMG is given (james, 29 Oct: the blocks may call SQL that is not released yet); it still
+# reads core and the compose file from the latest release. IMG, CORE and COMPOSE_REF in the environment override, and
+# a COMPOSE_REF that names no published versions is refused rather than replaced. At v0.2.35 the
+# defaults named 0.2.33 and the compose file came from main, so the release's own walkthrough tested the one before.
 #
 # It starts a stack and runs blocks/*.sh in order; 01-setup.sh downloads BEAM from Hugging Face, loads the two samples and
 # indexes both conversations. No key
@@ -13,12 +22,35 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.33}
-CORE=${CORE:-percolate-core[sample]>=0.2.13}
+GP=https://raw.githubusercontent.com/Percolation-Labs/get-percolate
+TREE=$(sed -n "s/^default_version *= *'\([0-9.]*\)'.*/\1/p" "$HERE/../../../extension/percolate/percolate.control")
+published() { curl -fsSL "$GP/$1/versions.toml" 2>/dev/null | sed -n '/^\[published\]/,/^\[/p' | sed -n "s/^$2 *= *\"\([0-9.]*\)\".*/\1/p"; }
+UNRELEASED=
+if [ -n "${COMPOSE_REF:-}" ]; then
+  REF=$COMPOSE_REF; EXT=$(published "$REF" extension)
+  [ -n "$EXT" ] || { echo "run.sh: COMPOSE_REF=$REF names no published versions in get-percolate" >&2; exit 1; }
+else
+  REF=v$TREE; EXT=$(published "$REF" extension)
+  if [ -z "$EXT" ]; then
+    UNRELEASED=1; EXT=$(published main extension); REF=v$EXT
+  fi
+fi
+CORE_V=$(published "$REF" core)
+[ -n "$EXT" ] && [ -n "$CORE_V" ] || { echo "run.sh: could not read the published versions from get-percolate $REF" >&2; exit 1; }
+if [ -n "$UNRELEASED" ] && [ -z "${IMG:-}" ] && [ "${1:-}" != --versions ]; then
+  echo "run.sh: this tree is $TREE, which is not released, and its blocks may call SQL no published image has." >&2
+  echo "        Pass IMG= (an image built from this tree), or check out a release tag such as v$EXT." >&2
+  exit 1
+fi
+IMG=${IMG:-percolationlabs/percolate-postgres:19-$EXT}
+CORE=${CORE:-percolate-core[sample]==$CORE_V}
+if [ "${1:-}" = --versions ]; then
+  printf 'tree %s%s\ncompose get-percolate %s\nimage %s\ncore %s\n' "$TREE" "${UNRELEASED:+ (unreleased: a run needs IMG=)}" "$REF" "$IMG" "$CORE"; exit 0
+fi
 # PROJECT and PG_PORT let a second run from empty stand beside this one: the stack takes PG_PORT and the six after it.
 PROJECT=${PROJECT:-muddling-through}; PG=${PG_PORT:-5801}
 mkdir -p $W $CAP; cd $W
-curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
+curl -fsSL "$GP/$REF/compose/docker-compose.yml" -o docker-compose.yml
 cat > .env <<ENV
 COMPOSE_PROJECT_NAME=$PROJECT
 P8_DB_IMAGE=$IMG

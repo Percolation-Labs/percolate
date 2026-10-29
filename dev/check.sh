@@ -138,6 +138,7 @@ TREE_GATES=(
   "No cache key is a prefix of another::tree_cache_keys_cannot_prefix"
   "Every file that should be text is text::tree_text_is_text"
   "No screenshot is committed::tree_no_screenshots"
+  "The walkthrough installs the release it ships, not a version typed in::tree_walkthrough_pins_its_release"
   "dev/reload.sh drops only the database it was told to::tree_reload_honours_db"
   "An extension bump moves every versioned reference, or changes nothing::$PY .github/scripts/test_bump_extension_version.py"
 )
@@ -237,6 +238,19 @@ PY
 # scripts write captures next to their results, and git keeps every one for
 # every clone. An allowlist again, for the reason tree_text_is_text gives: an
 # image is refused unless it sits in an `assets/` folder a page or render reads.
+# THE WALKTHROUGH INSTALLS THE RELEASE IT SHIPS (29 Oct). At v0.2.35, dev/examples/muddling-through/run.sh still
+# defaulted to the 0.2.33 image and core >= 0.2.13, typed in when those were current, and fetched get-percolate's
+# compose from main: run as documented, the release's own walkthrough tested the release before it. run.sh now reads
+# all three from get-percolate's versions.toml at this tree's tag. This refuses a version, or main, typed back in.
+tree_walkthrough_pins_its_release() {
+    local f=${1:-dev/examples/muddling-through/run.sh} bad
+    bad=$(grep -nE 'percolate-postgres:19-[0-9]|percolate-core[^ ]*(==|>=|<=|~=)[0-9]|get-percolate/main/' "$f" | grep -vE '^[0-9]+:[[:space:]]*#')
+    if [ -n "$bad" ]; then
+        echo "FAILED: $f names a version or get-percolate's main by hand:"; echo "$bad" | sed 's/^/  /'
+        echo "Read them from get-percolate's versions.toml at this tree's tag, as run.sh's head does."; return 1
+    fi
+}
+
 tree_no_screenshots() {
     $PY - <<'PY'
 import subprocess, sys
