@@ -1085,8 +1085,10 @@ begin
     st := aiq.walk_state(p_run);
     return query
     with wide as (
+        -- this round's accepted leads as well as earlier ones, so a wide lead's targets are judged before the read
+        -- step that would open it, not a wave later
         select c.key, coalesce(st->'serves'->>c.key, 'root') as q, c.value->'targets' as tg
-          from jsonb_each(st->'clues') c
+          from (select key, value from jsonb_each(st->'clues') union all select key, value from jsonb_each(st->'next')) c
          where not (st->'travelled') ? c.key and (st->'p'->>c.key)::real >= (st->'settings'->>'gate')::real
            and (select count(*) from jsonb_array_elements_text(c.value->'targets') t where not (st->'reached') ? t)
                > (st->'settings'->>'open_whole')::int
@@ -1155,6 +1157,7 @@ declare
     failed  int;
     asked   int;
     why     text;
+    via     text;
 begin
     if wn = 0 then
         raise invalid_parameter_value using message = 'the walk has not started: no seeds recorded';
@@ -1198,15 +1201,15 @@ begin
      where (st->'p'->>c.key)::real >= (s->>'gate')::real;
     -- F8 (walk.open_whole): an accepted lead with more than open_whole unread targets is opened target by target. Each
     -- unread target judged on its own line (X|<question>|<message>, the target step) and clearing the gate becomes a
-    -- single-target lead, one:<message>, at that P; the rest are never read. A wide lead whose targets are not yet
-    -- judged waits a wave, since its targets are asked the round after it is accepted.
+    -- single-target lead, one:<message>, at that P; the rest are never read. The target step runs after the judge
+    -- step in the same wave, so a lead accepted this round has its targets judged before this read.
     if jsonb_typeof(s->'open_whole') = 'number' then
         select coalesce(jsonb_object_agg(z.key, z.v), '{}'::jsonb) into open_ from (
             select o.key, o.value as v from jsonb_each(open_) o
              where (select count(*) from jsonb_array_elements_text(o.value->'targets') t where not reached ? t)
                    <= (s->>'open_whole')::int
             union all
-            select distinct on (t) 'one:' || t, jsonb_build_object(
+            (select distinct on (t) 'one:' || t, jsonb_build_object(
                        'p', (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real,
                        'targets', jsonb_build_array(t), 'via', o.key)
               from jsonb_each(open_) o, jsonb_array_elements_text(o.value->'targets') t
@@ -1215,7 +1218,7 @@ begin
                    > (s->>'open_whole')::int
                and (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real
                    >= (s->>'gate')::real
-             order by t, (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real desc
+             order by t, (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real desc)
         ) z;
     end if;
     if jsonb_typeof(nm) = 'object' then
@@ -1291,6 +1294,7 @@ begin
               from jsonb_array_elements(case when miss then misses else open_ end->best->'targets')
                    with ordinality x(t, ord_)
              where not reached ? (t #>> '{}');
+            via := open_->best->>'via';   -- a single target's wide lead (F8), before it leaves the open set
             open_ := open_ - best;
             misses := misses - best;
             travel := travel + 1;
@@ -1303,8 +1307,8 @@ begin
                                                     || case when st->'serves' ? best
                                                             then jsonb_build_object('serves', st->'serves'->>best)
                                                             else '{}'::jsonb end
-                                                    || case when open_->best ? 'via'
-                                                            then jsonb_build_object('via', open_->best->'via')
+                                                    || case when via is not null
+                                                            then jsonb_build_object('via', via)
                                                             else '{}'::jsonb end
                                                     || case when miss then '{"near_miss": true}'::jsonb
                                                             else '{}'::jsonb end);
