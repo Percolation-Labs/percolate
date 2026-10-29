@@ -5,6 +5,14 @@ python3 harness/beam_fetch.py samples/beam
 percolate sample load samples/beam
 percolate sample load samples/walk-0
 
+# Keyless (walk.md §5): a question enters the database by its words alone. A loader that copied BEAM's answer and
+# rubric into question metadata did so unseen for a run (cory, REM-1245), so the run stops here if any is stored.
+KEYED=$(psql "$P8_DSN" -Atc "select count(*) from content.resources where uri like 'question:%'
+                               and (metadata ? 'answer' or metadata ? 'rubric' or metadata ? 'gold')")
+if [ "$KEYED" != 0 ]; then
+  echo "the answer key is in the database: $KEYED question resources carry answer, rubric or gold"; exit 1
+fi
+
 # Every piece arrived with its vector, so the links can be built at once.
 percolate walk index --source beam-1m22
 percolate walk index --source beam-1m35
