@@ -1344,7 +1344,8 @@ declare
     uri text := 'verdicts:' || p_run;
 begin
     if not q ? 'node_id' then
-        return jsonb_build_object('kept', 0, 'why', 'the question has no node');
+        -- the board needs no question node: its root is a walk_question of its own
+        return jsonb_build_object('kept', 0, 'why', 'the question has no node', 'stack', aiq.walk_keep_stack(p_run));
     end if;
     select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
       from aiq.walk_answers(p_run) a;
