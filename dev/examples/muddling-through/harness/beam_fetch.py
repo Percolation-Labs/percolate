@@ -48,10 +48,11 @@ SPLITS = {
 }
 DEFAULT_SPLIT, DEFAULT_CONVERSATIONS = "1M", ("22", "35")
 CHUNK = 2000
-MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
+MARK = re.compile(r"\s*->->\s*\d+\s*,\s*(?:\d+|N/A)(?:\s*,\s*\d+)*\s*$")  # the same three forms, at a turn's end
 # The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
 # never read, since plan step predicts which exchanges BEAM's questions cite (REM-1240).
-MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*\d+[ \t]*(?=\n|$)")
+# Every form BEAM writes, counted on 1M:22 and 1M:35: "n,m" (1,848), "n,N/A" (9) and "n,m, k" (1), always at a line end.
+MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*(?:\d+|N/A)(?:[ \t]*,[ \t]*\d+)*[ \t]*(?=\n|$)")
 
 
 SAID = 160  # characters of the user's words a document's title carries
@@ -145,7 +146,8 @@ def main(sample, split=DEFAULT_SPLIT, conversations=DEFAULT_CONVERSATIONS, extra
             cs = []
             for n, c in enumerate(chunks(p["turns"])):
                 # The piece keeps its boundaries and loses the plan index; its vector is still matched by the text the
-                # study embedded, mark included, so search and the study's vectors are unchanged.
+                # study embedded, mark included, so the vectors are the study's. Search's keyword half reads the
+                # stripped text, so search's order moves a little (james's run from empty, 40dfbed1).
                 piece, v = {"content": MARK_IN_PIECE.sub("", c)}, vectors.get((uri, n))
                 pieces += 1
                 if v and v["sha256"] == hashlib.sha256(c.encode()).hexdigest():
