@@ -1,4 +1,0 @@
-why = "aiq.edges_close_never_delete refuses DELETE and TRUNCATE on aiq.edges, so a fact is closed rather than erased; it is a trigger function, the only place Postgres can refuse a statement on a table. aiq.walk_run_graph reads a past run's graph from the kept document its start step recorded; walk_graph takes a scope and a time and cannot know which document a run walked, so nothing existing holds it."
-
-[added]
-functions = ["aiq.edges_close_never_delete", "aiq.walk_run_graph"]

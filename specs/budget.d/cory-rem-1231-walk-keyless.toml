@@ -1,4 +1,0 @@
-why = "aiq.walk_coverage is the one evaluation of a walk against a labelled node set: the caller passes the nodes, so a run never holds its answer key, and every block that counted reads by hand against question->gold now calls it. walk_why only lists the unread nodes and their reasons, and walk_reads and walk_search_order only return rows, so nothing existing counts coverage by budget beside search."
-
-[added]
-functions = ["aiq.walk_coverage"]

@@ -1,7 +1,0 @@
-why = """REM-1240, walk.describe = lines: a clue described by what the user said in up to 3 of its targets and how far each
-sits from the source. aiq.walk_describe_clue is the one place a clue's text is made under every description, so
-aiq.walk_state and aiq.walk_clue_text cannot word a clue two ways; aiq.walk_clue_text gives a re-judge the walk's
-own words for any clue a run raised, instead of a second copy in Python."""
-
-[added]
-functions = ["aiq.walk_describe_clue", "aiq.walk_clue_text"]
