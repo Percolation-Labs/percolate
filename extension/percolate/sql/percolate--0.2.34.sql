@@ -41437,8 +41437,13 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
  ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
+ ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them. Neither reads a target.', 'aiq.walk_state, aiq.walk_task',
+  'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source stays the default until the paper''s 122 are walked under both (bill).'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
   'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
+ ('decider.task_targets', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by the messages it leads to. Would following it likely reach information needed to answer `question`, or part of it?'),
+  'The question Jev answers for every clue when walk.describe is targets. A verdict is kept with its wording, so verdicts given under one description never answer a clue described the other way.', 'aiq.walk_task',
+  'REM-1204''s A1 re-judge and graded-set walks asked it in exactly these words.'),
  ('search.hits', 'search', '2000', 'How many search hits a channel walk takes as its search order.', 'aiq.walk_start',
   'Enough to rank every document of a 1M BEAM conversation (about 1,100) by its best chunk.'),
  ('decider.task', 'decider', to_jsonb(text 'For each option, a lead into the user''s earlier messages that has not been read yet: a term the messages share, or the messages beside or close in meaning to one already read. Would following it likely reach information needed to answer `question`, or part of it?'),
@@ -41446,8 +41451,30 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Ported from the BEAM study with REM-1200, where the generic wording beat one naming BEAM''s question types on 7 of 9 types.'),
  ('index.nearest', 'index', '10', 'Nearest-in-meaning documents the index links from each document.', 'percolate walk index (core walk/index.py)',
   'Ten keeps room above walk.near for a walk that asks for more, at about 10 edges a document.'),
- ('index.df_floor', 'index', '20', 'The term fit keeps a term only when at most max(df_floor, df_share x documents) documents hold it.', 'percolate walk index (core walk/index.py, walk/terms.py)',
-  'Came in with the term fitter (REM-1201), not measured. It caps every walk_term posting, and so caps walk.cap from above. REM-1204 found the cost: a name in 40 of a 1M history''s messages, 20 of them evidence (the trainer in BEAM''s buried questions), has no term at all; refit with a floor of 100, terms from search''s top 10 enter 5.6 of 8.2 evidence islands against 4.0.'),
+ ('index.strategies', 'index', '["frequency"]', 'Which tagging strategies the index runs, in order: frequency (recurring word runs), entities (spaCy named entities), phrases (spaCy noun phrases). Each term records the strategies that found it.', 'percolate walk index (core walk/index.py)',
+  'Layered on Sirsh''s direction (M-20261028-111716-14e1). Frequency alone stays the default because it needs no model and is what every measured walk ran; entities and phrases need percolate-core[tags]. On REM-1204''s 156 buried BEAM questions, spaCy entities joined the evidence''s 8.2 islands into 5.7 but moved a walk''s evidence share at 50 reads by only +0.014 (95% CI +0.003 to +0.027).'),
+ ('index.min_df', 'index', '2', 'The LOWER bound of every strategy''s band: a tag must be held by at least this many documents. Small specific tags (a name in 3 messages) pass at any df_floor.', 'percolate walk index (core walk/terms.py limits_from)',
+  'A tag one document holds links nothing.'),
+ ('index.max_n', 'index', '3', 'The longest word run the frequency strategy keeps as a term.', 'percolate walk index (core walk/terms.py limits_from)',
+  'The BEAM study''s tagger (REM-1144); its postings were checked equal on BEAM 1M:22.'),
+ ('index.nest', 'index', '0.9', 'A shorter frequency term held almost only inside one longer kept term (this share of its documents) gives way to it.', 'percolate walk index (core walk/terms.py limits_from)',
+  'C-value''s idea, as the BEAM study''s tagger had it (REM-1144).'),
+ ('index.entity_labels', 'index', '["PERSON", "ORG", "GPE", "LOC", "FAC", "NORP", "PRODUCT", "EVENT", "WORK_OF_ART", "LANGUAGE", "DATE"]', 'The spaCy entity labels the entities strategy keeps.', 'percolate walk index (core walk/terms.py limits_from)',
+  'People, places, organisations and dates (Sirsh, M-20261028-111716-14e1), and the other kinds spaCy''s English models name. REM-1204''s probe measured these labels without DATE, so DATE is unmeasured: a date such as today or monday can recur widely and link messages only by time; a deployment can drop it here.'),
+ ('index.entity_df_floor', 'index', '100', 'The UPPER bound of the entities strategy''s band: an entity named in more than max(this, index.entity_df_share x documents) documents is dropped. Raising it admits wider entities and excludes none.', 'percolate walk index (core walk/terms.py limits_from)',
+  'REM-1204''s probe: at 100 on BEAM 1M, entities reached 54% of buried evidence, an entity edge out of evidence led to evidence at 17 times chance (95% CI 11 to 26), and the evidence''s islands went 8.2 to 5.7; at 10 they reached 19% and joined almost none.'),
+ ('index.entity_df_share', 'index', '0.02', 'The share of documents above which the entities strategy drops an entity, when it exceeds index.entity_df_floor.', 'percolate walk index (core walk/terms.py limits_from)',
+  'The frequency strategy''s share, so the two scale alike on large sources. Not measured.'),
+ ('index.phrase_df_floor', 'index', '50', 'The UPPER bound of the phrases strategy''s band: a noun phrase held by more than max(this, index.phrase_df_share x documents) documents is dropped. Raising it admits wider phrases and excludes none.', 'percolate walk index (core walk/terms.py limits_from)',
+  'The frequency strategy''s floor, so a phrase and a word run are capped alike. Not measured.'),
+ ('index.phrase_df_share', 'index', '0.02', 'The share of documents above which the phrases strategy drops a noun phrase, when it exceeds index.phrase_df_floor.', 'percolate walk index (core walk/terms.py limits_from)',
+  'The frequency strategy''s share. Not measured.'),
+ ('index.spacy_chars', 'index', '3000', 'How many characters of each document the entities and phrases strategies read.', 'percolate walk index (core walk/terms.py limits_from)',
+  'REM-1204''s probe read the first 3,000; spaCy refuses a text over its max_length (1,000,000) and is slow well before, and uploaded files are long (james''s review of percolate-core#145).'),
+ ('index.spacy_model', 'index', '"en_core_web_sm"', 'The spaCy model the entities and phrases strategies load.', 'percolate walk index (core walk/terms.py limits_from)',
+  'The small English model REM-1204''s probe ran. Its speed on a large source is not measured.'),
+ ('index.df_floor', 'index', '20', 'The UPPER bound of the frequency strategy''s band (index.min_df is the lower): the term fit keeps a term only when at most max(df_floor, df_share x documents) documents hold it. Raising it admits wider terms and excludes none.', 'percolate walk index (core walk/index.py, walk/terms.py)',
+  'The term fitter''s 20 (REM-1201), kept on REM-1204''s parameter study: on its graded set of 180 questions, one walk per setting, a ceiling of 50 read 23 points less of the evidence than 20 at L1 by 100 reads (95% CI -40 to -10) and 100 read 20 less (-33 to -7); 100 read 13 less at L4 by 50 reads (-23 to -3); no level was clearly better above 20 (50 read 13 more at L2 by 50 reads, 0 to +27). It caps every walk_term posting, and so caps walk.cap from above. The cost it leaves: a name in 40 of a 1M history''s messages, 20 of them evidence (the trainer in BEAM''s buried questions), has no term at all, so that kind of reach belongs to the entities strategy and its own band.'),
  ('index.df_share', 'index', '0.02', 'With index.df_floor, the share of documents above which a term is too common to keep.', 'percolate walk index (core walk/index.py, walk/terms.py)',
   'Came in with the term fitter (REM-1201), not measured. It binds above 1,000 documents: about 30 on BEAM''s longer 1M histories and about 200 on 10M.'),
  ('explain.cold', 'explain', '0.05', 'A wave is cold when under this share of its expanded reads raised a new accepted clue.', 'aiq.walk_why, aiq.walk_audit (core walk/why.py)',
@@ -41467,9 +41494,32 @@ $$;
 
 -- The wording a verdict is kept under (aiq.parameters decider.task). Verdicts given under another wording are
 -- refused rather than mixed (percolate-core decide.py).
-create or replace function aiq.walk_task() returns text
-language sql stable set search_path = pg_catalog, public as $$
-select value #>> '{}' from aiq.parameters where name = 'decider.task'
+drop function if exists aiq.walk_task();
+create or replace function aiq.walk_task(p_describe text default null) returns text
+language plpgsql stable set search_path = pg_catalog, public as $$
+begin
+    -- walk.describe: source asks decider.task, targets decider.task_targets (REM-1204).
+    if coalesce(p_describe, 'source') = 'source' then
+        return (select value #>> '{}' from aiq.parameters where name = 'decider.task');
+    elsif p_describe = 'targets' then
+        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_targets');
+    end if;
+    raise invalid_parameter_value using message = format('walk.describe is source or targets, not %s', p_describe);
+end;
+$$;
+
+-- A clue's sign under walk.describe = targets: the rarest stored terms (fewest postings first) of up to 3 of its
+-- targets, chosen by a hash of the clue key so the same clue always shows the same targets. Nothing is read.
+create or replace function aiq.walk_signs(p_graph jsonb, p_key text, p_targets jsonb) returns text
+language sql immutable set search_path = pg_catalog, public as $$
+    select coalesce(string_agg(t.sign, ' | ' order by t.h), '(none)')
+      from (select md5(p_key || ':' || (d.value #>> '{}')) as h,
+                   coalesce((select string_agg(x.term, ', ' order by x.n, x.term)
+                               from (select tm.value as term, jsonb_array_length(coalesce(p_graph->'post'->tm.value, '[]'::jsonb)) as n
+                                       from jsonb_array_elements_text(coalesce(p_graph->'terms'->(d.value #>> '{}'), '[]'::jsonb)) tm
+                                      order by 2, 1 limit 8) x), '(none)') as sign
+              from jsonb_array_elements(p_targets) d
+             order by 1 limit 3) t
 $$;
 
 -- The settings: the walk's parameters, under what a run's input asks for.
@@ -41808,7 +41858,7 @@ begin
         if rep is null then
             raise no_data_found using message = format('no replay document %s', inp->>'replay');
         end if;
-        if rep->>'task' is distinct from aiq.walk_task() then
+        if rep->>'task' is distinct from aiq.walk_task(s->>'describe') then
             raise invalid_parameter_value using message = 'the replay was judged under another task wording',
                 hint = 'a verdict belongs to its wording; walk again live, or replay a document made under this one';
         end if;
@@ -41836,10 +41886,11 @@ begin
         select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
                                                    else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
                || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
-                    where not exists (select 1 from aiq.walk_kept((q->>'node_id')::uuid, asof) k where k.key = n.key))
+                    where not exists (select 1 from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
+                                       where k.key = n.key))
           into pmap
           from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
-                  from aiq.walk_kept((q->>'node_id')::uuid, asof) k
+                  from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
                  group by k.key) z;
     end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
@@ -41906,14 +41957,24 @@ begin
         select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) into nxt from (
             select k, jsonb_build_object(
                        'kind', 'term', 'x', t, 'source', src, 'targets', tg,
-                       'text', case when last then
+                       'text', case when not last then null
+                                    when s->>'describe' = 'targets' then
+                                   format('the term ''%s'', shared by %s unread message(s). Their own key terms: %s',
+                                          t, jsonb_array_length(tg), aiq.walk_signs(g, k, tg))
+                                    else
                                    format('the term ''%s'', which %s unread message(s) share with this read one: "%s"',
                                           t, jsonb_array_length(tg), aiq.walk_snippet(txt->>src, t)) end) as c
               from term_clue where tg is not null
             union all
             select distinct on (k) k, jsonb_build_object(
                        'kind', kind, 'x', src, 'source', src, 'targets', tg,
-                       'text', case when last then
+                       'text', case when not last then null
+                                    when s->>'describe' = 'targets' then
+                                   format('%s unread message(s) %s. Their own key terms: %s', jsonb_array_length(tg),
+                                          case kind when 'next' then 'just before and after a read one, in the same sitting'
+                                                    else 'closest in meaning to a read one' end,
+                                          aiq.walk_signs(g, k, tg))
+                                    else
                                    format('%s: "%s"',
                                           case kind when 'next' then 'the messages just before and after this read one, in the same sitting'
                                                     else 'the messages closest in meaning to this read one' end,
@@ -42030,7 +42091,8 @@ begin
     select c.chunk,
            jsonb_agg(c.key order by c.j),
            jsonb_build_object('model', d.model,
-                              'state', jsonb_build_object('question', st->'question'->>'text', 'task', aiq.walk_task()),
+                              'state', jsonb_build_object('question', st->'question'->>'text',
+                                                          'task', aiq.walk_task(st->'settings'->>'describe')),
                               'questions', jsonb_object_agg('c' || c.j,
                                   jsonb_build_object('type', 'noul', 'instructions', c.text)))
       from chunks c
@@ -42319,22 +42381,26 @@ $$;
 create or replace function aiq.walk_verdicts(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'), 'task', aiq.walk_task(),
+    select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
+                              'task', aiq.walk_task(st->'settings'->>'describe'),
                               'verdicts', (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
                                              from jsonb_each(st->'p') where (st->'clues') ? key))
       from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
 
--- The verdicts earlier runs kept for a question under this wording, each answered before p_before. The question is
--- its node: a kept document names the node it was asked about, not a string the benchmark gave it (REM-1232).
+-- The verdicts earlier runs kept for a question under one wording (the source description's unless named), each
+-- answered before p_before. The question is its node: a kept document names the node it was asked about, not a
+-- string the benchmark gave it (REM-1232).
 drop function if exists aiq.walk_kept(text, timestamptz);
-create or replace function aiq.walk_kept(p_question uuid, p_before timestamptz default null)
+drop function if exists aiq.walk_kept(text, timestamptz, text);
+drop function if exists aiq.walk_kept(uuid, timestamptz);
+create or replace function aiq.walk_kept(p_question uuid, p_before timestamptz default null, p_task text default null)
 returns table (key text, p real, at timestamptz, model text, run uuid)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select v.key, (v.value->>'p')::real, (v.value->>'at')::timestamptz, v.value->>'model', (res.metadata->>'run')::uuid
       from content.resources res, jsonb_each(res.metadata->'verdicts') v
      where res.metadata->>'question' = p_question::text
-       and res.metadata->>'task' = aiq.walk_task()
+       and res.metadata->>'task' = coalesce(p_task, aiq.walk_task())
        and (p_before is null or (v.value->>'at')::timestamptz < p_before)
 $$;
 
@@ -42348,6 +42414,7 @@ returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
 declare
     q   jsonb := (select input->'question' from workflow.runs where id = p_run);
+    tk  text := aiq.walk_task(aiq.walk_settings((select input from workflow.runs where id = p_run))->>'describe');
     v   jsonb;
     uri text := 'verdicts:' || p_run;
 begin
@@ -42361,7 +42428,7 @@ begin
     end if;
     perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                 format('verdicts of run %s', p_run), uri, null,
-                jsonb_build_object('question', q->>'node_id', 'run', p_run, 'task', aiq.walk_task(), 'verdicts', v));
+                jsonb_build_object('question', q->>'node_id', 'run', p_run, 'task', tk, 'verdicts', v));
     return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri);
 end;
 $$;
@@ -42454,10 +42521,11 @@ $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider, v_q,
 end;
 $$;
 
-grant execute on function aiq.walk_task(), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
+grant execute on function aiq.walk_task(text), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
-                          aiq.walk_answers(uuid), aiq.walk_kept(uuid, timestamptz), aiq.walk_keep(uuid, text),
+                          aiq.walk_answers(uuid), aiq.walk_kept(uuid, timestamptz, text), aiq.walk_keep(uuid, text),
+                          aiq.walk_signs(jsonb, text, jsonb),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
                           aiq.walk_run_graph(uuid),
                           aiq.walk_requests(uuid, text), aiq.walk_read(uuid), aiq.walk_reads(uuid), aiq.walk_search_order(uuid),
