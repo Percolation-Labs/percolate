@@ -381,6 +381,17 @@ begin
                       'state', qs->'root'->'state', 'parts', qs->'root'->'answered_by', 'stale_parts', qs->'root'->'stale_parts'));
         open_ := open_ - 'root';
     end if;
+    -- a parent every one of whose parts closed stale, none answered, closes stale: it ends, and is never an answer
+    if open_ ? 'root' and exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                                     and x.value->>'state' <> 'displaced')
+       and not exists (select 1 from jsonb_each(qs) x where x.value->>'parent' = 'root'
+                          and x.value->>'state' not in ('stale', 'displaced')) then
+        qs := jsonb_set(qs, '{root}', qs->'root' || jsonb_build_object('state', 'stale', 'closed_wave', w, 'by', 'structure',
+                  'stale_parts', (select jsonb_agg(x.key order by x.key) from jsonb_each(qs) x
+                                   where x.value->>'parent' = 'root' and x.value->>'state' = 'stale')));
+        stale := stale || jsonb_build_array(jsonb_build_object('q', 'root'));
+        open_ := open_ - 'root';
+    end if;
     -- breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a root still open with no parts by
     -- wave stack.broad_after has had no line answer it, so the walk raises DECOMPOSITION_REQUIRED to the client for a
     -- split (walk.md §12), once, and keeps splitting in the loop from the aspects its reads name
