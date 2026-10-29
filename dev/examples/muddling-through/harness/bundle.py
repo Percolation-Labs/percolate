@@ -98,19 +98,21 @@ CLUES = ("select count(*), encode(sha256(convert_to(coalesce(string_agg(key || '
          "E'\\n' order by key collate \"C\", wave), ''), 'UTF8')), 'hex') from aiq.walk_clues(:run)")
 RECORDING = (f"select jsonb_build_object('reads', r.count, 'reads_sha256', r.encode, 'clues', c.count, 'clues_sha256', c.encode) "
              f"from ({READS}) r, ({CLUES}) c")
-CHECK = f"""-- Checks each replayed walk against its recording, by content: one row a replay. A replay passes when it is
--- faithful (every lead it raised has a recorded verdict), or when its reads and clues match the recording's digests
--- exactly (a walk that stopped before judging its last wave is partial in both). Run after the walks have finished:
+CHECK = f"""-- Checks each replayed walk against its recording, by content: one row a replay. A replay passes only when its reads
+-- and clues match the recording's digests; faithful (every lead it raised has a recorded verdict) then says which
+-- kind of pass: a walk that stopped before judging its last wave is partial in the recording and the replay alike.
+-- A faithful replay that differs from its recording fails. Run after the walks have finished:
 --   psql "$P8_DSN" -f walks/check.sql
 select res.external_id as replay,
        aiq.walk_summary(r.id)->'decider'->>'faithful' as faithful,
        rd.count = (res.metadata->'recording'->>'reads')::bigint and rd.encode = res.metadata->'recording'->>'reads_sha256' as reads_match,
        cl.count = (res.metadata->'recording'->>'clues')::bigint and cl.encode = res.metadata->'recording'->>'clues_sha256' as clues_match,
        case when r.status <> 'succeeded' then 'not finished: ' || r.status
+            when rd.count <> (res.metadata->'recording'->>'reads')::bigint or rd.encode <> res.metadata->'recording'->>'reads_sha256'
+              or cl.count <> (res.metadata->'recording'->>'clues')::bigint or cl.encode <> res.metadata->'recording'->>'clues_sha256'
+                 then 'FAIL: differs from its recording'
             when (aiq.walk_summary(r.id)->'decider'->>'faithful')::boolean then 'pass: faithful'
-            when rd.encode = res.metadata->'recording'->>'reads_sha256' and cl.encode = res.metadata->'recording'->>'clues_sha256'
-                 then 'pass: exact replay of a partial recording'
-            else 'FAIL' end as verdict
+            else 'pass: exact replay of a partial recording' end as verdict
   from workflow.runs r
   join content.resources res on res.id = (r.input->>'replay')::uuid and res.metadata ? 'recording'
   cross join lateral ({READS.replace(':run', 'r.id')}) rd
