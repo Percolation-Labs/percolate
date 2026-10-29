@@ -42,6 +42,7 @@ MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*\d+[ \t]*(?=\n|$)")
 
 
 SAID = 160  # characters of the user's words a document's title carries
+KEY = ("gold", "answer", "rubric")  # what a question carries that only evaluation may read
 
 def ints(x):
     """Every integer in BEAM's source_chat_ids, which nest lists and dicts."""
@@ -155,7 +156,9 @@ def main(sample):
         f.writelines(json.dumps(q) + "\n" for q in qs)
     with (sample / "question-texts.jsonl").open("w") as f:
         for q in qs:
-            md = dict({k: v for k, v in q.items() if k != "gold"}, id=q["qid"], text=q["question"])
+            # The question goes into the database by its words alone: its evidence, BEAM's reference answer and its
+            # rubric are the answer key, which stays in questions.jsonl for the evaluation functions (REM-1231).
+            md = dict({k: v for k, v in q.items() if k not in KEY}, id=q["qid"], text=q["question"])
             f.write(json.dumps({"channel": "walk-questions", "external_id": f"question:{q['qid']}",
                                 "title": q["question"], "uri": f"question:{q['qid']}",
                                 "chunks": [{"content": q["question"]}], "metadata": md}) + "\n")
