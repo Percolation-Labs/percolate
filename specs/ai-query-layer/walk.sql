@@ -149,11 +149,9 @@ begin
     return null;
 end;
 $$;
-drop trigger if exists parameters_append on aiq.parameters;
-create trigger parameters_append before insert or update or delete on aiq.parameters
+create or replace trigger parameters_append before insert or update or delete on aiq.parameters
     for each row execute function aiq.parameters_append();
-drop trigger if exists parameters_keep_old on aiq.parameters;
-create trigger parameters_keep_old after update on aiq.parameters
+create or replace trigger parameters_keep_old after update on aiq.parameters
     for each row when (old.valid_from is distinct from new.valid_from) execute function aiq.parameters_keep_old();
 -- A table made before the question stack (REM-1245) has the old list of parts; converge it. Only when it lacks
 -- 'stack': the ALTER takes an exclusive lock on a table every running walk reads, and an unconditional one on each

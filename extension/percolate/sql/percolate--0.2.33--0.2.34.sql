@@ -41395,7 +41395,7 @@ grant execute on function claims.search_leads(text, vector, text, jsonb, text[],
 -- a deployment (set_by naming who, why saying on what evidence) survives an upgrade. One table for all of them,
 -- rather than one per part, because they are one algorithm and are tuned against each other.
 create table if not exists aiq.parameters (
-    name       text primary key check (name ~ '^[a-z]+\.[a-z_]+$'),
+    name       text not null check (name ~ '^[a-z]+\.[a-z_]+$'),
     part       text not null check (part in ('index', 'search', 'walk', 'stack', 'decider', 'explain', 'dream')),
     value      jsonb not null,
     controls   text not null check (btrim(controls) <> ''),
@@ -41403,8 +41403,92 @@ create table if not exists aiq.parameters (
     why        text not null check (btrim(why) <> ''),
     set_by     text not null default 'spec',
     updated_at timestamptz not null default now(),
+    -- the row's interval: a value holds from valid_from until valid_to (null while it is the current one)
+    valid_from timestamptz not null default '-infinity',
+    valid_to   timestamptz,
+    primary key (name, valid_from),
+    check (valid_to is null or valid_to >= valid_from),
     check (split_part(name, '.', 1) = part)
 );
+-- HISTORY (Sirsh, M-20261029-142849-f9d4): the table is append-only, so every walk reads its defaults and wordings as
+-- of its own start. A change closes the current row and adds the new value as the next one (aiq.parameters_append);
+-- a delete closes the row; a closed row never changes. A row the spec seeds, and every row from before history was
+-- kept, holds from -infinity: what a parameter was before its first recorded change is not known, so its first value
+-- stands for it. On 5801 a default changed under finished walks and they were read back under the new one (REM-1245).
+do $$
+begin
+    if not exists (select 1 from pg_attribute where attrelid = 'aiq.parameters'::regclass and attname = 'valid_from'
+                      and not attisdropped) then
+        alter table aiq.parameters
+            add column valid_from timestamptz not null default '-infinity',
+            add column valid_to timestamptz,
+            drop constraint parameters_pkey,
+            add primary key (name, valid_from),
+            add check (valid_to is null or valid_to >= valid_from);
+    end if;
+end $$;
+create unique index if not exists parameters_current on aiq.parameters (name) where valid_to is null;
+
+create or replace function aiq.parameters_append() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    -- A change holds from its transaction's start, now(), as a run's created_at does, so a walk started in the same
+    -- transaction as a change sees it and one started earlier does not. A row this transaction made is not history
+    -- yet: changing it changes it in place, and deleting it deletes it. A statement that also matches closed rows
+    -- (update ... where name = x) leaves them as they are.
+    if tg_op = 'INSERT' then
+        -- a name whose history is there already starts again from now (a closed row is the AFTER trigger's own)
+        if new.valid_to is null and exists (select 1 from aiq.parameters p where p.name = new.name) then
+            new.valid_from := now();
+        end if;
+        return new;
+    end if;
+    if old.valid_to is not null then
+        return null;
+    end if;
+    if tg_op = 'DELETE' then
+        if old.valid_from = now() then
+            return old;
+        end if;
+        update aiq.parameters set valid_to = now() where name = old.name and valid_from = old.valid_from;
+        return null;
+    end if;
+    if new.name is distinct from old.name or new.valid_from is distinct from old.valid_from then
+        raise exception using errcode = 'restrict_violation',
+            message = 'a parameter''s name and valid_from are its history''s key: add a row rather than rename one';
+    end if;
+    if new.valid_to is not null then
+        -- closing, as a delete does: nothing else may change with it
+        if (new.part, new.value, new.controls, new.read_by, new.why, new.set_by)
+           is distinct from (old.part, old.value, old.controls, old.read_by, old.why, old.set_by) then
+            raise exception using errcode = 'restrict_violation', message = 'a row is closed as it stands, never changed and closed at once';
+        end if;
+        return new;
+    end if;
+    if old.valid_from = now()
+       or (new.part, new.value, new.controls, new.read_by, new.why, new.set_by)
+          is not distinct from (old.part, old.value, old.controls, old.read_by, old.why, old.set_by) then
+        return new;
+    end if;
+    -- a change: this row becomes the next value, from now; the AFTER trigger keeps the old one, closed now
+    new.valid_from := now();
+    new.updated_at := now();
+    return new;
+end;
+$$;
+create or replace function aiq.parameters_keep_old() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+begin
+    insert into aiq.parameters (name, part, value, controls, read_by, why, set_by, updated_at, valid_from, valid_to)
+    values (old.name, old.part, old.value, old.controls, old.read_by, old.why, old.set_by, old.updated_at,
+            old.valid_from, new.valid_from);
+    return null;
+end;
+$$;
+create or replace trigger parameters_append before insert or update or delete on aiq.parameters
+    for each row execute function aiq.parameters_append();
+create or replace trigger parameters_keep_old after update on aiq.parameters
+    for each row when (old.valid_from is distinct from new.valid_from) execute function aiq.parameters_keep_old();
 -- A table made before the question stack (REM-1245) has the old list of parts; converge it. Only when it lacks
 -- 'stack': the ALTER takes an exclusive lock on a table every running walk reads, and an unconditional one on each
 -- apply stalled ten live walks on 5801 until it was cancelled.
@@ -41557,26 +41641,38 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Not measured. Core walk/why.py credits REM-1194''s BEAM calibration, but that calibration binned cold at under 0.2; 0.05 is a stricter choice nobody tested.'),
  ('explain.near_miss', 'explain', '0.35', 'A rejected clue with P from this up to the gate is reported as a near miss.', 'aiq.walk_why (core walk/why.py)',
   'Not measured: a reporting band 0.15 under the gate, equal to the band REM-1207''s walkthrough travelled (0.35), so the audit and the walk agree on what a near miss is.')
-on conflict (name) do update
+on conflict (name) where valid_to is null do update
    set value = excluded.value, controls = excluded.controls, read_by = excluded.read_by, why = excluded.why,
        updated_at = now()
  where p.set_by = 'spec';
 
--- One part's parameters as {name without the part: value}.
-create or replace function aiq.parameters_of(p_part text) returns jsonb
+-- One parameter's value as of a time (null: the current one). A walk passes its start, so a value changed later never
+-- reaches it.
+create or replace function aiq.parameter(p_name text, p_at timestamptz default null) returns jsonb
 language sql stable set search_path = pg_catalog, public as $$
-select coalesce(jsonb_object_agg(split_part(name, '.', 2), value), '{}'::jsonb) from aiq.parameters where part = p_part
+select value from aiq.parameters
+ where name = p_name
+   and case when p_at is null then valid_to is null else valid_from <= p_at and (valid_to is null or valid_to > p_at) end
+$$;
+-- One part's parameters as {name without the part: value}, as of a time (null: the current ones).
+drop function if exists aiq.parameters_of(text);
+create or replace function aiq.parameters_of(p_part text, p_at timestamptz default null) returns jsonb
+language sql stable set search_path = pg_catalog, public as $$
+select coalesce(jsonb_object_agg(split_part(name, '.', 2), value), '{}'::jsonb) from aiq.parameters
+ where part = p_part
+   and case when p_at is null then valid_to is null else valid_from <= p_at and (valid_to is null or valid_to > p_at) end
 $$;
 -- readable by whoever may read aiq.parameters (every signed-in caller), so a walk's readers can call it as themselves
-grant execute on function aiq.parameters_of(text) to authenticated;
+grant execute on function aiq.parameter(text, timestamptz), aiq.parameters_of(text, timestamptz) to authenticated;
 
 -- One part's parameters, refusing when any it names is missing. aiq.parameters_of returns what is there, and a step
 -- that read a missing row as null compared against null and silently did nothing: a stack step whose link_floor row
 -- was absent would link no read and fail nothing (bill, REM-1245). A step that needs a parameter asks for it here.
-create or replace function aiq.parameters_need(p_part text, p_names text[]) returns jsonb
+drop function if exists aiq.parameters_need(text, text[]);
+create or replace function aiq.parameters_need(p_part text, p_names text[], p_at timestamptz default null) returns jsonb
 language plpgsql stable set search_path = pg_catalog, public as $$
 declare
-    v       jsonb := aiq.parameters_of(p_part);
+    v       jsonb := aiq.parameters_of(p_part, p_at);
     missing text;
 begin
     -- a row that is absent is missing; a row whose value is JSON null is a stated 'off' or 'not yet set'
@@ -41590,23 +41686,25 @@ begin
     return v;
 end;
 $$;
-grant execute on function aiq.parameters_need(text, text[]) to authenticated;
+grant execute on function aiq.parameters_need(text, text[], timestamptz) to authenticated;
 
 -- The wording a verdict is kept under (aiq.parameters decider.task). Verdicts given under another wording are
 -- refused rather than mixed (percolate-core decide.py).
+-- p_at: the wording as of a time, a run's start for a run (null: the current wording).
 drop function if exists aiq.walk_task();
-create or replace function aiq.walk_task(p_describe text default null) returns text
+drop function if exists aiq.walk_task(text);
+create or replace function aiq.walk_task(p_describe text default null, p_at timestamptz default null) returns text
 language plpgsql stable set search_path = pg_catalog, public as $$
 begin
     -- walk.describe: source asks decider.task, targets decider.task_targets (REM-1204), lines decider.task_lines (REM-1240).
     if coalesce(p_describe, 'source') = 'source' then
-        return (select value #>> '{}' from aiq.parameters where name = 'decider.task');
+        return aiq.parameter('decider.task', p_at) #>> '{}';
     elsif p_describe = 'targets' then
-        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_targets');
+        return aiq.parameter('decider.task_targets', p_at) #>> '{}';
     elsif p_describe = 'lines' then
-        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_lines');
+        return aiq.parameter('decider.task_lines', p_at) #>> '{}';
     elsif p_describe = 'lines_nocount' then
-        return (select value #>> '{}' from aiq.parameters where name = 'decider.task_lines_nocount');
+        return aiq.parameter('decider.task_lines_nocount', p_at) #>> '{}';
     end if;
     raise invalid_parameter_value using message = format('walk.describe is source, targets, lines or lines_nocount, not %s', p_describe);
 end;
@@ -41744,23 +41842,36 @@ $$;
 revoke all on function aiq.walk_run(uuid), aiq.walk_tasks(uuid), aiq.walk_runs_visible() from public;
 grant execute on function aiq.walk_run(uuid), aiq.walk_tasks(uuid), aiq.walk_runs_visible() to authenticated, worker;
 
--- The settings: the walk's parameters, under what a run's input asks for.
-create or replace function aiq.walk_settings(p_input jsonb) returns jsonb
+-- The settings: the walk's parameters as of p_at (null: the current ones), under what a run's input asks for.
+drop function if exists aiq.walk_settings(jsonb);
+create or replace function aiq.walk_settings(p_input jsonb, p_at timestamptz default null) returns jsonb
 language sql stable set search_path = pg_catalog, public as $$
-select aiq.parameters_of('walk') || jsonb_build_object('hits', aiq.parameters_of('search')->'hits')
+select aiq.parameters_of('walk', p_at) || jsonb_build_object('hits', aiq.parameters_of('search', p_at)->'hits')
        || coalesce(p_input->'settings', '{}'::jsonb)
 $$;
 
 -- A run's settings as they were when it started: the walk_start step records them, so a default changed later never
--- rewrites what a past run did. A run started before the record existed is resolved as before, from its input and
--- today's defaults: on 5801, changing walk.describe's default to lines turned past memoryless runs into lines walks,
--- and their source-worded replays were refused on reading back (REM-1245).
+-- rewrites what a past run did. A run with no record is resolved from its input and the defaults as of its start
+-- (aiq.parameters' history). A run from before both, which names no describe but replayed a document, ran under
+-- the description its replay's wording belongs to, as walk_launch chooses one: on 5801, changing walk.describe's
+-- default to lines turned such a run (01a187a8, a source-worded replay) into a lines walk that could not be read back.
 create or replace function aiq.walk_run_settings(p_run uuid) returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    select coalesce((select tk.output->'result'->0->'state'->'settings' from aiq.walk_tasks(p_run) tk
-                      where tk.step_key = 'start' and tk.status = 'succeeded'
-                        and jsonb_typeof(tk.output->'result'->0->'state'->'settings') = 'object' limit 1),
-                    aiq.walk_settings((select input from aiq.walk_run(p_run))))
+    select coalesce(
+        (select tk.output->'result'->0->'state'->'settings' from aiq.walk_tasks(p_run) tk
+          where tk.step_key = 'start' and tk.status = 'succeeded'
+            and jsonb_typeof(tk.output->'result'->0->'state'->'settings') = 'object' limit 1),
+        (select aiq.walk_settings(r.input, r.created_at)
+                || coalesce((select jsonb_build_object('describe', d)
+                               from content.resources res
+                               join lateral (select (string_agg(c.content, '' order by c.ordinal))::jsonb->>'task' as task
+                                               from content.resource_chunks c where c.resource_id = res.id) rp on true
+                               cross join unnest(array['source', 'targets', 'lines', 'lines_nocount']) d
+                              where r.input ? 'replay' and not coalesce(r.input->'settings', '{}'::jsonb) ? 'describe'
+                                and res.id = (r.input->>'replay')::uuid
+                                and aiq.walk_task(d, r.created_at) = rp.task
+                              limit 1), '{}'::jsonb)
+           from aiq.walk_run(p_run) r))
 $$;
 grant execute on function aiq.walk_run_settings(uuid) to authenticated;
 
@@ -42017,9 +42128,8 @@ begin
         ), n as (
             select doc, vec, row_number() over (order by md5(doc)) as rn, count(*) over () as cnt from v
         )
-        select jsonb_build_object('q', (select value from aiq.parameters where name = 'stack.cluster_quantile'),
-                                  'value', round(percentile_cont((select (value #>> '{}')::float8 from aiq.parameters
-                                                                    where name = 'stack.cluster_quantile'))
+        select jsonb_build_object('q', aiq.parameter('stack.cluster_quantile'),
+                                  'value', round(percentile_cont((aiq.parameter('stack.cluster_quantile') #>> '{}')::float8)
                                                  within group (order by 1 - (a.vec <=> b.vec))::numeric, 4),
                                   'pairs', count(*))
           into cosq
@@ -42125,7 +42235,7 @@ begin
         if rep is null then
             raise no_data_found using message = format('no replay document %s', inp->>'replay');
         end if;
-        if rep->>'task' is distinct from aiq.walk_task(s->>'describe') then
+        if rep->>'task' is distinct from aiq.walk_task(s->>'describe', r.created_at) then
             raise invalid_parameter_value using message = 'the replay was judged under another task wording',
                 hint = 'a verdict belongs to its wording; walk again live, or replay a document made under this one';
         end if;
@@ -42153,11 +42263,11 @@ begin
         select coalesce(jsonb_object_agg(z.k, case when z.now_p is null then z.past
                                                    else (1 - mem) * z.now_p + mem * z.past end), '{}'::jsonb)
                || (select coalesce(jsonb_object_agg(n.key, n.value), '{}'::jsonb) from jsonb_each(pmap) n
-                    where not exists (select 1 from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
+                    where not exists (select 1 from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe', r.created_at)) k
                                        where k.key = n.key))
           into pmap
           from (select k.key as k, avg(k.p)::real as past, (pmap->>k.key)::real as now_p
-                  from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe')) k
+                  from aiq.walk_kept((q->>'node_id')::uuid, asof, aiq.walk_task(s->>'describe', r.created_at)) k
                  group by k.key) z;
     end if;
     -- The read steps' records, in wave order; wave 0 is the start step's.
@@ -42403,7 +42513,7 @@ begin
               from described
         ), cut as (
             select n.*, (n.j / 60) as by_count,
-                   (n.cum / (select (value #>> '{}')::int from aiq.parameters where name = 'decider.request_bytes'))::int as by_bytes
+                   (n.cum / (aiq.parameter('decider.request_bytes', (select created_at from aiq.walk_run(p_run))) #>> '{}')::int)::int as by_bytes
               from numbered n
         ), chunks as (
             select q, key, text, dense_rank() over (order by q, by_bytes, by_count) - 1 as chunk,
@@ -42414,7 +42524,7 @@ begin
                jsonb_agg(c.key order by c.jj),
                jsonb_build_object('model', d.model,
                                   'state', jsonb_build_object('question', st->'board'->'questions'->(min(c.q))->>'text',
-                                                              'task', aiq.walk_task(st->'settings'->>'describe')),
+                                                              'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run)))),
                                   'questions', jsonb_object_agg('c' || c.jj,
                                       jsonb_build_object('type', 'noul', 'instructions', c.text)))
           from chunks c
@@ -42434,7 +42544,7 @@ begin
            jsonb_agg(c.key order by c.j),
            jsonb_build_object('model', d.model,
                               'state', jsonb_build_object('question', st->'question'->>'text',
-                                                          'task', aiq.walk_task(st->'settings'->>'describe')),
+                                                          'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run)))),
                               'questions', jsonb_object_agg('c' || c.j,
                                   jsonb_build_object('type', 'noul', 'instructions', c.text)))
       from chunks c
@@ -42481,8 +42591,7 @@ begin
                    over (partition by td.q order by td.key) as cum
           from todo td, lines ln
     ), chunks as (
-        select n.*, (dense_rank() over (order by n.q, (n.cum / (select (value #>> '{}')::int from aiq.parameters
-                                                               where name = 'decider.request_bytes'))::int, n.j / 60) - 1)::int as ch
+        select n.*, (dense_rank() over (order by n.q, (n.cum / (aiq.parameter('decider.request_bytes', (select created_at from aiq.walk_run(p_run))) #>> '{}')::int)::int, n.j / 60) - 1)::int as ch
           from numbered n
     ), cj as (
         select c.*, (row_number() over (partition by c.ch order by c.key) - 1)::int as jj from chunks c
@@ -42491,7 +42600,7 @@ begin
            jsonb_build_object('model', d.model,
                               'state', jsonb_build_object(
                                   'question', coalesce(st->'board'->'questions'->(min(cj.q))->>'text', st->'question'->>'text'),
-                                  'task', (select value #>> '{}' from aiq.parameters where name = 'decider.task_target')),
+                                  'task', (aiq.parameter('decider.task_target', (select created_at from aiq.walk_run(p_run))) #>> '{}')),
                               'questions', jsonb_object_agg('c' || cj.jj, jsonb_build_object('type', 'noul', 'instructions', cj.text)))
       from cj group by cj.ch order by cj.ch;
 end;
@@ -42871,7 +42980,7 @@ create or replace function aiq.walk_verdicts(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
-                              'task', aiq.walk_task(st->'settings'->>'describe'),
+                              'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
                               -- a stack walk's verdicts are every judgement it asked for (leads per question,
                               -- assessments, parts, closes), so a replay replays its board too
                               'verdicts', case when st ? 'answers' then st->'answers'
@@ -42906,7 +43015,7 @@ returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
 declare
     q   jsonb := (select input->'question' from aiq.walk_run(p_run));
-    tk  text := aiq.walk_task(aiq.walk_run_settings(p_run)->>'describe');
+    tk  text := aiq.walk_task(aiq.walk_run_settings(p_run)->>'describe', (select created_at from aiq.walk_run(p_run)));
     v   jsonb;
     uri text := 'verdicts:' || p_run;
 begin
@@ -43059,7 +43168,7 @@ $y$, p_name, d.endpoint, d.credential_ref, p_waves, p_decider, v_q,
 end;
 $$;
 
-grant execute on function aiq.walk_task(text), aiq.walk_settings(jsonb), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
+grant execute on function aiq.walk_task(text, timestamptz), aiq.walk_settings(jsonb, timestamptz), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
                           aiq.walk_answers(uuid), aiq.walk_kept(uuid, timestamptz, text), aiq.walk_keep(uuid, text),
@@ -43132,8 +43241,8 @@ declare
     -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
     v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
-    v_cold    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.cold');
-    v_band    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.near_miss');
+    v_cold    real  := (aiq.parameter('explain.cold', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
+    v_band    real  := (aiq.parameter('explain.near_miss', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
     v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;
@@ -43475,7 +43584,8 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate', 'set_gate', 'cluster_quantile']);
+                                                         'state_gate', 'set_gate', 'cluster_quantile'],
+                                       (select created_at from aiq.walk_run(p_run)));
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -43825,28 +43935,28 @@ begin
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
     perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'task_set_question',
-                                                 'request_bytes']);
+                                                 'request_bytes'], (select created_at from aiq.walk_run(p_run)));
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
     with todo as (
         select x->>'key' as key, x->>'q' as grp, st->'board'->'questions'->(x->>'q')->>'text' as question,
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_assess') as task, x->>'text' as text
+               (aiq.parameter('decider.task_assess', (select created_at from aiq.walk_run(p_run))) #>> '{}') as task, x->>'text' as text
           from jsonb_array_elements(nx->'assess') x where p_phase = 'assess'
         union all
         select x->>'key', 'T|' || (x->>'q'), st->'board'->'questions'->(x->>'q')->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_state'), x->>'text'
+               (aiq.parameter('decider.task_state', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
 
         union all
         -- the tested call shape, verbatim (spec 8ed4e1c2): the state's question is decider.task_set_question, the
         -- option is the root question's own text; AUC 0.936 belongs to exactly this prompt
-        select x->>'key', 'N|root', (select value #>> '{}' from aiq.parameters where name = 'decider.task_set_question'),
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'), x->>'text'
+        select x->>'key', 'N|root', (aiq.parameter('decider.task_set_question', (select created_at from aiq.walk_run(p_run))) #>> '{}'),
+               (aiq.parameter('decider.task_set', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'cardinality') x where p_phase = 'shape'
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_split'), x->>'text'
+               (aiq.parameter('decider.task_split', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'candidates') x where p_phase = 'shape'
     ), asked as (
         -- a request holds at most 60 options and decider.request_bytes of their text
@@ -43855,7 +43965,7 @@ begin
           from todo t where not (st->'answers') ? t.key
     ), cut as (
         select a.*, (a.j / 60) as by_count,
-               (a.cum / (select (value #>> '{}')::int from aiq.parameters where name = 'decider.request_bytes'))::int as by_bytes
+               (a.cum / (aiq.parameter('decider.request_bytes', (select created_at from aiq.walk_run(p_run))) #>> '{}')::int)::int as by_bytes
           from asked a
     ), chunks as (
         select c.*, (dense_rank() over (order by c.grp, c.by_bytes, c.by_count) - 1)::int as ch,
@@ -44008,9 +44118,9 @@ begin
         'graph', aiq.walk_graph_stats(p_run),
         'questions', (select coalesce(jsonb_agg(q.value || jsonb_build_object('id', q.key,
                                           -- the lines the decider judged against this leaf, highest P first, each with
-                                          -- its date and what was said: 'judged to answer', unscored. stack.state_gate
+                                          -- its date and what was said: 'judged to bear on', unscored. stack.state_gate
                                           -- is unset (F12 failed its 90% bar), so none of them closes the question.
-                                          'judged_to_answer', (select coalesce(jsonb_agg(jsonb_build_object(
+                                          'judged_to_bear_on', (select coalesce(jsonb_agg(jsonb_build_object(
                                                    'doc', split_part(a.key, '|', 3), 'p', (a.value #>> '{}')::real,
                                                    'said_at', (aiq.walk_places(inp, array[split_part(a.key, '|', 3)]))
                                                               ->split_part(a.key, '|', 3)->>'said_at',
