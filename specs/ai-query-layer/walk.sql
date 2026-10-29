@@ -60,7 +60,7 @@
 -- rather than one per part, because they are one algorithm and are tuned against each other.
 create table if not exists aiq.parameters (
     name       text primary key check (name ~ '^[a-z]+\.[a-z_]+$'),
-    part       text not null check (part in ('index', 'search', 'walk', 'decider', 'explain', 'dream')),
+    part       text not null check (part in ('index', 'search', 'walk', 'stack', 'decider', 'explain', 'dream')),
     value      jsonb not null,
     controls   text not null check (btrim(controls) <> ''),
     read_by    text not null check (btrim(read_by) <> ''),
@@ -69,6 +69,10 @@ create table if not exists aiq.parameters (
     updated_at timestamptz not null default now(),
     check (split_part(name, '.', 1) = part)
 );
+-- A table made before the question stack (REM-1245) has the old list of parts; converge it.
+alter table aiq.parameters drop constraint if exists parameters_part_check;
+alter table aiq.parameters add constraint parameters_part_check
+    check (part in ('index', 'search', 'walk', 'stack', 'decider', 'explain', 'dream'));
 comment on table aiq.parameters is
     'The walk''s, its index''s, its decider''s, its explanations'' and dreaming''s parameters: value, what it controls, where it is read and why.';
 alter table aiq.parameters enable row level security;
@@ -99,8 +103,35 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Sirsh, M-20261027-115632-55e8: verdicts are stored, and reads are memoryless by default.'),
  ('walk.memory_as_of', 'walk', 'null', 'Which stored verdicts a walk with memory reads: those given before this run started (null), before a past run started (its id), or before a time.', 'aiq.walk_state',
   'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
- ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: by P, or by how many open accepted clues agree on its target (votes, wvotes).', 'aiq.walk_read',
-  'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default.'),
+ ('walk.order', 'walk', '"p"', 'Which accepted clue is travelled next: p, the highest P; or per_target, the highest P per unread document it leads to. (votes and wvotes, by how many open accepted clues agree on a target, exist only in core''s Python walk.)', 'aiq.walk_read',
+  'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it.'),
+ ('walk.stack', 'walk', 'false', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
+  'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). Off by default until a stack walk is measured against the memoryless one; the walkthrough''s published steps ran memoryless.'),
+ ('stack.answers_gate', 'stack', '0.5', 'The P at or above which the decider''s judgement that a read answers a question, or part of it, links them (a walk_answers edge).', 'aiq.walk_stack_next',
+  'The walk''s own gate, read as a probability. On recorded walks Jev picks out labelled evidence among reads at AUC 0.745 [0.690, 0.799], oracle-scored (REM-1240); the gate itself is not tuned.'),
+ ('stack.close_gate', 'stack', '0.7', 'The P at or above which a question is answered by the reads linked to it, and leaves the open list.', 'aiq.walk_stack_next',
+  'Above the answers gate, so a question closes on more than one likely link. Not measured (REM-1244''s draft).'),
+ ('stack.split_gate', 'stack', '0.5', 'The P at or above which a candidate part is opened as a question under its parent.', 'aiq.walk_stack_next',
+  'The walk''s gate. Not measured.'),
+ ('stack.max_open', 'stack', '4', 'At most this many parts are open at once (the root not counted). Every open question multiplies the leads judged.', 'aiq.walk_stack_next',
+  'REM-1244''s draft: at 4 a wave judges at most 4 times today''s leads, under $0.10 of Jev for a 500-read walk.'),
+ ('stack.candidates', 'stack', '3', 'How many candidate parts a wave offers the decider: the most specific terms of the reads that answered something in it, not yet asked about.', 'aiq.walk_stack_next',
+  'Few, because each is one judgement and most terms of a read name nothing the question needs. Not measured.'),
+ ('stack.evidence_lines', 'stack', '12', 'How many of a question''s linked reads the decider is shown when asked whether they answer it, highest P first.', 'aiq.walk_stack_next',
+  'About 12 lines of a user''s words fit the decider''s state at about 300 tokens a judgement. Not measured.'),
+ ('stack.part_wording', 'stack', to_jsonb(text '%s (the part about ''%s'')'), 'How a candidate part is worded from its parent question and a term: format(wording, parent, term).', 'aiq.walk_stack_next',
+  'No generative model is in the loop (Sirsh, M-20261029-105852-65d0), so a part is the parent narrowed to a term the evidence holds, and Jev chooses among them. A part written by a model comes through the walk''s input (parts), from a caller the walk asked.'),
+ ('decider.request_bytes', 'decider', '40000', 'The most option text one Jev request carries; a round''s options are cut into requests of at most 60 options and at most this many bytes.', 'aiq.walk_requests, aiq.walk_stack_requests',
+  'The workflow caps a task''s input at 64 KB (workflow.max_payload_bytes). Sixty options fit when a lead is described by one snippet of its source; described by three targets'' lines and what its source answered (walk.describe lines, walk.stack) sixty came to 83 KB and the request was refused (REM-1245''s first live stack walk). 40,000 leaves room for the request''s own state and keys.'),
+ ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message the user wrote, already read. Does it hold information needed to answer `question`, or part of it?'),
+  'The question Jev answers for each new read and each open question: does this read answer it (REM-1245).', 'aiq.walk_stack_requests',
+  'REM-1240''s recognition test asked whether a read answers the question, shown its own line. Not measured in these words.'),
+ ('decider.task_close', 'decider', to_jsonb(text 'The option lists messages the user wrote that were judged to bear on `question`. Together, do they answer it fully enough that nothing more needs to be found?'),
+  'The question Jev answers for an open question with new linked reads: are they enough to close it (REM-1245).', 'aiq.walk_stack_requests',
+  'Not measured.'),
+ ('decider.task_split', 'decider', to_jsonb(text 'For each option, a narrower question. Is it a part of `question` that a complete answer needs?'),
+  'The question Jev answers for each candidate part (REM-1245).', 'aiq.walk_stack_requests',
+  'Not measured.'),
  ('walk.describe', 'walk', '"source"', 'What a clue''s description shows the decider: source, the read message it comes out of; or targets, its kind, how many unread messages it leads to, and the rarest stored terms of up to 3 of them; or lines, what the user said in up to 3 of them (their stored lines, so nothing is read at walk time), how far each is from the source, and for a term how many messages hold it; or lines_nocount, the same with no count of messages, since a count can lift P on wide bundles (REM-1240). Neither source nor targets reads a target.', 'aiq.walk_state, aiq.walk_task, aiq.walk_describe_clue',
   'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source stays the default until the paper''s 122 are walked under both (bill). lines (REM-1240): on REM-1204''s A1 re-judge Jev given the targets'' own text separated them at 0.768, against 0.644 for the source and 0.634 to 0.641 for the question''s cosine to the same text; lines is that text, stored at ingest. Not yet walked.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
@@ -563,7 +594,7 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       from workflow.tasks jt
       join workflow.tasks ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
       cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
-     where jt.run_id = p_run and jt.step_key like 'judge\_%'
+     where jt.run_id = p_run and (jt.step_key like 'judge\_%' or jt.step_key like 'assess\_%' or jt.step_key like 'shape\_%')
        and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul'
 $$;
 
@@ -601,6 +632,9 @@ declare
     txt      jsonb;
     mem      real;
     asof     timestamptz;
+    board    jsonb;
+    lp       jsonb;
+    serves   jsonb;
 begin
     select * into r from workflow.runs where id = p_run;
     if not found then
@@ -733,6 +767,26 @@ begin
         ) z;
         stop := w->'stop';
     end loop;
+    -- The question stack (walk.stack, REM-1245): the board after the last recorded stack step. A lead's P is then the
+    -- highest the decider gave it against any question still open (verdict keys L|<question>|<lead>), and the
+    -- question it serves is that one, so a lead toward a question already answered falls away. The raw verdicts,
+    -- every kind, stay in `answers` for walk_verdicts and the stack's own steps.
+    if coalesce((s->>'stack')::boolean, false) then
+        -- the board: every recorded wave's moves folded onto the initial one (walk-stack.sql)
+        select b into board from aiq.walk_stack_boards(p_run) b order by (b->>'iteration')::int desc limit 1;
+        select coalesce(jsonb_object_agg(z.key, z.p), '{}'::jsonb), coalesce(jsonb_object_agg(z.key, z.q), '{}'::jsonb)
+          into lp, serves
+          from (select distinct on (c.key) c.key, (pmap->>('L|' || o.q || '|' || c.key))::real as p, o.q
+                  from (select key from jsonb_each(clues) union select key from jsonb_each(nxt)) c,
+                       jsonb_array_elements_text(board->'open') o(q)
+                 where pmap ? ('L|' || o.q || '|' || c.key)
+                 order by c.key, 2 desc, o.q) z;
+        return jsonb_build_object('settings', s, 'question', q, 'order', coalesce(ord, '[]'::jsonb),
+                                  'waves', waves, 'clues', clues, 'travelled', travelled, 'reached', reached,
+                                  'pending', pending, 'next', nxt, 'pmap_size', (select count(*) from jsonb_object_keys(pmap)),
+                                  'p', lp, 'serves', serves, 'answers', pmap, 'board', board, 'stop', stop,
+                                  'replay', inp->'replay', 'offline', coalesce(inp->'offline', 'false'));
+    end if;
     return jsonb_build_object('settings', s, 'question', q, 'order', coalesce(ord, '[]'::jsonb),
                               'waves', waves, 'clues', clues, 'travelled', travelled, 'reached', reached,
                               'pending', pending, 'next', nxt, 'pmap_size', (select count(*) from jsonb_object_keys(pmap)),
@@ -816,6 +870,8 @@ $$;
 
 -- The judge step's rows: one Jev request for each 60 clues this round raises
 -- that the replay lacks. None when offline, or when the replay holds them all.
+-- Under walk.stack, every live lead against every open question it has not been judged against (REM-1245); each wave
+-- first runs the stack's own steps (assess, shape, stack: walk-stack.sql), which do nothing when the walk keeps none.
 create or replace function aiq.walk_requests(p_run uuid, p_decider text default 'jev')
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
@@ -829,6 +885,69 @@ begin
     select * into d from claims.deciders where name = p_decider;
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
+    end if;
+    if coalesce((st->'settings'->>'stack')::boolean, false) then
+        -- The question stack (REM-1245): every live lead -- raised, not travelled, still leading somewhere unread --
+        -- against every open question it has not been judged against. One request per open question, the question
+        -- as Jev's `question`, so a lead is judged against what is still to be found rather than the root alone. Each
+        -- lead's description says what its source was found to answer, so the decider knows which reads were
+        -- evidence (REM-1240: a term lead out of an evidence read is about 12 times as likely to be right).
+        return query
+        with g as (select aiq.walk_run_graph(p_run) as g),
+        inp as (select input from workflow.runs where id = p_run),
+        live as (
+            select key, value from jsonb_each(st->'clues')
+             where not (st->'travelled') ? key
+               and exists (select 1 from jsonb_array_elements_text(value->'targets') t where not (st->'reached') ? t)
+            union all
+            select key, value from jsonb_each(st->'next')
+        ), todo as (
+            select l.key, l.value as c, o.q
+              from live l, jsonb_array_elements_text(st->'board'->'open') o(q)
+             where not (st->'answers') ? ('L|' || o.q || '|' || l.key)
+        ), srcs as (
+            select aiq.walk_texts((select input from inp), array(select distinct c->>'source' from todo)) as t
+        ), said as (
+            -- what each source was linked to, best first: its line in the lead's description
+            select e->>'doc' as doc, string_agg(format('''%s''', st->'board'->'questions'->(e->>'q')->>'text'), ' and '
+                                                order by (e->>'p')::real desc) as qs
+              from jsonb_array_elements(st->'board'->'evidence') e group by 1
+        ), described as (
+            select t.q, 'L|' || t.q || '|' || t.key as key,
+                   coalesce(case when t.c ? 'text' and t.c->>'text' is not null then t.c->>'text' end,
+                            aiq.walk_describe_clue((select input from inp), g.g, st->'settings'->>'describe', t.key,
+                                                   t.c->>'kind', t.c->>'x', t.c->>'source',
+                                                   (select coalesce(jsonb_agg(x), '[]'::jsonb) from jsonb_array_elements(t.c->'targets') x
+                                                     where not (st->'reached') ? (x #>> '{}')),
+                                                   srcs.t->>(t.c->>'source')))
+                   || case when sd.qs is not null then ' It comes out of a message found to answer ' || sd.qs || '.'
+                           else ' It comes out of a message found to answer none of the questions.' end as text
+              from todo t cross join g cross join srcs left join said sd on sd.doc = t.c->>'source'
+        ), numbered as (
+            -- a request holds at most 60 options and decider.request_bytes of their text
+            select q, key, text, row_number() over (partition by q order by key) - 1 as j,
+                   sum(octet_length(text) + octet_length(key) + 64) over (partition by q order by key) as cum
+              from described
+        ), cut as (
+            select n.*, (n.j / 60) as by_count,
+                   (n.cum / (select (value #>> '{}')::int from aiq.parameters where name = 'decider.request_bytes'))::int as by_bytes
+              from numbered n
+        ), chunks as (
+            select q, key, text, dense_rank() over (order by q, by_bytes, by_count) - 1 as chunk,
+                   (row_number() over (partition by q, by_bytes, by_count order by key) - 1)::int as jj
+              from cut
+        )
+        select c.chunk::int,
+               jsonb_agg(c.key order by c.jj),
+               jsonb_build_object('model', d.model,
+                                  'state', jsonb_build_object('question', st->'board'->'questions'->(min(c.q))->>'text',
+                                                              'task', aiq.walk_task(st->'settings'->>'describe')),
+                                  'questions', jsonb_object_agg('c' || c.jj,
+                                      jsonb_build_object('type', 'noul', 'instructions', c.text)))
+          from chunks c
+         group by c.chunk
+         order by c.chunk;
+        return;
     end if;
     return query
     with todo as (
@@ -899,10 +1018,22 @@ begin
            (array_agg(t.error->>'error' order by t.updated_at) filter (where t.status = 'failed'))[1]
       into failed, asked, why
       from workflow.tasks t
-     where t.run_id = p_run and t.step_key like 'judge\_%' and t.matrix_parent_id is not null;
+     where t.run_id = p_run and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%')
+       and t.matrix_parent_id is not null;
     if failed > 0 then
         raise exception '% of the % Jev requests in this walk failed, so their clues were never judged', failed, asked
             using hint = 'the walk stops rather than read on without them; the first error: ' || coalesce(why, 'none recorded');
+    end if;
+    if coalesce(s->>'order', 'p') not in ('p', 'per_target') then
+        raise invalid_parameter_value using message = format('walk.order is p or per_target here, not %s', s->>'order'),
+            hint = 'votes and wvotes exist only in core''s Python walk';
+    end if;
+    -- The question stack (REM-1245): with the root answered there is nothing left to look for, and the walk stops.
+    if st->'board'->'questions'->'root'->>'state' = 'answered' then
+        return jsonb_build_object('wave', wn, 'si', si, 'reads', '[]'::jsonb, 'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
+                                  'judged', 0, 'unjudged', 0, 'dry', true,
+                                  'stop', jsonb_build_object('reason', 'answered', 'wave', wn,
+                                                             'closed_at', st->'board'->'questions'->'root'->'closed_wave'));
     end if;
     -- Every accepted clue still leading somewhere unread: earlier waves' not
     -- yet travelled, and this round's.
@@ -959,10 +1090,14 @@ begin
             miss := best is not null;
         end if;
         if not miss then
+            -- walk.order: p, the highest P; per_target, the highest P per document it would still read (REM-1240)
             select o.key, (o.value->>'p')::real into best, bp
               from jsonb_each(open_) o
-             where exists (select 1 from jsonb_array_elements(o.value->'targets') t where not reached ? (t #>> '{}'))
-             order by (o.value->>'p')::real desc, o.key
+              cross join lateral (select count(*) as n from jsonb_array_elements(o.value->'targets') t
+                                   where not reached ? (t #>> '{}')) u
+             where u.n > 0
+             order by case when s->>'order' = 'per_target' then (o.value->>'p')::real / u.n
+                           else (o.value->>'p')::real end desc, o.key
              limit 1;
         end if;
         if best is not null then
@@ -979,6 +1114,9 @@ begin
             pending := pending || land;
             travels := travels || jsonb_build_array(jsonb_build_object('key', best, 'p', round(bp::numeric, 3),
                                                                        'land', land)
+                                                    || case when st->'serves' ? best
+                                                            then jsonb_build_object('serves', st->'serves'->>best)
+                                                            else '{}'::jsonb end
                                                     || case when miss then '{"near_miss": true}'::jsonb
                                                             else '{}'::jsonb end);
             continue;
@@ -1036,9 +1174,12 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
      order by 1
 $$;
 
+-- serves: under walk.stack, the open question the lead's P was given against (REM-1245); null otherwise.
+drop function if exists aiq.walk_clues(uuid);
+drop function if exists aiq.walk_state_clues(jsonb);
 create or replace function aiq.walk_state_clues(p_state jsonb)
 returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
-               travelled_wave int)
+               travelled_wave int, serves text)
 language sql immutable security invoker set search_path = pg_catalog, public as $$
     with st as (select p_state as st)
     select c.key, c.value->>'kind', (c.value->>'wave')::int, c.value->>'source',
@@ -1052,14 +1193,15 @@ language sql immutable security invoker set search_path = pg_catalog, public as 
                 when exists (select 1 from jsonb_array_elements_text(c.value->'targets') t
                               where not (st->'reached') ? t) then 'open'
                 else 'spent' end,
-           (st->'travelled'->>c.key)::int
+           (st->'travelled'->>c.key)::int,
+           st->'serves'->>c.key
       from st, jsonb_each(st->'clues') c
      order by 3, 1
 $$;
 
 create or replace function aiq.walk_clues(p_run uuid)
 returns table (key text, kind text, wave int, source text, targets text[], p real, decision text, state text,
-               travelled_wave int)
+               travelled_wave int, serves text)
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select * from aiq.walk_state_clues(aiq.walk_state(p_run))
 $$;
@@ -1153,8 +1295,11 @@ returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
     select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
                               'task', aiq.walk_task(st->'settings'->>'describe'),
-                              'verdicts', (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
-                                             from jsonb_each(st->'p') where (st->'clues') ? key))
+                              -- a stack walk's verdicts are every judgement it asked for (leads per question,
+                              -- assessments, parts, closes), so a replay replays its board too
+                              'verdicts', case when st ? 'answers' then st->'answers'
+                                               else (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
+                                                       from jsonb_each(st->'p') where (st->'clues') ? key) end)
       from (select aiq.walk_state(p_run) as st offset 0) x
 $$;
 
@@ -1194,12 +1339,14 @@ begin
     select jsonb_object_agg(a.key, jsonb_build_object('p', a.p, 'at', a.at, 'model', a.model)) into v
       from aiq.walk_answers(p_run) a;
     if v is null then
-        return jsonb_build_object('kept', 0);
+        return jsonb_build_object('kept', 0, 'stack', aiq.walk_keep_stack(p_run));
     end if;
     perform content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                 format('verdicts of run %s', p_run), uri, null,
                 jsonb_build_object('question', q->>'node_id', 'run', p_run, 'task', tk, 'verdicts', v));
-    return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri);
+    -- the board too, under walk.stack: walk_question nodes and their edges (walk-stack.sql, REM-1245)
+    return jsonb_build_object('kept', (select count(*) from jsonb_object_keys(v)), 'uri', uri,
+                              'stack', aiq.walk_keep_stack(p_run));
 end;
 $$;
 
@@ -1267,7 +1414,34 @@ steps:%6$s
       max: %4$s
       until: "({{steps.read.result.0.state.dry}})::boolean"
       steps:
+        - id: assess
+          matrix:
+            rows: "select chunk, keys, body from aiq.walk_stack_requests({{run.$id}}::uuid, 'assess', '%5$s')"
+            max_fanout: 200
+            continue_on: failed
+            template:
+              rest:
+                url: %2$s
+                method: POST
+                credential_ref: %3$s
+                body: '{{item.body}}'
+        - id: shape
+          needs: [assess]
+          matrix:
+            rows: "select chunk, keys, body from aiq.walk_stack_requests({{run.$id}}::uuid, 'shape', '%5$s')"
+            max_fanout: 200
+            continue_on: failed
+            template:
+              rest:
+                url: %2$s
+                method: POST
+                credential_ref: %3$s
+                body: '{{item.body}}'
+        - id: stack
+          needs: [shape]
+          sql: "select aiq.walk_stack_move({{run.$id}}::uuid) as state"
         - id: judge
+          needs: [stack]
           matrix:
             rows: "select chunk, keys, body from aiq.walk_requests({{run.$id}}::uuid, '%5$s')"
             max_fanout: 200
