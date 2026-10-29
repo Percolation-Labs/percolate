@@ -41793,9 +41793,9 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message from the user''s earlier conversations that the search has already read. Does it hold information needed to answer `question`, or part of it?'),
   'The question Jev answers for each new read and each open question: does this read answer it (REM-1245).', 'aiq.walk_stack_requests',
   'REM-1240''s recognition test, in its words: shown each read as ''the user wrote: "<line>"'', Jev picked out labelled evidence at a mean per-walk AUC of 0.745 [0.690, 0.799] over 53 walks of mixed types (oracle-scored). On REM-1245''s first two live stack walks (an event-ordering and a multi-session question, both all-on-topic) evidence and other reads scored alike (mean P 0.36 against 0.35, and 0.42 against 0.41).'),
- ('decider.task_close', 'decider', to_jsonb(text 'The option lists messages the user wrote that were judged to bear on `question`. Together, do they answer it fully enough that nothing more needs to be found?'),
-  'The question Jev answers for an open question with new linked reads: are they enough to close it (REM-1245).', 'aiq.walk_stack_requests',
-  'Not measured.'),
+ ('decider.task_close', 'decider', to_jsonb(text 'The option lists messages the user wrote that bear on `question`, newest first, each with the date it was said. As of the latest of them, do they answer it fully enough that nothing more needs to be found?'),
+  'The question Jev answers for an open question with new linked reads: are they enough to close it, as of the latest of them (REM-1245, walk spec 92fc424a).', 'aiq.walk_stack_requests',
+  'Dated, newest first and as of the latest because on 1M:35 ku:0 the root closed on a deadline the user had since changed: the undated lines showed the old and new values as equally right (REM-1245''s test walks). Not measured.'),
  ('decider.task_split', 'decider', to_jsonb(text 'For each option, a narrower question. Is it a part of `question` that a complete answer needs?'),
   'The question Jev answers for each candidate part (REM-1245).', 'aiq.walk_stack_requests',
   'Not measured.'),
@@ -43660,10 +43660,17 @@ begin
       from jsonb_array_elements(assess) a
       join ranked rk on rk.q = a->>'q' and rk.doc = a->>'doc'
      where (a->>'p')::real >= (sp->>'link_floor')::real
-       and rk.rk <= greatest(1, ceil((sp->>'link_share')::real * rk.n));
+       -- at least close_min_links, so a question can be judged for closing before 100 reads are assessed: under
+       -- 100, the top 2% is one read, and close needs two (walk spec 4cf59f55; three of REM-1245's five test walks
+       -- linked exactly one read and so never asked)
+       and rk.rk <= greatest((sp->>'close_min_links')::int, ceil((sp->>'link_share')::real * rk.n));
     ev := board->'evidence' || linked;
-    -- 2. close: each open question that gained evidence, by its reads' lines; the root by every read linked to it or
-    -- to any part. Keyed by how many reads it then has, so a question that gains more is asked again.
+    -- 2. close (walk.md §6 move 4, spec 92fc424a): each open question that gained links, judged on its linked lines,
+    -- each with the date it was said, newest first; the root on every read linked to it or to any part. Close also
+    -- sees every assessed line above link_floor said AFTER the newest linked line: a later statement is the only way an
+    -- answer is superseded, and the newer value can rank below the link cut (on 1M:35 ku:0 the new deadline lost the
+    -- one link slot by 0.02 and the root closed on the old one). Keyed C|<q>|<links>[+<later>], so a question that
+    -- gains links or later lines is asked again. Judged only once it has close_min_links links.
     with gained as (
         select distinct x->>'q' as q from jsonb_array_elements(linked) x
         union
@@ -43674,22 +43681,45 @@ begin
          where e->>'q' = gq.q or (gq.q = 'root')
          group by 1, 2
     ), counted as (
-        -- close judges a question's links only once it has stack.close_min_links of them
         select q, count(*) as n from mine group by q having count(*) >= (sp->>'close_min_links')::int
+    ), assessed as (
+        -- every read assessed so far against the question, above the floor
+        select split_part(x.key, '|', 2) as q, split_part(x.key, '|', 3) as doc
+          from jsonb_each(ans) x
+         where x.key like 'A|%' and (x.value #>> '{}')::real >= (sp->>'link_floor')::real
+           and split_part(x.key, '|', 3) in (select r.value->>'doc' from jsonb_array_elements(p_state->'waves') wv,
+                                                    jsonb_array_elements(wv->'reads') r where (wv->>'wave')::int <= w)
+    ), docs as (
+        select distinct doc from mine union select distinct doc from assessed
+    ), pl as (
+        select aiq.walk_places(inp, array(select doc from docs)) as places,
+               aiq.walk_lines(inp, array(select doc from docs)) as lines
+    ), newest as (
+        select m.q, max((pl.places->m.doc->>'said_at')::timestamptz) as at from mine m, pl group by m.q
+    ), later as (
+        select a.q, a.doc from assessed a join newest nw on nw.q = a.q, pl
+         where (pl.places->a.doc->>'said_at')::timestamptz > nw.at
+           and not exists (select 1 from mine m where m.q = a.q and m.doc = a.doc)
     ), shown as (
-        select m.q, m.doc, m.p, row_number() over (partition by m.q order by m.p desc, m.doc) as k from mine m
+        select x.q, x.doc, x.later, row_number() over (partition by x.q order by x.at desc nulls last, x.doc) as k
+          from (select m.q, m.doc, false as later, (pl.places->m.doc->>'said_at')::timestamptz as at
+                  from mine m, pl
+                 where m.doc in (select doc from mine m2 where m2.q = m.q order by m2.p desc limit (sp->>'evidence_lines')::int)
+                union all
+                select lt.q, lt.doc, true, (pl.places->lt.doc->>'said_at')::timestamptz from later lt, pl) x
+    ), keyed as (
+        select ct.q, ct.n, (select count(*) from later lt where lt.q = ct.q) as m from counted ct
     )
-    select coalesce(jsonb_agg(jsonb_build_object('key', 'C|' || ct.q || '|' || ct.n, 'q', ct.q,
-                                                 'text', (select string_agg(format('%s) "%s"', sh.k,
-                                                                                   aiq.walk_snippet(coalesce(l.v->>sh.doc, sh.doc))),
-                                                                            ' ' order by sh.k)
-                                                            from shown sh
-                                                            cross join (select aiq.walk_lines(inp, array(select doc from shown where q = ct.q)) as v) l
-                                                           where sh.q = ct.q and sh.k <= (sp->>'evidence_lines')::int),
-                                                 'p', ans->('C|' || ct.q || '|' || ct.n)) order by ct.q), '[]'::jsonb)
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'key', 'C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end, 'q', kd.q,
+               'text', (select string_agg(format('%s) [%s] "%s"', sh.k,
+                                                 coalesce(to_char((pl.places->sh.doc->>'said_at')::timestamptz, 'YYYY-MM-DD'), 'undated'),
+                                                 aiq.walk_snippet(coalesce(pl.lines->>sh.doc, sh.doc))), ' ' order by sh.k)
+                          from shown sh, pl where sh.q = kd.q),
+               'p', ans->('C|' || kd.q || '|' || kd.n || case when kd.m > 0 then '+' || kd.m else '' end)) order by kd.q), '[]'::jsonb)
       into closes
-      from counted ct
-     where open_ ? ct.q;
+      from keyed kd
+     where open_ ? kd.q;
     -- 3. candidate parts (walk.md §6 move 2): parts open only under the root, so they never nest. The candidates are
     -- the terms the most reads linked to the root share (at least two), ties by specificity (fewest documents holding
     -- them), not yet asked about. The rarest term of each linked read is not used: on REM-1245's live ladder walk it
