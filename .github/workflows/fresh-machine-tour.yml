@@ -16,6 +16,7 @@ on:
       core: {description: "percolate-core version on PyPI", required: true}
       bundle: {description: "the bundle asset's file name on the release", required: true}
       bundle_sha256: {description: "the bundle asset's sha256", required: true}
+      bundle_url: {description: "where the bundle is published, if not the percolate release of this tag", required: false, default: ""}
       samples: {description: "sample directories to load before indexing, space-separated", required: true}
       walks: {description: "walk directories to load after indexing, space-separated", required: true}
   push:
@@ -29,6 +30,7 @@ jobs:
       CORE: ${{ inputs.core }}
       BUNDLE: ${{ inputs.bundle }}
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      BUNDLE_URL: ${{ inputs.bundle_url }}
       SAMPLES: ${{ inputs.samples }}
       WALKS: ${{ inputs.walks }}
       P8_DSN: postgres://p8:p8@localhost:5432/percolate
@@ -57,7 +59,9 @@ jobs:
         run: |
           cd tour && . .venv/bin/activate
           ASSET="$BUNDLE"
-          curl -fsSLO "https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET"
+          URL="${BUNDLE_URL:-https://github.com/Percolation-Labs/percolate/releases/download/$TAG/$ASSET}"
+          echo "bundle: $URL" | tee ../out/03-fetch-url.txt
+          curl -fsSL -o "$ASSET" "$URL"
           echo "$BUNDLE_SHA256  $ASSET" | sha256sum -c - | tee ../out/03-fetch.txt
           tar xzf "$ASSET"
           { for d in $SAMPLES; do percolate sample load "$d"; done
