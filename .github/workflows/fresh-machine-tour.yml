@@ -77,6 +77,12 @@ jobs:
                               where r.replays is not null group by 1 order by 2 desc" | tee out/03d-replays.txt
           test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r cross join lateral aiq.walk_clues(r.run) c
                                         where r.replays is not null and c.decision = 'unjudged'")" = 0
+      - name: 3e. every replayed walk says it is faithful (walk_structure's decider.faithful; absent is a failure, not a pass)
+        run: |
+          psql "$P8_DSN" -c "select r.run, aiq.walk_structure(r.run)->'decider'->'faithful' as faithful
+                               from aiq.walk_runs r where r.replays is not null order by r.created_at" | tee out/03e-faithful.txt
+          test "$(psql "$P8_DSN" -Atc "select count(*) from aiq.walk_runs r where r.replays is not null
+                                        and (aiq.walk_structure(r.run)->'decider'->'faithful') is distinct from 'true'::jsonb")" = 0
       - name: 4. the Walks screen answers
         run: |
           cd tour && . .venv/bin/activate
