@@ -56,12 +56,12 @@ begin
     values (ch, 'walk-desc:source', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task('source'),
-                                       'verdicts', jsonb_build_object('q1', jsonb_build_object('term:ladder', 0.9)))::text);
+                                       'verdicts', jsonb_build_object('term:ladder', 0.9))::text);
     insert into content.resources (channel_id, uri, title, org_id, visibility)
     values (ch, 'walk-desc:targets', 'replay', org, 'public') returning id into res;
     insert into content.resource_chunks (resource_id, ordinal, content)
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task('targets'),
-                                       'verdicts', jsonb_build_object('q1', jsonb_build_object('term:ladder', 0.9)))::text);
+                                       'verdicts', jsonb_build_object('term:ladder', 0.9))::text);
 end $$;
 
 -- One wave, so the clues its reads raise are still waiting, with their descriptions, when the walk stops.
@@ -71,10 +71,12 @@ do $$
 declare
     inp jsonb := jsonb_build_object(
         'nodes', 'walk_desc', 'prefix', 'wd/',
-        'question', jsonb_build_object('id', 'q1', 'text', 'Did I rent a ladder?'),
+        'question', jsonb_build_object('node_id', (select id from aiq.nodes where entity_type = 'walk_desc' and summary = 'wd/1'),
+                                       'text', 'Did I rent a ladder?'),
         'search', to_jsonb(array['wd/1','wd/11','wd/12','wd/2','wd/3','wd/4']),
-        'replay', 'walk-desc:targets', 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-desc:targets'), 'offline', true,
         'settings', jsonb_build_object('wave', 2, 'seeds', 1, 'per_wave', 1, 'describe', 'targets'));
+    src uuid := (select id from content.resources where uri = 'walk-desc:source');
     r uuid;
     st jsonb;
     bad text;
@@ -105,14 +107,14 @@ begin
     end if;
     -- 2. A replay given under the source wording cannot answer a targets walk.
     begin
-        r := workflow.start_workflow('walk_desc_1', jsonb_set(inp, '{replay}', '"walk-desc:source"'));
+        r := workflow.start_workflow('walk_desc_1', jsonb_set(inp, '{replay}', to_jsonb(src)));
         perform aiq.walk_state(r);
         raise exception 'a source-worded replay answered a targets walk';
     exception when invalid_parameter_value then
         null;
     end;
     -- and the source walk still quotes its source.
-    r := workflow.start_workflow('walk_desc_1', jsonb_set(jsonb_set(inp, '{replay}', '"walk-desc:source"'),
+    r := workflow.start_workflow('walk_desc_1', jsonb_set(jsonb_set(inp, '{replay}', to_jsonb(src)),
                                                           '{settings,describe}', '"source"'));
     if not exists (select 1 from jsonb_each(aiq.walk_state(r)->'next') where value->>'text' like '%this read one%') then
         raise exception 'under source no clue quoted its source: %', aiq.walk_state(r)->'next';
