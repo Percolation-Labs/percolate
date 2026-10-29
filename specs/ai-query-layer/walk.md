@@ -257,7 +257,7 @@ The first of these, recorded by the run's `stop` (Sirsh, F1):
   Past S's own stop, P found 16 more labelled pieces, 14 of them through its leads.
 - **A root with no parts never closes in V0.** It is a leaf, and with `stack.state_gate` unset no line closes it.
   So "stack empty" cannot stop a walk that opened no part, and such a walk ends at the budget, dry, or cold.
-- `stack.close_gate` (0.7) belongs to the holistic close this section retired. `walk_stack_next` fetches it and no
+- `stack.close_gate` (0.7) is **unused in V0**. It belongs to the holistic close this section retired. `walk_stack_next` fetches it and no
   code reads it. Its row is marked unused, or removed, in the first percolate change after tonight's release.
 
 ## 9. The walk structure: a first-class queryable object
@@ -315,7 +315,7 @@ For each piece, the first class that holds is its class:
 | 1 | data: unreachable | no lead path from the seeds reaches it | the graph does not connect it | ingest, links |
 | 2 | data: beyond the ceiling | the oracle does not read it within this budget either | the budget, not the walk | budget |
 | 3 | data: indistinguishable | shown everything the page holds (§3's fullest description: the target's whole text), the decider rejects it as often as the look-alikes around it, and the look-alikes outnumber the evidence | a reader without the key could not tell it from the messages around it; only the benchmark's rubric does | nothing in the walk: a stated limit of the question |
-| 4 | implementation: closed early or on superseded evidence | the question it answers was closed (§6, move 4) before a lead toward it was opened, and that lead then fell away; or it was closed on an earlier statement while a later one that supersedes it was read and not linked, or linked and ignored | the board closed too soon, or on the wrong value | `stack.close_gate`, the link rule, the close judgement |
+| 4 | implementation: closed early or on superseded evidence | the question it answers was closed (§6, move 4) before a lead toward it was opened, and that lead then fell away; or it was closed on an earlier statement while a later one that supersedes it was read and not linked, or linked and ignored | the board closed too soon, or on the wrong value | `stack.state_gate` (unset in V0), the link rule, the one-line close judgement |
 | 5 | implementation: never offered | the oracle reaches it, but no lead the walk raised pointed at it | the walk's reads went elsewhere earlier | opening order, seeds |
 | 6 | implementation: rejected | a lead toward it was judged under the gate | judging | §3's description, or the decider |
 | 7 | implementation: open, not read | a lead toward it was accepted but never opened | queue | opening order (§4), budget |
@@ -559,7 +559,7 @@ Decided:
   `stack.max_displace` (1) a wave. It closes `displaced` with its P, and its leads are kept. On the ladder retest, the
   question's own aspects 'ladder' (P 0.78) and 'money' (0.84) never got a slot.
 - **Fixed before the five-walk rerun, never retuned on it.** `stack.link_share` 0.02, `stack.link_floor` 0.7 (0.5 since F14),
-  `stack.close_min_links` 2, `stack.close_gate` 0.7, `stack.stale_waves` 2, `stack.max_open` 4, `stack.max_displace` 1.
+  `stack.close_min_links` 2, `stack.close_gate` 0.7 (unused in V0: nothing reads it since the holistic close was retired, §8), `stack.stale_waves` 2, `stack.max_open` 4, `stack.max_displace` 1.
   Each is an `aiq.parameters` row with its reason, set from the recognition run (REM-1240) and the ladder retest
   (REM-1245), where these rules were found. The five-walk rerun (the ladder walk and the four registered walks) is
   their test. The four registered walks started at 11:38–11:42Z, before F9–F11, are the pre-change baseline.
