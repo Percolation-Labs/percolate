@@ -172,7 +172,8 @@ declare
     s       jsonb := p_state->'settings';
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
-                                                         'evidence_lines', 'part_wording', 'split_gate', 'broad_after']);
+                                                         'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
+                                                         'state_gate']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -678,7 +679,8 @@ begin
                                               'output_tokens', coalesce(sum((t.output->'result'->'usage'->>'output_tokens')::bigint), 0))
                       from aiq.walk_tasks(p_run) t
                      where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
-                       and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'))));
+                       and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'
+                            or t.step_key like 'target\_%'))));
     if p_oracle is not null then
         select coalesce(jsonb_agg(jsonb_build_object('k', o.k, 'doc', o.doc) order by o.k), '[]'::jsonb) into oracle
           from aiq.walk_oracle(p_run, p_oracle) o;

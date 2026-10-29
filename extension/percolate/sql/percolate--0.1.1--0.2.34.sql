@@ -41772,6 +41772,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'Sirsh, M-20261028-134903-f73c: a rerun with memory read 86 verdicts its original never saw and differed in 451 of 500 reads; pinning the store to the original''s start keeps the memory it read.'),
  ('walk.order', 'walk', '"per_target"', 'Which accepted clue is travelled next: p, the highest P; or per_target, the highest P per unread document it leads to. (votes and wvotes, by how many open accepted clues agree on a target, exist only in core''s Python walk.)', 'aiq.walk_read',
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it. V0''s default (walk spec 68c02f68). Part three''s published walks pin p.'),
+ ('walk.open_whole', 'walk', 'null', 'Off (null), or n: an accepted lead with more than n unread targets is not opened whole; each unread target is judged once on its own line (decider.task_target), and those clearing walk.gate are read as single-target leads.', 'aiq.walk_target_requests, aiq.walk_read',
+  'F8, decided on principle (bill 13:42Z, walk spec 54619796): on the holiday stack walk 1,035 of 1,927 leads were accepted and 305 opened; 51 of the 89 accepted leads toward evidence were never opened, because ordering by P per target pushes wide leads out (median 7 targets against 3). A wide lead''s weak targets should not spend reads. Off until it passes on a fresh draw; the spec''s value is 3.'),
  ('walk.stack', 'walk', 'true', 'Whether the walk keeps a question stack: the decider links reads to the questions they answer, splits the question into parts, closes what is answered, and judges each lead against the questions still open (aiq.walk_stack). Off, every lead is judged once against the question alone.', 'aiq.walk_state, aiq.walk_requests, aiq.walk_stack_requests, aiq.walk_read',
   'Sirsh, M-20261029-085819-f102 and M-20261029-085944-62bd: a memoryless walk keeps accepting echoes of what it has read (Jev''s AUC fell to 0.27 to 0.36 in later waves, REM-1240). The walkthrough''s published steps ran memoryless and pin it. V0 walks with the stack (walk spec 68c02f68, sally): a reader who starts a walk with the shipped defaults gets V0, and changes one row to see what it does. Part three''s published walks pin stack false, describe source and order p, which is what they ran.'),
  ('stack.link_floor', 'stack', '0.5', 'The P a read''s assessment must reach to link it to a question (a walk_answers edge), whatever its rank.', 'aiq.walk_stack_next',
@@ -41801,6 +41803,9 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('decider.task_assess', 'decider', to_jsonb(text 'For each option, a message from the user''s earlier conversations that the search has already read. Does it hold information needed to answer `question`, or part of it?'),
   'The question Jev answers for each new read and each open question: does this read answer it (REM-1245).', 'aiq.walk_stack_requests',
   'REM-1240''s recognition test, in its words: shown each read as ''the user wrote: "<line>"'', Jev picked out labelled evidence at a mean per-walk AUC of 0.745 [0.690, 0.799] over 53 walks of mixed types (oracle-scored). On REM-1245''s first two live stack walks (an event-ordering and a multi-session question, both all-on-topic) evidence and other reads scored alike (mean P 0.36 against 0.35, and 0.42 against 0.41).'),
+ ('decider.task_target', 'decider', to_jsonb(text 'For each option, an unread message the user wrote, shown by what it says. Would reading it likely give information needed to answer `question`, or part of it?'),
+  'Asked of each unread target of an accepted wide lead (walk.open_whole, F8), against the question the lead serves; keyed X|<question>|<message>, so leads sharing a target share its judgement.', 'aiq.walk_target_requests',
+  'Not measured in these words: the assess wording, for a message not yet read.'),
  ('decider.task_state', 'decider', to_jsonb(text 'For each option, a message the user wrote, with the date it was said. Does this message answer `question`?'),
   'Asked of each candidate line of a leaf question, one line at a time: does this line answer it (walk spec 1d5f38d8 §6 move 4). A leaf closes on a line that clears stack.state_gate.', 'aiq.walk_stack_requests',
   'Jev is never asked whether a set of messages answers a question (Sirsh, 13:15Z): on the ten walks that holistic ask separated asks holding labelled evidence at AUC 0.622 and closed once in ten, wrongly. Jev judges one line well. Not measured in these words.'),
@@ -41883,8 +41888,10 @@ declare
     v       jsonb := aiq.parameters_of(p_part);
     missing text;
 begin
+    -- a row that is absent is missing; a row whose value is JSON null is a stated 'off' or 'not yet set'
+    -- (stack.state_gate until it is calibrated, walk.open_whole until F8 passes), which the step reads as such
     select string_agg(p_part || '.' || n, ', ' order by n) into missing
-      from unnest(p_names) n where jsonb_typeof(v->n) is null or jsonb_typeof(v->n) = 'null';
+      from unnest(p_names) n where jsonb_typeof(v->n) is null;
     if missing is not null then
         raise no_data_found using message = format('aiq.parameters has no value for %s', missing),
             hint = 'the spec seeds every parameter a step reads; reload the extension''s parameters rather than run without them';
@@ -42338,7 +42345,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       from aiq.walk_tasks(p_run) jt
       join aiq.walk_tasks(p_run) ch on ch.matrix_parent_id = jt.id and ch.status = 'succeeded'
       cross join lateral jsonb_array_elements(ch.input->'item'->'keys') with ordinality kk
-     where jt.run_id = p_run and (jt.step_key like 'judge\_%' or jt.step_key like 'assess\_%' or jt.step_key like 'shape\_%')
+     where jt.run_id = p_run and (jt.step_key like 'judge\_%' or jt.step_key like 'assess\_%' or jt.step_key like 'shape\_%'
+                                     or jt.step_key like 'target\_%')
        and ch.output->'result'->'answers'->('c' || (kk.ordinality - 1)) ? 'noul'
 $$;
 
@@ -42718,6 +42726,59 @@ begin
 end;
 $$;
 
+-- The target step's rows (F8, walk.open_whole): each unread target of an accepted lead wider than open_whole, judged
+-- once on its own line against the question the lead serves (the root's words in a walk with no stack), keyed
+-- X|<question>|<message>, for the targets the run holds no verdict on. None when open_whole is off or the walk is offline.
+create or replace function aiq.walk_target_requests(p_run uuid, p_decider text default 'jev')
+returns table (chunk int, keys jsonb, body jsonb)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    inp jsonb := (select input from aiq.walk_run(p_run));
+    st  jsonb;
+    d   claims.deciders;
+begin
+    if jsonb_typeof(aiq.walk_run_settings(p_run)->'open_whole') <> 'number' or coalesce((inp->>'offline')::boolean, false) then
+        return;
+    end if;
+    select * into d from claims.deciders where name = p_decider;
+    st := aiq.walk_state(p_run);
+    return query
+    with wide as (
+        select c.key, coalesce(st->'serves'->>c.key, 'root') as q, c.value->'targets' as tg
+          from jsonb_each(st->'clues') c
+         where not (st->'travelled') ? c.key and (st->'p'->>c.key)::real >= (st->'settings'->>'gate')::real
+           and (select count(*) from jsonb_array_elements_text(c.value->'targets') t where not (st->'reached') ? t)
+               > (st->'settings'->>'open_whole')::int
+    ), todo as (
+        select distinct w.q, t as doc, 'X|' || w.q || '|' || t as key
+          from wide w, jsonb_array_elements_text(w.tg) t
+         where not (st->'reached') ? t and not coalesce(st->'answers', st->'p') ? ('X|' || w.q || '|' || t)
+    ), lines as (
+        select aiq.walk_lines(inp, array(select distinct doc from todo)) as l
+    ), numbered as (
+        select td.*, format('the user wrote: "%s"', coalesce(ln.l->>td.doc, td.doc)) as text,
+               row_number() over (partition by td.q order by td.key) - 1 as j,
+               sum(octet_length(coalesce(ln.l->>td.doc, td.doc)) + octet_length(td.key) + 80)
+                   over (partition by td.q order by td.key) as cum
+          from todo td, lines ln
+    ), chunks as (
+        select n.*, (dense_rank() over (order by n.q, (n.cum / (select (value #>> '{}')::int from aiq.parameters
+                                                               where name = 'decider.request_bytes'))::int, n.j / 60) - 1)::int as ch
+          from numbered n
+    ), cj as (
+        select c.*, (row_number() over (partition by c.ch order by c.key) - 1)::int as jj from chunks c
+    )
+    select cj.ch, jsonb_agg(cj.key order by cj.jj),
+           jsonb_build_object('model', d.model,
+                              'state', jsonb_build_object(
+                                  'question', coalesce(st->'board'->'questions'->(min(cj.q))->>'text', st->'question'->>'text'),
+                                  'task', (select value #>> '{}' from aiq.parameters where name = 'decider.task_target')),
+                              'questions', jsonb_object_agg('c' || cj.jj, jsonb_build_object('type', 'noul', 'instructions', cj.text)))
+      from cj group by cj.ch order by cj.ch;
+end;
+$$;
+grant execute on function aiq.walk_target_requests(uuid, text) to authenticated;
+
 -- The read step: gate this round's clues, then travel accepted clues best
 -- first, reading what they reach, until the wave holds its share of reads.
 -- Search fills in when no accepted clue is left; with nothing left at all the
@@ -42766,7 +42827,8 @@ begin
            (array_agg(t.error->>'error' order by t.updated_at) filter (where t.status = 'failed'))[1]
       into failed, asked, why
       from aiq.walk_tasks(p_run) t
-     where t.run_id = p_run and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%')
+     where t.run_id = p_run and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'
+            or t.step_key like 'target\_%')
        and t.matrix_parent_id is not null;
     if failed > 0 then
         raise exception '% of the % Jev requests in this walk failed, so their clues were never judged', failed, asked
@@ -42793,6 +42855,28 @@ begin
             union all
             select key, value from jsonb_each(st->'next')) c
      where (st->'p'->>c.key)::real >= (s->>'gate')::real;
+    -- F8 (walk.open_whole): an accepted lead with more than open_whole unread targets is opened target by target. Each
+    -- unread target judged on its own line (X|<question>|<message>, the target step) and clearing the gate becomes a
+    -- single-target lead, one:<message>, at that P; the rest are never read. A wide lead whose targets are not yet
+    -- judged waits a wave, since its targets are asked the round after it is accepted.
+    if jsonb_typeof(s->'open_whole') = 'number' then
+        select coalesce(jsonb_object_agg(z.key, z.v), '{}'::jsonb) into open_ from (
+            select o.key, o.value as v from jsonb_each(open_) o
+             where (select count(*) from jsonb_array_elements_text(o.value->'targets') t where not reached ? t)
+                   <= (s->>'open_whole')::int
+            union all
+            select distinct on (t) 'one:' || t, jsonb_build_object(
+                       'p', (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real,
+                       'targets', jsonb_build_array(t), 'via', o.key)
+              from jsonb_each(open_) o, jsonb_array_elements_text(o.value->'targets') t
+             where not reached ? t
+               and (select count(*) from jsonb_array_elements_text(o.value->'targets') u where not reached ? u)
+                   > (s->>'open_whole')::int
+               and (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real
+                   >= (s->>'gate')::real
+             order by t, (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real desc
+        ) z;
+    end if;
     if jsonb_typeof(nm) = 'object' then
         select coalesce(jsonb_object_agg(c.key, jsonb_build_object('p', (st->'p'->>c.key)::real,
                                                                   'targets', coalesce(st->'clues'->c.key->'targets',
@@ -42877,6 +42961,9 @@ begin
                                                                        'land', land)
                                                     || case when st->'serves' ? best
                                                             then jsonb_build_object('serves', st->'serves'->>best)
+                                                            else '{}'::jsonb end
+                                                    || case when open_->best ? 'via'
+                                                            then jsonb_build_object('via', open_->best->'via')
                                                             else '{}'::jsonb end
                                                     || case when miss then '{"near_miss": true}'::jsonb
                                                             else '{}'::jsonb end);
@@ -43221,8 +43308,20 @@ steps:%6$s
                 method: POST
                 credential_ref: %3$s
                 body: '{{item.body}}'
-        - id: read
+        - id: target
           needs: [judge]
+          matrix:
+            rows: "select chunk, keys, body from aiq.walk_target_requests({{run.$id}}::uuid, '%5$s')"
+            max_fanout: 200
+            continue_on: failed
+            template:
+              rest:
+                url: %2$s
+                method: POST
+                credential_ref: %3$s
+                body: '{{item.body}}'
+        - id: read
+          needs: [target]
           sql: "select aiq.walk_read({{run.$id}}::uuid) as state"
   - id: keep
     needs: [wave]
@@ -43649,7 +43748,8 @@ declare
     s       jsonb := p_state->'settings';
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
-                                                         'evidence_lines', 'part_wording', 'split_gate', 'broad_after']);
+                                                         'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
+                                                         'state_gate']);
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -44155,7 +44255,8 @@ begin
                                               'output_tokens', coalesce(sum((t.output->'result'->'usage'->>'output_tokens')::bigint), 0))
                       from aiq.walk_tasks(p_run) t
                      where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
-                       and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'))));
+                       and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'
+                            or t.step_key like 'target\_%'))));
     if p_oracle is not null then
         select coalesce(jsonb_agg(jsonb_build_object('k', o.k, 'doc', o.doc) order by o.k), '[]'::jsonb) into oracle
           from aiq.walk_oracle(p_run, p_oracle) o;
