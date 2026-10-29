@@ -44010,8 +44010,8 @@ $$;
 -- one part marked "oracle": true -- the labels, which reads were evidence, coverage beside search's order, and why
 -- each missed piece was missed (aiq.walk_why). p_items, the labels grouped as the benchmark's answer items
 -- [{item, docs}], adds each item with the walk's first read of its evidence: the omniscient reader's own stack, each
--- item closing there. Without p_oracle the object is exactly what the walk knew. The ceiling (the oracle decider's own
--- reads) is not built here yet, and the part says so rather than leaving it out silently.
+-- item closing there, and the ceiling: aiq.walk_oracle's reads on the run's own graph, seeds and budget, set beside the
+-- walk's and search's. Without p_oracle the object is exactly what the walk knew.
 drop function if exists aiq.walk_structure(uuid, text[]);
 create or replace function aiq.walk_structure(p_run uuid, p_oracle text[] default null, p_items jsonb default null)
 returns jsonb
@@ -44024,6 +44024,7 @@ declare
     places  jsonb;
     reads   jsonb;
     result  jsonb;
+    oracle  jsonb;
 begin
     board := coalesce(st->'board', aiq.walk_stack_initial(inp));
     lines := aiq.walk_lines(inp, array(select doc from aiq.walk_state_reads(st)));
@@ -44103,6 +44104,8 @@ begin
                      where t.run_id = p_run and t.matrix_parent_id is not null and t.status = 'succeeded'
                        and (t.step_key like 'judge\_%' or t.step_key like 'assess\_%' or t.step_key like 'shape\_%'))));
     if p_oracle is not null then
+        select coalesce(jsonb_agg(jsonb_build_object('k', o.k, 'doc', o.doc) order by o.k), '[]'::jsonb) into oracle
+          from aiq.walk_oracle(p_run, p_oracle) o;
         result := result || jsonb_build_object('oracle', jsonb_build_object(
             'oracle', true,
             'note', 'oracle-scored: the labelled answer set comes from outside the walk, which never saw it',
@@ -44140,8 +44143,14 @@ begin
                                                order by c.wave, c.p desc, c.key limit 1) fa on true
                            left join lateral (select r.wave, r.ord, r.via from aiq.walk_state_reads(st) r
                                                where r.doc = d.doc order by r.wave, r.ord limit 1) rd on true),
-            'ceiling', jsonb_build_object('built', false,
-                                          'note', 'the oracle decider of walk.md §11 is not in the query layer yet')));
+            -- the ceiling: the oracle decider's reads on this run's graph, seeds and budget, beside the walk's and search's
+            'ceiling', jsonb_build_object('built', true, 'reads', jsonb_array_length(oracle),
+                           'evidence_by', (select jsonb_agg(jsonb_build_object('k', b,
+                                               'oracle', (select count(distinct o2->>'doc') from jsonb_array_elements(oracle) o2
+                                                           where (o2->>'k')::int <= b and o2->>'doc' = any(p_oracle)),
+                                               'walk', cv.walk, 'search', cv.search) order by b)
+                                             from unnest(array[50, 100, 500]) b
+                                             left join aiq.walk_coverage(p_run, p_oracle, array[50, 100, 500]) cv on cv.k = b))));
     end if;
     return result;
 end;
@@ -44276,6 +44285,7 @@ grant execute on function aiq.walk_state_reads(jsonb), aiq.walk_state_clues(json
 create or replace function aiq.walk_oracle(p_run uuid, p_labelled text[], p_budget int default null)
 returns table (k int, doc text, via text)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+#variable_conflict use_column
 declare
     st      jsonb := aiq.walk_state(p_run);
     s       jsonb := st->'settings';
@@ -44375,6 +44385,7 @@ begin
         live := live - best;
         for d in select t from jsonb_array_elements_text(leads->best) t where not readset ? t loop
             exit when n >= budget;
+            continue when readset ? d;   -- a target a lead lists twice is read once
             readset := readset || jsonb_build_object(d, true); n := n + 1;
             out := out || jsonb_build_array(jsonb_build_array(n, d, best));
             live := live || coalesce((select jsonb_object_agg(lk, true) from jsonb_array_elements_text(raised->d) lk
