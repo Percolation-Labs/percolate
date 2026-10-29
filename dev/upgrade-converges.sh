@@ -315,6 +315,18 @@ select 'trg '||n.nspname||'.'||c.relname||'.'||t.tgname
  where not t.tgisinternal
    and n.nspname in $S
 union all
+-- THE SPEC'S DEFAULTS (REM-1244). aiq.parameters is not a vocabulary (its rows
+-- carry a history keyed by a clock), so the section below never compared it,
+-- and nothing said whether a changed default reached a database that upgraded.
+-- walk.stack moved from true to false after the two-arm pilot: the seed's
+-- 'on conflict ... do update ... where set_by = spec' should carry it, and this
+-- is where that is checked, for every default the spec still owns. Only the
+-- current row's value is compared: an upgraded database also holds the old
+-- value as closed history, which a fresh one never had.
+select 'par '||p.name||'='||p.value::text
+  from aiq.parameters p
+ where p.valid_to is null and p.set_by = 'spec'
+union all
 -- THE VOCABULARY ROWS, added because everything above describes OBJECTS and a
 -- seed row is not one (REM-68). Extension-owned vocabulary was inserted with
 -- 'on conflict do nothing', so a corrected is_terminal, inverse_label or table
