@@ -173,7 +173,8 @@ declare
     sp      jsonb := aiq.parameters_need('stack', array['link_floor', 'link_share', 'close_min_links', 'close_gate',
                                                          'stale_waves', 'max_open', 'max_displace', 'candidates',
                                                          'evidence_lines', 'part_wording', 'split_gate', 'broad_after',
-                                                         'state_gate', 'set_gate', 'cluster_quantile']);
+                                                         'state_gate', 'set_gate', 'cluster_quantile'],
+                                       (select created_at from aiq.walk_run(p_run)));
     board   jsonb := p_state->'board';
     ans     jsonb := coalesce(p_state->'answers', '{}'::jsonb);
     w       int := (board->>'assessed')::int + 1;
@@ -523,28 +524,28 @@ begin
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
     end if;
     perform aiq.parameters_need('decider', array['task_assess', 'task_state', 'task_split', 'task_set', 'task_set_question',
-                                                 'request_bytes']);
+                                                 'request_bytes'], (select created_at from aiq.walk_run(p_run)));
     st := aiq.walk_state(p_run);
     nx := aiq.walk_stack_next(p_run, st);
     return query
     with todo as (
         select x->>'key' as key, x->>'q' as grp, st->'board'->'questions'->(x->>'q')->>'text' as question,
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_assess') as task, x->>'text' as text
+               (aiq.parameter('decider.task_assess', (select created_at from aiq.walk_run(p_run))) #>> '{}') as task, x->>'text' as text
           from jsonb_array_elements(nx->'assess') x where p_phase = 'assess'
         union all
         select x->>'key', 'T|' || (x->>'q'), st->'board'->'questions'->(x->>'q')->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_state'), x->>'text'
+               (aiq.parameter('decider.task_state', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'closes') x where p_phase = 'shape'
 
         union all
         -- the tested call shape, verbatim (spec 8ed4e1c2): the state's question is decider.task_set_question, the
         -- option is the root question's own text; AUC 0.936 belongs to exactly this prompt
-        select x->>'key', 'N|root', (select value #>> '{}' from aiq.parameters where name = 'decider.task_set_question'),
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_set'), x->>'text'
+        select x->>'key', 'N|root', (aiq.parameter('decider.task_set_question', (select created_at from aiq.walk_run(p_run))) #>> '{}'),
+               (aiq.parameter('decider.task_set', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'cardinality') x where p_phase = 'shape'
         union all
         select x->>'key', 'S|' || (x->>'parent'), st->'board'->'questions'->(x->>'parent')->>'text',
-               (select value #>> '{}' from aiq.parameters where name = 'decider.task_split'), x->>'text'
+               (aiq.parameter('decider.task_split', (select created_at from aiq.walk_run(p_run))) #>> '{}'), x->>'text'
           from jsonb_array_elements(nx->'candidates') x where p_phase = 'shape'
     ), asked as (
         -- a request holds at most 60 options and decider.request_bytes of their text
@@ -553,7 +554,7 @@ begin
           from todo t where not (st->'answers') ? t.key
     ), cut as (
         select a.*, (a.j / 60) as by_count,
-               (a.cum / (select (value #>> '{}')::int from aiq.parameters where name = 'decider.request_bytes'))::int as by_bytes
+               (a.cum / (aiq.parameter('decider.request_bytes', (select created_at from aiq.walk_run(p_run))) #>> '{}')::int)::int as by_bytes
           from asked a
     ), chunks as (
         select c.*, (dense_rank() over (order by c.grp, c.by_bytes, c.by_count) - 1)::int as ch,

@@ -53,8 +53,8 @@ declare
     -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
     v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
-    v_cold    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.cold');
-    v_band    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.near_miss');
+    v_cold    real  := (aiq.parameter('explain.cold', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
+    v_band    real  := (aiq.parameter('explain.near_miss', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
     v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;

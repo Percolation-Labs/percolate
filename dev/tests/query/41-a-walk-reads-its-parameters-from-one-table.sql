@@ -50,7 +50,7 @@ begin
     -- 4. Seeding again (as an upgrade does) keeps the tuned span and restores the wording the spec still owns.
     insert into aiq.parameters as p (name, part, value, controls, read_by, why)
     values ('walk.span', 'walk', '2', 'x', 'x', 'x'), ('decider.task', 'decider', to_jsonb(text 'spec wording'), 'x', 'x', 'x')
-    on conflict (name) do update
+    on conflict (name) where valid_to is null do update
        set value = excluded.value, controls = excluded.controls, read_by = excluded.read_by, why = excluded.why
      where p.set_by = 'spec';
     if (aiq.walk_settings('{}')->>'span')::int <> 7 then
