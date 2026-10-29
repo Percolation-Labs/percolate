@@ -407,6 +407,33 @@ A handful of walks is never the verdict.
     The 100K and 500K stage runs only the arm or arms the pilot keeps. At most 10 walks at once.
   - *Expectation, said up front:* on what is measured (walk − search from −8 to +7 points, sd 22–31), a null at 10
     points is the likely outcome for S against search, and outcome (iii) for S against P.
+- **The pilot's result** (REM-1244, 29 Oct, 80 of 80 walks, image 42d61547 with 34f7c80a's walk SQL, the oracle and
+  walk_why read after 42a1a5ee and ed0caa58; oracle-scored; Jev $1.44: S $0.854, P $0.584). Coverage of the labelled
+  evidence, mean over 40 questions, with paired differences in points and 95% bootstraps:
+
+  | reads | S | P | search | oracle | S − search | S − P | P − search |
+  |---|---|---|---|---|---|---|---|
+  | 50 | 55.0% | 55.0% | 54.9% | 69.7% | +0.2 [−5.4, +6.0] | −0.0 [−0.2, +0.2] | +0.2 [−5.4, +6.1] |
+  | **100** | 65.2% | 66.2% | 60.8% | 93.6% | **+4.4 [−1.7, +11.7]** | **−1.1 [−3.1, +0.2]** | +5.5 [−0.1, +12.7] |
+  | 500 | 83.0% | 85.3% | 80.3% | 97.5% | +2.7 [−2.3, +7.0] | −2.3 [−5.3, +0.1] | +5.0 [+1.6, +8.7] |
+
+  - *S against P: outcome (i), registered.* The interval lies wholly below +5, so **V0 ships with `walk.stack` off by
+    default**, as an opt-in the board still shows, recorded as measured. Why the stack loses ground: it stops on its
+    own (7 of 40 S walks before 100 reads; 306 reads on average against P's 500), and on 1M:3 msr:0 it stopped at 50
+    reads with 2 of 3 pieces, where P and search held all 3. What the stop bought: at S's own stop, S holds 83.0% and
+    P at the same read count 82.4% (+0.6 [−0.2, +1.4]), for $0.0028 per labelled piece read against P's $0.0012. The
+    stack judges each lead against its open questions, so it costs more per read, and its stop saves less than that.
+  - *S against search: "extend to 80", registered.* The interval spans both rules. Where the gain sits, by burial
+    stratum at 100 reads (descriptive): top 10, n = 30, +3.3; 11–50, n = 4, −11.1; 51–200, n = 3, +29.7; beyond 200,
+    n = 3, +11.1. On 30 of the 40 questions search already holds the evidence in its top 10, and the walk ties
+    there. The walk's gains come from the buried few. S beats search on 8 questions, loses on 8 and ties on 24.
+  - *Room left:* the oracle reads 93.6% by 100 reads on the walk's own schedule, against the walk's 65%. On the
+    failures, the leading reason a labelled piece stays unread is `open`: a lead that cleared the gate and was
+    never opened within the budget (class 7). The gate accepts more than the budget opens, and P does not rank
+    among the accepted.
+  - *1M:25 ku:0's key, checked before this result was used:* group A. Exchange 488 states the key's 48 beta sign-ups
+    by 19 May, updating 386's 45. The later counts (518: 75 new beta users in the week after launch; 120 and 350
+    active users) count other things. It is scored once, and dropping it moves S − search by +0.4.
 - **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
   registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
   search.
