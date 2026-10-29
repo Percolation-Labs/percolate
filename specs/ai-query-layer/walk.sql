@@ -1719,9 +1719,15 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                            (select jsonb_build_object('faithful', u.n = 0, 'unjudged', u.n,
                                                       'partial', case when u.n > 0 then format('partial: %s leads unjudged', u.n) end,
                                                       'graph', case when g.rg is not null and g.rg = g.walked then 'recorded' else 'rebuilt' end)
+                              -- held against the recording, not against every lead: a lead the recorded walk itself left
+                              -- unjudged (the stack's stale stop ends a wave before judging what it raised) is listed in the
+                              -- replay document and not counted. A document from before the list counts every lead, as before.
                               from (select count(*)::int as n from jsonb_each(coalesce(st->'clues', '{}'::jsonb)) c
                                      where not exists (select 1 from jsonb_object_keys(coalesce(st->'answers', st->'p', '{}'::jsonb)) a
-                                                        where a = c.key or (a like 'L|%' and split_part(a, '|', 3) = c.key))) u
+                                                        where a = c.key or (a like 'L|%' and split_part(a, '|', 3) = c.key))
+                                       and not coalesce((select (string_agg(ck.content, '' order by ck.ordinal))::jsonb->'unjudged'
+                                                           from content.resource_chunks ck
+                                                          where ck.resource_id = (st->>'replay')::uuid), '[]'::jsonb) ? c.key) u
                               left join (select tk.output->'result'->0->'state'->>'replay_graph' as rg,
                                                 tk.output->'result'->0->'state'->>'graph' as walked
                                            from aiq.walk_tasks(p_run) tk
@@ -1738,6 +1744,11 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
                               'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
                               -- the kept graph the verdicts were given on, so a replay can walk that graph (REM-1246)
                               -- search's order as the walk read it, so a replay reads the same documents (REM-1246)
+                              -- the leads this walk raised and never judged, so a replay is held only to the ones it did
+                              'unjudged', (select coalesce(jsonb_agg(c.key order by c.key), '[]'::jsonb)
+                                             from jsonb_each(coalesce(st->'clues', '{}'::jsonb)) c
+                                            where not exists (select 1 from jsonb_object_keys(coalesce(st->'answers', st->'p', '{}'::jsonb)) a
+                                                               where a = c.key or (a like 'L|%' and split_part(a, '|', 3) = c.key))),
                               'order', (select tk.output->'result'->0->'state'->'order' from aiq.walk_tasks(p_run) tk
                                          where tk.step_key = 'start' and tk.status = 'succeeded' limit 1),
                               'graph', (select tk.output->'result'->0->'state'->>'graph' from aiq.walk_tasks(p_run) tk
