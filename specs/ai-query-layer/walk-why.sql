@@ -19,6 +19,9 @@
 --                           stop, with its rank among the open leads by P
 --        rejected       (b) the best judged lead pointing at it was under the
 --                           gate, with its P
+--        answered       (c) under the question stack, a lead pointed at it but
+--                           every question it was judged against closed
+--                           answered first, so the walk let it go
 --        unjudged       (?) a lead pointed at it but holds no P (an offline
 --                           run), or an accepted lead neither travelled nor
 --                           open, which the walk should never leave
@@ -53,8 +56,8 @@ declare
     -- the walk rebuilt from the run's rows, once: every view below reads this build (aiq.walk_state_*)
     v_st      jsonb := aiq.walk_state(p_run);
     v_gate    real  := (v_summary #>> '{settings,gate}')::real;
-    v_cold    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.cold');
-    v_band    real  := (select (value #>> '{}')::real from aiq.parameters where name = 'explain.near_miss');
+    v_cold    real  := (aiq.parameter('explain.cold', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
+    v_band    real  := (aiq.parameter('explain.near_miss', (select created_at from aiq.walk_run(p_run))) #>> '{}')::real;
     v_waves   jsonb := (select jsonb_agg(to_jsonb(w) order by w.wave) from aiq.walk_state_waves(v_st) w);
     v_last    record;
     v_open    jsonb;
@@ -155,7 +158,7 @@ begin
          gold    as (select distinct g as doc from unnest(p_nodes) g),
          unread  as (select g.doc from gold g where g.doc not in (select r.doc from r))
     select u.doc,
-           case w.reason when 'queued' then 'c' when 'open' then 'c' when 'rejected' then 'b'
+           case w.reason when 'queued' then 'c' when 'open' then 'c' when 'answered' then 'c' when 'rejected' then 'b'
                          when 'unjudged' then '?' else 'a' end,
            w.reason, w.key, w.p, w.detail
       from unread u
@@ -177,11 +180,22 @@ begin
                  from c j where u.doc = any(j.targets) and j.p is not null
                 order by j.p desc, j.key desc limit 1)
               union all
-              (select 4, 'unjudged', j.key, null::real, 'no P recorded'
+              -- under the question stack a lead's P is the best against questions not answered, so a lead judged only
+              -- against questions the walk then closed answered holds none: judged, then let go, not unjudged
+              (select 4, 'answered', j.key,
+                      (select max((av.value #>> '{}')::real) from jsonb_each(coalesce(v_st->'answers', '{}'::jsonb)) av
+                        where av.key = 'L|' || split_part(av.key, '|', 2) || '|' || j.key),
+                      'judged, but every question it was judged against was answered before it was travelled'
+                 from c j where u.doc = any(j.targets) and j.p is null
+                  and exists (select 1 from jsonb_each(coalesce(v_st->'answers', '{}'::jsonb)) av
+                               where av.key = 'L|' || split_part(av.key, '|', 2) || '|' || j.key)
+                order by j.key limit 1)
+              union all
+              (select 5, 'unjudged', j.key, null::real, 'no P recorded'
                  from c j where u.doc = any(j.targets) and j.p is null
                 order by j.key limit 1)
               union all
-              select 5, 'never offered', null, null, 'no clue raised in the walk pointed at it'
+              select 6, 'never offered', null, null, 'no clue raised in the walk pointed at it'
           ) x order by x.k limit 1
       ) w
      order by u.doc;

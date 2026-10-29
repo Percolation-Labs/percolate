@@ -252,4 +252,54 @@ begin
 end $$;
 reset role;
 
+-- What it cost (walk.md §9, cost as an observable): from the run's own request rows, priced as of its start. The walk
+-- above asked nobody (offline), so one judge request is added beside its judge_1 step, as Jev's would be recorded:
+-- a million input tokens over two options, which decider.price_in prices at 0.042 dollars. Read as the operator again.
+select set_config('request.jwt.claims', '', true);
+do $$
+declare
+    r  uuid := (select id from workflow.runs where input->>'replay' = (select id::text from content.resources
+                                                                         where uri = 'walk-fixture-48:replay')
+                 order by created_at limit 1);
+    c    jsonb;
+    n    int;
+    cols text;
+begin
+    update workflow.runs set created_at = now() - interval '1 hour' where id = r;
+    -- every column the parent has but the generated ones, which take their own values
+    select string_agg(quote_ident(attname), ', ' order by attnum) into cols
+      from pg_attribute where attrelid = 'workflow.tasks'::regclass and attnum > 0 and not attisdropped and attgenerated = '';
+    execute format('insert into workflow.tasks (%1$s) select %1$s from jsonb_populate_record(null::workflow.tasks, $1)', cols)
+    using (select to_jsonb(t) || jsonb_build_object(
+               'id', gen_random_uuid(), 'step_key', 'judge_1[0]', 'matrix_parent_id', t.id,
+               'input', jsonb_build_object('body', jsonb_build_object('state', jsonb_build_object('question', 'the ladder'),
+                                                    'questions', '{"c0": {}, "c1": {}}'::jsonb)),
+               'output', '{"result": {"model": "jev-1.13.0", "usage": {"input_tokens": 1000000, "output_tokens": 500}}}'::jsonb)
+             from workflow.tasks t where t.run_id = r and t.step_key = 'judge_1');
+    -- a price changed after the walk does not reach it
+    update aiq.parameters set value = '1' where name = 'decider.price_in';
+    c := aiq.walk_structure(r)->'cost';
+    if (c->'total'->>'usd')::numeric <> 0.042 or (c->'total'->>'requests')::int <> 1 or (c->'total'->>'judgements')::int <> 2
+       or (c->'price'->>'usd_per_m_input')::numeric <> 0.042 then
+        raise exception 'the walk cost %, where one request of a million input tokens at its start''s price is $0.042', c->'total';
+    end if;
+    if c->'by_move'->0->>'move' <> 'judge leads' or (c->'by_move'->0->>'share')::numeric <> 1
+       or c->'by_question'->0->>'id' <> 'root' then
+        raise exception 'the cost by move or question is wrong: % %', c->'by_move', c->'by_question';
+    end if;
+    -- the curve: cost from wave 1, every read counted, and the reads judged to bear on are the board's evidence
+    select count(*) into n from aiq.walk_reads(r);
+    if (c->'curve'->0->>'usd')::numeric <> 0 or (c->'curve'->1->>'usd')::numeric <> 0.042
+       or (c->'curve'->-1->>'reads')::int <> n
+       or (c->'curve'->-1->>'reads_bearing')::int <> (select count(distinct e->>'doc') from aiq.walk_reads(r) rd,
+                                                       jsonb_array_elements(aiq.walk_structure(r)->'evidence') e
+                                                      where e->>'doc' = rd.doc) then
+        raise exception 'the cost curve is %', c->'curve';
+    end if;
+    if (select usd from aiq.walk_cost_curve(array[r], null, array[2]) where k = 2) <> 0.042 then
+        raise exception 'walk_cost_curve does not price the reads up to k';
+    end if;
+    raise notice 'query/48: a walk''s cost is read from its own request rows, at the price as of its start';
+end $$;
+
 rollback;

@@ -6,4 +6,5 @@ assembles nothing of its own); walk_keep_stack makes the board graph rows when a
 [added]
 functions = ["aiq.walk_stack_initial", "aiq.walk_lines", "aiq.walk_stack_next", "aiq.walk_stack_requests",
              "aiq.walk_stack_move", "aiq.walk_stack_boards", "aiq.walk_stack", "aiq.walk_graph_stats",
-             "aiq.walk_structure", "aiq.walk_keep_stack", "aiq.walk_places", "aiq.walk_clue_texts", "aiq.parameters_need", "aiq.walk_run", "aiq.walk_tasks", "aiq.walk_runs_visible", "aiq.walk_oracle", "aiq.walk_questions", "aiq.walk_launch", "aiq.walk_run_settings", "aiq.walk_target_requests"]
+             "aiq.walk_structure", "aiq.walk_keep_stack", "aiq.walk_places", "aiq.walk_clue_texts", "aiq.parameters_need", "aiq.walk_run", "aiq.walk_tasks", "aiq.walk_runs_visible", "aiq.walk_oracle", "aiq.walk_questions", "aiq.walk_launch", "aiq.walk_run_settings", "aiq.walk_target_requests",
+             "aiq.parameter", "aiq.parameters_append", "aiq.parameters_keep_old", "aiq.walk_cost", "aiq.walk_cost_curve"]
