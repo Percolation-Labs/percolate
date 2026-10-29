@@ -24,6 +24,7 @@ were chosen. The walks are built last, on the V0 rules (bill, 29 Oct); without -
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -116,9 +117,13 @@ def export_walks(dsn, walks, out):
     (out / "start.sql").write_text(
         "-- Starts each shipped walk offline, from the verdicts Jev gave it (replays.jsonl): no model key, $0.\n"
         "select aiq.install_walk_workflow();\n" + "\n".join(index) + "\n\n" + "\n\n".join(starts) + "\n")
+    # The replays live in their own channel, which the conversations' sources do not declare.
+    (out / "sources.yaml").write_text(
+        "channels:\n  - name: walk-replays\n    kind: manual\n    visibility: public\n"
+        "    config: {description: \"Jev's recorded verdicts for each shipped walk, one document a walk\"}\n")
     (out / "manifest.yaml").write_text(
         "name: beam-walks-walks\nversion: 1.0.0\ndescription: The shipped walks, replayed offline from Jev's recorded verdicts.\n"
-        "load:\n  - texts: replays.jsonl\n  - sql: start.sql\n")
+        "load:\n  - sources: sources.yaml\n  - texts: replays.jsonl\n  - sql: start.sql\n")
     return len(replays)
 
 
@@ -140,10 +145,25 @@ def main():
         shutil.rmtree(root)
     root.mkdir(parents=True)
     questions = jsonl(sample / "questions.jsonl")
-    shutil.copy(sample / "sources.yaml", root / "sources.yaml")
+    # With --questions, the bundle carries only the conversations those questions are about, and only their questions:
+    # a starter is a few conversations, not the whole sample.
+    keep_q = set(q.strip() for q in args.questions.split(",")) if args.questions else None
+    keep_ch = {q["channel"] for q in questions if q["qid"] in keep_q} if keep_q else None
+    if keep_ch is not None:
+        questions = [q for q in questions if q["channel"] in keep_ch]
+        src = (sample / "sources.yaml").read_text()
+        blocks = re.split(r"(?m)^(?=  - name: )", src)
+        (root / "sources.yaml").write_text("".join(b for b in blocks
+            if not b.startswith("  - name: beam-") or b.split("\n", 1)[0].split("name:", 1)[1].strip() in keep_ch))
+    else:
+        shutil.copy(sample / "sources.yaml", root / "sources.yaml")
     load = ["  - sources: sources.yaml"]
     if args.text == "shipped":
-        shutil.copy(sample / "texts.jsonl", root / "texts.jsonl")
+        if keep_ch is None:
+            shutil.copy(sample / "texts.jsonl", root / "texts.jsonl")
+        else:
+            with (sample / "texts.jsonl").open() as fin, (root / "texts.jsonl").open("w") as fout:
+                fout.writelines(l for l in fin if json.loads(l)["channel"] in keep_ch)
         load.append("  - texts: texts.jsonl")
     else:
         (root / "fetch").mkdir()
@@ -152,7 +172,7 @@ def main():
         load.append("  - texts: texts.jsonl   # written by: python3 fetch/beam_fetch.py .")
     write_jsonl(root / "question-texts.jsonl", question_texts(questions))
     load.append("  - texts: question-texts.jsonl")
-    channels = [l.split("name:", 1)[1].strip() for l in (sample / "sources.yaml").read_text().splitlines()
+    channels = [l.split("name:", 1)[1].strip() for l in (root / "sources.yaml").read_text().splitlines()
                 if l.strip().startswith("- name: beam-")]
     convs = ", ".join(c.replace("beam-", "").upper().replace("M", "M:", 1) for c in channels)
     (root / "manifest.yaml").write_text(
@@ -163,7 +183,7 @@ def main():
     items = json.loads((HERE / "answer-items.json").read_text())
     n_oracle = oracle_files(questions, items, root / "oracle")
     ARMS = {"S": "V0 walk (question stack)", "P": "plain walk"}
-    keep = set(q.strip() for q in args.questions.split(",")) if args.questions else None
+    keep = keep_q
     walks = [{"run": r["run"], "label": ARMS.get(r.get("arm"), r.get("arm") or "walk"), "qid": r["qid"], "arm": r.get("arm")}
              for r in jsonl(args.runs) if keep is None or r["qid"] in keep] if args.runs else []
     if keep is not None and {w["qid"] for w in walks} != keep:
