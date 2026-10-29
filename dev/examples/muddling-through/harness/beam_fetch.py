@@ -38,7 +38,8 @@ CHUNK = 2000
 MARK = re.compile(r"\s*->->\s*\d+\s*,\s*\d+\s*$")
 # The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
 # never read, since plan step predicts which exchanges BEAM's questions cite (REM-1240).
-MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*\d+[ \t]*(?=\n|$)")
+# Every form BEAM writes, counted on 1M:22 and 1M:35: "n,m" (1,848), "n,N/A" (9) and "n,m, k" (1), always at a line end.
+MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*(?:\d+|N/A)(?:[ \t]*,[ \t]*\d+)*[ \t]*(?=\n|$)")
 
 
 SAID = 160  # characters of the user's words a document's title carries
