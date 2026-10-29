@@ -444,7 +444,8 @@ A handful of walks is never the verdict.
   - *S against search is reported as stopped at n = 40,* with its interval: +4.4 [−1.7, +11.7].
   - *Questions:* `random.Random(1253).sample(sorted(rest), 40)`, where `rest` is the 50 of the sweep's 1M draw of 90
     left after the pilot's 40 (the pilot's 40 reproduce exactly from the same code). One drawn question, 1M:8 summ:1,
-    has no labelled evidence in BEAM, so it cannot be oracle-scored. It is dropped and not redrawn, which leaves 39:
+    has no labelled evidence in BEAM, so it cannot be oracle-scored. It is dropped and not redrawn, which leaves 39. The drop selects on whether a question has labels at all, never
+    on an outcome (sally, 17:43Z). The 39 are:
     1M:10 cr:0, 1M:10 eo:0, 1M:11 ku:1, 1M:11 tr:0, 1M:12 ie:1, 1M:12 if:1, 1M:13 msr:0, 1M:14 pf:0, 1M:15 ku:0, 1M:15 ku:1, 1M:16 cr:0, 1M:17 ie:0, 1M:18 ie:1, 1M:19 if:0, 1M:1 if:0, 1M:20 cr:1, 1M:20 eo:0, 1M:20 pf:1, 1M:21 if:0, 1M:21 tr:0, 1M:22 summ:1, 1M:26 ku:1, 1M:26 pf:1, 1M:27 eo:0, 1M:29 ku:1, 1M:2 ie:0, 1M:30 if:0, 1M:31 pf:1, 1M:32 pf:0, 1M:34 if:1, 1M:34 ku:0, 1M:34 ku:1, 1M:35 pf:1, 1M:35 summ:1, 1M:3 tr:1, 1M:5 ku:1, 1M:6 summ:1, 1M:7 ie:0, 1M:8 cr:0.
   - *Build and arm:* the pilot's database and commit (image 42d61547 with 34f7c80a's walk SQL), not 0.2.35. P is set
     explicitly: `walk.stack` false, `lines`, `per_target`, on the pilot's seeds. One walk runs alone as a probe, the
