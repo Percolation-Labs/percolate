@@ -145,11 +145,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
  ('decider.task_state', 'decider', to_jsonb(text 'For each option, a message the user wrote, with the date it was said. Does this message answer `question`?'),
   'Asked of each candidate line of a leaf question, one line at a time: does this line answer it (walk spec 1d5f38d8 §6 move 4). A leaf closes on a line that clears stack.state_gate.', 'aiq.walk_stack_requests',
   'Jev is never asked whether a set of messages answers a question (Sirsh, 13:15Z): on the ten walks that holistic ask separated asks holding labelled evidence at AUC 0.622 and closed once in ten, wrongly. Jev judges one line well. Not measured in these words.'),
- ('decider.task_narrow', 'decider', to_jsonb(text 'Could a single message the user wrote answer `question` on its own, rather than a set, a count, a summary or a change across many messages?'),
-  'Asked once of a walk''s root: is it narrow enough that one message could answer it. If not, the root is closed by no line, and the walk raises DECOMPOSITION_REQUIRED to the client (walk spec 1d5f38d8 §6 move 4, §12).', 'aiq.walk_stack_requests',
-  'Narrowness is the board''s job: a broad root has no single answering message, so a line close on it would be the holistic question again. Wording not measured; the spec names no row, so this name is the build''s until mike''s spec names one.'),
- ('stack.narrow_gate', 'stack', '0.5', 'The P at or above which the walk''s root counts as narrow enough for one message to answer it; below it, the root is closed by no line and DECOMPOSITION_REQUIRED is raised.', 'aiq.walk_stack_next',
-  'The walk''s own gate, read as a probability. Not measured.'),
+ ('stack.broad_after', 'stack', '2', 'A root still open with no parts at this wave has had no line answer it: the walk raises DECOMPOSITION_REQUIRED to the client, once, and keeps splitting in the loop.', 'aiq.walk_stack_next',
+  'Breadth is structural, never a judgement (bill 13:19Z, signed off by sally): a Jev call on the root''s words would add a gate nobody has measured. Two waves give the seeds and one wave of leads their chance to answer it. Not measured.'),
  ('stack.state_gate', 'stack', 'null', 'The P at or above which one line is judged to answer a leaf question, which closes it; unset, the walk records each line''s verdict and closes nothing.', 'aiq.walk_stack_next',
   'Set on the calibration set registered in walk spec 4fed4425 §14 (F12): the lowest P whose closes are at least 90% correct, a correct close being one whose lines state BEAM''s reference answer, then tested once on a fresh draw. Unset until then.'),
  ('decider.task_split', 'decider', to_jsonb(text 'For each option, a narrower question. Is it a part of `question` that a complete answer needs?'),
@@ -1101,11 +1098,12 @@ begin
         raise invalid_parameter_value using message = format('walk.order is p or per_target here, not %s', s->>'order'),
             hint = 'votes and wvotes exist only in core''s Python walk';
     end if;
-    -- The question stack (REM-1245): with the root answered there is nothing left to look for, and the walk stops.
-    if st->'board'->'questions'->'root'->>'state' = 'answered' then
+    -- The question stack (REM-1245): with the root closed (answered, or partly answered with the rest stale) the stack
+    -- is empty and there is nothing left to look for, so the walk stops (walk.md §8).
+    if coalesce(st->'board'->'questions'->'root'->>'state', 'open') <> 'open' then
         return jsonb_build_object('wave', wn, 'si', si, 'reads', '[]'::jsonb, 'travels', '[]'::jsonb, 'pending', '[]'::jsonb,
                                   'judged', 0, 'unjudged', 0, 'dry', true,
-                                  'stop', jsonb_build_object('reason', 'answered', 'wave', wn,
+                                  'stop', jsonb_build_object('reason', st->'board'->'questions'->'root'->>'state', 'wave', wn,
                                                              'closed_at', st->'board'->'questions'->'root'->'closed_wave'));
     end if;
     -- Every accepted clue still leading somewhere unread: earlier waves' not

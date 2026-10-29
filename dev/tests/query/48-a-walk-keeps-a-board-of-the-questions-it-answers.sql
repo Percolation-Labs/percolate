@@ -8,8 +8,8 @@
 --     nothing, so no part is offered. The leads out of 1 are judged against the root: term:ceiling accepted.
 --   wave 1 travels ceiling to 2 and fills from search (11, 12). Iteration 2 links 2 to the root; 1 and 2 share
 --     'ceiling', the one term two root-linked reads hold, so S|root|ceiling is asked and opens part:ceiling. The
---     root's two lines are each judged (T|root|wt/1, T|root|wt/2): the root, judged narrow (N|root), is a leaf until it has a
---     part, and neither line answers it. The leads out of 2 are judged against both open questions:
+--     root's two lines are each judged (T|root|wt/1, T|root|wt/2): the root is a leaf until it has a part, and neither line
+--     answers it. The leads out of 2 are judged against both open questions:
 --     term:ladder is low for the root and high for the part, so it is accepted and serves part:ceiling.
 --   wave 2 reads search's next (13), travels ladder to 5 and 7, and fills its fourth read from search (14, which the
 --     replay never assessed, so it is linked to nothing). Iteration 3 links 5 and 7 to the part; 5 answers
@@ -73,7 +73,7 @@ begin
     values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts', jsonb_build_object(
         'A|root|wt/1', 0.9, 'A|root|wt/2', 0.9, 'A|root|wt/11', 0.1, 'A|root|wt/12', 0.1,
         'L|root|term:ceiling', 0.9, 'L|root|term:hallway', 0.2,
-        'N|root', 0.9, 'S|root|ceiling', 0.8, 'T|root|wt/1', 0.3, 'T|root|wt/2', 0.3,
+        'S|root|ceiling', 0.8, 'T|root|wt/1', 0.3, 'T|root|wt/2', 0.3,
         'L|root|term:ladder', 0.2, 'L|part:ceiling|term:ladder', 0.9,
         'A|root|wt/13', 0.1, 'A|part:ceiling|wt/13', 0.1,
         'A|root|wt/5', 0.3, 'A|part:ceiling|wt/5', 0.9, 'A|root|wt/7', 0.3, 'A|part:ceiling|wt/7', 0.9,
