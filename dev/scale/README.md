@@ -35,6 +35,13 @@ rows is a probe that will pass on the day it should have failed.
 
 ## Beside it
 
+[`walks.sh`](walks.sh) starts many offline walks over one seeded scope
+(`06-walks-seed.sql`: 2,000 items, about 10,000 links, 20,000 other resources)
+and samples Postgres's private memory every 2 s; it fails if a walk does not
+succeed or a backend is killed (REM-1228). On 30 Oct, 250 walks 16 at a time:
+all succeeded in 34 s, no backend killed, 589 MB private in total and 44 MB in
+the largest backend; 39 s without `idx_resources_uri`.
+
 [`kind/`](kind/README.md) runs the claim probe on a three-node cluster, and
 [`research/`](research/README.md) holds a separate study with its own README.
 
