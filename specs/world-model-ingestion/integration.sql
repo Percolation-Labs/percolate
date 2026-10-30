@@ -18,6 +18,9 @@
 -- resource_chunks, so TEXT mode works over real content rather than a fixture.
 -- ------------------------------------------------------------
 select aiq.register_lexical_source('chunks', 'content.resource_chunks');
+-- A chunk belongs to its resource's document node, so SEARCH puts a document
+-- the query names exactly ahead of the fusion (REM-1273).
+update aiq.lexical_sources set node_type = 'document', node_col = 'resource_id' where name = 'chunks';
 
 insert into aiq.semantic_sources (name, source_table)
 values ('chunks', 'content.resource_chunks')
@@ -74,7 +77,15 @@ select aiq.register_entity_table(
     -- to the table first: the trigger this regenerates fires on that write,
     -- with the column not there yet. Until it is, the old rule.
     p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
-                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$,
+    -- THE IDS A DOCUMENT DECLARES (REM-1273): `metadata.keys`, an array of
+    -- strings its writer sets, such as a board card's frontmatter `id: REM-571`.
+    -- Only its string elements count, and `keys` that is not an array declares
+    -- nothing: the expression runs inside the projection trigger, so a malformed
+    -- value must declare nothing rather than fail the document's ingest.
+    p_keys_expr => $$array(select e #>> '{}' from jsonb_array_elements(
+                        case when jsonb_typeof(n.metadata->'keys') = 'array' then n.metadata->'keys' else '[]' end) e
+                      where jsonb_typeof(e) = 'string')$$
 );
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's

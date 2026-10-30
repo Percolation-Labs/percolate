@@ -333,8 +333,11 @@ begin
           from aiq.lexical('chunks', p_query, v_pool, p_scope) l
          where 'documents' = any(p_layers) and p_documents = 'lexical'
         union all
-        select h.chunk_id, row_number() over (order by h.rrf_score desc, h.chunk_id)::int
-          from aiq.search('chunks', p_query, p_vector, p_model, v_pool, 60, p_scope) h
+        -- SEARCH's own order, not its rrf_score: a document the query names by key comes first with whatever
+        -- fused score it has, possibly none (REM-1273), so re-sorting by the score would undo the key tier.
+        select h.chunk_id, h.ord::int
+          from aiq.search('chunks', p_query, p_vector, p_model, v_pool, 60, p_scope)
+               with ordinality h(chunk_id, content, rrf_score, lexical_rank, semantic_rank, key_match, ord)
          where 'documents' = any(p_layers) and p_documents = 'hybrid'
     ),
     docs as (
