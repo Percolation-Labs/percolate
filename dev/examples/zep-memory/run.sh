@@ -2,7 +2,7 @@
 # Every block of "Percolate for Zep users", in order, from an empty directory, on part one's stack (the LangGraph
 # tour), against a real model:
 #
-#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.27 dev/examples/zep-memory/run.sh [workdir]
+#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.35 dev/examples/zep-memory/run.sh [workdir]
 #
 # The SQL blocks that need no model are asserted by dev/tests/query/21-zep-quickstart.sql. This runs the rest too:
 # Ana's assistant's turns, the only model calls, and the reading and judging her own agent does over MCP. Each block's input and output
@@ -14,7 +14,7 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.27}
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.35}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY
@@ -41,7 +41,7 @@ if [ -n "${UPGRADE:-}" ]; then
     -c "set role app_owner" -c "alter extension percolate update to '$to'" > $CAP/00-upgrade.txt 2>&1 \
     || { echo upgrade failed; exit 1; }
 fi
-python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install 'percolate-core[sample,agent]>=0.2.5' > /dev/null 2>&1
+python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install 'percolate-core[sample,agent]==0.2.16' > /dev/null 2>&1
 set -a; . ./.env; set +a
 export PAGER=cat
 export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
