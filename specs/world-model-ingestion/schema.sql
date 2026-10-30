@@ -178,6 +178,9 @@ comment on table content.resources is
     'The unit of ingested content: one uploaded document, fetched page or post, pointing at its channel and its bytes.';
 create index if not exists idx_resources_channel on content.resources (channel_id, ingested_at desc);
 create index if not exists idx_resources_org on content.resources (org_id);
+-- A kept walk graph and a replay's recording are found by uri on every step of every walk (walk.sql). Without
+-- this index each lookup scans the table, so a step costs more as the stack holds more documents (REM-1228).
+create index if not exists idx_resources_uri on content.resources (uri);
 -- Partial on the states worth hunting for. 'stored' joins 'ready' in the
 -- exclusion: both are terminal and neither is something an operator goes
 -- looking for, so admitting artifacts here would grow the index without
