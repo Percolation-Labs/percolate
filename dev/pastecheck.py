@@ -27,7 +27,12 @@ HERE = pathlib.Path(__file__).resolve().parent
 BLOCK = re.compile(r"^-- block: (\S+)\n(.*?)\n-- /block", re.S | re.M)
 # What psql says when a paste mangled a block. Measured, not guessed: each is
 # what psql 18/19 prints for a backslash command that swallowed what followed it.
-MANGLED = re.compile(r"extra argument .* ignored|invalid command|unterminated quoted")
+# `\!` is the one that says nothing itself: it hands the rest of the paste to the
+# shell, and the shell names the first SQL line it could not run. Line 1 is the
+# command itself (which may fail here for its own reasons, such as no docker in
+# the container); a line after it can only be the rest of the paste.
+MANGLED = re.compile(r"extra argument .* ignored|invalid command|unterminated quoted"
+                     r"|sh: ([2-9]|\d{2,}): \S+: not found")
 
 
 def paste(argv, block):
