@@ -1,5 +1,5 @@
 insert into content.channels (name, kind, visibility) values ('notes', 'manual', 'public') on conflict do nothing;
-select content.install_text_embed_workflow('text-embedding-3-small');
+select content.install_text_embed_workflow('bge-small-en-v1.5');
 
 select content.register_text('notes', 'standup-0303', $j$[{"content":
   "Standup, 3 March. P. Raman: the berth log scans are too slow in Postgres; DuckDB read a year of them in four seconds. Wants to try it for the harbour analytics."}]$j$) ->> 'resource_id' as standup;
@@ -13,7 +13,7 @@ select workflow.define_yaml($y$
 name: ask_notes
 steps:
   - id: search
-    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING text-embedding-3-small LIMIT 1'
+    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING bge-small-en-v1.5 LIMIT 1'
   - id: questions
-    p8ql: 'SEMANTIC "{{run.question}}" FROM questions USING text-embedding-3-small LIMIT 2'
+    p8ql: 'SEMANTIC "{{run.question}}" FROM questions USING bge-small-en-v1.5 LIMIT 2'
 $y$);

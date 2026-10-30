@@ -137,15 +137,15 @@ select claims.propose_answer(pg_temp.note('Agent memory notes',
 select claims.propose_answer(pg_temp.note('Clinical transfer study',
          'A triage method validated in one hospital lost a third of its accuracy in two others.'), 'C1', (select id from claims.questions where phrasing = 'Is a method validated at one clinic valid at another hospital?'), 'no');
 insert into aiq.embedding_models (name, dim, provider, endpoint, credential_ref, notes)
-values ('text-embedding-3-small', 1536, 'openai', 'https://api.openai.com/v1/embeddings', 'LLM_API_KEY',
-        'called by the worker with the key it holds as LLM_API_KEY; no secret is stored here')
+values ('bge-small-en-v1.5', 384, 'fastembed', 'BAAI/bge-small-en-v1.5', null,
+        'runs inside the worker through fastembed, so it needs no key')
 on conflict (name) do nothing;
 set role app_owner;
-select aiq.register_embedding_space('text-embedding-3-small');
+select aiq.register_embedding_space('bge-small-en-v1.5');
 reset role;
-select claims.install_fact_question_workflow('text-embedding-3-small');
+select claims.install_fact_question_workflow('bge-small-en-v1.5');
 insert into content.channels (name, kind, visibility) values ('notes', 'manual', 'public') on conflict do nothing;
-select content.install_text_embed_workflow('text-embedding-3-small');
+select content.install_text_embed_workflow('bge-small-en-v1.5');
 
 select content.register_text('notes', 'standup-0303', $j$[{"content":
   "Standup, 3 March. P. Raman: the berth log scans are too slow in Postgres; DuckDB read a year of them in four seconds. Wants to try it for the harbour analytics."}]$j$) ->> 'resource_id' as standup;
@@ -159,9 +159,9 @@ select workflow.define_yaml($y$
 name: ask_notes
 steps:
   - id: search
-    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING text-embedding-3-small LIMIT 1'
+    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING bge-small-en-v1.5 LIMIT 1'
   - id: questions
-    p8ql: 'SEMANTIC "{{run.question}}" FROM questions USING text-embedding-3-small LIMIT 2'
+    p8ql: 'SEMANTIC "{{run.question}}" FROM questions USING bge-small-en-v1.5 LIMIT 2'
 $y$);
 select now() as before_withdrawal \gset
 select claims.withdraw_answer(r.evidence, r.claim_key, r.question_id)
@@ -173,14 +173,14 @@ select c.stance_then, c.stance_now, c.change
  where q.phrasing = 'Should the harbour analytics move off Postgres?';
 select 'before' as read_at, f.yes, f.no
   from claims.questions q
-  join aiq.emb_text_embedding_3_small e on e.chunk_id = q.id
-  cross join claims.find_question(e.embedding, 0.1, 1, 'text-embedding-3-small', :'before_withdrawal') f
+  join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = q.id
+  cross join claims.find_question(e.embedding, 0.1, 1, 'bge-small-en-v1.5', :'before_withdrawal') f
  where q.phrasing = 'Should the harbour analytics move off Postgres?'
 union all
 select 'now', f.yes, f.no
   from claims.questions q
-  join aiq.emb_text_embedding_3_small e on e.chunk_id = q.id
-  cross join claims.find_question(e.embedding, 0.1, 1, 'text-embedding-3-small', now()) f
+  join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = q.id
+  cross join claims.find_question(e.embedding, 0.1, 1, 'bge-small-en-v1.5', now()) f
  where q.phrasing = 'Should the harbour analytics move off Postgres?';
 -- In one transaction now() does not move and an answer added and withdrawn in it never held at any instant, so
 -- stance_changes has nothing to say here, and with no worker no question has a vector for the counts block; the live run (dev/examples/advanced-memory) shows its output. This reads the

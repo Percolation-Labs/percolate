@@ -8,12 +8,12 @@ select c.stance_then, c.stance_now, c.change
 
 select 'before' as read_at, f.yes, f.no
   from claims.questions q
-  join aiq.emb_text_embedding_3_small e on e.chunk_id = q.id
-  cross join claims.find_question(e.embedding, 0.1, 1, 'text-embedding-3-small', :'before_withdrawal') f
+  join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = q.id
+  cross join claims.find_question(e.embedding, 0.1, 1, 'bge-small-en-v1.5', :'before_withdrawal') f
  where q.phrasing = 'Should the harbour analytics move off Postgres?'
 union all
 select 'now', f.yes, f.no
   from claims.questions q
-  join aiq.emb_text_embedding_3_small e on e.chunk_id = q.id
-  cross join claims.find_question(e.embedding, 0.1, 1, 'text-embedding-3-small', now()) f
+  join aiq."emb_bge_small_en_v1.5" e on e.chunk_id = q.id
+  cross join claims.find_question(e.embedding, 0.1, 1, 'bge-small-en-v1.5', now()) f
  where q.phrasing = 'Should the harbour analytics move off Postgres?';
