@@ -1,9 +1,9 @@
 #!/bin/bash
 # Every block of "Advanced Percolate memory and semantic iteration", in order, from an empty directory, on part one's
-# stack (the LangGraph tour), against a real model and a real decider:
+# stack (the LangGraph tour), against a real decider. Embeddings are bge-small, which the worker runs itself, so the
+# only key is Jev's:
 #
-#     OPENAI_API_KEY=... JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.27 \
-#         dev/examples/advanced-memory/run.sh [workdir]
+#     JEV_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.35 dev/examples/advanced-memory/run.sh [workdir]
 #
 # The SQL blocks are dev/tests/query/20-advanced-memory-article.sql's, which asserts the ones that need no model.
 # This runs the rest too: linking facts to questions with Jev, embedding notes, SEARCH and SEMANTIC in a workflow.
@@ -12,10 +12,10 @@
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.27}
-: "${OPENAI_API_KEY:?set OPENAI_API_KEY}" "${JEV_API_KEY:?set JEV_API_KEY}"
+IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.35}
+: "${JEV_API_KEY:?set JEV_API_KEY}"
 mkdir -p $W $CAP; cd $W
-OK=$OPENAI_API_KEY; JK=$JEV_API_KEY
+OK=${OPENAI_API_KEY:-}; JK=$JEV_API_KEY
 # part one's stack block, with the documented deviations: image, project name, ports
 curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
 umask 077
@@ -29,10 +29,10 @@ P8_CONTENT_PORT=5784
 P8_MINIO_PORT=5785
 P8_MINIO_CONSOLE_PORT=5786
 P8_QUERY_MCP_PORT=5787
-OPENAI_API_KEY=$OK
 ENV
+[ -n "$OK" ] && echo "OPENAI_API_KEY=$OK" >> .env
 docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
-python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install 'percolate-core[sample,agent]>=0.2.5' > /dev/null 2>&1
+python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install 'percolate-core[sample,agent]==0.2.16' > /dev/null 2>&1
 set -a; . ./.env; set +a
 export PAGER=cat
 export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
@@ -94,6 +94,6 @@ for f in $(ls $B | grep -v '^00-' | sort); do
   echo "done $f"
 done
 exec 3>&-; wait
-if grep -rlF -e "$OK" -e "$JK" $CAP; then echo "a key reached a capture"; fail=1; fi
+if grep -rlF -e "$JK" ${OK:+-e "$OK"} $CAP; then echo "a key reached a capture"; fail=1; fi
 echo fail=$fail
 exit $fail
