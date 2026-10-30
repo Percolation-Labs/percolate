@@ -16,8 +16,8 @@ downloads BEAM's million-token split from Hugging Face (Mohammadta/BEAM, CC BY-S
 
   texts.jsonl           one line per exchange of 1M:22 and 1M:35 for `percolate sample load`: a user turn and the
                         replies after it, in pieces of at most 2,000 characters cut at turn boundaries, with the
-                        sitting, the place in the conversation and the date said. BEAM's trailing '->-> n,m' plan
-                        index is removed from every piece and from `terms_text`, the user's words the walk tags. Each piece gets its
+                        sitting, the place in the conversation and the date said. BEAM's '->-> n,m' plan index
+                        (to the end of its line) is removed from every piece and from `terms_text`, the user's words the walk tags. Each piece gets its
                         vector from vectors.jsonl only if the piece's sha256 is the one that vector was made from.
   questions.jsonl       the 36 questions on the two conversations, each with its evidence as document keys, and
                         BEAM's reference answer and rubric, which harness/examples.py sets the walk's reads against.
@@ -48,11 +48,13 @@ SPLITS = {
 }
 DEFAULT_SPLIT, DEFAULT_CONVERSATIONS = "1M", ("22", "35")
 CHUNK = 2000
-MARK = re.compile(r"\s*->->\s*\d+\s*,\s*(?:\d+|N/A)(?:\s*,\s*\d+)*\s*$")  # the same three forms, at a turn's end
-# The same mark at the end of any line of a piece: BEAM's generator's (sitting, plan step), which a decider must
-# never read, since plan step predicts which exchanges BEAM's questions cite (REM-1240).
-# Every form BEAM writes, counted on 1M:22 and 1M:35: "n,m" (1,848), "n,N/A" (9) and "n,m, k" (1), always at a line end.
-MARK_IN_PIECE = re.compile(r"[ \t]*->->[ \t]*\d+[ \t]*,[ \t]*(?:\d+|N/A)(?:[ \t]*,[ \t]*\d+)*[ \t]*(?=\n|$)")
+MARK = re.compile(r"\s*->->[^\n]*$")  # the mark at a turn's end, with the whitespace before it
+# The mark on any line of a piece: BEAM's generator's (sitting, plan step), which a decider must never read, since
+# plan step predicts which exchanges BEAM's questions cite (REM-1240). It runs from '->->' to the end of its line.
+# 1M:22 and 1M:35 hold only "n,m", "n,N/A" and "n,m, k"; across all 35 1M conversations BEAM also writes "n," with no
+# step, "n,(N/A, but related to ...)" notes, and the mark mid-turn before a code block (1M:2). The old pattern, which
+# matched only the first three, left 482 marked texts in the split and none in 1M:22/35, whose output is unchanged.
+MARK_IN_PIECE = re.compile(r"[ \t]*->->[^\n]*")
 
 
 SAID = 160  # characters of the user's words a document's title carries
@@ -156,7 +158,7 @@ def main(sample, split=DEFAULT_SPLIT, conversations=DEFAULT_CONVERSATIONS, extra
                     piece["vector_f32"] = v["vector_f32"]
                     matched += 1
                 cs.append(piece)
-            user = "\n".join(MARK.sub("", t["content"]) for t in p["turns"] if t["role"] == "user")
+            user = "\n".join(MARK_IN_PIECE.sub("", MARK.sub("", t["content"])) for t in p["turns"] if t["role"] == "user")
             # The title is the document node's summary, so a step shows what was said by reading the node (REM-1233).
             said = " ".join(user.split())
             said = said if len(said) <= SAID else said[:SAID - 1].rstrip() + "…"
