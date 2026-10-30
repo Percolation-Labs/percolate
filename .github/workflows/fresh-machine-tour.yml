@@ -129,20 +129,40 @@ jobs:
           nohup percolate ui serve --host 127.0.0.1 --port 8082 > ../out/04-ui.log 2>&1 &
           for i in $(seq 1 30); do curl -fs http://127.0.0.1:8082/ > ../out/04-ui.html && break; sleep 2; done
           grep -qi walks ../out/04-ui.html
-      - name: 4b. the app serves its icon, and the Walks screen renders (a headless browser has no tab strip, so the tab icon itself is the Mac leg's)
+      - name: 4b. the app serves its icon, and the Walks screen lists the walks and opens one, signed in as the reader (a headless browser has no tab strip, so the tab icon itself is the Mac leg's)
         run: |
           curl -fsS -o out/favicon.svg -w '%{http_code} %{content_type}\n' http://127.0.0.1:8082/favicon.svg | tee out/04b-favicon.txt
           grep -q '^200 image/svg+xml' out/04b-favicon.txt
           grep -Eiq '<link[^>]+rel="?(shortcut )?icon"?[^>]+favicon\.svg|<link[^>]+favicon\.svg[^>]+rel="?icon' out/04-ui.html
           cd tour && . .venv/bin/activate && pip -q install playwright && python -m playwright install --with-deps chromium > /dev/null
+          # signed out, the screen shows no walk; signed in with the reader's token, it lists them and one opens
+          export WALKS_N=$(psql "$P8_DSN" -Atc "select least(count(*), 50) from aiq.walk_runs")
           python - <<'PY'
+          import os
           from playwright.sync_api import sync_playwright
+          token, want = open("../out/token").read().strip(), int(os.environ["WALKS_N"])
+          rows = "a[href^='#/walk/']"
           with sync_playwright() as p:
-              b = p.chromium.launch(); pg = b.new_page(viewport={"width": 1400, "height": 900})
+              b = p.chromium.launch()
+              pg = b.new_page(viewport={"width": 1400, "height": 900})
               pg.goto("http://127.0.0.1:8082/#/walks"); pg.wait_for_timeout(3000)
-              pg.screenshot(path="../out/04b-walks.png", full_page=True)
               icon = pg.evaluate("[...document.querySelectorAll('link[rel~=icon]')].map(l => l.href)")
               print("icon links:", icon); assert any(h.endswith("/favicon.svg") for h in icon), icon
+              out = pg.locator(rows).count(); print("signed out, walks listed:", out); assert out == 0, out
+              ctx = b.new_context(viewport={"width": 1400, "height": 900})
+              ctx.add_init_script(f"sessionStorage.setItem('p8-token', {token!r})")
+              pg = ctx.new_page(); pg.goto("http://127.0.0.1:8082/#/walks")
+              pg.wait_for_selector(rows, timeout=30000); pg.wait_for_timeout(1000)
+              pg.screenshot(path="../out/04b-walks.png", full_page=True)
+              got = pg.locator(rows).count(); print(f"signed in, walks listed: {got} of {want}"); assert got == want, (got, want)
+              pg.locator(rows).first.click()
+              pg.get_by_text("Spend", exact=True).first.wait_for(timeout=60000); pg.wait_for_timeout(2000)
+              pg.screenshot(path="../out/04b-walk.png", full_page=True)
+              text = pg.inner_text("body")
+              for panel in ("Question stack", "Waves", "Spend"):
+                  assert panel in text, panel
+              assert "query layer (REM-1245)" not in text, "a query-layer gap on the walk's screen"
+              print("one walk: its panels render, no query-layer gap")
               b.close()
           PY
       - name: 5. query it from psql
