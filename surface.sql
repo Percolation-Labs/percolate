@@ -437,7 +437,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.sql_passthrough','text','§12: the escape hatch'),
 ('ai-query-layer','function','aiq.check_drift','text','graph-identity.md D7'),
 ('ai-query-layer','function','aiq.rebuild_entity_type','text','graph-identity.md: rebuild'),
-('ai-query-layer','function','aiq.register_entity_table','text,text,text,text,text,text,text','graph-identity.md D6: a consumer gets projection by registering, not by hand-writing three triggers'),
+('ai-query-layer','function','aiq.register_entity_table','text,text,text,text,text,text,text,text','graph-identity.md D6: a consumer gets projection by registering, not by hand-writing three triggers'),
 ('ai-query-layer','table','aiq.entity_registry',null,'graph-identity.md "Inclusion policy": rebuild and live projection read ONE predicate'),
 ('ai-query-layer','table','aiq.relation_types',null,'graph-identity.md "Catalogue": an unlisted triple is refused at write'),
 -- Aliases and short keys are two thirds of LOOKUP's cascade and invariant 5

@@ -38,7 +38,7 @@ set role app_owner;
 -- be the worse answer -- same division of labour as 04-graph-sample.sql.
 do $$
 begin
-    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text,text)') is null
+    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text,text,text)') is null
        or to_regprocedure('aiq.register_lexical_source(text,text,text,text)') is null then
         raise exception
             'this database predates aiq.register_entity_table / '
