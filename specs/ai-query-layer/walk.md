@@ -41,7 +41,7 @@ telling it to do something, or the walk returns a result it can interrogate.
 | 11 | Stops: stack empty, budget, dry, cold | PARTLY SHOWN | Built. The cold stop runs only under the stack, and it cost S evidence: past S's own stop P found 16 more labelled pieces, 14 through leads (§11). |
 | 12 | Durable, keyless, append-only, replayable, every parameter a dated row | SHOWN | A crashed walk resumes and redoes nothing (REM-1236). `walk_start` refuses more than the question (REM-1231). An old run reads its original defaults (query/51, REM-1245). A changed default reaches an upgraded database (query/54, upgrade-converges). |
 | 13 | The walk is a queryable object, with cost as an observable | SHOWN | Built: `walk_structure`, `walk_cost`. The pilot's spend, $1.44, was read from its own rows. |
-| 14 | Evaluation outside the walk, by eight classes and statistically against search | SHOWN at 1M; TO BE SHOWN across sizes | Built: `walk_coverage`, `walk_why`. The registered extension: P − search at 100 reads +15.6 [+5.2, +27.5] on 39 new 1M questions, GO; at 500 reads +1.2, so the gain is speed within a budget (§17). 100K and 500K are registered (Appendix B). |
+| 14 | Evaluation outside the walk, by eight classes and statistically against search | SHOWN at 1M; NOT SHOWN at 100K and 500K | Built: `walk_coverage`, `walk_why`. P − search at 100 reads: 1M +15.6 [+5.2, +27.5] (GO), 500K +1.1 [−2.5, +4.9] (NO-GO), 100K +1.2 [−3.1, +6.3] (no difference). The gain sits on evidence buried at search ranks 51–200 (pooled +50.0, n = 9) and the share of such questions grows with size (Appendix B). |
 | 15 | Oracle mode: a ceiling on the walk's own schedule | SHOWN | Built: `walk_oracle` reads wave by wave as the walk does (REM-1245). |
 | 16 | The LLM interface: semantic exceptions and interrogable results | PARTLY SHOWN | `DECOMPOSITION_REQUIRED` is raised structurally, and results carry the run's handle. No client has yet split a question in a walk. |
 
@@ -1149,6 +1149,31 @@ A handful of walks is never the verdict.
   - *Reporting order* (bill): the gained/lost split first, then the speed-within-a-budget reading at 500, then the
     figure without single-piece questions beside the headline.
   - *Cost:* about 100 × $0.014 = $1.40.
+- **The scaling stage's result** (REM-1244, 29 Oct, 100 of 100 P walks on the pilot's build, in the registered order,
+  oracle-scored; Jev $0.18 at 100K, $0.65 at 500K).
+  - *Per size, at 100 reads (checkpoint at 25 continued at both sizes):*
+
+    | size | P − search at 100 | outcome | gained / lost pieces | without single-piece questions |
+    |---|---|---|---|---|
+    | 100K | +1.2 [−3.1, +6.3] | no difference detectable at 10 points | 5 / 7 of 141 | −1.2 [−5.5, +1.7] |
+    | 500K | +1.1 [−2.5, +4.9] | NO-GO at this size | 21 / 19 of 212 | +1.4 [−3.3, +6.7] |
+    | 1M | +15.6 [+5.2, +27.5] | GO (the extension) | 23 / 3 of 179 | +7.5 [+0.2, +16.2] |
+
+  - *Gain by burial depth* (the best search rank of a question's evidence; points, n): top 10, pooled +2.8 (102);
+    11–50, −0.6 (26); 51–200, +50.0 (9); beyond 200, 0 (2). Questions with their best evidence beyond rank 50: 1 of 50
+    at 100K, 3 of 50 at 500K, 7 of 39 at 1M.
+  - *Why:* the walk gains where evidence is buried at search ranks 51–200 and is level elsewhere. Its gain at a size
+    follows how many questions are buried there, a share that grows with the history.
+    - *100K:* a history is about 143 exchanges, so 100 reads cover about 70% of it, search's top 100 holds 95.8%, and
+      the endpoint measures a ceiling.
+    - *500K:* only 3 of 50 questions are buried. The endpoint is mostly search against itself, with swaps of the same
+      size (21 gained, 19 lost). On a buried question the walk can lose time: on 500K:7 pf:1 search reads piece 93 at
+      rank 76, and the walk reaches it through a term lead only at read 115.
+    - *Beyond the budget:* on 500K:13 summ:0 the walk reads 4 of 5 pieces sitting at search ranks 335–505 by read 500,
+      where search's top 500 holds one. A 100-read endpoint does not see this.
+  - *The claim it supports:* the walk's gain is on buried evidence and grows with the share of buried questions. On
+    this draw it is detectable at 1M and absent at 100K and 500K. 1M's gain rests on 7 buried questions, and the
+    document gives that n.
 - **Walks of one question each** are diagnoses. The five walks the board's rules were found on, and the fresh
   registered set, exist to catch faults and to explain them with real leads. They are never evidence that V0 beats
   search.
