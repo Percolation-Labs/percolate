@@ -15,12 +15,12 @@ insert into content.channels (name, kind, config, visibility)
 values ('memory', 'manual', '{"description": "memories written directly, with no pipeline"}', 'public')
 on conflict do nothing;
 
--- 3. Search: an embedding model, called by the worker with the key it holds; uploads are embedded, not read.
+-- 3. Search: an embedding model the ingest worker runs itself, so it needs no key; uploads are embedded, not read.
 insert into aiq.embedding_models (name, dim, provider, endpoint, credential_ref, is_default)
-values ('text-embedding-3-small', 1536, 'openai', 'https://api.openai.com/v1/embeddings', 'LLM_API_KEY', true)
+values ('bge-small-en-v1.5', 384, 'fastembed', 'BAAI/bge-small-en-v1.5', null, true)
 on conflict (name) do nothing;
-select aiq.register_embedding_space('text-embedding-3-small') is not null as space;
-select content.install_ingest_workflow(p_model => 'text-embedding-3-small') as ingest;
+select aiq.register_embedding_space('bge-small-en-v1.5') is not null as space;
+select content.install_ingest_workflow(p_model => 'bge-small-en-v1.5') as ingest;
 
 -- 4. The query tool the planners read through, and your own agent reads and judges with.
 select (agentic.upsert_tool_server('{"name": "harbour-query", "kind": "mcp", "url": "http://query-mcp:8090"}'::jsonb)).name;
