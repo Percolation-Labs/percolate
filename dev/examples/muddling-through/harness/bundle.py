@@ -14,7 +14,9 @@ questions.jsonl, sources.yaml, manifest.yaml). OUT/NAME/ is then a directory `pe
   oracle/<qid>.json, all.json   the answer key, for oracle mode only: {question, labelled, items}. Never loaded: the
                                 Walks screen passes a file to aiq.walk_structure beside a run
   walks/                        a second sample: Jev's verdicts for each shipped walk (replays.jsonl, exported with
-                                aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0
+                                aiq.walk_verdicts) and start.sql, which starts each walk offline from them at $0,
+                                under the run's resolved settings and its recorded search order; check.sql checks
+                                each finished replay against its recording's digests (in its metadata)
   README.md, LICENSE, SHA256SUMS
 
 --runs is a walk list as the pilot writes it, one {qid, arm, run} a line (arm P: V0's walk, the question stack off,
@@ -88,6 +90,38 @@ def psql(dsn, sql):
     return r.stdout.strip()
 
 
+# A run's reads in (wave, ord) order and its clues in (key, wave) order, one line each, hashed: the same SQL computes
+# the recording's digests here and the reader's in check.sql. Keys sort in the C collation, so every install agrees.
+READS = ("select count(*), encode(sha256(convert_to(coalesce(string_agg(wave || '|' || ord || '|' || doc || '|' || "
+         "coalesce(via, ''), E'\\n' order by wave, ord), ''), 'UTF8')), 'hex') from aiq.walk_reads(:run)")
+CLUES = ("select count(*), encode(sha256(convert_to(coalesce(string_agg(key || '|' || wave || '|' || coalesce(p::text, 'null'), "
+         "E'\\n' order by key collate \"C\", wave), ''), 'UTF8')), 'hex') from aiq.walk_clues(:run)")
+RECORDING = (f"select jsonb_build_object('reads', r.count, 'reads_sha256', r.encode, 'clues', c.count, 'clues_sha256', c.encode) "
+             f"from ({READS}) r, ({CLUES}) c")
+CHECK = f"""-- Checks each replayed walk against its recording, by content: one row a replay. A replay passes only when its reads
+-- and clues match the recording's digests; faithful (every lead it raised has a recorded verdict) then says which
+-- kind of pass: a walk that stopped before judging its last wave is partial in the recording and the replay alike.
+-- A faithful replay that differs from its recording fails. Run after the walks have finished:
+--   psql "$P8_DSN" -f walks/check.sql
+select res.external_id as replay,
+       aiq.walk_summary(r.id)->'decider'->>'faithful' as faithful,
+       rd.count = (res.metadata->'recording'->>'reads')::bigint and rd.encode = res.metadata->'recording'->>'reads_sha256' as reads_match,
+       cl.count = (res.metadata->'recording'->>'clues')::bigint and cl.encode = res.metadata->'recording'->>'clues_sha256' as clues_match,
+       case when r.status <> 'succeeded' then 'not finished: ' || r.status
+            when rd.count <> (res.metadata->'recording'->>'reads')::bigint or rd.encode <> res.metadata->'recording'->>'reads_sha256'
+              or cl.count <> (res.metadata->'recording'->>'clues')::bigint or cl.encode <> res.metadata->'recording'->>'clues_sha256'
+                 then 'FAIL: differs from its recording'
+            when (aiq.walk_summary(r.id)->'decider'->>'faithful')::boolean then 'pass: faithful'
+            else 'pass: exact replay of a partial recording' end as verdict
+  from workflow.runs r
+  join content.resources res on res.id = (r.input->>'replay')::uuid and res.metadata ? 'recording'
+  cross join lateral ({READS.replace(':run', 'r.id')}) rd
+  cross join lateral ({CLUES.replace(':run', 'r.id')}) cl
+ where r.input ? 'replay'
+ order by res.external_id collate "C";
+"""
+
+
 def export_walks(dsn, walks, out):
     """Jev's verdicts for each run, as replay documents, and the SQL that starts each walk offline from them."""
     out.mkdir(parents=True, exist_ok=True)
@@ -98,25 +132,44 @@ def export_walks(dsn, walks, out):
         doc = json.loads(psql(dsn, f"select aiq.walk_verdicts('{run}'::uuid)"))
         q = inp["question"]["text"]
         uri = f"replay:bundle:{i + 1}"
+        # What the recording read and raised, as digests a reader's run is checked against (check.sql): a walk that
+        # stopped before judging its last wave is partial by aiq.walk_summary and still an exact replay (timmy, bill).
+        rec = json.loads(psql(dsn, RECORDING.replace(":run", f"'{run}'::uuid")))
         replays.append({"channel": "walk-replays", "external_id": uri, "title": f"{w['label']}: {q}", "uri": uri,
-                        "chunks": [{"content": json.dumps(doc)}], "metadata": {"label": w["label"], "from_run": run}})
-        settings = inp.get("settings") or {}
+                        "chunks": [{"content": json.dumps(doc)}],
+                        "metadata": {"label": w["label"], "from_run": run, "recording": rec}})
+        # A replay holds only Jev's verdicts, so the walk must not meet anything Jev was never asked about. Ship the
+        # run's settings as resolved when it started, not its overrides, or a changed default (walk.stack, 0.2.35)
+        # walks it differently; and search's order as the run recorded it, or the reader's search (another install's
+        # vector index and question embedding) reads other messages from wave 0 (timmy's smoke 3, 29 Oct).
+        settings = json.loads(psql(dsn, f"select aiq.walk_run_settings('{run}'::uuid)"))
+        order = json.loads(psql(dsn, f"select coalesce(jsonb_agg(doc order by rank), '[]') from aiq.walk_search_order('{run}'::uuid)"))
+        if not order:
+            sys.exit(f"run {run} recorded no search order to ship")
         graphs.add((inp["channel"], json.dumps(settings, sort_keys=True)))
+        # Each start in its own transaction: with search's order given, a replay has no worker step to wait on, so
+        # start_workflow runs the whole walk inline, and the 30 s statement_timeout workflow.run_sql sets locally for
+        # a step would otherwise outlive it and cancel the next walk (the loader sends start.sql as one string).
         starts.append(
+            "begin;\n"
             "select workflow.start_workflow('walk', jsonb_build_object(\n"
             "  'question', jsonb_build_object('node_id', n.id, 'text', r.title),\n"
             f"  'channel', {sql_text(inp['channel'])}, 'offline', true,\n"
             f"  'replay', (select id from content.resources where uri = {sql_text(uri)}),\n"
-            f"  'settings', {sql_text(json.dumps(settings))}::jsonb))\n"
+            f"  'settings', {sql_text(json.dumps(settings, sort_keys=True))}::jsonb,\n"
+            f"  'search', {sql_text(json.dumps(order))}::jsonb))\n"
             "  from content.resources r join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id\n"
-            f" where r.uri like 'question:%' and r.title = {sql_text(q)};")
+            f" where r.uri like 'question:%' and r.title = {sql_text(q)};\n"
+            "commit;")
     write_jsonl(out / "replays.jsonl", replays)
+    (out / "check.sql").write_text(CHECK)
     # A graph is kept per channel and settings; build each walk's first, as the setup block does, or the walk builds
     # it inside its own step and can hit the statement timeout.
     index = [f"select aiq.walk_index(jsonb_build_object('channel', {sql_text(c)}, 'settings', {sql_text(st)}::jsonb))->>'uri';"
              for c, st in sorted(graphs)]
     (out / "start.sql").write_text(
-        "-- Starts each shipped walk offline, from the verdicts Jev gave it (replays.jsonl): no model key, $0.\n"
+        "-- Starts each shipped walk offline, from the verdicts Jev gave it (replays.jsonl): no model key, $0. Each walk\n"
+        "-- runs to its end inside its start, so this step returns when they have all finished; then check.sql.\n"
         "select aiq.install_walk_workflow();\n" + "\n".join(index) + "\n\n" + "\n\n".join(starts) + "\n")
     # The replays live in their own channel, which the conversations' sources do not declare.
     (out / "sources.yaml").write_text(
