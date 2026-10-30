@@ -48,13 +48,14 @@ SPLITS = {
 }
 DEFAULT_SPLIT, DEFAULT_CONVERSATIONS = "1M", ("22", "35")
 CHUNK = 2000
-MARK = re.compile(r"\s*->->[^\n]*$")  # the mark at a turn's end, with the whitespace before it
+MARK = re.compile(r"\s*->->(?:(?!```)[^\n])*$")  # the mark at a turn's end, with the whitespace before it
 # The mark on any line of a piece: BEAM's generator's (sitting, plan step), which a decider must never read, since
-# plan step predicts which exchanges BEAM's questions cite (REM-1240). It runs from '->->' to the end of its line.
+# plan step predicts which exchanges BEAM's questions cite (REM-1240). It runs from '->->' to the end of its line, or
+# to a code fence that BEAM opened on the same line ('->-> 4,```python', 12 times across the splits), which is kept.
 # 1M:22 and 1M:35 hold only "n,m", "n,N/A" and "n,m, k"; across all 35 1M conversations BEAM also writes "n," with no
 # step, "n,(N/A, but related to ...)" notes, and the mark mid-turn before a code block (1M:2). The old pattern, which
 # matched only the first three, left 482 marked texts in the split and none in 1M:22/35, whose output is unchanged.
-MARK_IN_PIECE = re.compile(r"[ \t]*->->[^\n]*")
+MARK_IN_PIECE = re.compile(r"[ \t]*->->(?:(?!```)[^\n])*")
 
 
 SAID = 160  # characters of the user's words a document's title carries
