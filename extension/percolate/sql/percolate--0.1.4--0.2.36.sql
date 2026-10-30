@@ -16836,6 +16836,15 @@ alter table aiq.entity_registry alter column shipped set default
 -- idempotent while being silently incomplete.
 alter table aiq.entity_registry
     add column if not exists visibility_expr text not null default 'null';
+-- THE IDENTIFIERS A ROW DECLARES FOR ITSELF (REM-1273): an expression giving a
+-- text[] of names besides its canonical key, written as `short` keys. A board
+-- card loaded as a document has the canonical key `file:board/cards/rem-571.md`,
+-- so LOOKUP "REM-571" found nothing and the card's own ID could only reach it
+-- through the lexical arm, where `rem` matches every card and ranked it 1,894th.
+-- Declared by the row, never read off its text by a pattern: what counts as an
+-- identifier is the writer's knowledge, and a shape rule over prose is a guess.
+-- Null for a type that declares none.
+alter table aiq.entity_registry add column if not exists keys_expr text;
 
 -- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. Adding
 -- p_visibility_expr with a default does not replace the six-argument function;
@@ -16932,10 +16941,26 @@ begin
               and k.kind = 'canonical'
               and k.key is distinct from lower(trim(%2$s))
         $q$, r.entity_type, r.key_expr, p_rows)
-    ];
+    ] || case when r.keys_expr is null then array[]::text[] else array[
+        -- 5. Declared keys (REM-1273), `short` because they are not unique: two
+        --    documents may declare one ID, and LOOKUP returns both. Insert
+        --    only, as short keys and aliases always are (statement 4's note): a
+        --    key no longer declared stays until somebody removes it.
+        format($q$
+            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+            select distinct nd.id, %1$L, lower(trim(d.key)), 'short', rbac.org_or_shared(%2$s),
+                   case when nd.visibility = 'private' then nd.owner_id end
+            from %3$s n
+            join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
+            cross join lateral unnest(%4$s) d(key)
+            where %5$s and nullif(trim(d.key), '') is not null
+            on conflict (node_id, key, kind) do nothing
+        $q$, r.entity_type, r.org_expr, p_rows, r.keys_expr, r.include_where)
+    ] end;
 end $$;
 
 drop function if exists aiq.register_entity_table(text,text,text,text,text,text);
+drop function if exists aiq.register_entity_table(text,text,text,text,text,text,text);
 
 create or replace function aiq.register_entity_table(
     p_entity_type   text,
@@ -16953,7 +16978,10 @@ create or replace function aiq.register_entity_table(
     -- "nodes_visibility_fkey"` from the corpus seed -- loud, but loud in a
     -- place that named neither the argument nor the caller. A new optional
     -- parameter goes at the end.
-    p_visibility_expr text default null
+    p_visibility_expr text default null,
+    -- Last for the same reason (REM-1273): a text[] expression of the row's
+    -- declared identifiers, projected as short keys.
+    p_keys_expr text default null
 ) returns void as $$
 declare
     -- Named after the ENTITY TYPE, not after the source table's short name.
@@ -17023,14 +17051,14 @@ begin
 
     insert into aiq.entity_registry
         (entity_type, source_table, key_expr, summary_expr, org_expr,
-         visibility_expr, include_where)
+         visibility_expr, include_where, keys_expr)
     values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr,
-            v_vis, p_include_where)
+            v_vis, p_include_where, p_keys_expr)
     on conflict (entity_type) do update
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
             visibility_expr = excluded.visibility_expr,
-            include_where = excluded.include_where,
+            include_where = excluded.include_where, keys_expr = excluded.keys_expr,
             -- OR, not assignment: a re-registration by a deployment (seeding
             -- off, excluded.shipped false) must not un-ship a row the
             -- extension seeded, or the next restore collides on it.
@@ -20017,6 +20045,13 @@ alter table aiq.lexical_sources alter column shipped set default
 -- above aiq.search).
 alter table aiq.lexical_sources add column if not exists search_with text;
 
+-- WHICH NODE A ROW BELONGS TO, so SEARCH can put an exact key match first
+-- (REM-1273). node_col names the source column holding that node's entity_id
+-- and node_type its entity type: `resource_id` and `document` for chunks. Null
+-- for a source whose rows no node owns; SEARCH over it has no key tier.
+alter table aiq.lexical_sources add column if not exists node_type text;
+alter table aiq.lexical_sources add column if not exists node_col text;
+
 -- A generated tsvector column + GIN index is the standard shape: the vector
 -- is maintained by Postgres on write, never by application code that can
 -- forget, and the index is what makes it a search rather than a scan.
@@ -20125,19 +20160,49 @@ $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 -- ------------------------------------------------------------
 
 drop function if exists aiq.search(text, text, vector, text, int, int);
+-- The result gained `key_match` (REM-1273), and a changed result type is a drop, not a replace.
+drop function if exists aiq.search(text, text, vector, text, int, int, jsonb);
 create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
     p_limit int default 10, p_k int default 60, p_scope jsonb default null
 ) returns table(chunk_id uuid, content text, rrf_score real,
-                lexical_rank int, semantic_rank int) as $$
+                lexical_rank int, semantic_rank int, key_match text) as $$
 declare
     src aiq.lexical_sources;
+    v_keyed text;
 begin
     select * into src from aiq.lexical_sources where name = p_lexical_source;
     if not found then
         raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_lexical_source;
     end if;
+
+    -- THE KEY TIER (REM-1273): a node the query names exactly comes first, ahead
+    -- of the fusion. Lexical and semantic are statistical, and RRF over them
+    -- ranked a card queried by its own ID 3rd to 392nd on the 1,271 board cards
+    -- (1,894th over 17,915 history documents) behind cards that only mention it.
+    -- A key match is identity, so no sum of two statistical ranks may outvote it.
+    -- One row per named node: its best fused row, or its first if none fused.
+    -- LOOKUP's exact tiers only (canonical, short/alias, soft name), never fuzzy,
+    -- and only nodes of the type that owns this source's rows. What LOOKUP is
+    -- asked: the whole query, and each word with its outer punctuation removed,
+    -- so `why is REM-571 still open?` offers `rem-571` as well as itself.
+    v_keyed := case when src.node_col is null
+        then 'select null::uuid as chunk_id, null::text as key where false'
+        else format($k$
+            select distinct on (n.entity_id) c.id as chunk_id, n.key
+              from (select l.entity_id, min(l.key) as key
+                      from aiq.lookup_many(array(
+                               select distinct t from (
+                                   select btrim($2) union all
+                                   select regexp_replace(w, '^[[:punct:]]+|[[:punct:]]+$', '', 'g')
+                                     from regexp_split_to_table($2, '\s+') w) x(t)
+                                where t <> '')) l
+                     where l.entity_type = %L group by l.entity_id) n
+              join %s c on c.%I = n.entity_id
+              left join fused f on f.chunk_id = c.id
+             order by n.entity_id, f.rrf desc nulls last, c.id
+        $k$, src.node_type, aiq.scoped_source(src.source_table, p_scope), src.node_col) end;
 
     return query execute format($q$
     with lex as (
@@ -20171,12 +20236,20 @@ begin
                lex.rnk as lexical_rank, sem.rnk as semantic_rank
         from lex full outer join sem on sem.chunk_id = lex.chunk_id
     )
-    select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank
-    from fused f
+    , keyed as materialized (%3$s)
+    , ranked as materialized (
+        select k.chunk_id, coalesce(f.rrf, 0)::real as rrf, f.lexical_rank, f.semantic_rank, k.key
+          from keyed k left join fused f on f.chunk_id = k.chunk_id
+        union all
+        select f.chunk_id, f.rrf, f.lexical_rank, f.semantic_rank, null
+          from fused f where f.chunk_id not in (select keyed.chunk_id from keyed)
+    )
+    select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank, f.key
+    from ranked f
     cross join lateral (select c.%1$I from %2$s c where c.id = f.chunk_id limit 1) c
-    order by f.rrf desc
+    order by f.key is null, f.rrf desc
     limit $4
-    $q$, src.content_col, src.source_table)
+    $q$, src.content_col, src.source_table, v_keyed)
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model, p_scope;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -25564,6 +25637,9 @@ grant select on content.resource_snapshots to authenticated;
 -- resource_chunks, so TEXT mode works over real content rather than a fixture.
 -- ------------------------------------------------------------
 select aiq.register_lexical_source('chunks', 'content.resource_chunks');
+-- A chunk belongs to its resource's document node, so SEARCH puts a document
+-- the query names exactly ahead of the fusion (REM-1273).
+update aiq.lexical_sources set node_type = 'document', node_col = 'resource_id' where name = 'chunks';
 
 insert into aiq.semantic_sources (name, source_table)
 values ('chunks', 'content.resource_chunks')
@@ -25620,7 +25696,15 @@ select aiq.register_entity_table(
     -- to the table first: the trigger this regenerates fires on that write,
     -- with the column not there yet. Until it is, the old rule.
     p_visibility_expr => $$coalesce(to_jsonb(n)->>'visibility',
-                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$
+                                 case when rbac.is_shared_org(n.org_id) then 'public' else 'org' end)$$,
+    -- THE IDS A DOCUMENT DECLARES (REM-1273): `metadata.keys`, an array of
+    -- strings its writer sets, such as a board card's frontmatter `id: REM-571`.
+    -- Only its string elements count, and `keys` that is not an array declares
+    -- nothing: the expression runs inside the projection trigger, so a malformed
+    -- value must declare nothing rather than fail the document's ingest.
+    p_keys_expr => $$array(select e #>> '{}' from jsonb_array_elements(
+                        case when jsonb_typeof(n.metadata->'keys') = 'array' then n.metadata->'keys' else '[]' end) e
+                      where jsonb_typeof(e) = 'string')$$
 );
 
 -- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
@@ -41444,8 +41528,11 @@ begin
           from aiq.lexical('chunks', p_query, v_pool, p_scope) l
          where 'documents' = any(p_layers) and p_documents = 'lexical'
         union all
-        select h.chunk_id, row_number() over (order by h.rrf_score desc, h.chunk_id)::int
-          from aiq.search('chunks', p_query, p_vector, p_model, v_pool, 60, p_scope) h
+        -- SEARCH's own order, not its rrf_score: a document the query names by key comes first with whatever
+        -- fused score it has, possibly none (REM-1273), so re-sorting by the score would undo the key tier.
+        select h.chunk_id, h.ord::int
+          from aiq.search('chunks', p_query, p_vector, p_model, v_pool, 60, p_scope)
+               with ordinality h(chunk_id, content, rrf_score, lexical_rank, semantic_rank, key_match, ord)
          where 'documents' = any(p_layers) and p_documents = 'hybrid'
     ),
     docs as (

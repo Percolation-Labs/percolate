@@ -801,6 +801,12 @@ Reciprocal rank fusion, not score blending: `ts_rank` and cosine distance share
 neither scale nor direction. `null` in a rank column means that signal did not
 match at all — the R7 chunk wins because **both** ranked it first.
 
+**A document the query names comes first.** When the query, or one of its
+words, is a document's key by LOOKUP's exact tiers (its uri, or an ID it
+declares in `metadata.keys`), that document's best chunk leads, with
+`key_match` naming the key, ahead of the fusion. `SEARCH "REM-571"` returns the
+card that declares `REM-571`, not the cards that mention it most (REM-1273).
+
 ---
 
 ## SCHEMA — what this database *is*

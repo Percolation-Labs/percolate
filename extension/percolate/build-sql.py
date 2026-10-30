@@ -230,6 +230,9 @@ REPLAYED_DML = {
     ("claims/schema.sql", "insert claims.deciders"):
         (1, "the shipped Jev decider row (REM-996), do nothing on conflict, so a deployment's own endpoint "
             "or credential name is never overwritten"),
+    ("world-model-ingestion/integration.sql", "update aiq.lexical_sources"):
+        (1, "the shipped chunks source's owning node (REM-1273): chunks belong to their resource's document, "
+            "a fact of this extension's own schema that no deployment sets otherwise"),
     ("workflow-engine/schema.sql", "insert workflow.lifecycle_states"):
         (1, "the status vocabulary, shipped, converged with do update"),
     ("workflow-engine/schema.sql", "update workflow.rate_limits"):
