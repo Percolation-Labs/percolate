@@ -246,7 +246,8 @@ select step_key, output->>'result' as said
 select workflow.signal_task(:'run', 'approve', '{"decision": "restart content-server", "by": "me"}');
 ```
 
-`signal_task` returns 1, the number of waiting steps it answered. The approval is a write made as you, so it is
+The diagnosis comes from the runbook line the search found: the content server can't reach the object store, so
+check that first. `signal_task` returns 1, the number of waiting steps it answered. The approval is a write made as you, so it is
 refused for anyone who may not sign this run. The last step lands the decision in your table:
 
 ```sql
