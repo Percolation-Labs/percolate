@@ -1,7 +1,7 @@
 -- psql, as p8: the forwarder's reference data, which everyone may read, and Ana's bookings, which only she may
 create schema if not exists crm;
 create table if not exists crm.ports (id uuid primary key default gen_random_uuid(), name text not null unique);
--- registered as an entity table: each row is a node, those already there too from 0.2.25 (REM-1057)
+-- registered as an entity table: each row is a node, those already there too from 0.2.25
 select aiq.register_entity_table('port', 'crm.ports', 'n.name', 'n.name', 'rbac.shared_org_id()');
 -- a new entity type needs the relation catalogue widened to it, or no fact can point at a port row
 select aiq.register_graph_vocabulary() ->> 'relations' as relations;
