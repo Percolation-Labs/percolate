@@ -887,6 +887,13 @@ alter table aiq.entity_registry
 -- identifier is the writer's knowledge, and a shape rule over prose is a guess.
 -- Null for a type that declares none.
 alter table aiq.entity_registry add column if not exists keys_expr text;
+-- THE HEURISTIC NAMES A ROW'S WRITER GIVES IT (REM-1273): a text[] expression
+-- like keys_expr, written as `alias` keys, which is what marks them heuristic.
+-- A board card's bare number, `143` for REM-143, is the case: its writer knows
+-- the card is called that, but so is the 143rd of anything else, so SEARCH
+-- accepts an alias only for a query that is that one word (aiq.search's key
+-- tier). Null for a type that declares none.
+alter table aiq.entity_registry add column if not exists aliases_expr text;
 
 -- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. Adding
 -- p_visibility_expr with a default does not replace the six-argument function;
@@ -998,11 +1005,26 @@ begin
             where %5$s and nullif(trim(d.key), '') is not null
             on conflict (node_id, key, kind) do nothing
         $q$, r.entity_type, r.org_expr, p_rows, r.keys_expr, r.include_where)
+    ] end || case when r.aliases_expr is null then array[]::text[] else array[
+        -- 6. Declared aliases (REM-1273), as statement 5 writes keys, but as
+        --    `alias`: a name the writer offers on a guess, which SEARCH honours
+        --    only when it is the whole query.
+        format($q$
+            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id, owner_scope)
+            select distinct nd.id, %1$L, lower(trim(d.key)), 'alias', rbac.org_or_shared(%2$s),
+                   case when nd.visibility = 'private' then nd.owner_id end
+            from %3$s n
+            join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
+            cross join lateral unnest(%4$s) d(key)
+            where %5$s and nullif(trim(d.key), '') is not null
+            on conflict (node_id, key, kind) do nothing
+        $q$, r.entity_type, r.org_expr, p_rows, r.aliases_expr, r.include_where)
     ] end;
 end $$;
 
 drop function if exists aiq.register_entity_table(text,text,text,text,text,text);
 drop function if exists aiq.register_entity_table(text,text,text,text,text,text,text);
+drop function if exists aiq.register_entity_table(text,text,text,text,text,text,text,text);
 
 create or replace function aiq.register_entity_table(
     p_entity_type   text,
@@ -1023,7 +1045,10 @@ create or replace function aiq.register_entity_table(
     p_visibility_expr text default null,
     -- Last for the same reason (REM-1273): a text[] expression of the row's
     -- declared identifiers, projected as short keys.
-    p_keys_expr text default null
+    p_keys_expr text default null,
+    -- Last again (REM-1273): a text[] expression of heuristic names, projected
+    -- as alias keys.
+    p_aliases_expr text default null
 ) returns void as $$
 declare
     -- Named after the ENTITY TYPE, not after the source table's short name.
@@ -1093,14 +1118,15 @@ begin
 
     insert into aiq.entity_registry
         (entity_type, source_table, key_expr, summary_expr, org_expr,
-         visibility_expr, include_where, keys_expr)
+         visibility_expr, include_where, keys_expr, aliases_expr)
     values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr,
-            v_vis, p_include_where, p_keys_expr)
+            v_vis, p_include_where, p_keys_expr, p_aliases_expr)
     on conflict (entity_type) do update
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
             visibility_expr = excluded.visibility_expr,
             include_where = excluded.include_where, keys_expr = excluded.keys_expr,
+            aliases_expr = excluded.aliases_expr,
             -- OR, not assignment: a re-registration by a deployment (seeding
             -- off, excluded.shipped false) must not un-ship a row the
             -- extension seeded, or the next restore collides on it.
@@ -4229,18 +4255,27 @@ begin
     -- and only nodes of the type that owns this source's rows. What LOOKUP is
     -- asked: the whole query, and each word with its outer punctuation removed,
     -- so `why is REM-571 still open?` offers `rem-571` as well as itself.
+    -- An ALIAS answers only a one-word query: cards REM-1 to REM-1274 have the
+    -- aliases `1` to `1274`, and accepted on any word they took 16 of 20
+    -- ordinary questions to the wrong card (`why did 3 tests fail` to REM-3),
+    -- while as the whole query `143` and `#143` found REM-143 20 times in 20
+    -- (p8-subsystems meta/spikes/2026-10-31-bare-number-alias). key_match says
+    -- `alias:143`, so a caller can tell the guess from a declared key.
     v_keyed := case when src.node_col is null
         then 'select null::uuid as chunk_id, null::text as key where false'
         else format($k$
             select distinct on (n.entity_id) c.id as chunk_id, n.key
-              from (select l.entity_id, min(l.key) as key
+              from (select l.entity_id,
+                           min(case when l.match_kind = 'alias' then 'alias:' || l.key else l.key end) as key
                       from aiq.lookup_many(array(
                                select distinct t from (
                                    select btrim($2) union all
                                    select regexp_replace(w, '^[[:punct:]]+|[[:punct:]]+$', '', 'g')
                                      from regexp_split_to_table($2, '\s+') w) x(t)
                                 where t <> '')) l
-                     where l.entity_type = %L group by l.entity_id) n
+                     where l.entity_type = %L
+                       and (l.match_kind <> 'alias' or btrim($2) !~ '[[:space:]]')
+                     group by l.entity_id) n
               join %s c on c.%I = n.entity_id
               left join fused f on f.chunk_id = c.id
              order by n.entity_id, f.rrf desc nulls last, c.id

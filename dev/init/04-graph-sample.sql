@@ -40,7 +40,7 @@ set role app_owner;
 -- failure is useful.
 do $$
 begin
-    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text,text,text)') is null then
+    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text,text,text,text)') is null then
         raise warning
             'skipping the graph sample: this database image predates '
             'aiq.register_entity_table. Everything else installed normally. '
