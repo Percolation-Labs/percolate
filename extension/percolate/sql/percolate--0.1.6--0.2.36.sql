@@ -20216,8 +20216,8 @@ begin
     -- An ALIAS answers only a one-word query: cards REM-1 to REM-1274 have the
     -- aliases `1` to `1274`, and accepted on any word they took 16 of 20
     -- ordinary questions to the wrong card (`why did 3 tests fail` to REM-3),
-    -- while as the whole query `143` and `#143` found REM-143 20 times in 20
-    -- (p8-subsystems meta/spikes/2026-10-31-bare-number-alias). key_match says
+    -- while as the whole query `143` and `#143` found REM-143 20 times in 20,
+    -- on 1,272 board cards with the queries fixed before scoring. key_match says
     -- `alias:143`, so a caller can tell the guess from a declared key.
     v_keyed := case when src.node_col is null
         then 'select null::uuid as chunk_id, null::text as key where false'

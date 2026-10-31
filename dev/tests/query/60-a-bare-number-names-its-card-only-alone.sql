@@ -2,8 +2,7 @@
 --
 -- A board card's writer declares its bare number as an alias (`metadata.aliases`, projected as `alias` keys), so
 -- `143` reaches REM-143. But cards REM-1 to REM-1274 have the aliases 1 to 1274, and accepted on any word of a
--- query they took 16 of 20 ordinary questions to the wrong card (p8-subsystems
--- meta/spikes/2026-10-31-bare-number-alias). What is held:
+-- query they took 16 of 20 ordinary questions to the wrong card, measured on 1,272 board cards. What is held:
 --
 --   1. without the alias the card is not first for `143`, so this test can fail;
 --   2. `143` and `#143` return the card first, with key_match `alias:143`;
