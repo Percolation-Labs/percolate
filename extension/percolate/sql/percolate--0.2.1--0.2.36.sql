@@ -41825,6 +41825,12 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source was the default until REM-1240 step 3. lines (REM-1240): on REM-1204''s A1 re-judge Jev given the targets'' own text separated them at 0.768, against 0.644 for the source and 0.634 to 0.641 for the question''s cosine to the same text; lines is that text, stored at ingest. Not yet walked. V0''s default (walk spec 68c02f68): REM-1240 step 3 passed lines against source on its registered bar, paired and between-source. Part three''s replayed walks pin source, the wording their verdicts were judged under.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
   'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
+ ('walk.travel', 'walk', '"gate"', 'Which judged clues may be travelled: gate, those at P >= walk.gate; or topk, each round''s walk.topk highest-P judged clues whatever their P, plus every clue at P >= walk.gate (the gate as a floor, so nothing the gate travels stops travelling), earlier rounds'' kept open until travelled.', 'aiq.walk_read',
+  'Off (gate) until switched on for a corpus. On chain-like questions the right lead scores about .3, so the gate travels nothing: MuSiQue Jev walks travel in 31% of rounds against 60-89% on BEAM, and 62 rounds that travel nothing hold a lead reaching an unread answer piece, which Jev ranks first in 9 and top 3 in 15. Jev''s P ranks those leads well within each kind (AUC .79 to .90). On 7 judged MuSiQue walks top 3 read 16 of 20 required items against the gate''s 15, none lost. Directional; switching it on is the owner''s call.'),
+ ('walk.topk', 'walk', '3', 'Under walk.travel topk, how many of each round''s judged clues are opened whatever their P.', 'aiq.walk_read',
+  'The value the 7-walk comparison measured; not tuned.'),
+ ('walk.travel_cap', 'walk', 'null', 'Off (null), or n: a travelled clue lands at most n of its unread targets, best search rank first; the rest stay unread.', 'aiq.walk_read',
+  'With top 3 on the same 7 walks, a cap of 10 read the same 16 of 20 items with 215 reads spent on travelled clues against 258, the saving from a few wide term clues (one of 50 targets cut to 10).'),
  ('decider.task_targets', 'decider', to_jsonb(text 'For each option, a lead to messages in the user''s earlier conversations that have not been read yet, described by the messages it leads to. Would following it likely reach information needed to answer `question`, or part of it?'),
   'The question Jev answers for every clue when walk.describe is targets. A verdict is kept with its wording, so verdicts given under one description never answer a clue described the other way.', 'aiq.walk_task',
   'REM-1204''s A1 re-judge and graded-set walks asked it in exactly these words.'),
@@ -42929,6 +42935,7 @@ declare
     asked   int;
     why     text;
     via     text;
+    rank_   jsonb;   -- {doc: its place in search's order}, built once when walk.travel_cap is set
 begin
     if wn = 0 then
         raise invalid_parameter_value using message = 'the walk has not started: no seeds recorded';
@@ -42964,12 +42971,30 @@ begin
     -- Every accepted clue still leading somewhere unread: earlier waves' not
     -- yet travelled, and this round's.
     -- (each built in one aggregate: a merge per key copies the growing object every time)
+    -- walk.travel topk (off by default): each round's walk.topk highest-P judged clues are opened whatever their P,
+    -- ties by key, and stay open until travelled; walk.gate is kept as a floor. A round is the clues one wave judged,
+    -- recorded on each clue as its wave (this round's are st->next, judged at wave wn).
+    if coalesce(s->>'travel', 'gate') = 'topk' then
+        select coalesce(jsonb_object_agg(c.key, jsonb_build_object('p', c.p, 'targets', c.value->'targets')), '{}'::jsonb)
+          into open_
+          from (select a.*, row_number() over (partition by a.w order by a.p desc, a.key) as rk
+                  from (select key, value, (value->>'wave')::int as w, (st->'p'->>key)::real as p
+                          from jsonb_each(st->'clues')
+                        union all
+                        select key, value, wn, (st->'p'->>key)::real from jsonb_each(st->'next')) a
+                 where a.p is not null) c
+         where not (st->'travelled') ? c.key
+           and (c.rk <= (s->>'topk')::int or c.p >= (s->>'gate')::real);
+    elsif coalesce(s->>'travel', 'gate') <> 'gate' then
+        raise invalid_parameter_value using message = format('walk.travel is gate or topk, not %s', s->>'travel');
+    else
     select coalesce(jsonb_object_agg(c.key, jsonb_build_object('p', (st->'p'->>c.key)::real, 'targets', c.value->'targets')),
                     '{}'::jsonb) into open_
       from (select key, value from jsonb_each(st->'clues') where not (st->'travelled') ? key
             union all
             select key, value from jsonb_each(st->'next')) c
      where (st->'p'->>c.key)::real >= (s->>'gate')::real;
+    end if;
     -- F8 (walk.open_whole): an accepted lead with more than open_whole unread targets is opened target by target. Each
     -- unread target judged on its own line (X|<question>|<message>, the target step) and clearing the gate becomes a
     -- single-target lead, one:<message>, at that P; the rest are never read. The target step runs after the judge
@@ -43065,6 +43090,15 @@ begin
               from jsonb_array_elements(case when miss then misses else open_ end->best->'targets')
                    with ordinality x(t, ord_)
              where not reached ? (t #>> '{}');
+            -- walk.travel_cap (off by default): at most n unread targets, best search rank first (unranked last, by key)
+            if jsonb_typeof(s->'travel_cap') = 'number' then
+                rank_ := coalesce(rank_, (select jsonb_object_agg(d, o) from jsonb_array_elements_text(ord) with ordinality z(d, o)));
+                select coalesce(jsonb_agg(t order by r_, t #>> '{}' collate "C"), '[]'::jsonb) into land
+                  from (select t, coalesce((rank_->>(t #>> '{}'))::int, 2147483647) as r_
+                          from jsonb_array_elements(land) t
+                         order by 2, t #>> '{}' collate "C"
+                         limit (s->>'travel_cap')::int) x;
+            end if;
             via := open_->best->>'via';   -- a single target's wide lead (F8), before it leaves the open set
             open_ := open_ - best;
             misses := misses - best;
