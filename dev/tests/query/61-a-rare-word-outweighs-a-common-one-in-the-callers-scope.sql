@@ -19,13 +19,16 @@ begin;
 
 insert into content.channels (name, kind, visibility) values ('query61', 'manual', 'public');
 
--- Twenty documents say 'apple'; one says it three times; one says 'kiwi' once.
+-- Twenty documents say 'apple'; one says it three times; a longer one says 'kiwi' once. ts_rank divides by
+-- length, so the short repeat of the common word beats it.
 select content.register_text('query61', 'query61:a' || n, jsonb_build_array(jsonb_build_object('content',
                              'apple orchard note ' || n)), 'apple ' || n, 'query61:a' || n, null, '{}')
   from generate_series(1, 20) n;
 select content.register_text('query61', 'query61:apples', '[{"content": "apple apple apple"}]', 'apples',
                              'query61:apples', null, '{}');
-select content.register_text('query61', 'query61:kiwi', '[{"content": "kiwi"}]', 'kiwi', 'query61:kiwi', null, '{}');
+select content.register_text('query61', 'query61:kiwi',
+                             '[{"content": "kiwi arrived with the morning delivery from the market stall"}]',
+                             'kiwi', 'query61:kiwi', null, '{}');
 
 create temp table query61_scores (phase text, chunk_id uuid, score real) on commit drop;
 grant all on query61_scores to authenticated;
@@ -47,7 +50,7 @@ begin
 end $$;
 
 set local role authenticated;
-set local request.jwt.claims = '{"sub":"61610000-0000-0000-0000-00000000000b"}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
 
 do $$
 declare
@@ -68,14 +71,15 @@ begin
 end $$;
 
 reset role;
+set local request.jwt.claims = '';   -- the install again, not the reader, to write the other owner's rows
 -- Another owner's private documents in the same channel, each saying 'kiwi' 30 times.
 select content.register_text('query61', 'query61:p' || n, jsonb_build_array(jsonb_build_object('content',
                              repeat('kiwi ', 30))), 'private ' || n, 'query61:p' || n, null, '{}')
   from generate_series(1, 40) n;
-update content.resources set visibility = 'private', owner_id = '61610000-0000-0000-0000-00000000000a'
+update content.resources set visibility = 'private', owner_id = '11111111-1111-1111-1111-111111111111'
  where uri like 'query61:p%';
 set local role authenticated;
-set local request.jwt.claims = '{"sub":"61610000-0000-0000-0000-00000000000b"}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
 
 do $$
 declare n int;

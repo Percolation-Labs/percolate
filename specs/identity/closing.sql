@@ -174,6 +174,10 @@ declare
         -- that exists; the criterion goes in as %L (REM-997).
         'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer,jsonb)',
+        -- lexical's word rarity counted over the caller's scope (REM-1273), built
+        -- as lexical is: regconfig as %L, the relation from aiq.scoped_source,
+        -- the query text bound with USING, never formatted in.
+        'aiq.lexical_idf(text,text,jsonb)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
         'aiq.schema_p8ql(text)',

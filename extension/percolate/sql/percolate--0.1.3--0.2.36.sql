@@ -21974,6 +21974,8 @@ grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authen
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+-- lexical ranks with its word rarity, as the caller (REM-1273); listed in section 4's definer check.
+grant execute on function aiq.lexical_idf(text, text, jsonb) to authenticated;
 -- Both halves build their scoped relation through it as the caller (REM-965).
 grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
@@ -22029,7 +22031,7 @@ begin
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'aiq'
       and p.proname in ('query','lookup','graph_neighbors','graph_walk',
-                        'semantic_in','lexical','hybrid','sql_passthrough')
+                        'semantic_in','lexical','lexical_idf','hybrid','sql_passthrough')
       and p.prosecdef;
     if v_bad is not null then
         raise exception
@@ -47226,6 +47228,10 @@ declare
         -- that exists; the criterion goes in as %L (REM-997).
         'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer,jsonb)',
+        -- lexical's word rarity counted over the caller's scope (REM-1273), built
+        -- as lexical is: regconfig as %L, the relation from aiq.scoped_source,
+        -- the query text bound with USING, never formatted in.
+        'aiq.lexical_idf(text,text,jsonb)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
         'aiq.schema_p8ql(text)',
