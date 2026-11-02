@@ -236,7 +236,7 @@ select set_config('request.jwt.claims', json_build_object('sub', (select id from
 set local role authenticated;
 do $$
 begin
-    if (select count(*) from aiq.walk_stack((select run from aiq.walk_runs where question_text = 'the ladder' order by created_at limit 1))) = 0 then
+    if (select count(*) from aiq.walk_stack((select run from aiq.walk_runs where question_text = 'the ladder' order by created_at, run limit 1))) = 0 then
         raise exception 'the run''s owner, signed in, cannot read its board';
     end if;
 end $$;
@@ -260,7 +260,7 @@ do $$
 declare
     r  uuid := (select id from workflow.runs where input->>'replay' = (select id::text from content.resources
                                                                          where uri = 'walk-fixture-48:replay')
-                 order by created_at limit 1);
+                 order by created_at, id limit 1);   -- the test's runs share one now(); ids are time-ordered (v7)
     c    jsonb;
     n    int;
     cols text;
