@@ -85,6 +85,11 @@ select aiq.register_entity_table(
     -- value must declare nothing rather than fail the document's ingest.
     p_keys_expr => $$array(select e #>> '{}' from jsonb_array_elements(
                         case when jsonb_typeof(n.metadata->'keys') = 'array' then n.metadata->'keys' else '[]' end) e
+                      where jsonb_typeof(e) = 'string')$$,
+    -- THE NAMES IT GOES BY ON A GUESS (REM-1273): `metadata.aliases`, read as
+    -- `keys` is, projected as alias keys -- a board card's bare number.
+    p_aliases_expr => $$array(select e #>> '{}' from jsonb_array_elements(
+                        case when jsonb_typeof(n.metadata->'aliases') = 'array' then n.metadata->'aliases' else '[]' end) e
                       where jsonb_typeof(e) = 'string')$$
 );
 

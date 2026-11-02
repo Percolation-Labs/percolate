@@ -806,6 +806,10 @@ words, is a document's key by LOOKUP's exact tiers (its uri, or an ID it
 declares in `metadata.keys`), that document's best chunk leads, with
 `key_match` naming the key, ahead of the fusion. `SEARCH "REM-571"` returns the
 card that declares `REM-571`, not the cards that mention it most (REM-1273).
+A document may also declare `metadata.aliases`, names it answers to on a guess,
+such as a card's bare number. An alias counts only when it is the whole query:
+`SEARCH "143"` returns REM-143 with `key_match` `alias:143`, and
+`SEARCH "why did 3 tests fail"` is not sent to REM-3.
 
 ---
 
