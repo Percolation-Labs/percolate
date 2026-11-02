@@ -42064,8 +42064,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1204: Jev, shown only a clue''s source, separates clues that lead to evidence at AUC 0.64 to 0.68; shown the targets'' stored terms, 0.69 to 0.75 (+0.06 [+0.03, +0.08] on 156 buried BEAM questions, +0.07 [+0.02, +0.14] on 41 indirect ones). Walked on the graded set (180 questions, span 5, cap 100), target terms beat source at read 50 on one-hop questions (+0.63 against +0.27 over search) and led search from split evidence up, where source lost. Source was the default until REM-1240 step 3. lines (REM-1240): on REM-1204''s A1 re-judge Jev given the targets'' own text separated them at 0.768, against 0.644 for the source and 0.634 to 0.641 for the question''s cosine to the same text; lines is that text, stored at ingest. Not yet walked. V0''s default (walk spec 68c02f68): REM-1240 step 3 passed lines against source on its registered bar, paired and between-source. Part three''s replayed walks pin source, the wording their verdicts were judged under.'),
  ('walk.near_miss', 'walk', 'null', 'Off, or {band, every}: every every-th travel takes the best rejected clue with P in [band, gate).', 'aiq.walk_read',
   'Off because no measurement shows it helps across questions: its only evidence is the walkthrough''s q19 (0 of 2 under the gate without it, 2 of 2 with {band 0.35, every 2}), REM-1207.'),
- ('walk.travel', 'walk', '"gate"', 'Which judged clues may be travelled: gate, those at P >= walk.gate; or topk, each round''s walk.topk highest-P judged clues whatever their P, plus every clue at P >= walk.gate (the gate as a floor, so nothing the gate travels stops travelling), earlier rounds'' kept open until travelled.', 'aiq.walk_read',
-  'Off (gate) until switched on for a corpus. On chain-like questions the right lead scores about .3, so the gate travels nothing: MuSiQue Jev walks travel in 31% of rounds against 60-89% on BEAM, and 62 rounds that travel nothing hold a lead reaching an unread answer piece, which Jev ranks first in 9 and top 3 in 15. Jev''s P ranks those leads well within each kind (AUC .79 to .90). On 7 judged MuSiQue walks top 3 read 16 of 20 required items against the gate''s 15, none lost. Directional; switching it on is the owner''s call.'),
+ ('walk.travel', 'walk', '"gate"', 'Which judged clues may be travelled: gate, those at P >= walk.gate; or topk, each round''s walk.topk highest-P judged clues whatever their P, plus every clue at P >= walk.gate (the gate as a floor, so nothing the gate travels stops travelling), earlier rounds'' kept open until travelled. Under topk the open clues are travelled highest P first, whatever walk.order says.', 'aiq.walk_read',
+  'Off (gate) until switched on for a corpus. On chain-like questions the right lead scores about .3, so the gate travels nothing: MuSiQue Jev walks travel in 31% of rounds against 60-89% on BEAM, and 62 rounds that travel nothing hold a lead reaching an unread answer piece, which Jev ranks first in 9 and top 3 in 15. Jev''s P ranks those leads well within each kind (AUC .79 to .90). On 7 judged MuSiQue walks top 3 read 16 of 20 required items against the gate''s 15, none lost. Highest P first, not per_target: where the floor opens more clues than a wave can read, per_target travelled narrow clues and never the round''s best (a .95 clue with 6 targets, ranked first of 8,324); by P the repository walks read 27 of 33 required items against 23, MuSiQue unchanged. Directional; switching it on is the owner''s call.'),
  ('walk.topk', 'walk', '3', 'Under walk.travel topk, how many of each round''s judged clues are opened whatever their P.', 'aiq.walk_read',
   'The value the 7-walk comparison measured; not tuned.'),
  ('walk.travel_cap', 'walk', 'null', 'Off (null), or n: a travelled clue lands at most n of its unread targets, best search rank first; the rest stay unread.', 'aiq.walk_read',
@@ -43314,13 +43314,17 @@ begin
             miss := best is not null;
         end if;
         if not miss then
-            -- walk.order: p, the highest P; per_target, the highest P per document it would still read (REM-1240)
+            -- walk.order: p, the highest P; per_target, the highest P per document it would still read (REM-1240).
+            -- Under walk.travel topk the open set is travelled highest P first whatever walk.order says: when the
+            -- floor opens more leads than a wave can read, per_target spends the reads on narrow leads and the
+            -- round's best lead goes unread (ledger 5.32, 5.35).
             select o.key, (o.value->>'p')::real into best, bp
               from jsonb_each(open_) o
               cross join lateral (select count(*) as n from jsonb_array_elements(o.value->'targets') t
                                    where not reached ? (t #>> '{}')) u
              where u.n > 0
-             order by case when s->>'order' = 'per_target' then (o.value->>'p')::real / u.n
+             order by case when s->>'order' = 'per_target' and coalesce(s->>'travel', 'gate') <> 'topk'
+                           then (o.value->>'p')::real / u.n
                            else (o.value->>'p')::real end desc, o.key
              limit 1;
         end if;

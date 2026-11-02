@@ -12,6 +12,9 @@
 --   2. four clues at P >= .5: topk travels all four, the fourth through the floor although it ranks 4th;
 --   3. a clue to twelve targets under travel_cap 10 lands the ten with the best search rank, in rank order (the two
 --      search never ranks are left unread); without the cap it lands all twelve.
+--   4. under topk the open clues are travelled highest P first whatever walk.order says: wp/1 holds term c (six targets,
+--      P .95) and d1..d4 (one target each, P .6). topk reads c's targets before any d's; the gate under per_target,
+--      .6/1 against .95/6, reads the d's first (ledger 5.32: the round's best lead never travelled).
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -60,6 +63,34 @@ begin
     end loop;
 end $$;
 
+create temp table fp(n int, terms text[]);
+insert into fp values (1, '{c,d1,d2,d3,d4}'), (50, '{d1}'), (51, '{d2}'), (52, '{d3}'), (53, '{d4}');
+insert into fp select n, '{c}' from generate_series(40, 45) n;
+
+do $$
+declare
+    org uuid := (select id from rbac.orgs order by id limit 1);
+    res uuid;
+begin
+    insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+    select 'walk_topk', gen_random_uuid(), org, 'public', 'wp/' || n from fp;
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    select id, 'walk_topk', summary, 'canonical', org from aiq.nodes where entity_type = 'walk_topk' and summary like 'wp/%';
+    insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+    select distinct 'walk_topk_tag', gen_random_uuid(), org, 'public', t from fp, unnest(terms) t;
+    insert into aiq.edges (src_id, dst_id, relation, org_id, provenance)
+    select i.id, tg.id, 'walk_tagged', org, '{}'
+      from fp join aiq.nodes i on i.entity_type = 'walk_topk' and i.summary = 'wp/' || fp.n
+      cross join unnest(fp.terms) t
+      join aiq.nodes tg on tg.entity_type = 'walk_topk_tag' and tg.summary = t;
+    insert into content.resources (channel_id, uri, title, org_id, visibility)
+    values ((select id from content.channels where name = 'walk-topk'), 'walk-topk:order', 'walk-topk:order', org, 'public')
+    returning id into res;
+    insert into content.resource_chunks (resource_id, ordinal, content)
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts',
+            jsonb_build_object('term:c', 0.95, 'term:d1', 0.6, 'term:d2', 0.6, 'term:d3', 0.6, 'term:d4', 0.6))::text);
+end $$;
+
 select aiq.install_walk_workflow('walk_topk_run', 'jev', 3);
 
 create temp table query62 (name text, run uuid);
@@ -89,6 +120,28 @@ begin
         if (select status from workflow.runs where id = r) is distinct from 'succeeded' then
             raise exception '% did not finish: %', k, (select string_agg(step_key || ' ' || status || ' '
                 || coalesce(error::text, ''), '; ') from workflow.tasks where run_id = r and status not in ('succeeded', 'skipped'));
+        end if;
+        insert into query62 values (k, r);
+    end loop;
+end $$;
+
+do $$
+declare
+    inp jsonb := jsonb_build_object(
+        'nodes', 'walk_topk', 'prefix', 'wp/', 'question', jsonb_build_object('text', 'the question'),
+        'search', to_jsonb(array['wp/1'] || array(select 'wp/' || n from generate_series(40, 45) n)
+                           || array['wp/50', 'wp/51', 'wp/52', 'wp/53']),
+        'offline', true, 'replay', (select id from content.resources where uri = 'walk-topk:order'),
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'per_target', 'wave', 20,
+                                       'seeds', 1, 'per_wave', 1, 'expand_all', false, 'waves', 2));
+    r uuid;
+    k text;
+begin
+    for k, r in select x.name, workflow.start_workflow('walk_topk_run', x.i) from (values
+            ('order topk', jsonb_set(inp, '{settings,travel}', '"topk"')),
+            ('order gate', inp)) x(name, i) loop
+        if (select status from workflow.runs where id = r) is distinct from 'succeeded' then
+            raise exception '% did not finish', k;
         end if;
         insert into query62 values (k, r);
     end loop;
@@ -124,7 +177,19 @@ begin
         raise exception 'without the cap term:b landed % targets, not 12',
             (select jsonb_array_length(land) from query62_travels where name = 'wide whole' and key = 'term:b');
     end if;
-    raise notice 'query/62: a round travels its top 3 under the gate, the gate is a floor, and a travel lands at most travel_cap';
+    -- 4. Highest P first under topk: c's six targets (P .95) are read before any d (P .6, one target each); the gate
+    --    under per_target reads the d's first.
+    if (select min(rd.ord) filter (where rd.doc between 'wp/40' and 'wp/45') < min(rd.ord) filter (where rd.doc between 'wp/50' and 'wp/53')
+          from query62 q, aiq.walk_reads(q.run) rd where q.name = 'order topk') is distinct from true then
+        raise exception 'under topk the d leads (P .6, one target) travelled before c (P .95, six targets): %',
+            (select string_agg(rd.doc, ',' order by rd.wave, rd.ord) from query62 q, aiq.walk_reads(q.run) rd where q.name = 'order topk');
+    end if;
+    if (select min(rd.ord) filter (where rd.doc between 'wp/50' and 'wp/53') < min(rd.ord) filter (where rd.doc between 'wp/40' and 'wp/45')
+          from query62 q, aiq.walk_reads(q.run) rd where q.name = 'order gate') is distinct from true then
+        raise exception 'under the gate with per_target, c travelled before the d leads: %',
+            (select string_agg(rd.doc, ',' order by rd.wave, rd.ord) from query62 q, aiq.walk_reads(q.run) rd where q.name = 'order gate');
+    end if;
+    raise notice 'query/62: a round travels its top 3 under the gate, the gate is a floor, a travel lands at most travel_cap, and topk travels highest P first';
 end $$;
 
 rollback;
