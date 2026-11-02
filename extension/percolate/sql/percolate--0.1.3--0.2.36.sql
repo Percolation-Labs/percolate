@@ -41999,6 +41999,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'REM-1219: votes gained 3 questions of 122 and lost none, sign p 0.25; not enough to change the default. per_target: under P alone the walk spent reads on wide bundles; ordering by P per unread read landed 28% more fresh evidence in REM-1240''s matched-budget replay, so the question stack (REM-1245) walks with it. V0''s default (walk spec 68c02f68). Part three''s published walks pin p.'),
  ('walk.open_whole', 'walk', 'null', 'Off (null), or n: an accepted lead with more than n unread targets is not opened whole; each unread target is judged once on its own line (decider.task_target), and those clearing walk.gate are read as single-target leads.', 'aiq.walk_target_requests, aiq.walk_read',
   'F8, decided on principle (bill 13:42Z, walk spec 54619796): on the holiday stack walk 1,035 of 1,927 leads were accepted and 305 opened; 51 of the 89 accepted leads toward evidence were never opened, because ordering by P per target pushes wide leads out (median 7 targets against 3). A wide lead''s weak targets should not spend reads. Off until it passes on a fresh draw; the spec''s value is 3.'),
+ ('walk.open_whole_topk', 'walk', 'null', 'Off (null), or k: under walk.open_whole, a wide lead also opens its k best targets by their own judged P, whatever the P, besides those clearing walk.gate (the round rule of walk.travel topk, applied inside a lead).', 'aiq.walk_target_requests, aiq.walk_read',
+  'Off until switched on for a corpus. The per-target judge ranks a wide lead''s targets well and scores them low: on QASPER a buried paragraph was judged 2nd of its lead''s 39 targets at P .35, under the gate, so open_whole alone opened none of the 3 items walk.travel_cap had cut, while its top 3 by rank opened all 3 and lost nothing on 5 walks, at about 6 extra judge requests per recovered item. Directional (5 walks); switching it on is the owner''s call.'),
  ('walk.cardinality', 'walk', 'false', 'Whether the walk judges once if its root asks for a set, a count, an order or a summary across messages (N|root against stack.set_gate); a set root is never a leaf, so only its parts can close it.', 'aiq.walk_stack_next',
   'Sirsh''s test, recorded in walk spec b2fc3cb1 (bill confirmed 13:52Z): Jev on the question''s words separates set from single questions at AUC 0.94. Off until stack.set_gate is set on the held-out half of the 1M questions (Youden''s J, temporal left out), so ''not yet calibrated'' is a stated state.'),
  ('walk.split', 'walk', '"terms"', 'Where candidate parts come from: terms, the terms the most reads linked to the root share; or clusters, one part per cluster of linked reads (within walk.span in one sitting, or at or above the history''s stack.cluster_quantile cosine), named by the most specific term its reads share.', 'aiq.walk_stack_next',
@@ -43106,7 +43108,18 @@ begin
         -- step that would open it, not a wave later
         select c.key, coalesce(st->'serves'->>c.key, 'root') as q, c.value->'targets' as tg
           from (select key, value from jsonb_each(st->'clues') union all select key, value from jsonb_each(st->'next')) c
-         where not (st->'travelled') ? c.key and (st->'p'->>c.key)::real >= (st->'settings'->>'gate')::real
+         where not (st->'travelled') ? c.key
+           and ((st->'p'->>c.key)::real >= (st->'settings'->>'gate')::real
+                -- under walk.travel topk a round's walk.topk best judged leads are open whatever their P, so their
+                -- targets are judged too (a round is the clues one wave judged; this round's are st->'next')
+                or (coalesce(st->'settings'->>'travel', 'gate') = 'topk' and c.key in (
+                    select r.key from (select a.key, row_number() over (partition by a.w order by a.p desc, a.key) as rk
+                                         from (select key, coalesce((value->>'wave')::int, -1) as w, (st->'p'->>key)::real as p
+                                                 from jsonb_each(st->'clues')
+                                               union all
+                                               select key, -1, (st->'p'->>key)::real from jsonb_each(st->'next')) a
+                                        where a.p is not null) r
+                     where r.rk <= (st->'settings'->>'topk')::int)))
            and (select count(*) from jsonb_array_elements_text(c.value->'targets') t where not (st->'reached') ? t)
                > (st->'settings'->>'open_whole')::int
     ), todo as (
@@ -43251,8 +43264,15 @@ begin
              where not reached ? t
                and (select count(*) from jsonb_array_elements_text(o.value->'targets') u where not reached ? u)
                    > (s->>'open_whole')::int
-               and (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real
-                   >= (s->>'gate')::real
+               and ((coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real
+                       >= (s->>'gate')::real
+                    -- walk.open_whole_topk: also the lead's k best targets by their own P, whatever the P
+                    or (jsonb_typeof(s->'open_whole_topk') = 'number' and t in (
+                        select u from jsonb_array_elements_text(o.value->'targets') u
+                         where not reached ? u
+                           and (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || u)) is not null
+                         order by (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || u))::real desc, u
+                         limit (s->>'open_whole_topk')::int)))
              order by t, (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real desc)
         ) z;
     end if;
