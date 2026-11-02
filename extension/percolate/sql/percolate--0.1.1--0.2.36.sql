@@ -20170,15 +20170,13 @@ $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 -- strongest, which is why production RAG is near-universally hybrid. We had
 -- only half of it.
 --
--- Native tsvector/ts_rank, NOT BM25, and the difference is worth being honest
--- about: ts_rank uses its own length-normalisation and has no k1/b term
--- saturation, so a term occurring 20 times keeps accruing score in a way BM25
--- deliberately damps. For short chunks the practical difference is small; for
--- long documents with repeated terms it is not.
+-- Native tsvector, ranked by BM25 written in SQL over it (REM-1273; until then
+-- ts_rank, which has no IDF and no k1/b saturation). The note above
+-- aiq.lexical_idf says where word rarity comes from and why.
 --
--- Chosen as the DEFAULT anyway because it is permissive-licensed, already in
+-- tsvector was chosen as the DEFAULT because it is permissive-licensed, already in
 -- core Postgres, costs one GIN index and zero new dependencies. pg_search
--- (ParadeDB, real BM25) is the promote-on-evidence upgrade. It is AGPLv3,
+-- (ParadeDB, an indexed BM25) is the promote-on-evidence upgrade. It is AGPLv3,
 -- which would make it the one
 -- non-permissive license in the collection and deserves a deliberate decision
 -- rather than a default.
@@ -20267,13 +20265,82 @@ begin
 end;
 $$ language plpgsql;
 
+-- WORD RARITY FOR BM25, AS THE CALLER (REM-1273). One row per distinct lexeme of
+-- the query: its IDF, and the average document length the scores are normalised
+-- by (in bytes when by_bytes, else in lexemes, matching how aiq.lexical measures
+-- each row).
+--
+-- Two sources, and the caller's row security picks between them:
+--  - pg_stats, when the caller can read it: ANALYZE's most common lexemes of the
+--    column and their frequencies, so df is free and N is reltuples. Postgres
+--    shows a table's statistics only to a caller row security does not apply to,
+--    so this is the owner's path, and it reveals nothing that caller could not
+--    already read row by row. A lexeme ANALYZE did not list is rarer than the
+--    rarest it did, and gets half that frequency.
+--  - otherwise, counted over the caller's scoped rows now: N, the average length,
+--    and df for each query lexeme in one pass. No other owner's row is counted.
+--
+-- NOT a security definer read of pg_statistic, which would give every caller the
+-- table-wide numbers: that function would answer "is this word common in rows
+-- you cannot see?", the one-word edit the note above aiq.search warns about.
+-- Measured on LongMemEval S held-out (39), recall@5: ts_rank 0.791, counted in
+-- scope 0.838, table-wide stats 0.874; the in-scope count is the price of not
+-- disclosing other owners' word frequencies (REM-1273).
+create or replace function aiq.lexical_idf(p_source text, p_query text, p_scope jsonb default null)
+returns table(lexeme text, idf float8, avgdl float8, by_bytes boolean) as $$
+declare
+    s     aiq.lexical_sources;
+    v_ns  text;
+    v_rel text;
+    v_n   float8;
+    v_e   text[];
+    v_f   real[];
+    v_aw  float8;
+begin
+    select * into s from aiq.lexical_sources where name = p_source;
+    if not found then raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
+    select n.nspname, c.relname, greatest(c.reltuples, 1)::float8 into v_ns, v_rel, v_n
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = s.source_table::regclass;
+    select st.most_common_elems::text::text[], st.most_common_elem_freqs, st.avg_width
+      into v_e, v_f, v_aw
+      from pg_stats st where st.schemaname = v_ns and st.tablename = v_rel and st.attname = 'search_tsv';
+    if v_e is not null and v_f is not null then
+        -- most_common_elem_freqs holds one frequency per element, then the minimum, maximum and null fraction.
+        return query
+            select t.t, ln(1 + (v_n - d.df + 0.5) / (d.df + 0.5)), greatest(coalesce(v_aw, 1), 1), true
+              from (select distinct u.lexeme as t from unnest(to_tsvector(s.regconfig::regconfig, p_query)) u) t
+             cross join lateral (select v_n * coalesce(v_f[array_position(v_e, t.t)],
+                                                       v_f[array_length(v_e, 1) + 1] / 2) as df) d;
+        return;
+    end if;
+    return query execute format($f$
+        with terms as (select array_agg(distinct u.lexeme) as ta from unnest(to_tsvector(%1$L::regconfig, $1)) u),
+        src as materialized (select c.search_tsv from %2$s c),
+        n as (select greatest(count(*), 1)::float8 as n, greatest(avg(length(search_tsv)), 1)::float8 as a from src),
+        -- only the query's lexemes of each row, cut out in C (setweight marks them, ts_filter keeps them)
+        df as (select u.lexeme, count(*)::float8 as df
+                 from src c cross join terms
+                cross join lateral unnest(ts_filter(setweight(c.search_tsv, 'A', terms.ta), '{a}')) u
+                group by u.lexeme)
+        select t.t, ln(1 + (n.n - coalesce(df.df, 0) + 0.5) / (coalesce(df.df, 0) + 0.5)), n.a, false
+          from (select unnest(ta) as t from terms) t cross join n left join df on df.lexeme = t.t $f$,
+        s.regconfig, aiq.scoped_source(s.source_table, p_scope))
+        using p_query;
+end;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately: see above
+
 -- TEXT mode. Deliberately returns the same (id, score) shape as
 -- aiq.semantic_in() so the two can be fused without reshaping either.
 drop function if exists aiq.lexical(text, text, int);
 create or replace function aiq.lexical(
     p_source text, p_query text, p_limit int default 10, p_scope jsonb default null
 ) returns table(chunk_id uuid, content text, score real) as $$
-declare s aiq.lexical_sources;
+declare
+    s       aiq.lexical_sources;
+    v_t     text[];
+    v_idf   float8[];
+    v_a     float8;
+    v_bytes boolean;
 begin
     select * into s from aiq.lexical_sources where name = p_source;
     if not found then raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
@@ -20282,19 +20349,32 @@ begin
             using errcode = 'feature_not_supported',
                   hint = 'as the caller, its row security reads every row before the text index (REM-519)';
     end if;
-    -- ANY OF THE WORDS, ranked by how many and how densely (REM-1145). plainto_tsquery ANDs every word, so a
-    -- question matched only a chunk holding all of them: on LongMemEval S through Percolate it found every source
-    -- for 3 of 39 held-out questions within 50 reads, and aiq.search's hybrid came back as its semantic half alone.
-    -- The same words ORed, ranked by ts_rank normalised by document length (1 + log length), were chosen on the
-    -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
-    -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
-    return query execute format(
-        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
-         select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
-           from %s c, q where c.search_tsv @@ q.t
-          order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
-        s.regconfig, s.content_col, aiq.scoped_source(s.source_table, p_scope))
-        using p_query, p_limit;
+    -- ANY OF THE WORDS (REM-1145): plainto_tsquery ANDs every word, so a question matched only a chunk holding all
+    -- of them, and aiq.search's hybrid came back as its semantic half alone. Ranked by BM25 (k1 1.2, b 0.75) with
+    -- aiq.lexical_idf's word rarity (REM-1273). ts_rank had no IDF, so 'rem', in every board card, outweighed the
+    -- '-571' that names one; on LongMemEval S held-out recall@5 went 0.791 -> 0.838 counted in the caller's scope.
+    -- A query with no indexable word (all stop words) has no lexemes and matches nothing, as it did before.
+    select array_agg(i.lexeme), array_agg(i.idf), max(i.avgdl), bool_or(i.by_bytes)
+      into v_t, v_idf, v_a, v_bytes
+      from aiq.lexical_idf(p_source, p_query, p_scope) i;
+    if v_t is null then return; end if;
+    return query execute format($f$
+        with q as (select string_agg(quote_literal(t), ' | ')::tsquery as tq from unnest($3) t),
+        i as (select * from unnest($3, $4) as i(t, idf))
+        select c.id, c.%1$I::text, b.score
+          from %2$s c cross join q
+         cross join lateral (
+             select sum(i.idf * m.tf * 2.2 / (m.tf + 1.2 * (0.25 + 0.75 *
+                        (case when $6 then pg_column_size(c.search_tsv) else length(c.search_tsv) end) / $5)))::real
+                    as score
+               -- only the query's lexemes, cut out in C: unnesting every lexeme of a matched row cost 3x
+               from (select u.lexeme, coalesce(array_length(u.positions, 1), 1) as tf
+                       from unnest(ts_filter(setweight(c.search_tsv, 'A', $3), '{a}')) u) m
+               join i on i.t = m.lexeme) b
+         where c.search_tsv @@ q.tq
+         order by b.score desc, c.id limit $2 $f$,
+        s.content_col, aiq.scoped_source(s.source_table, p_scope))
+        using p_query, p_limit, v_t, v_idf, v_a, v_bytes;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
@@ -21928,6 +22008,8 @@ grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authen
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+-- lexical ranks with its word rarity, as the caller (REM-1273); listed in section 4's definer check.
+grant execute on function aiq.lexical_idf(text, text, jsonb) to authenticated;
 -- Both halves build their scoped relation through it as the caller (REM-965).
 grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
@@ -21983,7 +22065,7 @@ begin
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'aiq'
       and p.proname in ('query','lookup','graph_neighbors','graph_walk',
-                        'semantic_in','lexical','hybrid','sql_passthrough')
+                        'semantic_in','lexical','lexical_idf','hybrid','sql_passthrough')
       and p.prosecdef;
     if v_bad is not null then
         raise exception
@@ -47180,6 +47262,10 @@ declare
         -- that exists; the criterion goes in as %L (REM-997).
         'aiq.iterated_join(text,text,integer,integer,real,text,text[])',
         'aiq.lexical(text,text,integer,jsonb)',
+        -- lexical's word rarity counted over the caller's scope (REM-1273), built
+        -- as lexical is: regconfig as %L, the relation from aiq.scoped_source,
+        -- the query text bound with USING, never formatted in.
+        'aiq.lexical_idf(text,text,jsonb)',
         'aiq.query(text,vector)',
         'aiq.render_facet(text,text)',
         'aiq.schema_p8ql(text)',

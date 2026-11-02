@@ -431,6 +431,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.semantic_ranks_exactly','text,jsonb,integer','whether SEMANTIC ranks a registered source exactly or through the index: the caller''s readable (scoped) rows, counted to a threshold (REM-1146)'),
 ('ai-query-layer','function','aiq.set_scan_order','text','§10: the one setting semantic_in changes (hnsw.iterative_scan), set as the owner because a caller no longer holds set_config -- user-rbac/roles.sql §6'),
 ('ai-query-layer','function','aiq.lexical','text,text,integer,jsonb','§11: TEXT'),
+('ai-query-layer','function','aiq.lexical_idf','text,text,jsonb','§11: TEXT ranks by BM25; the word rarity it uses, as the caller (REM-1273)'),
 ('ai-query-layer','function','aiq.search','text,text,vector,text,integer,integer,jsonb','§11: SEARCH / RRF'),
 ('ai-query-layer','function','aiq.scoped_source','text,jsonb','§11: SEARCH BY AGENT / BY RUN -- a source narrowed to one agent''s or run''s memories'),
 ('ai-query-layer','function','aiq.lookup_many','text[],boolean,integer','§7: LOOKUP takes a list of keys'),

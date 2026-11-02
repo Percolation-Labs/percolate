@@ -1,0 +1,6 @@
+why = """aiq.lexical ranks by BM25 (REM-1273), and aiq.lexical_idf is where word rarity comes from: pg_stats for a \
+caller who may read it, otherwise counted over the caller's own rows. It is its own function so the source can \
+change in one place; nothing held IDF before, since ts_rank has none, and no df table is added."""
+
+[added]
+functions = ["aiq.lexical_idf"]
