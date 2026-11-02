@@ -216,6 +216,8 @@ insert into aiq.parameters as p (name, part, value, controls, read_by, why) valu
   'F8, decided on principle (bill 13:42Z, walk spec 54619796): on the holiday stack walk 1,035 of 1,927 leads were accepted and 305 opened; 51 of the 89 accepted leads toward evidence were never opened, because ordering by P per target pushes wide leads out (median 7 targets against 3). A wide lead''s weak targets should not spend reads. Off until it passes on a fresh draw; the spec''s value is 3.'),
  ('walk.open_whole_topk', 'walk', 'null', 'Off (null), or k: under walk.open_whole, a wide lead also opens its k best targets by their own judged P, whatever the P, besides those clearing walk.gate (the round rule of walk.travel topk, applied inside a lead).', 'aiq.walk_target_requests, aiq.walk_read',
   'Off until switched on for a corpus. The per-target judge ranks a wide lead''s targets well and scores them low: on QASPER a buried paragraph was judged 2nd of its lead''s 39 targets at P .35, under the gate, so open_whole alone opened none of the 3 items walk.travel_cap had cut, while its top 3 by rank opened all 3 and lost nothing on 5 walks, at about 6 extra judge requests per recovered item. Directional (5 walks); switching it on is the owner''s call.'),
+ ('walk.open_whole_max_width', 'walk', '50', 'Under walk.open_whole, the widest lead judged target by target: a lead with more unread targets than this is opened whole instead, under walk.travel_cap''s search-rank cap. Null: no bound.', 'aiq.walk_target_requests, aiq.walk_read',
+  'Bounds the per-target judging cost at about max_width / 20 requests a lead (a target batch is about 20). On QASPER and MuSiQue the wide leads that mattered had 32 to 39 targets; on the repository, whose long documents raise leads of hundreds of targets, an unbounded walk had not reached read 100 after 22 minutes and 163 calls.'),
  ('walk.cardinality', 'walk', 'false', 'Whether the walk judges once if its root asks for a set, a count, an order or a summary across messages (N|root against stack.set_gate); a set root is never a leaf, so only its parts can close it.', 'aiq.walk_stack_next',
   'Sirsh''s test, recorded in walk spec b2fc3cb1 (bill confirmed 13:52Z): Jev on the question''s words separates set from single questions at AUC 0.94. Off until stack.set_gate is set on the held-out half of the 1M questions (Youden''s J, temporal left out), so ''not yet calibrated'' is a stated state.'),
  ('walk.split', 'walk', '"terms"', 'Where candidate parts come from: terms, the terms the most reads linked to the root share; or clusters, one part per cluster of linked reads (within walk.span in one sitting, or at or above the history''s stack.cluster_quantile cosine), named by the most specific term its reads share.', 'aiq.walk_stack_next',
@@ -1337,6 +1339,10 @@ begin
                      where r.rk <= (st->'settings'->>'topk')::int)))
            and (select count(*) from jsonb_array_elements_text(c.value->'targets') t where not (st->'reached') ? t)
                > (st->'settings'->>'open_whole')::int
+           -- walk.open_whole_max_width: a lead wider than this is opened whole under the search-rank cap, not judged
+           and (coalesce(jsonb_typeof(st->'settings'->'open_whole_max_width'), 'null') <> 'number'
+                or (select count(*) from jsonb_array_elements_text(c.value->'targets') t where not (st->'reached') ? t)
+                   <= (st->'settings'->>'open_whole_max_width')::int)
     ), todo as (
         select distinct w.q, t as doc, 'X|' || w.q || '|' || t as key
           from wide w, jsonb_array_elements_text(w.tg) t
@@ -1471,6 +1477,10 @@ begin
             select o.key, o.value as v from jsonb_each(open_) o
              where (select count(*) from jsonb_array_elements_text(o.value->'targets') t where not reached ? t)
                    <= (s->>'open_whole')::int
+                -- wider than walk.open_whole_max_width: opened whole, under the search-rank cap (walk.travel_cap)
+                or (jsonb_typeof(s->'open_whole_max_width') = 'number'
+                    and (select count(*) from jsonb_array_elements_text(o.value->'targets') t where not reached ? t)
+                        > (s->>'open_whole_max_width')::int)
             union all
             (select distinct on (t) 'one:' || t, jsonb_build_object(
                        'p', (coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real,
@@ -1479,6 +1489,9 @@ begin
              where not reached ? t
                and (select count(*) from jsonb_array_elements_text(o.value->'targets') u where not reached ? u)
                    > (s->>'open_whole')::int
+               and (coalesce(jsonb_typeof(s->'open_whole_max_width'), 'null') <> 'number'
+                    or (select count(*) from jsonb_array_elements_text(o.value->'targets') u where not reached ? u)
+                       <= (s->>'open_whole_max_width')::int)
                and ((coalesce(st->'answers', st->'p')->>('X|' || coalesce(st->'serves'->>o.key, 'root') || '|' || t))::real
                        >= (s->>'gate')::real
                     -- walk.open_whole_topk: also the lead's k best targets by their own P, whatever the P

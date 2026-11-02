@@ -13,6 +13,9 @@
 --   2. Under walk.travel topk the target step judges the targets of a wide lead that is open only by rank: term:w at
 --      P .3, the round's best, is open, so aiq.walk_target_requests lists its twelve targets once the run is online.
 --      (Offline, the replay supplies verdicts and the step returns nothing, as walk.sql says.)
+--   3. walk.open_whole_max_width (50) bounds the cost: wx/1's term x is shared with sixty messages (wx/100..wx/159),
+--      so it is opened whole under travel_cap 10, landing the ten search ranks best (wx/100..wx/109), and no target is
+--      judged on its own; with the bound off, the same lead opens by rank (wx/159 at P .9 first).
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -60,6 +63,34 @@ begin
     end loop;
 end $$;
 
+create temp table fw(n int, terms text[]);
+insert into fw values (1, '{x}');
+insert into fw select n, '{x}' from generate_series(100, 159) n;
+
+do $$
+declare
+    org uuid := (select id from rbac.orgs order by id limit 1);
+    res uuid;
+begin
+    insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+    select 'walk_onek', gen_random_uuid(), org, 'public', 'wx/' || n from fw;
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    select id, 'walk_onek', summary, 'canonical', org from aiq.nodes where entity_type = 'walk_onek' and summary like 'wx/%';
+    insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+    values ('walk_onek_tag', gen_random_uuid(), org, 'public', 'x');
+    insert into aiq.edges (src_id, dst_id, relation, org_id, provenance)
+    select i.id, tg.id, 'walk_tagged', org, '{}'
+      from fw join aiq.nodes i on i.entity_type = 'walk_onek' and i.summary = 'wx/' || fw.n
+      join aiq.nodes tg on tg.entity_type = 'walk_onek_tag' and tg.summary = 'x';
+    insert into content.resources (channel_id, uri, title, org_id, visibility)
+    values ((select id from content.channels where name = 'walk-onek'), 'walk-onek:wide60', 'walk-onek:wide60', org, 'public')
+    returning id into res;
+    insert into content.resource_chunks (resource_id, ordinal, content)
+    values (res, 0, jsonb_build_object('model', 'stand-in', 'task', aiq.walk_task(), 'verdicts',
+            jsonb_build_object('term:x', 0.9, 'X|root|wx/159', 0.9)
+            || (select jsonb_object_agg('X|root|wx/' || n, 0.1) from generate_series(100, 158) n))::text);
+end $$;
+
 select aiq.install_walk_workflow('walk_onek_run', 'jev', 3);
 
 do $$
@@ -95,6 +126,29 @@ begin
     select coalesce(sum(jsonb_array_length(keys)), 0) into n from aiq.walk_target_requests(r);
     if n is distinct from 12 then
         raise exception 'under topk the target step listed % targets of term:w (P .3, open by rank), not 12', n;
+    end if;
+    -- 3. the width bound: a sixty-target lead is opened whole under the search-rank cap, not judged target by target
+    inp := jsonb_build_object(
+        'nodes', 'walk_onek', 'prefix', 'wx/', 'question', jsonb_build_object('text', 'the question'),
+        'search', to_jsonb(array['wx/1'] || array(select 'wx/' || g from generate_series(100, 109) g)), 'offline', true,
+        'replay', (select id from content.resources where uri = 'walk-onek:wide60'),
+        'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 20, 'seeds', 1,
+                                       'per_wave', 1, 'expand_all', false, 'waves', 2, 'open_whole', 10,
+                                       'open_whole_topk', 3, 'travel_cap', 10, 'open_whole_max_width', 50));
+    r := workflow.start_workflow('walk_onek_run', inp);
+    if (select status from workflow.runs where id = r) is distinct from 'succeeded' then
+        raise exception 'the bounded walk did not finish';
+    end if;
+    select string_agg(doc, ',' order by doc) into got from aiq.walk_reads(r) where via = 'term:x';
+    if got is distinct from (select string_agg('wx/' || g, ',' order by 'wx/' || g) from generate_series(100, 109) g) then
+        raise exception 'a sixty-target lead under open_whole_max_width 50 landed % through term:x, not wx/100..wx/109', got;
+    end if;
+    if exists (select 1 from aiq.walk_reads(r) where via like 'one:%') then
+        raise exception 'a lead wider than open_whole_max_width was judged target by target';
+    end if;
+    r := workflow.start_workflow('walk_onek_run', jsonb_set(inp, '{settings,open_whole_max_width}', 'null'));
+    if not exists (select 1 from aiq.walk_reads(r) where via = 'one:wx/159') then
+        raise exception 'with the bound off the sixty-target lead did not open wx/159 (P .9) by rank';
     end if;
     raise notice 'query/63: a wide lead opens its top targets by rank, and under topk its targets are judged whatever its P';
 end $$;
