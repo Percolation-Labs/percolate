@@ -24,9 +24,19 @@ CONVERSATIONS = ("16", "26")
 QIDS = {"1M:16:event_ordering:1", "1M:26:event_ordering:1"}
 
 
+# The walkthrough's harness, in the tree or copied beside this file (a run that copies harness/ out of the tree, as
+# muddling-through's run.sh does, has no ../muddling-through).
+WALKTHROUGH = (HERE.parent.parent / "muddling-through/harness/beam_fetch.py", HERE / "walkthrough_beam_fetch.py")
+
+
 def walkthrough():
-    spec = importlib.util.spec_from_file_location("beam_fetch_walkthrough",
-                                                  HERE.parent.parent / "muddling-through/harness/beam_fetch.py")
+    found = [p for p in WALKTHROUGH if p.exists()]
+    if not found:
+        sys.exit("beam_fetch.py needs the Muddling Through walkthrough's BEAM harness, and found neither "
+                 + " nor ".join(str(p) for p in WALKTHROUGH) + ". Run it from dev/examples/advanced-walk in a "
+                 "percolate checkout, or copy dev/examples/muddling-through/harness/beam_fetch.py beside it as "
+                 "walkthrough_beam_fetch.py.")
+    spec = importlib.util.spec_from_file_location("beam_fetch_walkthrough", found[0])
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

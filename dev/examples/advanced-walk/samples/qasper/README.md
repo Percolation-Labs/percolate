@@ -21,6 +21,11 @@ The gold never enters the database: question-texts.jsonl carries each question's
     percolate sample load samples/qasper
     percolate walk index --source qasper
 
+**Indexing takes about 8 minutes and 3.4 GB.** `walk index` writes one link for each ordered pair of paragraphs that
+share a term, 7.2 million of them, and needs percolate-core with percolate-core#153 (REM-1274). Before it, the index
+wrote every pair of every term the fit allows, 23.3 million, and did not finish: 6.4 GB in 44 minutes on a laptop.
+Measured 3 Nov on extension 0.2.36 from main: 497 s, 252 MB in the client.
+
 The fetch script downloads QASPER's train-dev release from AllenAI's bucket and checks it against a pinned sha256.
 It writes one document per paragraph, and embeds each with BAAI/bge-small-en-v1.5, the model the stack's worker
 runs, so loading takes seconds rather than hours of the stack's rate-limited embedding queue. Measured on a busy
@@ -28,7 +33,8 @@ laptop: the fetch and embedding took 16 minutes, and `sample load` stored all 13
 in under a minute. The chunk is each paragraph's title line, a blank line and its text, the text the lab's search
 ranks were measured on. `--no-vectors` skips the embedding.
 
-**What to expect.** Measured with a stand-in judge on the product's graph, under the walk rule this tutorial turns on
+**What to expect.** Measured with a stand-in judge on the graph `walk index` builds (3 Nov: every one of the 17 replays
+reproduced its walk's items there; items compared per walk, not read order), under the walk rule this tutorial turns on
 (each round's top three leads plus any the judge scores at one half or more, highest first, at most ten documents
 each):
 - on the 14 buried questions, the walk read 31 of 40 required paragraphs, against 18 for search alone, including 13
