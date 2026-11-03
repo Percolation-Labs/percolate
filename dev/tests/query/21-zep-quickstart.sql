@@ -115,7 +115,9 @@ create table if not exists crm.bookings (id int primary key, departs date not nu
   port_id uuid not null references crm.ports, owner_id uuid not null);
 with ana as (select id from rbac.users where email = 'ana@zep.test')
 insert into crm.bookings select b.id, b.departs, p.id, ana.id
-  from ana, (values (1, date '2026-11-03', 'Rotterdam'), (2, date '2026-11-24', 'Felixstowe')) b(id, departs, port)
+  -- dated from the run, not fixed: the move to Felixstowe is said now (the October chat has no said_at), so a fixed
+  -- date stops being after it on that date (it did on 2026-11-03, failing every percolate PR)
+  from ana, (values (1, current_date + 1, 'Rotterdam'), (2, current_date + 22, 'Felixstowe')) b(id, departs, port)
   join crm.ports p on p.name = b.port
 on conflict (id) do nothing;
 grant usage on schema crm to authenticated;
@@ -215,13 +217,19 @@ select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q
     'based_in place/lisbon, prefers mode/rail, prefers mode/road, ships_via rotterdam, works_at company/tagus ceramics',
     '§5: as of May the withdrawn road preference still reads as held (REM-1013): '
     || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$), 'nothing'));
+-- the premise §5 tests: every booking departs after the move it is routed by. It fails, naming the cause, on any
+-- run date where a booking no longer does, as a fixed date did from 2026-11-03.
+select pg_temp.check((select min(b.departs) from crm.bookings b)
+                     > (select max(e.valid_from)::date from aiq.edges e join aiq.nodes d on d.id = e.dst_id
+                         where e.relation = 'ships_via' and d.summary ilike '%felixstowe%'),
+    '§5 premise: every booking departs after the move to Felixstowe, or §5 tests a past route, not the routing');
 select pg_temp.check((select string_agg(b.id || ' ' || p.name || ' ' || d.summary, ', ' order by b.departs)
                         from crm.bookings b
                         join crm.ports p on p.id = b.port_id
                         left join aiq.edges e on e.relation = 'ships_via'
                                              and aiq.edge_is_current(e.valid_from, e.valid_to, b.departs)
                         left join aiq.nodes d on d.id = e.dst_id) = '1 Rotterdam Felixstowe, 2 Felixstowe Felixstowe',
-    '§5: the 3 November booking routes via Rotterdam after she moved to Felixstowe');
+    '§5: booking 1, booked via Rotterdam and departing after she moved, is shipped via Felixstowe');
 :as_operator
 
 -- §6 The article's context block (blocks/12), pasted as a reader pastes it.
