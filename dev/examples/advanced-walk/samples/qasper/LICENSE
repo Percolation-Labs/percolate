@@ -1,6 +1,0 @@
-The questions and evidence in questions.jsonl are derived from QASPER (Dasigi, Lo, Beltagy, Cohan, Smith and Gardner,
-"A Dataset of Information-Seeking Questions and Answers Anchored in Research Papers", NAACL 2021), released by the
-Allen Institute for AI under the Creative Commons Attribution 4.0 International licence (CC BY 4.0):
-https://creativecommons.org/licenses/by/4.0/. The papers' text is not included; harness/qasper_fetch.py downloads it.
-Changes: questions selected (17 of the development set's), each prefixed with its paper's title, and the first
-annotator's evidence paragraphs listed by paragraph id.
