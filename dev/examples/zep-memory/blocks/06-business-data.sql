@@ -14,7 +14,7 @@ create table if not exists crm.bookings (id int primary key, departs date not nu
   port_id uuid not null references crm.ports, owner_id uuid not null);
 with ana as (select id from rbac.users where email = 'ana@example.com')
 insert into crm.bookings select b.id, b.departs, p.id, ana.id
-  from ana, (values (1, date '2026-11-03', 'Rotterdam'), (2, date '2026-11-24', 'Felixstowe')) b(id, departs, port)
+  from ana, (values (1, current_date + 1, 'Rotterdam'), (2, current_date + 22, 'Felixstowe')) b(id, departs, port)
   join crm.ports p on p.name = b.port
 on conflict (id) do nothing;
 

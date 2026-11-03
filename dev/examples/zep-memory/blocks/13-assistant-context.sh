@@ -5,5 +5,5 @@ curl -s $REST/rpc/upsert_agent -H 'Content-Profile: agentic' \
        "tools": [{"server": "harbour-query", "tools": ["query"]}]}}' | jq -c '{name, visibility}'
 curl -s $AGENT/chat -H "Authorization: Bearer $ANA" -H 'Content-Type: application/json' \
   -d '{"model": "ana-assistant", "stream": false, "messages": [{"role": "user", "content":
-       "Is my booking on 3 November going through the right port?"}]}' \
+       "Is my booking tomorrow going through the right port?"}]}' \
   | jq -r '.choices[0].message.content // .'
