@@ -28,12 +28,20 @@ laptop: the fetch and embedding took 16 minutes, and `sample load` stored all 13
 in under a minute. The chunk is each paragraph's title line, a blank line and its text, the text the lab's search
 ranks were measured on. `--no-vectors` skips the embedding.
 
-**What to expect.** Measured in the lab with a stand-in judge, under the walk rule this tutorial turns on (each
-round's top three leads plus any the judge scores at one half or more, highest first, at most ten documents each):
-- on the 14 buried questions, the walk read 35 of 40 required paragraphs against 18 for search alone, including 17 of
-  the 22 past search's 100th result;
-- it completed 10 of the 14 questions, where search completed none;
+**What to expect.** Measured with a stand-in judge on the product's graph, under the walk rule this tutorial turns on
+(each round's top three leads plus any the judge scores at one half or more, highest first, at most ten documents
+each):
+- on the 14 buried questions, the walk read 31 of 40 required paragraphs, against 18 for search alone, including 13
+  of the 22 past search's 100th result;
+- it completed 9 of the 14 questions, where search completed none;
 - on the 3 others it read what search reads, 5 of 5.
 Your numbers depend on the judge you run, so treat these as a direction, not a target.
+
+**Replays, a stand-in judge's, NOT Jev's (replays.jsonl).** One document per question in `walk-replays`, holding every
+P a stand-in judge (Claude, asked with no outside knowledge) gave on that walk under the rule above. Pass a replay's
+document id as the run's `replay` with `offline: true`, and settings `{"travel": "topk", "topk": 3, "travel_cap": 10,
+"order": "p", "waves": 2}`, and walk.sql walks without calling a judge. On all 17 the
+offline walk reads the same 100 documents in the same order as the walk that recorded them. They let you run every
+step without a judge's credit; they are not Jev's verdicts, and each says so in its metadata (`judge`) and model.
 
 Licence: CC BY 4.0 (see LICENSE).

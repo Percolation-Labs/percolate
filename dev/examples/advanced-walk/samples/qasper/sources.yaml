@@ -15,6 +15,10 @@ channels:
     kind: manual
     visibility: public
     config: {description: "QASPER development papers, one document per paragraph"}
+  - name: walk-replays
+    kind: manual
+    visibility: public
+    config: {description: "stand-in verdicts (NOT Jev), one document per question, read back by a run's {replay: document id}"}
   - name: walk-questions
     kind: manual
     visibility: public

@@ -16,4 +16,5 @@ description: |-
 load:
   - sources: sources.yaml
   - texts: texts.jsonl
+  - texts: replays.jsonl
   - texts: question-texts.jsonl
