@@ -374,7 +374,7 @@ table.data td.pill-row .chip { margin: 0 .3rem .15rem 0; }
 table.data { width: 100%; border-collapse: collapse; font-size: .84rem; }
 table.data th {
   text-align: left; font-family: var(--mono); font-weight: 500; font-size: .62rem;
-  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted); white-space: nowrap;
   padding: .5rem .95rem; border-bottom: 1px solid var(--rule); background: var(--sunk);
   position: sticky; top: 0;
 }
