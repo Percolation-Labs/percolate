@@ -8,7 +8,9 @@
 --   5. lines asks in its own wording, so a replay given under another is refused, and a clue the run never raised
 --      is an error, not null;
 --   6. a channel's documents are described by their stored terms_text, and one in another sitting by days apart;
---   7. lines_nocount says the same with no count of messages, in a wording of its own.
+--   7. lines_nocount says the same with no count of messages, in a wording of its own;
+--   8. a channel that stores no terms_text (QASPER's) is described by its documents' text, never by their ids
+--      (REM-1289: every QASPER lead line listed ids).
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -190,6 +192,31 @@ begin
         if txt not like '%"The van holds six boxes" (same sitting, 1 exchange(s) later)%'
            or txt not like '%"The van was late by an hour" (another sitting, 3 day(s) later)%' then
             raise exception 'a channel''s documents were not described by their stored lines and distance: %', txt;
+        end if;
+    end;
+    -- 8. A channel with no terms_text: each target by its own text (aiq.walk_lines), not its id.
+    declare
+        org uuid := (select id from rbac.orgs order by id limit 1);
+        ch  uuid;
+        txt text;
+    begin
+        insert into content.channels (name, kind, org_id, visibility) values ('walk-lines-text', 'manual', org, 'public')
+        returning id into ch;
+        insert into content.resources (channel_id, uri, title, org_id, visibility, metadata)
+        select ch, 'wlt/' || x.i, 'wlt', org, 'public', '{"paper": "1705.01214"}'
+          from (values (1), (2)) x(i);
+        insert into content.resource_chunks (resource_id, ordinal, content)
+        select r.id, 0, x.said
+          from content.resources r
+          join (values ('wlt/1', 'We built a small topic classifier.'),
+                       ('wlt/2', 'There is no public dataset with financial intents in Portuguese.')) x(uri, said)
+            on x.uri = r.uri;
+        insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+        select 'document', r.id, org, 'public', r.uri from content.resources r where r.channel_id = ch;
+        txt := aiq.walk_describe_clue(jsonb_build_object('channel', 'walk-lines-text'), '{}'::jsonb, 'lines', 'term:intents',
+                                      'term', 'intents', 'wlt/1', '["wlt/2"]');
+        if txt not like '%"There is no public dataset with financial intents in Portuguese."%' or txt like '%"wlt/2"%' then
+            raise exception 'a channel with no terms_text was described by ids, not text: %', txt;
         end if;
     end;
     -- 7. lines_nocount: the same lines, no count, its own wording.
