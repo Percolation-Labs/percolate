@@ -2024,3 +2024,125 @@ grant execute on function aiq.walk_task(text, timestamptz), aiq.walk_settings(js
                           aiq.walk_clues(uuid), aiq.walk_waves(uuid), aiq.walk_summary(uuid), aiq.walk_verdicts(uuid)
     to authenticated;
 revoke all on function aiq.install_walk_workflow(text, text, int, text) from public;
+
+-- EDGES FROM USE (tutorial four; off: nothing in the walk calls these). After a walk fails to bridge two things it
+-- read, find the unread paragraphs that name both, and keep the sentence that states the join on the edge. The rule
+-- is the edges-from-use rule, version 3, with its stated-evidence rule:
+--   chain   the terms of the source read (the read the walk stood on) that it names as names: every word capitalised
+--           or a digit, small words exempt, and at least one letter in the term (a bare number is not a name);
+--   ends    the question's index terms (its n-grams of 1-5 words that are terms of the scope) and the named terms of
+--           the other reads, less the chain;
+--   pairs   (end, chain term) that no read holds both of; candidates are unread paragraphs holding both, ranked by
+--           the summed idf of the distinct pairs they join, ties by key;
+--   stated  a sentence ends at . ! ? or a blank line, and a heading block is not one; a candidate makes an edge
+--           only if one of its sentences names both ends of a pair (pairs tried lowest df sum
+--           first, ties by text); among several, the sentence most similar to the question and the source's first 160
+--           characters. No sentence, no edge: nothing falls back to an unrelated sentence.
+-- Similarity here is pg_trgm's similarity(), lexical; the lab chose by embedding, so on a tie of several stating
+-- sentences the two may pick differently.
+
+create or replace function aiq.use_edge_named(p_term text, p_text text)
+returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select p_term ~ '[[:alpha:]]' and exists (  -- a term with no letter ('27', '18') is not a name
+        select 1 from regexp_matches(p_text, regexp_replace(p_term, '([^[:alnum:][:space:]])', '\\\1', 'g'), 'gi') m
+         where not exists (
+             select 1 from regexp_split_to_table(m[1], '[[:space:]–-]+') w
+              where w <> '' and lower(w) not in ('of', 'the', 'and', 'de', 'in', 'on', 'for', 'a', 'an', 'to')
+                and not (substr(w, 1, 1) ~ '^[[:digit:]]'
+                         or (upper(substr(w, 1, 1)) = substr(w, 1, 1) and lower(substr(w, 1, 1)) <> substr(w, 1, 1)))))
+$$;
+
+-- The candidates and their stated sentences. Reads nothing it may not read and writes nothing.
+create or replace function aiq.use_edges(p_input jsonb, p_question text, p_read text[], p_source text, p_top int default 3)
+returns table (rank int, target text, a text, b text, sentence text, score float8)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    g     jsonb := aiq.walk_graph(p_input);
+    txt   jsonb;
+    n     float8;
+    query text;
+begin
+    n := greatest((select count(*) from jsonb_object_keys(coalesce(g->'terms', '{}'::jsonb))), 1);
+    txt := aiq.walk_texts(p_input, p_read);
+    query := p_question || ' ' || left(coalesce(txt->>p_source, ''), 160);
+    return query
+    with rt as (select r as doc, t as term from unnest(p_read) r, jsonb_array_elements_text(coalesce(g->'terms'->r, '[]')) t),
+    named_rt as (select rt.doc, rt.term from rt where aiq.use_edge_named(rt.term, coalesce(txt->>rt.doc, ''))),
+    chain as (select distinct nr.term from named_rt nr where nr.doc = p_source),
+    words as (select m[1] as w, i from regexp_matches(lower(p_question), '[[:alnum:]_''’–-]+', 'g') with ordinality x(m, i)),
+    grams as (select (select string_agg(w2.w, ' ' order by w2.i) from words w2 where w2.i between w1.i and w1.i + k - 1) as t,
+                     (select count(*) from words w2 where w2.i between w1.i and w1.i + k - 1) as len, k
+                from words w1 cross join generate_series(1, 5) k),
+    ends as (select gr.t as term from grams gr where gr.len = gr.k and g->'post' ? gr.t
+             union select nr.term from named_rt nr where nr.doc <> p_source
+             except select ch.term from chain ch),
+    joined as (select distinct r1.term as ta, r2.term as tb from rt r1 join rt r2 on r2.doc = r1.doc),
+    pairs as (select e.term as ta, c.term as tb from ends e cross join chain c
+               where not exists (select 1 from joined j where j.ta = e.term and j.tb = c.term)),
+    cand as (select pa.doc as p, pr.ta, pr.tb
+               from pairs pr
+               cross join lateral (select d as doc from jsonb_array_elements_text(g->'post'->pr.ta) d) pa
+               join lateral (select d as doc from jsonb_array_elements_text(g->'post'->pr.tb) d) pb on pb.doc = pa.doc
+              where pa.doc <> all(p_read)),
+    df as (select t, jsonb_array_length(g->'post'->t)::float8 as df from (select ta as t from cand union select tb from cand) x),
+    scored as (select c.p, sum(ln(n / da.df) + ln(n / db.df)) as score
+                 from (select distinct p, ta, tb from cand) c join df da on da.t = c.ta join df db on db.t = c.tb
+                group by c.p),
+    ptext as (select s.p, aiq.walk_texts(p_input, array[s.p])->>s.p as body from scored s),
+    -- a sentence ends at . ! ? or a blank line; a heading block (one line, no closing punctuation, text after it)
+    -- is not a sentence, so 'Title | Section' is never glued onto the paragraph's first sentence
+    blocks as (select pt.p, b.blk, b.j, count(*) over (partition by pt.p) as nb from ptext pt
+                cross join lateral regexp_split_to_table(coalesce(pt.body, ''), '\n[[:space:]]*\n') with ordinality b(blk, j)),
+    sents as (select bl.p, x.s, bl.j * 100000 + x.i as i from blocks bl
+               cross join lateral regexp_split_to_table(bl.blk, '(?<=[.!?])\s+') with ordinality x(s, i)
+              where x.s ~ '[^[:space:]]'
+                and not (bl.j < bl.nb and btrim(bl.blk) !~ '\n' and btrim(bl.blk) !~ '[.!?:;"”’)]$')),
+    stated as (select distinct on (c.p) c.p, c.ta, c.tb, regexp_replace(s.s, '\s+', ' ', 'g') as sentence
+                 from (select distinct p, ta, tb from cand) c
+                 join df da on da.t = c.ta join df db on db.t = c.tb
+                 join sents s on s.p = c.p and position(c.ta in lower(s.s)) > 0 and position(c.tb in lower(s.s)) > 0
+                order by c.p, da.df + db.df, c.ta collate "C", c.tb collate "C",
+                         similarity(lower(query), lower(s.s)) desc, s.i)
+    select (row_number() over (order by sc.score desc, sc.p collate "C"))::int, sc.p, st.ta, st.tb,
+           left(st.sentence, 400), sc.score
+      from scored sc join stated st on st.p = sc.p
+     order by sc.score desc, sc.p collate "C"
+     limit p_top;
+end;
+$$;
+
+-- Write them: one 'walk_use' edge from the source read to each stated candidate, the sentence on the edge
+-- (provenance {sentence, a, b, question, rule}). Additive: no walk follows 'walk_use' unless a caller adds it.
+create or replace function aiq.use_edges_write(p_input jsonb, p_question text, p_read text[], p_source text, p_top int default 3)
+returns table (target text, edge uuid, sentence text)
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+    keys jsonb := aiq.walk_keys(p_input);
+    src  uuid := (select k::uuid from jsonb_each_text(keys) x(k, v) where v = p_source limit 1);
+    r    record;
+    e    uuid;
+    ty   text;
+begin
+    if src is null then
+        raise invalid_parameter_value using message = format('use_edges_write: %s is not a document of the scope', p_source);
+    end if;
+    ty := (select entity_type from aiq.nodes where id = src);
+    insert into aiq.relation_types (src_type, relation, dst_type, description)
+    values (ty, 'walk_use', ty, 'an edge from use: two things a read named, joined by a sentence of the target')
+    on conflict do nothing;
+    for r in select * from aiq.use_edges(p_input, p_question, p_read, p_source, p_top) loop
+        insert into aiq.edges (src_id, dst_id, relation, org_id, provenance)
+        select src, x.k::uuid, 'walk_use', (select org_id from aiq.nodes where id = src),
+               jsonb_build_object('sentence', r.sentence, 'a', r.a, 'b', r.b, 'question', p_question, 'rule', 'use-v3-stated')
+          from jsonb_each_text(keys) x(k, v) where x.v = r.target
+        on conflict (src_id, dst_id, relation) do update set provenance = excluded.provenance
+        returning id into e;
+        target := r.target; edge := e; sentence := r.sentence;
+        return next;
+    end loop;
+end;
+$$;
+
+grant execute on function aiq.use_edge_named(text, text), aiq.use_edges(jsonb, text, text[], text, int),
+                          aiq.use_edges_write(jsonb, text, text[], text, int) to authenticated;

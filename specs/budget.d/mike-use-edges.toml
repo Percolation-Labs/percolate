@@ -1,0 +1,3 @@
+why = "Edges from use for tutorial four: a finder (aiq.use_edges, stable, writes nothing), its name test, and a writer that stores the stating sentence on a walk_use edge. Additive; nothing in the walk calls them, and no existing function does this: walk_index builds a graph from links, never a link from a failed walk."
+[added]
+functions = ["aiq.use_edge_named", "aiq.use_edges", "aiq.use_edges_write"]
