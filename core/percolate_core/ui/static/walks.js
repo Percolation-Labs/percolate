@@ -418,7 +418,8 @@ export async function walk(run) {
       h("span", { class: "label" }, "By move"),
       table(["Move", "Requests", "Judgements", "Tokens per judgement", "Spend", "Share"], c.by_move || [], (m) =>
         h("tr", {}, [m.move, m.requests, m.judgements, m.tokens_per_judgement, usd(m.usd), m.share != null ? Math.round(m.share * 100) + "%" : "—"]
-          .map((v, i) => h("td", { class: i ? "mono" : "" }, esc(v))))),
+          .map((v, i) => h("td", { class: i ? "mono" : "" }, esc(v)))),
+        "No Jev requests on this walk, so no move has a cost (a replay is judged from recorded verdicts)."),
       (c.by_question || []).length ? h("span", { class: "label" }, "By question (the judge requests per question a lead was judged against)") : null,
       (c.by_question || []).length ? table(["Question", "Requests", "Judgements", "Input tokens", "Spend"], c.by_question, (q) =>
         h("tr", {}, h("td", {}, esc(q.question)), ...[q.requests, q.judgements, Number(q.input_tokens || 0).toLocaleString(), usd(q.usd)].map((v) => h("td", { class: "mono" }, esc(v))))) : null);

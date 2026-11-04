@@ -53,13 +53,14 @@ export function statusClass(s) {
 
 export const status = (s) => chip(s || "—", statusClass(s));
 
-export function table(cols, rows, render) {
+/* `empty` says why a table has no rows where the caller knows; otherwise the reader is told RLS returned none. */
+export function table(cols, rows, render, empty = "No rows. The view is reachable and RLS returned nothing.") {
   return h("table", { class: "data" },
     h("thead", {}, h("tr", {}, cols.map((c) => h("th", {}, c)))),
     h("tbody", {}, rows.length
       ? rows.map((r) => render(r))
       : h("tr", {}, h("td", { colspan: cols.length },
-          h("div", { class: "empty" }, "No rows. The view is reachable and RLS returned nothing.")))));
+          h("div", { class: "empty" }, empty)))));
 }
 
 export const stat = (label, value, note, tone = "") =>
