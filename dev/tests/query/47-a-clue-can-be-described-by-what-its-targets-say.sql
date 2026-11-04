@@ -219,6 +219,63 @@ begin
             raise exception 'a channel with no terms_text was described by ids, not text: %', txt;
         end if;
     end;
+    -- 9. lines_near: the 3 targets shown are the unread ones nearest the question by their stored vectors, nearest
+    -- first; lines still shows the 3 its hash chooses; with no question vector lines_near refuses rather than guess.
+    declare
+        org  uuid := (select id from rbac.orgs order by id limit 1);
+        ch   uuid;
+        txt  text;
+        q    vector := (array[1]::real[] || array_fill(0::real, array[383]))::vector;
+        tg   jsonb := '["wln/2","wln/3","wln/4","wln/5"]';
+        want text;
+    begin
+        if to_regclass('aiq."emb_bge_small_en_v1.5"') is null then
+            create table aiq."emb_bge_small_en_v1.5" (chunk_id uuid not null, embedding vector(384) not null,
+                                                      embedded_at timestamptz not null default now());
+        end if;
+        insert into content.channels (name, kind, org_id, visibility) values ('walk-lines-near', 'manual', org, 'public')
+        returning id into ch;
+        insert into content.resources (channel_id, uri, title, org_id, visibility)
+        select ch, 'wln/' || x.i, 'wln', org, 'public' from generate_series(1, 5) x(i);
+        insert into content.resource_chunks (resource_id, ordinal, content)
+        select r.id, 0, x.said
+          from content.resources r
+          join (values ('wln/1', 'The source paragraph.'), ('wln/2', 'Nearest of all.'), ('wln/3', 'Second nearest.'),
+                       ('wln/4', 'Third nearest.'), ('wln/5', 'Furthest from the question.')) x(uri, said) on x.uri = r.uri;
+        insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
+        select 'document', r.id, org, 'public', r.uri from content.resources r where r.channel_id = ch;
+        insert into aiq."emb_bge_small_en_v1.5" (chunk_id, embedding)
+        select c.id, (array[x.a, x.b]::real[] || array_fill(0::real, array[382]))::vector
+          from content.resources r join content.resource_chunks c on c.resource_id = r.id
+          join (values ('wln/2', 1.0, 0.0), ('wln/3', 0.8, 0.6), ('wln/4', 0.6, 0.8), ('wln/5', 0.0, 1.0)) x(uri, a, b)
+            on x.uri = r.uri;
+        txt := aiq.walk_describe_clue(jsonb_build_object('channel', 'walk-lines-near'), '{}'::jsonb, 'lines_near',
+                                      'term:near', 'term', 'near', 'wln/1', tg, null, q);
+        if txt not like '%"Nearest of all." | "Second nearest." | "Third nearest."%' or txt like '%Furthest%' then
+            raise exception 'lines_near did not show the 3 targets nearest the question, nearest first: %', txt;
+        end if;
+        select string_agg(format('"%s"', c.content), ' | ' order by md5('term:near:' || r.uri)) into want
+          from (select r.uri from content.resources r where r.channel_id = ch and r.uri <> 'wln/1'
+                 order by md5('term:near:' || r.uri) limit 3) pick
+          join content.resources r on r.uri = pick.uri and r.channel_id = ch
+          join content.resource_chunks c on c.resource_id = r.id;
+        txt := aiq.walk_describe_clue(jsonb_build_object('channel', 'walk-lines-near'), '{}'::jsonb, 'lines',
+                                      'term:near', 'term', 'near', 'wln/1', tg, null, q);
+        if txt not like '%' || want || '%' then
+            raise exception 'lines no longer shows the 3 targets its hash chooses (%): %', want, txt;
+        end if;
+        begin
+            txt := aiq.walk_describe_clue(jsonb_build_object('channel', 'walk-lines-near'), '{}'::jsonb, 'lines_near',
+                                          'term:near', 'term', 'near', 'wln/1', tg);
+            raise exception 'lines_near described a lead with no question vector: %', txt;
+        exception when invalid_parameter_value then
+            null;
+        end;
+        if aiq.walk_task('lines_near') in (aiq.walk_task('source'), aiq.walk_task('targets'), aiq.walk_task('lines'),
+                                           aiq.walk_task('lines_nocount')) then
+            raise exception 'lines_near shares a wording with another description';
+        end if;
+    end;
     -- 7. lines_nocount: the same lines, no count, its own wording.
     select string_agg(key || ' = ' || coalesce(value->>'text', 'null'), '; ') into bad
       from jsonb_each(aiq.walk_state((runs->>'lines_nocount')::uuid)->'next')

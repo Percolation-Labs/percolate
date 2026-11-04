@@ -910,9 +910,11 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     select c.key,
            aiq.walk_describe_clue((select input from inp), g.g, coalesce(p_describe, st.st->'settings'->>'describe'), c.key,
                                   c.value->>'kind', c.value->>'x', c.value->>'source', c.value->'targets',
-                                  src.t->>(c.value->>'source')),
+                                  src.t->>(c.value->>'source'), qv.v),
            case when sd.qs is not null then 'It comes out of a message found to answer: ' || sd.qs || '.' end
-      from c cross join st cross join g cross join src left join said sd on sd.doc = c.value->>'source'
+      from c cross join st cross join g cross join src
+      cross join (select aiq.walk_question_vector(p_run) as v) qv
+      left join said sd on sd.doc = c.value->>'source'
      order by c.key
 $$;
 grant execute on function aiq.walk_clue_texts(uuid, text) to authenticated;
@@ -924,7 +926,7 @@ grant execute on function aiq.walk_clue_texts(uuid, text) to authenticated;
 -- refused walk_state_reads, walk_state_waves and parameters_of. walk_coverage, walk_why and walk_audit serve oracle
 -- mode, whose labels the caller passes in.
 grant execute on function aiq.walk_state_reads(jsonb), aiq.walk_state_clues(jsonb), aiq.walk_state_waves(jsonb),
-                          aiq.walk_describe_clue(jsonb, jsonb, text, text, text, text, text, jsonb, text),
+                          aiq.walk_describe_clue(jsonb, jsonb, text, text, text, text, text, jsonb, text, vector),
                           aiq.walk_clue_text(uuid, text, text), aiq.walk_audit(uuid), aiq.walk_why(uuid, text[]),
                           aiq.walk_coverage(uuid, text[], integer[])
     to authenticated;

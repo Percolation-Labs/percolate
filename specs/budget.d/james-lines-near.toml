@@ -1,0 +1,3 @@
+why = "walk.describe lines_near chooses the 3 targets a lead shows by their cosine to the question, and needs the question's vector, which a run keeps only in its q step's output. aiq.walk_question_vector reads it there. Nothing held it before: walk_state never kept the vector, and walk_doc_vectors returns documents' vectors, not the question's."
+[added]
+functions = ["aiq.walk_question_vector"]
