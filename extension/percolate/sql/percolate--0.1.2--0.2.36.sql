@@ -42240,8 +42240,8 @@ $$;
 -- A clue's description, as the decider reads it, under each walk.describe (REM-1240). aiq.walk_state calls it for the
 -- clues the next round judges, and aiq.walk_clue_text for any clue a run raised, so a re-judge asks in the walk's own
 -- words. p_text is the source's text (aiq.walk_texts); only source quotes it.
---   lines: up to 3 targets, chosen as aiq.walk_signs chooses them, each by what the user said in it (its stored
---   terms_text, or a node's summary) and how far it sits from the source: in the same sitting (the index's walk_next
+--   lines: up to 3 targets, chosen as aiq.walk_signs chooses them, each by what the user said in it (aiq.walk_lines:
+--   its stored terms_text, else its text, or a node's summary) and how far it sits from the source: in the same sitting (the index's walk_next
 --   provenance), by exchanges; in another, by days (said_at), when known. A term also says how many messages hold
 --   it. lines_nocount is lines without any count. Nothing is read at walk time.
 create or replace function aiq.walk_describe_clue(p_input jsonb, p_graph jsonb, p_describe text, p_key text,
@@ -42277,7 +42277,9 @@ begin
           from jsonb_array_elements(coalesce(p_targets, '[]'::jsonb)) d
          order by 2 limit 3
     ), doc as (
-        select coalesce(r.uri, r.id::text) as doc, n.id as node, r.metadata->>'terms_text' as line,
+        -- the line a read is assessed by (aiq.walk_lines): terms_text where the channel stores it, else the text
+        select coalesce(r.uri, r.id::text) as doc, n.id as node,
+               aiq.walk_lines(p_input, array[coalesce(r.uri, r.id::text)])->>coalesce(r.uri, r.id::text) as line,
                (r.metadata->>'said_at')::timestamptz as said_at
           from content.resources r join content.channels ch on ch.id = r.channel_id
           join aiq.nodes n on n.entity_type = 'document' and n.entity_id = r.id
