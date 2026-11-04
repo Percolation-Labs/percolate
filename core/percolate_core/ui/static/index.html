@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="evidence.css">
 <style>
   /* theme.css is shared verbatim with the mockups, which have no router. The
      outlet is this app's own object: it has to stretch, or `.page.flush` --
@@ -70,6 +71,7 @@ import { query } from "./workbench.js";
 import { files } from "./files.js";
 import { sources } from "./sources.js";
 import * as WK from "./walks.js";
+import { evidence } from "./evidence.js";
 import { token, setToken, claims, config, setEndpoint, loadConfig, sessionState, canRenewSession, renewSession, ensureSession, devToken } from "./api.js";
 
 /* Top-level navigation also registers its screens. Child screens are added
@@ -80,7 +82,7 @@ const NAV = [
             ["runs", "Runs", "runs", W.runs],
             ["schedules", "Schedules", "clock", W.schedules],
             ["query", "Query", "grid", query], ["sources", "Data Sources", "flow", sources], ["files", "Files", "book", files],
-            ["walks", "Walks", "flow", WK.walks]]],
+            ["walks", "Walks", "flow", WK.walks], ["evidence", "Evidence", "grid", evidence]]],
   ["Fleet", [["queues", "Queues & pools", "pools", W.queues],
              ["scale", "Load & limits", "scale", W.scale],
              ["events", "Events", "events", W.events]]],
@@ -101,7 +103,7 @@ function drawNav(active) {
   document.getElementById("nav").replaceChildren(...NAV.map(([group, items]) =>
     h("div", { class: "nav-group" },
       group ? h("h6", {}, group) : null,
-      items.flatMap(([slug, label, ic]) => {
+      items.filter(([slug]) => slug !== "evidence" || config().evidenceExample).flatMap(([slug, label, ic]) => {
         const item = h("a", { class: "nav-item", href: "#/" + slug, title: label,
                               "aria-current": slug === active ? "page" : null },
           iconEl(ic), h("span", { class: "lbl" }, label));
@@ -245,7 +247,7 @@ drawWho();
     const { setStatusVocabulary } = await import("./ui.js");
     setStatusVocabulary((await read(READS.lifecycleStates)).rows);
   } catch (_) {}
-  if (!token()) location.hash = "#/signin";
+  if (!token() && !(config().evidenceExample && /^#\/evidence(?:\/|$)/.test(location.hash))) location.hash = "#/signin";
   route();
 })();
 </script>
