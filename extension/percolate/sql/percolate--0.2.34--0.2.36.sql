@@ -43523,12 +43523,13 @@ revoke all on function aiq.install_walk_workflow(text, text, int, text) from pub
 -- read, find the unread paragraphs that name both, and keep the sentence that states the join on the edge. The rule
 -- is the edges-from-use rule, version 3, with its stated-evidence rule:
 --   chain   the terms of the source read (the read the walk stood on) that it names as names: every word capitalised
---           or a digit, small words exempt;
+--           or a digit, small words exempt, and at least one letter in the term (a bare number is not a name);
 --   ends    the question's index terms (its n-grams of 1-5 words that are terms of the scope) and the named terms of
 --           the other reads, less the chain;
 --   pairs   (end, chain term) that no read holds both of; candidates are unread paragraphs holding both, ranked by
 --           the summed idf of the distinct pairs they join, ties by key;
---   stated  a candidate makes an edge only if one of its sentences names both ends of a pair (pairs tried lowest df sum
+--   stated  a sentence ends at . ! ? or a blank line, and a heading block is not one; a candidate makes an edge
+--           only if one of its sentences names both ends of a pair (pairs tried lowest df sum
 --           first, ties by text); among several, the sentence most similar to the question and the source's first 160
 --           characters. No sentence, no edge: nothing falls back to an unrelated sentence.
 -- Similarity here is pg_trgm's similarity(), lexical; the lab chose by embedding, so on a tie of several stating
@@ -43537,7 +43538,7 @@ revoke all on function aiq.install_walk_workflow(text, text, int, text) from pub
 create or replace function aiq.use_edge_named(p_term text, p_text text)
 returns boolean
 language sql immutable set search_path = pg_catalog, public as $$
-    select exists (
+    select p_term ~ '[[:alpha:]]' and exists (  -- a term with no letter ('27', '18') is not a name
         select 1 from regexp_matches(p_text, regexp_replace(p_term, '([^[:alnum:][:space:]])', '\\\1', 'g'), 'gi') m
          where not exists (
              select 1 from regexp_split_to_table(m[1], '[[:space:]–-]+') w
@@ -43583,9 +43584,14 @@ begin
                  from (select distinct p, ta, tb from cand) c join df da on da.t = c.ta join df db on db.t = c.tb
                 group by c.p),
     ptext as (select s.p, aiq.walk_texts(p_input, array[s.p])->>s.p as body from scored s),
-    sents as (select pt.p, x.s, x.i from ptext pt
-               cross join lateral regexp_split_to_table(coalesce(pt.body, ''), '(?<=[.!?])\s+') with ordinality x(s, i)
-              where x.s <> ''),
+    -- a sentence ends at . ! ? or a blank line; a heading block (one line, no closing punctuation, text after it)
+    -- is not a sentence, so 'Title | Section' is never glued onto the paragraph's first sentence
+    blocks as (select pt.p, b.blk, b.j, count(*) over (partition by pt.p) as nb from ptext pt
+                cross join lateral regexp_split_to_table(coalesce(pt.body, ''), '\n[[:space:]]*\n') with ordinality b(blk, j)),
+    sents as (select bl.p, x.s, bl.j * 100000 + x.i as i from blocks bl
+               cross join lateral regexp_split_to_table(bl.blk, '(?<=[.!?])\s+') with ordinality x(s, i)
+              where x.s ~ '[^[:space:]]'
+                and not (bl.j < bl.nb and btrim(bl.blk) !~ '\n' and btrim(bl.blk) !~ '[.!?:;"”’)]$')),
     stated as (select distinct on (c.p) c.p, c.ta, c.tb, regexp_replace(s.s, '\s+', ' ', 'g') as sentence
                  from (select distinct p, ta, tb from cand) c
                  join df da on da.t = c.ta join df db on db.t = c.tb
