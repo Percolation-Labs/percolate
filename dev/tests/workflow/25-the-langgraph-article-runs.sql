@@ -33,6 +33,10 @@
 -- joins the stack through COMPOSE_FILE, OPENAI_BASE_URL points the agents at it, and the agent rows script it,
 -- so every request is the reader's word for word.
 --
+-- Setup is one block, `live: setup`, as the article has it: it starts the stack, installs the CLI, signs the reader
+-- in and defines start, show and waiting. Its .env heredoc is unquoted, so the key comes from OPENAI_API_KEY in the
+-- reader's shell and the block runs without an edit.
+--
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -113,11 +117,11 @@ $$ language sql;
 
 
 -- Before you start -----------------------------------------------------------------------------------------------
--- live: stack
+-- live: setup
 -- mkdir langgraph-tour && cd langgraph-tour
 -- curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml \
 --   -o docker-compose.yml
--- cat > .env <<'EOF'
+-- cat > .env <<EOF
 -- COMPOSE_PROJECT_NAME=langgraph-tour
 -- P8_PG_PORT=5432
 -- P8_REST_PORT=3000
@@ -126,26 +130,16 @@ $$ language sql;
 -- P8_MINIO_PORT=9000
 -- P8_MINIO_CONSOLE_PORT=9001
 -- P8_QUERY_MCP_PORT=8090
--- OPENAI_API_KEY=sk-your-key
+-- OPENAI_API_KEY=$OPENAI_API_KEY
 -- EOF
 -- docker compose up -d --wait
--- /live
--- live: venv
--- python3 -c 'import sys; sys.exit(sys.version_info < (3, 11) and "Percolate needs Python 3.11 or newer: use python3.11 or python3.13 in place of python3")' &&
---   python3 -m venv .venv && . .venv/bin/activate &&
---   pip install 'percolate-core[sample,agent]==0.2.16'
--- /live
--- live: shell
--- set -a; . ./.env; set +a
--- export PAGER=cat
--- export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
--- export P8_ADMIN_DSN=$P8_DSN
--- export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
--- REST=http://localhost:$P8_REST_PORT
--- AGENT=http://localhost:$P8_AGENT_PORT
+-- python3 -m venv .venv && . .venv/bin/activate && pip install -q 'percolate-core==0.2.17'
 --
+-- set -a; . ./.env; set +a
+-- export PAGER=cat P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
+-- export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
+-- REST=http://localhost:$P8_REST_PORT AGENT=http://localhost:$P8_AGENT_PORT
 -- psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')"
--- export P8_USER_ID=$(psql "$P8_DSN" -Atc "select id from rbac.users where email = 'me@example.com'")
 -- export TOKEN=$(percolate auth token --email me@example.com)
 --
 -- start() {
