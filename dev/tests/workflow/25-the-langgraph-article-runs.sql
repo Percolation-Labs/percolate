@@ -774,8 +774,14 @@ select pg_temp.check(:'LAST_ERROR_MESSAGE' like 'not authorized to signal run %'
     '§8 crew is refused at the signature: ' || :'LAST_ERROR_MESSAGE');
 select pg_temp.check(pg_temp.status(current_setting('run.id')::uuid, 'approve') = 'waiting_external',
     '§8 and the step still waits');
--- The reader finds the run by its workflow's name, and says who they are before signing, as the published
--- first-workflow page does.
+-- The wait survives a restart of every process but the database: the article restarts the worker and the
+-- agent runtime while approve waits, and waiting still prints waiting_external. Here the step is a row in this
+-- transaction, so the live run carries the claim.
+-- live: restart
+-- docker compose restart worker agent
+-- waiting $RUN approve
+-- /live
+-- The reader finds the run by its workflow's name, and says who they are before signing.
 -- block: signal
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false);
@@ -1022,5 +1028,22 @@ select v.name, b.port,
 --   -d '{"p_statement": "select v.name, b.port, count(distinct m.session_id) as conversations, count(distinct t.run_id) as runs from fleet.port_calls c join fleet.vessels v on v.id = c.vessel_id join fleet.berths b on b.id = c.berth_id left join agentic.messages_api m on strpos(m.content, v.name) > 0 left join workflow.tasks_api t on strpos(t.output::text, v.name) > 0 where c.departed_at is null group by v.name, b.port order by v.name"}'; echo
 -- /live
 
+
+-- What the run cost: the model calls workflow.task_usage records, and the engine's gap from one task finishing to
+-- the next being claimed. Here nothing calls a model, so the first select may count none; it must still run.
+-- block: cost
+-- Percolate: what the model calls cost, and what the engine added between steps
+select count(*) as calls, sum(input_tokens) as input_tokens, sum(output_tokens) as output_tokens,
+       round(avg(wall_seconds), 1) as avg_s, round(min(wall_seconds), 1) as min_s,
+       round(max(wall_seconds), 1) as max_s
+  from workflow.task_usage;
+
+select round(min(gap_ms), 1) as min_gap_ms, round(max(gap_ms), 1) as max_gap_ms, count(*) as handoffs
+  from (select extract(epoch from claimed_at - lag(completed_at) over w) * 1000 as gap_ms
+          from workflow.tasks where queue = 'http' and claimed_at is not null
+        window w as (partition by run_id order by claimed_at)) g
+ where gap_ms >= 0;
+-- /block
+select pg_temp.check(to_regclass('workflow.task_usage') is not null, 'cost: workflow.task_usage exists');
 
 rollback;
