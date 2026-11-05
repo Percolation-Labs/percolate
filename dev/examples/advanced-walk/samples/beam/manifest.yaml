@@ -1,0 +1,19 @@
+# BEAM for tutorial four (Advanced Percolate Memory): when the judge is sure of many leads.
+#
+#     python3 harness/beam_fetch.py samples/beam    # BEAM's text, downloaded and checked; vectors made here
+#     percolate sample load samples/beam
+#     percolate walk index --source beam-1m16
+#     percolate walk index --source beam-1m26
+#
+# Two conversations, one document per exchange, one channel each (a person's memory). Two questions, where the judge
+# scores tens of leads at one half or more and the walk's budget becomes the limit.
+name: advanced-walk-beam
+version: 1.0.0
+description: |-
+  BEAM conversations 1M:16 and 1M:26 with two event-ordering questions and their evidence. CC BY-SA 4.0, from
+  Tavakoli et al., "Beyond a Million Tokens", ICLR 2026 (arXiv 2510.27246). See README.md.
+load:
+  - sources: sources.yaml
+  - texts: texts.jsonl
+  - texts: replays.jsonl
+  - texts: question-texts.jsonl

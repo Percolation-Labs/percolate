@@ -1,0 +1,20 @@
+# QASPER for tutorial four (Advanced Percolate Memory): questions whose answer search buries.
+#
+#     python3 harness/qasper_fetch.py samples/qasper    # QASPER's text, downloaded and checked; vectors made here
+#     percolate sample load samples/qasper
+#     percolate walk index --source qasper
+#
+# One document per paragraph of QASPER's 281 development papers (13,547), pooled in one channel, so a paper's
+# paragraphs compete with every other's. 17 questions: 14 whose answer has a paragraph search ranks past its 100th
+# result, and 3 whose answer search reads within its first 100 (does the walk lose anything there?).
+name: advanced-walk-qasper
+version: 1.0.0
+description: |-
+  QASPER development papers (281, 13,547 paragraphs) with 17 questions and their annotated evidence paragraphs.
+  CC BY 4.0, from Dasigi et al., "A Dataset of Information-Seeking Questions and Answers Anchored in Research
+  Papers", NAACL 2021. See README.md.
+load:
+  - sources: sources.yaml
+  - texts: texts.jsonl
+  - texts: replays.jsonl
+  - texts: question-texts.jsonl

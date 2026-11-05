@@ -1,0 +1,25 @@
+# The model the stack's worker runs, and the one qasper_fetch.py embeds with. It is the image's default; registering
+# it again is harmless.
+embedding_models:
+  - name: bge-small-en-v1.5
+    dim: 384
+    provider: fastembed
+    endpoint: BAAI/bge-small-en-v1.5
+    credential_ref: null
+    is_default: true
+
+# One channel for the pooled papers. It names no workflow: the vectors arrive with the text (qasper_fetch.py), so
+# nothing waits on the embedding queue. Fetched with --no-vectors, give it one (content.install_text_embed_workflow).
+channels:
+  - name: qasper
+    kind: manual
+    visibility: public
+    config: {description: "QASPER development papers, one document per paragraph"}
+  - name: walk-replays
+    kind: manual
+    visibility: public
+    config: {description: "stand-in verdicts (NOT Jev), one document per question, read back by a run's {replay: document id}"}
+  - name: walk-questions
+    kind: manual
+    visibility: public
+    config: {description: "each question, by uri question:<qid>, without its answer key; never embedded"}

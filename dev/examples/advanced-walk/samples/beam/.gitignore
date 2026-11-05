@@ -1,0 +1,5 @@
+# written by harness/beam_fetch.py: BEAM's text is downloaded, never committed
+texts.jsonl
+questions.jsonl
+question-texts.jsonl
+vectors.local.jsonl
