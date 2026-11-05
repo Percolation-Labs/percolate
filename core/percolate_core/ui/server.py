@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import mimetypes
 import os
+from pathlib import Path
 from importlib import resources
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from .. import __version__
 
@@ -38,7 +39,7 @@ from .. import __version__
 # A module missing from this tuple 404s and takes the whole page down with it,
 # so `tests/test_ui_reads.py` asserts that every module the UI imports is here
 # rather than leaving it to whoever adds the next one to remember.
-ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js",
+ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js", "evidence.js", "evidence.css",
           "access.js", "chat-stream.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
           "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "walks.js", "theme.css", "favicon.svg")
 
@@ -85,6 +86,7 @@ def config() -> dict:
                        or os.environ.get("PGRST_JWT_SECRET")
                        or os.environ.get("P8_JWT_SECRET") or "") if dev else "",
         "version": __version__,
+        "evidence_example": bool(os.environ.get("P8_UI_EVIDENCE_EXAMPLE")),
     }
 
 
@@ -101,6 +103,19 @@ def router() -> APIRouter:
         # deployment moves, and a stale copy points a browser at the wrong
         # database.
         return JSONResponse(config(), headers={"Cache-Control": "no-store"})
+
+    @r.get("/example/{asset}")
+    async def example_asset(asset: str, request: Request) -> FileResponse:
+        # Explicit local example files, never database rows or an authorization proxy.
+        # The archived experiment stays outside the distributed package. No directory browsing.
+        directory = os.environ.get("P8_UI_EVIDENCE_EXAMPLE")
+        if (not directory or not request.client or request.client.host not in {"127.0.0.1", "::1"}
+                or asset not in {"cases.json", "engine.js", "duckdb-worker.js", "duckdb.wasm"}):
+            raise HTTPException(404, "No local example")
+        path = Path(directory) / asset
+        if not path.is_file():
+            raise HTTPException(404, "Example asset is missing; run dev/prepare_evidence_example.py")
+        return FileResponse(path, headers={"Cache-Control": "no-store"})
 
     @r.get("/{asset}")
     async def asset(asset: str) -> Response:

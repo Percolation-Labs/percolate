@@ -1,6 +1,6 @@
 [project]
 name = "percolate-core"
-version = "0.2.17"
+version = "0.2.18"
 description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -123,7 +123,7 @@ all = ["percolate-core[content,agent,providers,ingest,tabular,lake,otel,embed]"]
 percolate = "percolate_core.cli:app"
 
 [build-system]
-requires = ["hatchling<1.28"]
+requires = ["hatchling<1.33"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

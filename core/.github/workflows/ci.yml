@@ -102,6 +102,10 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_reads.py
 
+      - name: Recorded evidence files are opt-in and loopback-only
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_ui_evidence.py
+
       # Every run in a delegation tree publishes on one session channel
       # (brief.md §4). Chat keeps each run's text apart, lets only the root run
       # end the turn, and nests a child's output under its delegation.
