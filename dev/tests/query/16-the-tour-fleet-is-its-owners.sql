@@ -53,7 +53,7 @@ create table if not exists fleet.port_calls (
   arrived_at timestamptz not null, departed_at timestamptz,  -- null: alongside now
   purpose text not null, owner_id uuid not null);
 comment on column fleet.port_calls.departed_at is 'null while the vessel is still alongside';
-comment on table fleet.vessels    is 'Synthetic tour data (CC0-1.0): the fleet. IMO numbers fail the check digit on purpose.';
+comment on table fleet.vessels    is 'Synthetic tour data (CC0-1.0): the fleet. IMO numbers deliberately fail the check digit.';
 comment on table fleet.berths     is 'Synthetic tour data (CC0-1.0): berths at real ports, with invented codes and sizes.';
 comment on table fleet.port_calls is 'Synthetic tour data (CC0-1.0): one row per call; departed_at is null while alongside.';
 
