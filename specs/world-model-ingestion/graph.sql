@@ -1415,24 +1415,30 @@ create or replace trigger edges_close_never_delete
 -- known_at. So "what did the agent believe the budget was at 00:11:20, as it
 -- knew things after the first landing" is one call, read from the edge's own
 -- columns. aiq.edge_is_current is the valid-time half; this adds the record
--- clock. Intervals come from aiq.edge_periods, so a retraction and a revival
+-- clock. A withdrawal is a record-time end: aiq.retract_derived records when
+-- the store stopped believing a fact, and from then the fact never held at
+-- any valid time, while a read as known before it still shows the fact
+-- (REM-1314). Intervals come from aiq.edge_periods_recorded, so a retraction and a revival
 -- leave a gap; an edge keeps one provenance, so what changed in it is not
 -- read back (REM-1229 keeps every interval with its own provenance).
 -- ------------------------------------------------------------
 create or replace function aiq.edges_as_of(p_valid_at timestamptz, p_known_at timestamptz default now())
 returns setof aiq.edges
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    -- Over aiq.edge_periods, one row per interval an edge held (a retraction and its revival cut a gap). A period
+    -- Over aiq.edge_periods_recorded, one row per interval an edge held (a retraction and its revival cut a gap). A period
     -- counts at known_at if the edge was recorded by then and, for a revived period, the revival was too; its end
     -- counts only if recorded by then: close_edge's closed.at for the edge's latest end, the retraction itself for
     -- an earlier one.
+    -- A WITHDRAWN period (aiq.retract_derived, REM-1314) counts only as known before the withdrawal: until then it
+    -- was believed and its end was not on record, so it reads open; from then on it never held.
     select e.*
       from aiq.edges e
      where e.created_at <= p_known_at
        and exists (
            select 1
-             from aiq.edge_periods p
+             from aiq.edge_periods_recorded p
             where p.edge_id = e.id
+              and (p.withdrawn_at is null or p.withdrawn_at > p_known_at)
               and (p.valid_from = e.valid_from or p.valid_from <= p_known_at)
               and aiq.edge_is_current(
                       p.valid_from,

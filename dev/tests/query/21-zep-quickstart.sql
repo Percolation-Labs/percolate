@@ -217,12 +217,22 @@ select pg_temp.check((select count(*) filter (where r.tier = 'registry' and r.de
                         from aiq.node_resolutions r join aiq.soft_nodes s on s.id = (r.evidence ->> 'soft_id')::uuid
                        where s.key in ('rotterdam', 'felixstowe', 'a. costa', 'tagus ceramics')),
     '§5: four bindings, each with who made it');
--- REM-1013, scoped: a withdrawn fact is ended today, so a read of March still says she preferred road.
--- This assertion records the gap; when retraction becomes an appended record it fails, and goes.
-select pg_temp.check((select e.valid_from = '2026-03-09T16:00:00Z' and e.valid_to is not null
+-- A withdrawal ends the fact on the record clock (REM-1314): as the store knew things before it, road was held from
+-- March; as it knows them now, road never held. The facts are dated an hour back on the record clock, as on the
+-- article's run, where the reader's agent read them before the withdrawal; in one transaction they share its now().
+update aiq.edges e set created_at = now() - interval '1 hour'
+  from aiq.node_keys k where k.node_id = e.dst_id and k.kind = 'canonical' and e.relation = 'prefers';
+select pg_temp.check((select e.valid_from = '2026-03-09T16:00:00Z' and e.provenance -> 'withdrawn' ->> 'agent' = 'reader-v0'
                         from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
                        where e.relation = 'prefers' and k.key = 'mode/road'),
-    '§5: the withdrawn road fact reads as held from March (REM-1013)');
+    '§5: the road fact said in March carries its withdrawal by reader-v0');
+select pg_temp.check((select string_agg(t.known || ' ' || (select count(*) from aiq.edges_as_of('2026-05-01', t.at) e
+                                                          join aiq.node_keys k on k.node_id = e.dst_id
+                                                         where k.kind = 'canonical' and k.key = 'mode/road'), ', '
+                                       order by t.known)
+                        from (values ('after', now()), ('before', now() - interval '30 minutes')) t(known, at))
+                     = 'after 0, before 1',
+    '§5: as of May, road reads as held as known before the withdrawal and not as known after it (REM-1314)');
 select pg_temp.check((select e.valid_to is not null and e.valid_from = '2026-01-14T09:30:00Z'
                         from aiq.edges e join aiq.node_keys k on k.node_id = e.dst_id and k.kind = 'canonical'
                        where e.relation = 'ships_via' and k.key = 'rotterdam'),
@@ -232,8 +242,8 @@ select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q
     'based_in place/lisbon, ships_via rotterdam, works_at company/tagus ceramics',
     '§5: as of March she shipped via Rotterdam: ' || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-03-01'$q$), 'nothing'));
 select pg_temp.check(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$) =
-    'based_in place/lisbon, prefers mode/rail, prefers mode/road, ships_via rotterdam, works_at company/tagus ceramics',
-    '§5: as of May the withdrawn road preference still reads as held (REM-1013): '
+    'based_in place/lisbon, prefers mode/rail, ships_via rotterdam, works_at company/tagus ceramics',
+    '§5: as of May, read now, the withdrawn road preference never held (REM-1314): '
     || coalesce(pg_temp.ana_graph($q$GRAPH "Ana Costa" AS OF '2026-05-01'$q$), 'nothing'));
 -- the premise §5 tests: every booking departs after the move it is routed by. It fails, naming the cause, on any
 -- run date where a booking no longer does, as a fixed date did from 2026-11-03.
