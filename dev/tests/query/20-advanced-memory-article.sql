@@ -1,4 +1,4 @@
--- PART THREE OF THE SERIES: FROM A REMEMBERED FACT TO THE QUESTION IT BEARS ON.
+-- PART THREE OF THE SERIES: ADVANCED PERCOLATE MEMORY.
 --
 -- The blocks of part three (Percolate writing ld-a56393c09254) that need no model, verbatim and in the article's
 -- order, each followed by the assertion that keeps the article true:
@@ -7,8 +7,9 @@
 --      complete_judgement at tier agent), so every verdict carries decided_by and tier;
 --   §2 questions answered from notes, and a withdrawn answer kept as a row;
 --   §3 TEXT's warnings, and an iterated join that resolves and one that stops at its bound.
--- The blocks that call a model (linking facts to questions with Jev, embedding notes, SEARCH and SEMANTIC in a
--- workflow) run against a live stack in dev/examples/advanced-memory/run.sh, which runs every block in order.
+-- The blocks that need the worker or the reader's Claude (embedding, Claude choosing which question each fact bears
+-- on, SEARCH and SEMANTIC in a workflow) run against a live stack in dev/examples/advanced-memory/run.sh, which runs
+-- every block in order.
 --
 -- WHAT WOULD MAKE IT FAIL. Leave P. Raman undecided, or let dream bind it by rule, and §1 raises; let withdraw_answer delete and §2 raises; drop
 -- TEXT's count and §3 raises.
@@ -85,7 +86,7 @@ select kind, evidence ->> 'key' as name, status,
 select pg_temp.check((select status from aiq.judgements where evidence ->> 'key' = 'p. raman') = 'open',
     '§1 dream should queue P. Raman for a judge, not bind it');
 select pg_temp.check((select array_agg(evidence ->> 'key') from aiq.judgements) = '{p. raman}',
-    '§1 the queue should hold only P. Raman: a name with no candidate is not queued (0.2.26)');
+    '§1 the queue should hold only P. Raman: a name with no candidate is not queued');
 
 -- The reader's agent: the calls the MCP tools claim_judgement and decide_judgement make, as the signed-in person.
 -- Claims are set before the role switch, as the tools' calls arrive: as authenticated.
@@ -103,11 +104,14 @@ select aiq.complete_judgement(j.id, jsonb_build_object('decision', 'bind', 'targ
          'Session, 3 March: "P. Raman: DuckDB read a year of the harbour logs in four seconds, so I would move the harbour analytics to it." Session, 12 January, of the only candidate: "Priya Raman, harbour analytics lead: the Harbour Rewrite stays on Postgres for now." The same initial and surname, both on the harbour analytics.', 'agent') ->> 'status' as decided
   from aiq.judgements j where j.evidence ->> 'key' = 'p. raman';
 reset role;
-select evidence ->> 'label' as name, status, decided_by, tier, reason
+select evidence ->> 'label' as name, status, verdict ->> 'decision' as verdict, tier,
+       decided_by = 'agent:' || (select id from rbac.users where email = 'me@example.com') as by_my_agent
   from aiq.judgements order by status desc, name;
 
 select relation, key from jsonb_to_recordset(aiq.query('GRAPH "Priya Raman" DEPTH 1') -> 'rows')
     as r(relation text, key text) order by relation, key;
+
+select reason from aiq.judgements where evidence ->> 'label' = 'P. Raman';
 select pg_temp.check((select decided_by like 'agent:%' and tier = 'agent' from aiq.judgements where evidence ->> 'key' = 'p. raman'),
     '§1 the verdict should read decided_by agent:<user> and tier agent');
 select pg_temp.check((select array_agg(key order by key) from pg_temp.priya()) = '{project/tide dashboard,tool/duckdb,tool/postgres}',
@@ -116,6 +120,19 @@ select pg_temp.check((select array_agg(key order by key) from pg_temp.priya()) =
 -- §2
 select set_config('request.jwt.claims', json_build_object('sub',
          (select id from rbac.users where email = 'me@example.com'))::text, false) is not null as signed_in;
+-- The suite's sample makes demo-quad-a the default model, which a fresh install does not have; set aside here, inside
+-- this transaction, so the article's model can be the default as it is for the reader.
+update aiq.embedding_models set is_default = false where is_default;
+insert into aiq.embedding_models (name, dim, provider, endpoint, credential_ref, is_default, notes)
+values ('bge-small-en-v1.5', 384, 'fastembed', 'BAAI/bge-small-en-v1.5', null, true,
+        'runs inside the worker through fastembed, so it needs no key')
+on conflict (name) do nothing;
+set role app_owner;
+select aiq.register_embedding_space('bge-small-en-v1.5') is not null as space;
+reset role;
+select aiq.install_source_embed_workflow(array['questions', 'facts', 'chunks']) as embedding;
+select pg_temp.check((workflow.current_definition('embed_sources')).id is not null,
+    '§2 the embedding workflow for questions, facts and chunks should be installed');
 create or replace function pg_temp.note(p_title text, p_claim text) returns uuid language sql as $$
   select (research.submit_package(jsonb_build_object(
     'schema_version', '0.1', 'title', p_title, 'visibility', 'listed', 'edges', '[]'::jsonb,
@@ -136,30 +153,33 @@ select claims.propose_answer(pg_temp.note('Agent memory notes',
          'An assistant that dates a fact by when it was stored answers questions about the past wrongly.'), 'C1', (select id from claims.questions where phrasing = 'Should an agent''s memory record when each fact became true?'), 'yes');
 select claims.propose_answer(pg_temp.note('Clinical transfer study',
          'A triage method validated in one hospital lost a third of its accuracy in two others.'), 'C1', (select id from claims.questions where phrasing = 'Is a method validated at one clinic valid at another hospital?'), 'no');
-insert into aiq.embedding_models (name, dim, provider, endpoint, credential_ref, notes)
-values ('bge-small-en-v1.5', 384, 'fastembed', 'BAAI/bge-small-en-v1.5', null,
-        'runs inside the worker through fastembed, so it needs no key')
-on conflict (name) do nothing;
-set role app_owner;
-select aiq.register_embedding_space('bge-small-en-v1.5');
-reset role;
-select claims.install_fact_question_workflow('bge-small-en-v1.5');
+-- 09-links.sh lands the reader's Claude's choices as the signed-in reader, at the linking step's own bar of 0.5;
+-- this is its SQL, with one choice written in (the worker that embeds is not here, and propose_bears_on needs no vector).
+select count(claims.propose_bears_on((l ->> 'edge_id')::uuid, (l ->> 'question_id')::uuid,
+                                     (l ->> 'p')::real, 'Claude: ' || (l ->> 'reason'))) as proposed
+  from jsonb_array_elements(jsonb_build_array(
+         jsonb_build_object('edge_id', (select id from claims.fact_texts where content = 'Priya Raman prefers DuckDB'),
+                            'question_id', (select id from claims.questions where phrasing = 'Should the harbour analytics move off Postgres?'),
+                            'p', 0.8, 'reason', 'A preference for DuckDB bears on moving off Postgres.'),
+         jsonb_build_object('edge_id', (select id from claims.fact_texts where content = 'Priya Raman works on Tide Dashboard'),
+                            'question_id', null, 'p', 0.7, 'reason', 'Bears on none of them.'))) l
+ where l ->> 'question_id' is not null and (l ->> 'p')::real >= 0.5;
+select pg_temp.check((select array_agg(f.content) from claims.questions qs, claims.facts_on_question(qs.id) f
+                       where qs.phrasing = 'Should the harbour analytics move off Postgres?') = '{Priya Raman prefers DuckDB}',
+    '§2 the link Claude chose should be readable from the question, and a fact it linked to none should have no link');
 insert into content.channels (name, kind, visibility) values ('notes', 'manual', 'public') on conflict do nothing;
-select content.install_text_embed_workflow('bge-small-en-v1.5');
-
 select content.register_text('notes', 'standup-0303', $j$[{"content":
   "Standup, 3 March. P. Raman: the berth log scans are too slow in Postgres; DuckDB read a year of them in four seconds. Wants to try it for the harbour analytics."}]$j$) ->> 'resource_id' as standup;
 select content.register_text('notes', 'review-0420', $j$[{"content":
   "Ops review, 20 April. Keep the berth logs in Postgres: the permissions live there, and a second store doubles the access rules. Revisit after the Tide Dashboard ships."}]$j$) ->> 'resource_id' as review;
 
-select workflow.start_workflow('embed_text', jsonb_build_object('resource_id', id)) as embed_run
-  from content.resources where external_id in ('standup-0303', 'review-0420');
+select aiq.queue_source_embedding('two notes') ->> 'queued' as embedding;
 
 select workflow.define_yaml($y$
 name: ask_notes
 steps:
   - id: search
-    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING bge-small-en-v1.5 LIMIT 1'
+    p8ql: 'SEARCH "{{run.question}}" FROM chunks USING bge-small-en-v1.5 LIMIT 3'
   - id: questions
     p8ql: 'SEMANTIC "{{run.question}}" FROM questions USING bge-small-en-v1.5 LIMIT 2'
 $y$);

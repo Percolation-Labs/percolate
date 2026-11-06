@@ -18,7 +18,7 @@ import os, pty, re, select, sys, time
 
 dsn, cmd_fifo, ack_fifo = sys.argv[1:4]
 PROMPT = re.compile(rb"\n[\w-]+=[#>] $")
-ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[=>]|\r")
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[=>]|\r|\x00")
 
 pid, fd = pty.fork()
 if pid == 0:
