@@ -88,10 +88,11 @@ it what supersedes what. From `scores-graphiti.txt` (`python3 -I score.py fixtur
 
 ```bash
 uv venv -p 3.12 env && uv pip install -p env mem0ai==2.2.1 fastembed==0.9.0 'psycopg[binary]'
+env/bin/python -I mem0_time.py 2> /dev/null      # what Mem0's OSS SDK says to timestamp= and reference_date=
 env/bin/python -I mem0_run.py fixture.json > mem0.jsonl
 
 docker run -d --name memory-bench -e POSTGRES_USER=p8 -e POSTGRES_PASSWORD=p8 -e POSTGRES_DB=p8 \
-  -p 47959:5432 percolationlabs/percolate-postgres:19-0.2.23
+  -p 47959:5432 percolationlabs/percolate-postgres:19-0.2.37
 DSN=postgresql://p8:p8@localhost:47959/p8 env/bin/python -I percolate_run.py fixture.json > percolate.jsonl
 
 python3 -I score.py fixture.json mem0.jsonl percolate.jsonl
@@ -99,7 +100,14 @@ python3 -I score.py fixture.json mem0.jsonl percolate.jsonl
 
 `percolate_run.py` prints each user's graph reach as it goes (`maya reads 40 of Maya's facts and 0 of Leo's`).
 `ORGLESS=1` registers every memory with no org. A fresh reader reproduced the Percolate rows exactly on the
-published `19-0.2.23` image, 19 October 2026.
+published `19-0.2.23` image, 19 October 2026. `percolate_run.py` waits up to two minutes for a container started a
+moment before it to finish installing the extension.
+
+The Percolate rows moved between the published 0.2.30 and 0.2.31 images, with the fixture, the runner and the embedder
+unchanged: percolate-search fell from 52% to 43% hit@1 and percolate-valid from 76% to 63% (against `scores.txt`: stable 92% to 67%,
+current 57% to 21%, historical 75% to 88%). `scores-0.2.37.txt` is the run on the image get-percolate pins on 6 November 2026.
+The images 0.2.23, 0.2.27, 0.2.28, 0.2.29 and
+0.2.30 give `scores.txt`'s two Percolate totals; 0.2.31, 0.2.34, 0.2.35, 0.2.36 and 0.2.37 give the new ones. The Results above are from 0.2.23.
 
 Graphiti, with the OpenAI key in the environment (this sends the fixture's text to OpenAI):
 
