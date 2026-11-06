@@ -154,7 +154,7 @@ when that fires inside a step, `execute_sql_step` fails that step, terminally,
 with the timeout as its reason, and the caller's statement carries on. That
 is `mode: inline`; in `mode: worker`, below, a step's `timeout_ms` is exact.
 
-#### Where a `sql` step runs: `mode: worker` or `mode: inline` (REM-1316; specified, not built)
+#### Where a `sql` step runs: `mode: worker` or `mode: inline` (REM-1316; built in #392, the worker's handler in percolate-core #158)
 
 Sirsh decided REM-1316 on 6 Nov: two modes, and no watchdog.
 
