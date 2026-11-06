@@ -272,6 +272,8 @@ insert into t14_declared (fn, mechanism, why) values
  'whether the caller may read a fact, asked with the caller''s own id and orgs in the terms of aiq.edges'' policy; research/38 compares it with the policy (REM-996)'),
 ('claims.propose_bears_on(uuid,uuid,real,text)', 'rbac.require',
  'proposes a link for a research writer who may read both the fact (claims.edge_readable) and the question (claims.question_readable); it lands proposed (REM-996)'),
+('claims.queue_link_judgements(text,integer)', 'rbac.current_user_id',
+ 'queues a link case only for facts claims.edge_readable says the signed-in caller may read, with only the questions claims.question_readable says they may read, and stores no sentence; a case is then read through its fact (REM-1324)'),
 ('claims.review_bears_on(uuid,uuid,text,text)', 'rbac.require',
  'a person confirms or disputes a proposed link they may read both ends of; an agent is refused (REM-996)'),
 ('claims.withdraw_answer(uuid,text,uuid,text)', 'rbac.require',

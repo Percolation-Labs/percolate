@@ -281,7 +281,8 @@
         "bind",
         "merge",
         "withdraw",
-        "challenge"
+        "challenge",
+        "link"
       ],
       "column": "kind",
       "enforced_by": "check",
