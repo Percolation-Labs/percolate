@@ -46,6 +46,7 @@ select pg_temp.check(
 
 select workflow.define_yaml($y$
 name: wf29_held
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: cooling_off
     timer: 3600
@@ -56,6 +57,7 @@ $y$);
 
 select workflow.define_yaml($y$
 name: wf29_waits
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: approve
     signal: true

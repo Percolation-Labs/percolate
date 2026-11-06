@@ -822,6 +822,7 @@ begin
 
     perform workflow.define_yaml($y$
 name: t_bx_yaml
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: fan
     queue: none

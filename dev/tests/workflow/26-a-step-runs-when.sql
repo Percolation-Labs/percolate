@@ -58,6 +58,7 @@ select pg_temp.check((workflow.compiler_capabilities()->'accepts'->>'when')::boo
 -- 3 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: when_gate
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: score
     sql: "select {{run.score}} as v"
@@ -111,6 +112,7 @@ end $$;
 -- 4 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: when_root
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: only_if_asked
     when: "{{run.wanted}}"
@@ -146,6 +148,7 @@ end $$;
 -- Nothing finishes through complete_task when every step is skipped, so the skip itself asks whether the run is done.
 select workflow.define_yaml($y$
 name: when_nothing
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: never
     when: "false"
@@ -159,6 +162,7 @@ select pg_temp.check(pg_temp.run_status(workflow.start_workflow('when_nothing', 
 -- 5 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: when_waits
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: decide
     sql: "select false as escalate"
@@ -191,6 +195,7 @@ begin
     begin
         perform workflow.define_yaml($y$
 name: when_outside_needs
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: a
     sql: "select 1 as n"
@@ -211,6 +216,7 @@ end $$;
 -- 7 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: when_broken
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: first
     sql: "select 1 as n"

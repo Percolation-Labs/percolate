@@ -65,6 +65,7 @@ insert into workflow.definitions (name, spec) values ('wf33_spends', $j${"steps"
 -- No run of this one ever finishes here, so it has no history and its estimate stays incomplete until told.
 select workflow.define_yaml($y$
 name: wf33_plain
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: chore
     queue: wf33-plain
@@ -77,6 +78,7 @@ insert into workflow.definitions (name, spec) values ('wf33_fresh', $j${"steps":
 
 select workflow.define_yaml($y$
 name: wf33_child
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: n
     sql: "select 1 as n"

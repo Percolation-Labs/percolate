@@ -1367,7 +1367,7 @@ begin
     if v_model is null or not exists (select 1 from aiq.embedding_models where name = v_model) then
         raise no_data_found using message = format('embedding model %s is not registered', coalesce(v_model, '(the default)'));
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed
@@ -1778,7 +1778,7 @@ begin
     if not exists (select 1 from aiq.embedding_models where name = p_model) then
         raise no_data_found using message = format('embedding model %s is not registered', p_model);
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed_questions

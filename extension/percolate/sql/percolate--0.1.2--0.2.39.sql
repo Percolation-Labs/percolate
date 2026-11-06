@@ -1213,6 +1213,29 @@ begin
         raise exception 'spec has duplicate step keys';
     end if;
 
+    -- `mode` (REM-1316): two words, and only where a sql step can read it. A
+    -- spec arrives as JSON as often as through the compiler, which refuses the
+    -- same things with the step named.
+    if p_spec ? 'mode' and p_spec->>'mode' is distinct from 'worker'
+                       and p_spec->>'mode' is distinct from 'inline' then
+        raise exception 'spec has mode %, where worker or inline was expected', p_spec->'mode';
+    end if;
+    for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
+        if v_step ? 'mode' and (v_step->>'kind' is distinct from 'sql'
+                                or v_step->>'mode' not in ('worker', 'inline')) then
+            raise exception
+                'step ''%'' has mode %, but only a sql step has a mode, and it is worker or inline',
+                v_step->>'key', v_step->'mode';
+        end if;
+        if v_step->>'kind' = 'matrix' and (v_step->'input'->'template') ? 'mode'
+           and (v_step->'input'->'template'->>'kind' is distinct from 'sql'
+                or v_step->'input'->'template'->>'mode' not in ('worker', 'inline')) then
+            raise exception
+                'the template of matrix step ''%'' has mode %, but only a sql template has a '
+                'mode, and it is worker or inline', v_step->>'key', v_step->'input'->'template'->'mode';
+        end if;
+    end loop;
+
     -- every depends_on must reference a real step
     for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
         for v_dep in select jsonb_array_elements_text(coalesce(v_step->'depends_on', '[]'::jsonb)) loop
@@ -2071,6 +2094,55 @@ begin
 end;
 $$ language plpgsql stable;
 
+-- A STEP AS ITS TASK WILL RUN IT: the `sql` mode resolved (REM-1316).
+--
+-- The step's `mode` beats the definition's, and a matrix child takes its
+-- template's, else the definition's. Nothing says `worker` -> `inline`, which is
+-- what every spec stored before this means. A worker-mode step carries
+-- `mode: worker` in its task input -- where execute_sql_step and drain look,
+-- and where a matrix child inherits it from its template's input -- and goes on
+-- a queue a worker claims: the one the step names, else `http`.
+--
+-- WHY `http`. A sql step compiles to queue `none`, a label nothing polls, and
+-- a worker-mode step on it would wait forever. `http` is the queue the shipped
+-- worker is deployed on (`percolate worker --queue http`: the README, the
+-- Dockerfile, every compose file), and the handler is keyed by the task's KIND,
+-- so that worker runs sql tasks as it runs http_call ones. A queue of its own
+-- would leave every new workflow's sql steps unclaimed on a deployment that had
+-- not added a worker for it, and since the compiler now defaults to worker
+-- mode that is every deployment. Name a `queue:` on the step to route it
+-- elsewhere.
+create or replace function workflow.with_sql_mode(p_step jsonb, p_spec_mode text)
+returns jsonb as $$
+declare
+    v_step jsonb := p_step;
+    v_tmpl jsonb;
+begin
+    if p_step->>'kind' = 'sql' then
+        if coalesce(p_step->>'mode', p_spec_mode, 'inline') = 'worker' then
+            v_step := jsonb_set(v_step, '{input}',
+                          coalesce(p_step->'input', '{}'::jsonb) || '{"mode":"worker"}');
+            if coalesce(p_step->>'queue', 'none') = 'none' then
+                v_step := jsonb_set(v_step, '{queue}', '"http"');
+            end if;
+        end if;
+    elsif p_step->>'kind' = 'matrix' and p_step->'input'->'template'->>'kind' = 'sql' then
+        v_tmpl := p_step->'input'->'template';
+        if coalesce(v_tmpl->>'mode', p_spec_mode, 'inline') = 'worker' then
+            v_tmpl := jsonb_set(v_tmpl, '{input}',
+                          coalesce(v_tmpl->'input', '{}'::jsonb) || '{"mode":"worker"}');
+            if coalesce(v_tmpl->>'queue', 'none') = 'none' then
+                v_tmpl := jsonb_set(v_tmpl, '{queue}', '"http"');
+            end if;
+            v_step := jsonb_set(v_step, '{input,template}', v_tmpl);
+        end if;
+    end if;
+    return v_step;
+end;
+$$ language plpgsql immutable;
+
+revoke execute on function workflow.with_sql_mode(jsonb, text) from public;
+
 -- p_trace_id: propagate an existing W3C trace_id from an already-traced
 -- caller (e.g. a FastAPI request already inside a trace) instead of always
 -- starting a disconnected new one -- specs/README.md's OTel ground rule.
@@ -2145,6 +2217,8 @@ begin
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
         continue when (v_step->>'key') = any(v_comp);
+        -- Where its sql runs, decided once, here (REM-1316).
+        v_step := workflow.with_sql_mode(v_step, v_def.spec->>'mode');
         insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
                                     wait_signal, input, rate_key, saga_group, compensation_task_key,
                                     when_sql)
@@ -4283,7 +4357,52 @@ by inspecting the statement, and refused entirely when percolate.sql_policy is
 'registered'. p_timeout_ms does NOT bound this statement: a statement_timeout set
 inside a running statement is never armed for it. The limit a step meets is its
 caller's statement_timeout, and execute_sql_step fails the step running when it
-fires (REM-1316, which leaves open how a step gets a limit of its own).$c$;
+fires. A step in mode worker gets a limit of its own: the worker sets
+statement_timeout before execute_worker_sql_step (REM-1316, §17b).$c$;
+
+-- What a `sql` step's statement returns, one place for both modes.
+--
+-- TWO SPELLINGS, ONE KIND. A step either names something the deployment
+-- registered or carries its own statement; the engine dispatches on which, and
+-- everything downstream -- retries, the event log, the payload cap, the plan --
+-- is identical for both. `statement` is checked first because it is the one an
+-- author writes by hand and a spec carrying both is refused at registration
+-- (validate_spec).
+--
+-- A function of its own since REM-1316, because two executors now reach it:
+-- execute_sql_step, which runs a step inside the statement that made it ready
+-- and catches what it raises, and execute_worker_sql_step, which runs one a
+-- worker claimed and lets what it raises fail the task through the worker. A
+-- second copy of this dispatch is how a fix lands in one mode and not the other.
+--
+-- The caller publishes workflow.current_run_id / current_task_id / braces
+-- first: run_sql reads the run's owner from them, and an allow-listed function
+-- reads its own run.
+create or replace function workflow.sql_step_output(p_spec jsonb, p_run_id uuid)
+returns jsonb as $$
+declare
+    v_res jsonb;
+begin
+    if p_spec ? 'statement' then
+        -- Resolved into a STATEMENT PLUS PARAMETERS, not into text. The item
+        -- is the child's own row, and on a matrix child that row is data
+        -- somebody else wrote -- see resolve_statement_params for why that is
+        -- the case escaping is the wrong answer to.
+        v_res := workflow.resolve_statement_params(
+                     p_spec->>'statement', p_run_id, p_spec->'item');
+        return workflow.run_sql(
+            v_res->>'sql',
+            coalesce((p_spec->>'write')::boolean, false),
+            coalesce((p_spec->>'timeout_ms')::int, 30000),
+            v_res->'params');
+    end if;
+    return workflow.call_step_function(
+        p_spec->>'function', p_spec->'args', p_run_id, p_spec->'item');
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+-- Reached only from the two executors, which are SECURITY DEFINER and own it.
+revoke execute on function workflow.sql_step_output(jsonb, uuid) from public;
 
 -- Executes one ready `sql` task. Returns true if it did something.
 -- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
@@ -4329,6 +4448,14 @@ begin
     if not found or t.status <> 'ready' or t.kind <> 'sql' then
         return false;
     end if;
+    -- A WORKER-MODE STEP IS NOT RUN HERE (REM-1316). It is a task a worker
+    -- claims, on its queue, and runs through execute_worker_sql_step below under
+    -- a statement_timeout of its own. Asked here rather than at each caller
+    -- (the autorun trigger, drain_sql_steps, expand_matrix's kick, the tick),
+    -- because this is the one function all of them reach.
+    if t.input->>'mode' is not distinct from 'worker' then
+        return false;
+    end if;
 
     update workflow.tasks set status = 'running', claimed_by = 'in-database',
            claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
@@ -4358,22 +4485,7 @@ begin
         -- payload cap, the plan -- is identical for both. `statement` is
         -- checked first because it is the one an author writes by hand and a
         -- spec carrying both is refused at registration (validate_spec).
-        if v_spec ? 'statement' then
-            -- Resolved into a STATEMENT PLUS PARAMETERS, not into text. The
-            -- item is the child's own row, and on a matrix child that row is
-            -- data somebody else wrote -- see resolve_statement_params for why
-            -- that is the case escaping is the wrong answer to.
-            v_res := workflow.resolve_statement_params(
-                         v_spec->>'statement', t.run_id, t.input->'item');
-            v_out := workflow.run_sql(
-                v_res->>'sql',
-                coalesce((v_spec->>'write')::boolean, false),
-                coalesce((v_spec->>'timeout_ms')::int, 30000),
-                v_res->'params');
-        else
-            v_out := workflow.call_step_function(
-                v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
-        end if;
+        v_out := workflow.sql_step_output(v_spec, t.run_id);
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
         perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
@@ -4388,8 +4500,8 @@ begin
     -- this is where a running step meets a limit at all. Terminal, because
     -- the timer fires once per statement: a retry would rerun at once, in the
     -- same statement, with no limit left. The caller's statement goes on
-    -- unbounded after this. Whether a step gets a limit of its own is the
-    -- design question REM-1316 leaves open.
+    -- unbounded after this. A step that needs a limit of its own runs in
+    -- mode worker (§17b), where the worker arms one before its statement.
     --
     -- ONLY A TIMEOUT. 57014 is also a person's cancel (pg_cancel_backend, a
     -- client's Ctrl-C), and that one must still stop the caller, so anything
@@ -4438,8 +4550,12 @@ returns int as $$
 declare v_id uuid; v_kind text; v_done int := 0;
 begin
     loop
+        -- Not a worker-mode sql step (REM-1316): execute_sql_step leaves it
+        -- ready for a worker, so selecting it here would pick it again on every
+        -- pass and drain nothing behind it.
         select id, kind into v_id, v_kind from workflow.tasks
         where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
+          and not (kind = 'sql' and input->>'mode' is not distinct from 'worker')
           and run_after <= now() and not workflow.run_is_held(p_run_id)
         order by kind, created_at
         limit 1;
@@ -4574,6 +4690,101 @@ grant execute on function workflow.execute_sql_step(uuid) to worker;
 grant execute on function workflow.drain_sql_steps(uuid, int) to worker;
 revoke execute on function workflow.execute_sql_step(uuid) from authenticated;
 revoke execute on function workflow.drain_sql_steps(uuid, int) from authenticated;
+
+-- ------------------------------------------------------------
+-- 17b. A `sql` step a worker runs (REM-1316, YAML.md "Where a `sql` step runs").
+--
+-- An inline step runs inside the statement that made it ready, and Postgres
+-- arms statement_timeout only when a top-level statement starts, so its
+-- timeout_ms bounds nothing (measured on 0.2.38: `run_sql('select
+-- pg_sleep(3)', false, 1000)` ran 3 s). A worker-mode step is a task of its
+-- own instead, on a queue, claimed the way an http_call step is. The worker
+-- then, in one transaction:
+--
+--     select workflow.worker_sql_step_timeout(<task>, <worker>);   -- N
+--     set local statement_timeout = N;                              -- its own statement
+--     select workflow.execute_worker_sql_step(<task>, <worker>);   -- armed when it starts
+--     set local statement_timeout = <what it was>;
+--     select workflow.complete_task(<task>, <output>, <worker>);
+--
+-- so the limit is exact, and the step's writes commit with its completion or
+-- not at all. A timeout or an error is raised to the worker, which fails the
+-- task through fail_task in a transaction of its own, and the usual rules
+-- decide whether it retries. complete_task makes the successors ready; a
+-- worker-mode successor is then claimed in its turn rather than run here.
+--
+-- Both are SECURITY DEFINER and granted to `worker` alone, like
+-- get_task_context: each asks the lease first, so a worker reaches only a task
+-- it holds.
+-- ------------------------------------------------------------
+
+-- The limit the worker arms: the step's timeout_ms, else a registered
+-- function's, else run_sql's default of 30 s. NULL when this worker does not
+-- hold a running sql task by that id, which the worker reports as such.
+create or replace function workflow.worker_sql_step_timeout(p_task_id uuid, p_worker_id text)
+returns int as $$
+    select greatest(coalesce((t.input->>'timeout_ms')::int, f.timeout_ms, 30000), 1)
+      from workflow.tasks t
+      left join workflow.step_functions f on f.name = t.input->>'function'
+     where t.id = p_task_id and t.kind = 'sql' and t.status = 'running'
+       and p_worker_id is not null and t.claimed_by = p_worker_id;
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- Runs a claimed sql step's statement and returns its output, shaped as
+-- execute_sql_step completes one ({"result": ...}). It does not complete the
+-- task and catches nothing: what it raises fails the task through the worker.
+create or replace function workflow.execute_worker_sql_step(p_task_id uuid, p_worker_id text)
+returns jsonb as $$
+declare
+    t      workflow.tasks;
+    v_out  jsonb;
+    v_prev_task text := coalesce(current_setting('workflow.current_task_id', true), '');
+    v_prev text := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
+    v_why  text;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found or t.kind <> 'sql' then
+        raise exception 'task % is not a sql step', p_task_id
+            using errcode = 'invalid_parameter_value';
+    end if;
+    -- The lease, asked by the function the rest of the worker surface asks.
+    -- A NULL worker or an unclaimed task is refused here too: lease_violation
+    -- leaves both open for the in-database paths, and this one is a worker's.
+    v_why := workflow.lease_violation(p_task_id, p_worker_id, 'execute_sql');
+    if v_why is null and (p_worker_id is null or t.status <> 'running'
+                          or t.claimed_by is distinct from p_worker_id) then
+        v_why := format('task is %s and claimed by %s, not running under %s',
+                        t.status, coalesce(t.claimed_by, 'nobody'), coalesce(p_worker_id, 'no worker'));
+    end if;
+    if v_why is not null then
+        raise exception 'cannot run sql step %: %', p_task_id, v_why
+            using errcode = 'insufficient_privilege';
+    end if;
+
+    -- Published as execute_sql_step publishes them, for the same readers.
+    perform set_config('workflow.current_run_id', t.run_id::text, true);
+    perform set_config('workflow.current_task_id', t.id::text, true);
+    perform set_config('workflow.braces', coalesce(t.input->>'braces', ''), true);
+
+    v_out := workflow.sql_step_output(coalesce(t.input, '{}'::jsonb), t.run_id);
+
+    perform set_config('workflow.current_task_id', v_prev_task, true);
+    perform set_config('workflow.current_run_id', v_prev, true);
+    return jsonb_build_object('result', v_out);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.worker_sql_step_timeout(uuid, text) from public;
+revoke execute on function workflow.execute_worker_sql_step(uuid, text) from public;
+grant execute on function workflow.worker_sql_step_timeout(uuid, text) to worker;
+grant execute on function workflow.execute_worker_sql_step(uuid, text) to worker;
+
+comment on function workflow.execute_worker_sql_step(uuid, text) is
+$c$Run a worker-mode sql step this worker has claimed, and return its output as {"result": ...}.
+The worker sets statement_timeout to workflow.worker_sql_step_timeout() as a statement of its own first, so the
+limit is armed for this one and is exact. Raises rather than failing the task: the worker fails it through
+fail_task and the usual retry rules apply. Refuses a task the caller does not hold.$c$;
+
 -- The allow-list is readable by `authenticated` for discoverability: a user
 -- authoring a `sql` step should be able to see which functions are callable
 -- without guessing. It is NOT granted to `worker`, and that omission is the
@@ -8013,7 +8224,14 @@ begin
             -- unlike output_schema below, because WfMatrix carries
             -- deny_unknown_fields -- a compiler that has not heard of
             -- batch_size refuses the document rather than dropping the key.
-            ('batching',     E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 10\n      batch_size: 5\n      partition_by: [tenant]\n      template: {work: true}')
+            ('batching',     E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 10\n      batch_size: 5\n      partition_by: [tenant]\n      template: {work: true}'),
+
+            -- REM-1316. Named sql_mode, not mode, because define_yaml's skew
+            -- check matches a feature's name as a key anywhere in a document,
+            -- and `mode: async` inside a rest block is an old, ordinary key: a
+            -- probe named `mode` would refuse every async agent step on a
+            -- deployment whose compiler predates this one.
+            ('sql_mode',     E'name: c\nmode: inline\nsteps:\n  - id: s\n    sql: {function: f}\n    mode: worker\n    timeout_ms: 1000')
         ) as t(feature, yaml)
     loop
         execute 'select p8_compile_workflow($1)' into v_res using v_case.yaml;
@@ -8047,6 +8265,36 @@ begin
                              from jsonb_each(v_out) e(k, v) where v = 'false'::jsonb), '[]'::jsonb));
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- `mode: inline` for a definition the engine installs itself, or nothing on a
+-- compiler that predates `mode:` (REM-1316).
+--
+-- The walk, the ingestion pipelines and the other installers need their sql
+-- steps inline: their callers read the result in the same call, or the chain
+-- is meant to finish inside one complete_task. The compiler now writes `mode:
+-- worker` unless a document says otherwise, so each says `inline` -- through
+-- this line rather than in its literal YAML, because two of them
+-- (install_ingest_workflow, install_source_embed_workflow) run when the
+-- extension installs or upgrades, and a database can take this SQL before the
+-- compiled parser that knows the key: the upgrade gates install it on the last
+-- published image. That compiler refuses `mode:` as an unknown field, and would
+-- fail the whole upgrade; given nothing, it stores no mode, which the engine
+-- reads as inline. Either way the definition runs inline.
+create or replace function workflow.inline_mode_line()
+returns text as $$
+declare v_ok text;
+begin
+    if to_regprocedure('p8_compile_workflow(text)') is null then
+        return '';
+    end if;
+    execute 'select p8_compile_workflow($1)->>''ok''' into v_ok
+        using E'name: c\nmode: inline\nsteps:\n  - id: s\n    sql: "select 1"';
+    return case when v_ok = 'true' then 'mode: inline' else '' end;
+end;
+$$ language plpgsql stable set search_path = pg_catalog, public;
+
+-- Owner-only, like the installers that call it.
+revoke execute on function workflow.inline_mode_line() from public;
 
 -- define_yaml, with the halves' disagreement made legible. A compile error
 -- that mentions the one-of rule on a document using a feature the installed
@@ -32768,7 +33016,7 @@ begin
     -- resolves to nothing fails the step rather than passing null.)
     perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
-    perform workflow.define_yaml($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || $y$
 name: dream
 steps:
   - id: reconcile
@@ -33793,7 +34041,7 @@ begin
 
     -- define_yaml, the same door install_ingest_workflow uses: a definition is
     -- a document, and there is no second way to write one.
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed
@@ -33955,7 +34203,7 @@ $y$, v_src, p_queue, case when p_rate_key is not null then E'\n    rate_key: ' |
             set capacity = excluded.capacity, refill_rate = excluded.refill_rate;
     end if;
 
-    perform workflow.define_yaml(format(E'name: %s\nsteps:', p_name) || v_steps);
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format(E'name: %s\nsteps:', p_name) || v_steps);
     return format('%s: embeds %s with the default model, on queue %s', p_name, array_to_string(p_sources, ', '), p_queue);
 end;
 $$;
@@ -34128,7 +34376,7 @@ begin
             'with no argument to install the parse-only pipeline.', v_model;
     end if;
 
-    v_parse := format($y$
+    v_parse := workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: parse
@@ -34477,7 +34725,7 @@ begin
     values ('structure_extraction', 20, 20, 1)
     on conflict (key) do nothing;
 
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
 %3$s
@@ -39351,7 +39599,7 @@ begin
     if v_model is null or not exists (select 1 from aiq.embedding_models where name = v_model) then
         raise no_data_found using message = format('embedding model %s is not registered', coalesce(v_model, '(the default)'));
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed
@@ -39762,7 +40010,7 @@ begin
     if not exists (select 1 from aiq.embedding_models where name = p_model) then
         raise no_data_found using message = format('embedding model %s is not registered', p_model);
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed_questions
@@ -44128,7 +44376,7 @@ $q$, v_model);
     if p_waves not between 1 and 20 then
         raise invalid_parameter_value using message = 'a walk has 1 to 20 waves (repeat''s bound)';
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:%6$s
   - id: start

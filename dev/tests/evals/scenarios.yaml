@@ -1027,6 +1027,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_hitl01
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: gather
           p8ql: 'LOOKUP "sig-114"'
@@ -1123,6 +1124,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_hitl04
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: officer
           signal: true
@@ -2258,6 +2260,7 @@ scenarios:
         '39990000-0000-0000-0000-0000000000fc'::uuid);
       select workflow.define_yaml($y$
       name: ev_f2g10
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: expand
           p8ql: 'GRAPH "tolvaxen" DEPTH 2'
@@ -2434,6 +2437,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_coll05
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: fan
           matrix:
@@ -2557,6 +2561,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_coll07
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: fan
           matrix:
@@ -2647,6 +2652,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_coll09
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: fan
           matrix:
@@ -2775,6 +2781,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_coll12
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: land
           sql:
@@ -3224,6 +3231,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_qs20
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: echo
           sql: {function: calder_echo, args: ['{{run.a}} then {{run.b}}']}
@@ -3449,6 +3457,7 @@ scenarios:
     setup: |
       select workflow.define_yaml($y$
       name: ev_recov06
+      mode: inline  # REM-1316: asserts what runs with no worker
       steps:
         - id: reserve_slot
           p8ql: 'LOOKUP "sig-114"'

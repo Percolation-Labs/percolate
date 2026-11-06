@@ -501,7 +501,7 @@ begin
 
     -- define_yaml, the same door install_ingest_workflow uses: a definition is
     -- a document, and there is no second way to write one.
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: embed
@@ -663,7 +663,7 @@ $y$, v_src, p_queue, case when p_rate_key is not null then E'\n    rate_key: ' |
             set capacity = excluded.capacity, refill_rate = excluded.refill_rate;
     end if;
 
-    perform workflow.define_yaml(format(E'name: %s\nsteps:', p_name) || v_steps);
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format(E'name: %s\nsteps:', p_name) || v_steps);
     return format('%s: embeds %s with the default model, on queue %s', p_name, array_to_string(p_sources, ', '), p_queue);
 end;
 $$;
@@ -836,7 +836,7 @@ begin
             'with no argument to install the parse-only pipeline.', v_model;
     end if;
 
-    v_parse := format($y$
+    v_parse := workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
   - id: parse
@@ -1185,7 +1185,7 @@ begin
     values ('structure_extraction', 20, 20, 1)
     on conflict (key) do nothing;
 
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:
 %3$s

@@ -241,6 +241,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.queue_stale_timeout','text','scale.md: what a worker on this queue is bound by, so it paces its heartbeat from the database'),
 ('workflow-engine','function','workflow.define_yaml','text','YAML.md: workflows are authored as YAML'),
 ('workflow-engine','function','workflow.execute_sql_step','uuid','§17: sql steps run with no process'),
+('workflow-engine','function','workflow.worker_sql_step_timeout','uuid,text','YAML.md "Where a sql step runs": the limit a worker arms before a worker-mode step (REM-1316)'),
+('workflow-engine','function','workflow.execute_worker_sql_step','uuid,text','YAML.md "Where a sql step runs": a worker runs a claimed sql step under its own statement_timeout (REM-1316)'),
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid','§17: sql steps consume prior output'),
 
 -- ---------- workflow-engine: matrix fan-out (schema.sql §20) -----------

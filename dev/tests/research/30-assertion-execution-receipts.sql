@@ -33,6 +33,7 @@ $$;
 select workflow.register_step_function('rem590_assert','public.rem590_assert');
 select workflow.define_yaml($y$
 name: rem590_receipt
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: assert
     sql: {function: rem590_assert, args: []}

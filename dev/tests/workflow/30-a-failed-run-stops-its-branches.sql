@@ -34,6 +34,7 @@ $$ language sql;
 
 select workflow.define_yaml($y$
 name: wf30_compare
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - {id: joke,  work: true, queue: wf30_joke}
   - {id: story, work: true, queue: wf30_story}
@@ -83,6 +84,7 @@ grant select, insert, delete on public.wf30_holds to authenticated;
 
 select workflow.define_yaml($y$
 name: wf30_saga
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: reserve
     sql: {statement: "insert into public.wf30_holds values ('{{run.$id}}'::uuid, 'berth')", write: true}

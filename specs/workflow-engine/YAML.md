@@ -114,8 +114,9 @@ The shortest way to ask the database a question is to ask it:
     sql: "select fy, fp, val from sec.facts where cik = {{run.cik}} order by fy desc"
 ```
 
-Read-only, executed inside Postgres with no process anywhere, and the rows come
-back under `result` like any other step's output. Nothing to register.
+Read-only, executed inside Postgres, and the rows come back under `result`
+like any other step's output. Nothing to register. Which statement it runs in
+-- a worker's, or the one that made it ready -- is its `mode`, below.
 
 **A statement that changes the database says so**, and the engine refuses one
 that does not:
@@ -150,10 +151,10 @@ starts, so neither a statement's `timeout_ms` nor a registered function's
 timeout cancels anything (measured on 0.2.38: a 3 s step under `timeout_ms:
 1000` ran its 3 s). Today the limit a step meets is its **caller's** `statement_timeout`:
 when that fires inside a step, `execute_sql_step` fails that step, terminally,
-with the timeout as its reason, and the caller's statement carries on. A step
-gets a limit of its own in `mode: worker`, below.
+with the timeout as its reason, and the caller's statement carries on. That
+is `mode: inline`; in `mode: worker`, below, a step's `timeout_ms` is exact.
 
-#### Where a `sql` step runs: `mode: worker` or `mode: inline` (REM-1316; specified, not built)
+#### Where a `sql` step runs: `mode: worker` or `mode: inline` (REM-1316; built in #392, the worker's handler in percolate-core #158)
 
 Sirsh decided REM-1316 on 6 Nov: two modes, and no watchdog.
 
@@ -190,6 +191,45 @@ definition stored before this ships, the engine's own, and hand-written JSON in
 tests, so nothing that runs today changes how it executes. A definition that
 installs itself and needs inline (the walk, the bundles) says `inline`
 explicitly.
+
+**As built.** Where each of those decisions landed, for a reader of the code:
+
+- **The task carries the answer.** `start_workflow` resolves each step's mode
+  when it creates the task (`workflow.with_sql_mode`) and writes `mode: worker`
+  into a worker-mode task's input; a matrix template gets it the same way, and
+  its children inherit it with the rest of the template's input. Absent means
+  inline. `execute_sql_step` returns without running a worker-mode task, which
+  covers every path that reaches it (the autorun trigger, `drain_sql_steps`, a
+  matrix's kick, the tick), and `drain_sql_steps` does not select one.
+- **The queue is `http`** unless the step names one. A sql step compiles to
+  queue `none`, which nothing polls; `http` is the queue the shipped worker is
+  deployed on (`percolate worker --queue http`), and the worker picks a handler
+  by the task's kind, so it runs a sql task as it runs an http_call one. A queue
+  of its own would leave every new workflow's sql steps unclaimed wherever no
+  worker had been added for it. The cost is that a sql step waits behind
+  whatever else is on `http`, an agent turn's hold included.
+- **The limit** is the step's `timeout_ms` (inside `sql:` or beside it, as in the
+  example), else a registered function's `timeout_ms`, else 30 s, the default
+  `run_sql` has always taken. `workflow.worker_sql_step_timeout` answers it.
+- **One transaction.** The worker runs, in order: the limit;
+  `set local statement_timeout` to it; `workflow.execute_worker_sql_step`; the
+  previous `statement_timeout` back; `complete_task`. So a write step's rows
+  commit with its completion or not at all, and an inline successor that
+  `complete_task` runs is not held to this step's limit. Both functions refuse
+  a task the caller does not hold.
+- **The usual rules** are the worker's, plus the SQLSTATEs `execute_sql_step`
+  already fails terminally (42501, 42883, 42P01, 42601, P0001), so a step fails
+  on the same errors in either mode. A timeout is retryable: each attempt is a
+  new statement with a new limit.
+- **The engine's installers** say `inline` through
+  `workflow.inline_mode_line()`, which is `mode: inline` for a compiler that
+  knows the key and nothing for one that does not. Two of them run when the
+  extension installs or upgrades, on whatever parser the image carries, and an
+  older compiler refuses `mode:` as an unknown field; given nothing, it stores
+  no mode, which reads as inline.
+- **Before a release that carries the compiler,** the worker that serves `http`
+  must have the `sql` handler (percolate-core). An older one fails a worker-mode
+  sql task terminally: `no handler registered for kind 'sql'`.
 
 **What each mode costs.** Measured on 6 Nov with percolate-postgres
 19-0.2.38, percolate-core 0.2.18 (`worker --queue http`, one worker, the

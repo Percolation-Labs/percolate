@@ -2847,7 +2847,7 @@ begin
     -- resolves to nothing fails the step rather than passing null.)
     perform workflow.register_step_function('dream', 'aiq.dream', '{timestamptz,text}', 300000,
         'reconcile the graph: supersede declared single-valued relations, promote exact soft nodes');
-    perform workflow.define_yaml($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || $y$
 name: dream
 steps:
   - id: reconcile

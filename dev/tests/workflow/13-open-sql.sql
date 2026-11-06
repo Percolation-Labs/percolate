@@ -291,6 +291,7 @@ begin
 
     perform workflow.define_yaml($y$
 name: t_os_matrix_inject
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: fan
     matrix:
@@ -361,6 +362,7 @@ declare v_run uuid; v_err text;
 begin
     perform workflow.define_yaml($y$
 name: t_os_p8ql_locked
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: dump
     p8ql: "select current_user::text as u"

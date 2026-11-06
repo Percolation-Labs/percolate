@@ -9,6 +9,7 @@ set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","o
 
 select workflow.define_yaml($$
 name: detention
+mode: inline
 steps:
   - id: notice
     p8ql: 'LOOKUP "Bulk Harmony"'

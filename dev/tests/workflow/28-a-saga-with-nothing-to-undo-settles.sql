@@ -36,6 +36,7 @@ grant select, insert, delete on public.wf28_holds to authenticated;
 -- 1 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: saga_first_fails
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: reserve
     sql: {statement: "insert into public.wf28_holds values ('{{run.$id}}'::uuid, 1 / 0)", write: true}
@@ -63,6 +64,7 @@ end $$;
 -- 2 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: saga_third_fails
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: reserve
     sql: {statement: "insert into public.wf28_holds values ('{{run.$id}}'::uuid, 'berth')", write: true}
@@ -96,6 +98,7 @@ end $$;
 -- keeps the run compensating until it finishes.
 select workflow.define_yaml($y$
 name: saga_slow_undo
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: reserve
     sql: {statement: "insert into public.wf28_holds values ('{{run.$id}}'::uuid, 'berth')", write: true}
