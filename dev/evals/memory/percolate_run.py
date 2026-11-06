@@ -142,7 +142,8 @@ def load():
 
 CANDIDATES = f"""
 select r.external_id, r.id
-  from aiq.search('chunks', %(ask)s, %(v)s::vector, '{MODEL}', 50) h
+  from aiq.search('chunks', %(ask)s, %(v)s::vector, '{MODEL}', 50)
+       with ordinality h(chunk_id, content, rrf_score, lexical_rank, semantic_rank, key_match, ord)
   join content.resource_chunks c on c.id = h.chunk_id
   join content.resources r on r.id = c.resource_id
  where (%(agent)s::text is null or r.metadata->>'agent' = %(agent)s)
@@ -150,7 +151,7 @@ select r.external_id, r.id
         select 1 from aiq.edges e, jsonb_array_elements(e.provenance->'sources') s
          where s->>'resource_id' = r.id::text
            and aiq.edge_is_current(e.valid_from, e.valid_to, %(at)s::timestamptz)))
- order by h.rrf_score desc
+ order by h.ord  -- aiq.search's own order, ties broken by id (REM-1312); rrf_score alone left them to the plan
  limit 10
 """
 

@@ -20241,14 +20241,14 @@ begin
 
     return query execute format($q$
     with lex as (
-        select l.chunk_id, row_number() over (order by l.score desc)::int as rnk
+        select l.chunk_id, row_number() over (order by l.score desc, l.chunk_id)::int as rnk
         from aiq.lexical($1, $2, $4 * 4, $7) l
     ),
     sem as (
         -- The SAME source name feeds both halves, so `SEARCH "..." FROM x`
         -- means one corpus and not two. It must therefore be registered in
         -- both registries; the semantic branch says so by name if it is not.
-        select s.chunk_id, row_number() over (order by s.distance asc)::int as rnk
+        select s.chunk_id, row_number() over (order by s.distance asc, s.chunk_id)::int as rnk
         from aiq.semantic_in($1, $3, $6, $4 * 4, $7) s
     )
     -- Content is fetched by id AFTER the fusion, not carried through the
@@ -20282,7 +20282,12 @@ begin
     select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank, f.key
     from ranked f
     cross join lateral (select c.%1$I from %2$s c where c.id = f.chunk_id limit 1) c
-    order by f.key is null, f.rrf desc
+    -- A TIE IS BROKEN BY ID, ALWAYS (REM-1312). RRF ties are common, not rare: ranks 1 and 3 on one side and 3 and 1
+    -- on the other sum to the same score, and equal ts_rank scores are equal ranks. Unbroken, tied rows came back in
+    -- the order of the join the planner chose (id order under a merge join, the semantic side's under a hash join),
+    -- so the Mem0 fixture's q21 put a different memory first between runs and the benchmark moved by a question.
+    -- Each rank above and this order end on the chunk id. No percent sign in here: this is a format() template.
+    order by f.key is null, f.rrf desc, f.chunk_id
     limit $4
     $q$, src.content_col, src.source_table, v_keyed)
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model, p_scope;
