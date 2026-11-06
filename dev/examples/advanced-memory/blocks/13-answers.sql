@@ -1,4 +1,4 @@
-select c.content as note, h.value ->> 'semantic_rank' as semantic_rank, h.value ->> 'lexical_rank' as lexical_rank
+select left(c.content, 70) as note, h.value ->> 'semantic_rank' as semantic_rank, h.value ->> 'lexical_rank' as lexical_rank
   from workflow.tasks t
   cross join jsonb_array_elements(t.output -> 'result' -> 'rows') h
   join content.resource_chunks c on c.id = (h.value ->> 'chunk_id')::uuid
