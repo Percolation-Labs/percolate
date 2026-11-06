@@ -4244,6 +4244,12 @@ begin
     if not found then
         raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_lexical_source;
     end if;
+    -- The words half reads the source itself (below), so it refuses what aiq.lexical refuses (REM-519).
+    if src.search_with is not null then
+        raise exception 'lexical source % is searched with %, not aiq.search', p_lexical_source, src.search_with
+            using errcode = 'feature_not_supported',
+                  hint = 'as the caller, its row security reads every row before the text index (REM-519)';
+    end if;
 
     -- THE KEY TIER (REM-1273): a node the query names exactly comes first, ahead
     -- of the fusion. Lexical and semantic are statistical, and RRF over them
@@ -4282,9 +4288,22 @@ begin
         $k$, src.node_type, aiq.scoped_source(src.source_table, p_scope), src.node_col) end;
 
     return query execute format($q$
+    -- THE WORDS HALF MATCHES ALL OF THE QUERY'S WORDS, NOT ANY (REM-1312). aiq.lexical matches any of them since
+    -- REM-1145, which is right for TEXT and for the lexical arm alone (LongMemEval S held-out recall@5 0.077 -> 0.791)
+    -- and wrong here. RRF uses only rank, so every row that matches gets one, however little its words weigh: a
+    -- memory's owner is named in every one of their memories, and "Which language is Maya trying to pick up?"
+    -- matched all 40 of Maya's facts, ranked shortest first, and outvoted the meaning half. Measured with only this
+    -- half changed: Mem0 fixture percolate-valid hit@1 63 percent (any) against 76 (all); LongMemEval S held-out
+    -- hybrid recall@5 0.887 against 0.936. Users get this function, so its own number decides, not the lexical
+    -- arm's. When no row holds every word the half is empty and the meaning half ranks alone, as before REM-1145.
+    -- No percent sign in these comments: they are inside a format() template.
     with lex as (
-        select l.chunk_id, row_number() over (order by l.score desc, l.chunk_id)::int as rnk
-        from aiq.lexical($1, $2, $4 * 4, $7) l
+        select c.id as chunk_id,
+               row_number() over (order by ts_rank(c.search_tsv, plainto_tsquery(%4$L, $2)) desc, c.id)::int as rnk
+          from %5$s c
+         where c.search_tsv @@ plainto_tsquery(%4$L, $2)
+         order by 2
+         limit $4 * 4
     ),
     sem as (
         -- The SAME source name feeds both halves, so `SEARCH "..." FROM x`
@@ -4331,7 +4350,7 @@ begin
     -- Each rank above and this order end on the chunk id. No percent sign in here: this is a format() template.
     order by f.key is null, f.rrf desc, f.chunk_id
     limit $4
-    $q$, src.content_col, src.source_table, v_keyed)
+    $q$, src.content_col, src.source_table, v_keyed, src.regconfig, aiq.scoped_source(src.source_table, p_scope))
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model, p_scope;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
