@@ -3108,6 +3108,7 @@ returns jsonb as $$
 declare
     v_out   jsonb;
     v_count bigint;
+    v_prev_timeout text;
     v_pol   text := workflow.sql_policy();
     -- Only bind when there is something to bind: EXECUTE refuses USING against
     -- a statement with no placeholders ("too many parameters specified").
@@ -3132,6 +3133,19 @@ begin
         raise exception 'this sql step carries an empty statement';
     end if;
 
+    -- THE STEP'S TIMEOUT ENDS WITH THE STEP (REM-1262). set_config(..., true)
+    -- is transaction-local, so left alone it outlived this call and bound every
+    -- later statement in the CALLER's transaction: on 29 Oct a bundle that ran
+    -- 18 walk starts as one transaction had its next long walk cancelled at
+    -- 30 s, and every start rolled back. So the caller's value is put back on
+    -- each return below. A raise needs no restore: it aborts the subtransaction
+    -- or transaction this setting was made in, and that rolls the GUC back.
+    --
+    -- What it does NOT do, measured on 0.2.38: a timeout set mid-statement is
+    -- not armed for the statement already running, so `select
+    -- workflow.run_sql('select pg_sleep(3)', false, 1000)` runs its 3 s. The
+    -- step's own limit is not enforced here; this only stops it leaking.
+    v_prev_timeout := current_setting('statement_timeout');
     perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
 
     if p_write then
@@ -3142,13 +3156,16 @@ begin
         -- review, and every reader of a definition deserves to see which steps
         -- change the database.
         if v_for is not null then
-            return workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+            v_out := workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+        else
+            if v_bind then execute p_statement using p_params;
+            else           execute p_statement;
+            end if;
+            get diagnostics v_count = row_count;
+            v_out := jsonb_build_object('rows_affected', v_count);
         end if;
-        if v_bind then execute p_statement using p_params;
-        else           execute p_statement;
-        end if;
-        get diagnostics v_count = row_count;
-        return jsonb_build_object('rows_affected', v_count);
+        perform set_config('statement_timeout', v_prev_timeout, true);
+        return v_out;
     end if;
 
     -- The courtesy check: unambiguous, cheap, and it turns an abort into a
@@ -3200,6 +3217,7 @@ begin
         end if;
     end;
 
+    perform set_config('statement_timeout', v_prev_timeout, true);
     return coalesce(v_out, '[]'::jsonb);
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
@@ -4757,6 +4775,7 @@ declare
     v_args jsonb;
     v_sql  text;
     v_out  jsonb;
+    v_prev text;
 begin
     select * into f from workflow.step_functions where name = p_name;
     if not found then
@@ -4768,6 +4787,9 @@ begin
             p_name;
     end if;
 
+    -- Put back on return, as run_sql does: transaction-local, it would
+    -- otherwise bind the caller's later statements (REM-1262).
+    v_prev := current_setting('statement_timeout');
     perform set_config('statement_timeout', f.timeout_ms::text, true);
 
     -- Arguments are passed as parameters, never interpolated: a step's args
@@ -4794,6 +4816,7 @@ begin
         execute v_sql into v_out using v_args;
     end if;
 
+    perform set_config('statement_timeout', v_prev, true);
     return v_out;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
