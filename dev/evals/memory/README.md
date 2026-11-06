@@ -92,7 +92,7 @@ env/bin/python -I mem0_time.py 2> /dev/null      # what Mem0's OSS SDK says to t
 env/bin/python -I mem0_run.py fixture.json > mem0.jsonl
 
 docker run -d --name memory-bench -e POSTGRES_USER=p8 -e POSTGRES_PASSWORD=p8 -e POSTGRES_DB=p8 \
-  -p 47959:5432 percolationlabs/percolate-postgres:19-0.2.37
+  -p 47959:5432 percolationlabs/percolate-postgres:19-0.2.37 > /dev/null
 DSN=postgresql://p8:p8@localhost:47959/p8 env/bin/python -I percolate_run.py fixture.json > percolate.jsonl
 
 python3 -I score.py fixture.json mem0.jsonl percolate.jsonl
