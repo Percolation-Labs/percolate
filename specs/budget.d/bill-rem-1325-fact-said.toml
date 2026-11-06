@@ -1,0 +1,3 @@
+why = "A candidate fact for linking now carries the sentences behind it and when it began to hold, as judgement evidence does. claims.fact_said reads them per edge as the caller; aiq.judgement_said is per node and reads every fact touching it, so it cannot say what one fact rests on."
+[added]
+functions = ["claims.fact_said"]

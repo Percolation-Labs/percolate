@@ -1635,9 +1635,40 @@ drop policy if exists deciders_readable on claims.deciders;
 create policy deciders_readable on claims.deciders for select using (true);
 grant select on claims.deciders to authenticated;
 
+-- WHAT WAS SAID, AND SINCE WHEN (REM-1325). A decider offered only "Priya Raman prefers DuckDB" could not tell
+-- whether Priya works on the harbour analytics, nor which of two preferences is current: a reader's Claude said both
+-- in its reasons. So each fact comes with when it began to hold and the sentences behind it, as the judgement queue's
+-- evidence carries them (aiq.judgement_said): the message or the resource each source names, the resource's chunk
+-- that names the subject first, cut to 300 characters. SECURITY INVOKER, so a source the caller may not read is
+-- simply not here.
+create or replace function claims.fact_said(p_edge uuid, p_limit int default 3)
+returns jsonb language sql stable set search_path = pg_catalog, public as $$
+    select coalesce(jsonb_agg(x), '[]'::jsonb) from (
+        select jsonb_strip_nulls(jsonb_build_object(
+                   'title', r.title,
+                   'said', left(coalesce(m.content, ch.content), 300))) as x
+          from aiq.edges e
+          cross join lateral jsonb_array_elements(coalesce(e.provenance->'sources', '[]'::jsonb)) s
+          left join lateral (select agentic.message_said((s->'message_ids'->>0)::uuid) as content
+                              where pg_input_is_valid(s->'message_ids'->>0, 'uuid')) m on true
+          left join content.resources r
+            on pg_input_is_valid(s->>'resource_id', 'uuid') and r.id = (s->>'resource_id')::uuid
+          left join lateral (
+              select c.content from content.resource_chunks c, aiq.nodes me
+               where c.resource_id = r.id and me.id = e.src_id
+               order by (c.content ilike '%' || coalesce(me.summary, '') || '%') desc, c.ordinal
+               limit 1) ch on true
+         where e.id = p_edge and coalesce(m.content, ch.content) is not null
+         limit greatest(least(coalesce(p_limit, 3), 10), 1)) t;
+$$;
+revoke execute on function claims.fact_said(uuid, int) from public;
+grant execute on function claims.fact_said(uuid, int) to authenticated;
+
+-- The return type grew valid_from and said (REM-1325), which create or replace cannot change.
+drop function if exists claims.facts_to_link(text, text, int, int);
 create or replace function claims.facts_to_link(p_model text, p_decider text default 'jev', p_k int default 5,
                                                 p_limit int default 100)
-returns table (edge_id uuid, fact text, candidates jsonb, body jsonb)
+returns table (edge_id uuid, fact text, valid_from timestamptz, said jsonb, candidates jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
     v_tbl text;
@@ -1653,17 +1684,20 @@ begin
         raise no_data_found using message = format('embedding model %s has no space', p_model);
     end if;
     return query execute format($q$
-        select f.id, f.content, c.candidates,
+        select f.id, f.content, f.valid_from, w.said, c.candidates,
                jsonb_build_object(
                    'model', $4::text,
-                   'state', jsonb_build_object('fact', f.content),
+                   'state', jsonb_build_object('fact', f.content, 'since', f.valid_from,
+                                               'said', (select coalesce(jsonb_agg(x->>'said'), '[]'::jsonb)
+                                                          from jsonb_array_elements(w.said) x)),
                    'questions', jsonb_build_object('bears_on', jsonb_build_object(
                        'type', 'choice',
-                       'instructions', 'Which question does `fact` bear on, as evidence a person answering it would want?',
+                       'instructions', 'Which question does `fact` bear on, as evidence a person answering it would want? `said` is what was said, and `since` when the fact began to hold.',
                        'criteria', c.options || jsonb_build_object('none_of_these',
                            'The fact bears on none of these questions.'))))
           from claims.fact_texts f
           join aiq.%1$I fe on fe.chunk_id = f.id
+          cross join lateral (select claims.fact_said(f.id) as said) w
           cross join lateral (
               select jsonb_object_agg(k.key, jsonb_build_object('id', k.id, 'text', k.search_text)) as candidates,
                      jsonb_object_agg(k.key, k.search_text) as options
