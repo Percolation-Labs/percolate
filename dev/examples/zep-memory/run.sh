@@ -1,73 +1,52 @@
 #!/bin/bash
-# Every block of "Percolate for Zep users", in order, from an empty directory, on part one's stack (the LangGraph
-# tour), against a real model:
+# Every block of "Percolate for Zep users", in order, from an empty directory, against a real model and the reader's
+# own Claude:
 #
-#     OPENAI_API_KEY=... IMG=percolationlabs/percolate-postgres:19-0.2.35 dev/examples/zep-memory/run.sh [workdir]
+#     OPENAI_API_KEY=... dev/examples/zep-memory/run.sh [workdir]
 #
-# The SQL blocks that need no model are asserted by dev/tests/query/21-zep-quickstart.sql. This runs the rest too:
-# Ana's assistant's turns, the only model calls, and the reading and judging her own agent does over MCP. Each block's input and output
-# land in <workdir>/captures. The key goes into the stack's .env only, and the script fails if it appears in a
-# capture. The project is its own (zep-memory), so `down -v` touches nothing else.
+# blocks/00-setup.sh is the article's setup block: it starts get-percolate's compose stack at the release tag it names, installs
+# the CLI and signs in. PROJECT renames its compose project and directory, PORT_BASE moves its seven ports to
+# PORT_BASE..PORT_BASE+6, and IMG pins the database image, so a run can sit beside other stacks; otherwise it runs as
+# written. The SQL blocks that need no model are asserted by dev/tests/query/21-zep-quickstart.sql. This runs the rest:
+# Ana's assistant's turns (gpt-4o-mini, then gpt-4o), the reading her agent does over MCP, and blocks/08-claude.sh,
+# where `claude -p` (Claude Code, on PATH and signed in) decides the judgements dream queued.
 #
-# UPGRADE=<percolate--A--B.sql> runs an image that predates a release: the script is copied into the database
-# container and applied as app_owner before any block, which is how this ran on main before 0.2.24 was published.
+# Each block's input and output go to <workdir>/captures. The key goes into the stack's .env only, and the script fails
+# if it appears in a capture. Tear down with `docker compose -p $PROJECT down -v` from <workdir>/$PROJECT.
 set -u
 B=$(cd "$(dirname "$0")" && pwd)/blocks
 W=${1:-$(mktemp -d)}; CAP=$W/captures
-IMG=${IMG:-percolationlabs/percolate-postgres:19-0.2.35}
+PROJECT=${PROJECT:-zep-tour}
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
+command -v claude > /dev/null || { echo "blocks/08-claude.sh needs Claude Code (claude) on PATH"; exit 1; }
+# Run from inside a Claude Code session, the nested `claude -p` would refuse to start.
+unset CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_MESSAGING_SOCKET \
+      CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SSE_PORT CLAUDE_CODE_ENTRYPOINT
+# A reader's Claude starts with no hooks of this machine's user's: read only project settings, of which there are none.
+claude() { command claude --setting-sources project "$@"; }
 mkdir -p $W $CAP; cd $W
 OK=$OPENAI_API_KEY
-curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml -o docker-compose.yml
 umask 077
-cat > .env <<ENV
-COMPOSE_PROJECT_NAME=zep-memory
-P8_DB_IMAGE=$IMG
-P8_PG_PORT=5791
-P8_REST_PORT=5792
-P8_AGENT_PORT=5793
-P8_CONTENT_PORT=5794
-P8_MINIO_PORT=5795
-P8_MINIO_CONSOLE_PORT=5796
-P8_QUERY_MCP_PORT=5797
-OPENAI_API_KEY=$OK
-ENV
-docker compose up -d --wait > $CAP/00-stack.txt 2>&1 || { echo stack failed; exit 1; }
-if [ -n "${UPGRADE:-}" ]; then
-  D=$(docker compose exec -T db pg_config --sharedir)/extension
-  docker compose cp "$UPGRADE" db:$D/ > /dev/null
-  to=$(basename "$UPGRADE" .sql); to=${to##*--}
-  docker compose exec -T db psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
-    -c "set role app_owner" -c "alter extension percolate update to '$to'" > $CAP/00-upgrade.txt 2>&1 \
-    || { echo upgrade failed; exit 1; }
-fi
-python3 -m venv .venv > /dev/null && . .venv/bin/activate && pip -q install 'percolate-core[sample,agent]==0.2.16' > /dev/null 2>&1
-set -a; . ./.env; set +a
-export PAGER=cat
-export P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
-export P8_ADMIN_DSN=$P8_DSN
-export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
-REST=http://localhost:$P8_REST_PORT
-AGENT=http://localhost:$P8_AGENT_PORT
-psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')" > /dev/null
-export P8_USER_ID=$(psql "$P8_DSN" -Atc "select id from rbac.users where email = 'me@example.com'")
-export TOKEN=$(percolate auth token --email me@example.com)
-show() {
-  for i in $(seq 150); do
-    [ "$(psql "$P8_DSN" -Atc "select status from workflow.runs where id = '$1'")" != running ] && break
-    sleep 2
+SETUP=$CAP/.setup.sh
+sed "s/zep-tour/$PROJECT/g" $B/00-setup.sh > $SETUP
+if [ -n "${PORT_BASE:-}" ]; then
+  i=0
+  for v in PG REST AGENT CONTENT MINIO MINIO_CONSOLE QUERY_MCP; do
+    sed -i.bak "s/^P8_${v}_PORT=.*/P8_${v}_PORT=$((PORT_BASE + i))/" $SETUP; i=$((i + 1))
   done
-  psql "$P8_DSN" -c "select status, compensation_state from workflow.runs where id = '$1'" \
-    -c "select step_key, status, left(output->>'result', 60) as result,
-               left(coalesce(error->>'error', error::text), 120) as error
-        from workflow.tasks where run_id = '$1'
-        order by completed_at nulls last, step_key"
-}
+fi
+[ -n "${IMG:-}" ] && awk -v img="$IMG" '{print} /^COMPOSE_PROJECT_NAME=/{print "P8_DB_IMAGE=" img}' $SETUP > $SETUP.new && mv $SETUP.new $SETUP
+rm -f $SETUP.bak
 fail=0
-for f in $(ls $B | sort); do
+{ sed 's/^/$ /' $B/00-setup.sh; . $SETUP < /dev/null 2>&1; } > $CAP/00-setup.txt
+rm -f $SETUP
+[ -n "${TOKEN:-}" ] || { echo "FAIL 00-setup.sh"; exit 1; }
+echo "done 00-setup.sh"
+for f in $(ls $B | sort | grep -v '^00-setup'); do
   out=$CAP/${f%.*}.txt
   case $f in
-    *.sh)  { sed 's/^/$ /' $B/$f; . $B/$f 2>&1; } > $out ;;
+    *.sh)  { sed 's/^/$ /' $B/$f; . $B/$f < /dev/null 2>&1; } > $out
+           grep -q '^Error' $out && { echo "FAIL $f"; fail=1; } ;;
     *.sql) { sed 's/^/=# /' $B/$f; psql "$P8_DSN" -X -v ON_ERROR_STOP=1 -f $B/$f 2>&1; } > $out
            grep -q '^psql:.*ERROR' $out && { echo "FAIL $f"; fail=1; } ;;
   esac

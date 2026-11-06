@@ -23,8 +23,9 @@ fixture fact, so a ranked list of edges becomes a ranked list of fact ids,
 which score.py grades against gold with no judge.
 
 The embedder is the one every other runner uses, fastembed BAAI/bge-small-en-v1.5,
-through Graphiti's EmbedderClient interface. The LLM is gpt-4o-mini, Graphiti's
-default; the other systems write without one.
+through Graphiti's EmbedderClient interface. The LLM is gpt-4o-mini unless LLM_MODEL
+names another (LLM_MODEL=default keeps the release's own); the other systems write
+without one.
 
     NEO4J_URI=bolt://localhost:57687 NEO4J_USER=neo4j NEO4J_PASSWORD=... \
     OPENAI_API_KEY=... python -I graphiti_run.py fixture.json > graphiti.jsonl
@@ -34,10 +35,12 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import version
 
 from fastembed import TextEmbedding
 from graphiti_core import Graphiti
 from graphiti_core.embedder.client import EmbedderClient
+from graphiti_core.llm_client import LLMConfig, OpenAIClient
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import ComparisonOperator, DateFilter, SearchFilters
@@ -74,6 +77,24 @@ async def main(path):
     # EMBEDDER=openai keeps Graphiti's own default embedder (text-embedding-3-small),
     # whose scores its 0.6 similarity floor was tuned for: Graphiti's best case.
     kw = {} if os.environ.get("EMBEDDER") == "openai" else {"embedder": FastEmbed()}
+    # The extraction model, named rather than left to the default, which moves between releases (0.31.2's is
+    # gpt-6-luna). LLM_MODEL=default keeps whatever the installed release defaults to.
+    model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+    if model != "default":
+        kw["llm_client"] = OpenAIClient(config=LLMConfig(model=model, small_model=model))
+    print(f"graphiti: graphiti-core {version('graphiti-core')}, LLM {model}", flush=True)
+    # A Neo4j container started a moment ago takes a while to accept a login: wait for it, up to two minutes.
+    from neo4j import GraphDatabase
+    for _ in range(60):
+        try:
+            with GraphDatabase.driver(os.environ["NEO4J_URI"],
+                                      auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"])) as d:
+                d.verify_connectivity()
+            break
+        except Exception:
+            await asyncio.sleep(2)
+    else:
+        sys.exit(f"no Neo4j at {os.environ['NEO4J_URI']} after two minutes")
     g = Graphiti(os.environ["NEO4J_URI"], os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"], **kw)
     await g.build_indices_and_constraints()
 
@@ -93,6 +114,26 @@ async def main(path):
                                 group_id=f["user"])
         episode_fact[r.episode.uuid] = f["id"]
         print(f"# added {f['id']}: {len(r.edges)} edges", file=sys.stderr)
+
+    # What the graph holds after the load, and which replaced facts Graphiti ended itself: an edge drawn from a
+    # replaced fact's episode with invalid_at (or expired_at) set. Printed as plain lines, which score.py skips.
+    records, _, _ = await g.driver.execute_query(
+        "MATCH ()-[r:RELATES_TO]->() RETURN r.episodes AS episodes, r.fact AS fact, "
+        "r.invalid_at IS NOT NULL OR r.expired_at IS NOT NULL AS ended")
+    by_fact = {}
+    for r in records:
+        for ep in r["episodes"] or []:
+            if ep in episode_fact:
+                by_fact.setdefault(episode_fact[ep], []).append((r["fact"], r["ended"]))
+    replaced = [f["supersedes"] for f in fixture["facts"] if f.get("supersedes")]
+    ended = [x for x in replaced if any(e for _, e in by_fact.get(x, []))]
+    print(f"graphiti: {len(records)} facts written from {len(fixture['facts'])} episodes", flush=True)
+    print(f"graphiti: {len(ended)} of the {len(replaced)} replaced facts ended", flush=True)
+    for fid in replaced:
+        if fid not in ended:
+            text = next(f["text"] for f in fixture["facts"] if f["id"] == fid)
+            state = "still current" if by_fact.get(fid) else "never written as a fact"
+            print(f"graphiti: {state}: {fid} {text}", flush=True)
 
     now = datetime.now(timezone.utc)
     for q in fixture["questions"]:
