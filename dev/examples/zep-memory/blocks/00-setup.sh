@@ -17,7 +17,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install -q 'percolate-core=
 
 set -a; . ./.env; set +a
 export PAGER=cat P8_DSN=postgres://p8:p8@localhost:$P8_PG_PORT/percolate
-export P8_JWT_SECRET=change-me-a-long-random-string-at-least-32-chars
+export P8_JWT_SECRET=$(docker compose exec -T agent printenv P8_JWT_SECRET)
 REST=http://localhost:$P8_REST_PORT AGENT=http://localhost:$P8_AGENT_PORT
 psql "$P8_DSN" -c "select rbac.bootstrap_admin('me@example.com', 'a long passphrase')"
 export TOKEN=$(percolate auth token --email me@example.com)
