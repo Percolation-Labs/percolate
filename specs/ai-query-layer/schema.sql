@@ -593,15 +593,20 @@ create or replace trigger trg_record_edge_retraction
     referencing old table as old_rows new table as new_rows
     for each statement execute function aiq.record_edge_retraction();
 
--- One row per BELIEF PERIOD. An edge with no undone retraction is its row; one
--- with k of them is k+1 rows, the holes cut out. `aiq.edge_is_current(
--- valid_from, valid_to, t)` over this view is the as-of read -- the same rule
--- a current read applies to aiq.edges, at a different t -- and it is what the
--- compiled snapshot is built from (graph-algorithms.md §7).
+-- One row per BELIEF PERIOD ON RECORD. An edge with no undone retraction is its
+-- row; one with k of them is k+1 rows, the holes cut out. `withdrawn_at` is
+-- set on the period a withdrawal ended (aiq.retract_derived, below): the
+-- period whose end is the withdrawal's own instant. Such a period was believed
+-- until withdrawn_at and, as the store knows things from then on, never held
+-- at all -- which is a record-time end, not a valid-time one (REM-1314).
 --
 -- security_invoker for edges_current's reason: the caller's RLS on aiq.edges
 -- decides which edges have periods at all.
-create or replace view aiq.edge_periods with (security_invoker = true) as
+create or replace view aiq.edge_periods_recorded with (security_invoker = true) as
+    select p.*,
+           case when (p.provenance->'withdrawn'->>'at')::timestamptz = p.valid_to
+                then p.valid_to end as withdrawn_at
+      from (
     select e.id as edge_id, e.src_id, e.dst_id, e.relation, e.weight, e.org_id,
            e.valid_from, e.valid_to, e.provenance
       from aiq.edges e
@@ -622,7 +627,31 @@ create or replace view aiq.edge_periods with (security_invoker = true) as
       from (select distinct on (edge_id) edge_id, revived_at
               from aiq.edge_retractions
              order by edge_id, retracted_at desc) l
-      join aiq.edges e on e.id = l.edge_id;
+      join aiq.edges e on e.id = l.edge_id
+      ) p;
+comment on view aiq.edge_periods_recorded is
+    'Every belief period on record, with withdrawn_at set on one a withdrawal '
+    'ended. Read by aiq.edges_as_of; an as-of read meaning "as known now" '
+    'reads aiq.edge_periods.';
+
+-- One row per BELIEF PERIOD, AS KNOWN NOW: the periods on record less the ones
+-- withdrawn. `aiq.edge_is_current(valid_from, valid_to, t)` over this view is
+-- the as-of read -- the same rule a current read applies to aiq.edges, at a
+-- different t -- and it is what the compiled snapshot, graph_neighbors and
+-- graph_walk (GRAPH ... AS OF) are built from (graph-algorithms.md §7).
+--
+-- A WITHDRAWN PERIOD IS LEFT OUT HERE, not by each reader. Until REM-1314 a
+-- withdrawal set valid_to to the moment it was made and nothing else, so the
+-- withdrawn fact read as held from when it was said until the withdrawal: a
+-- misreading withdrawn on 6 November still answered GRAPH ... AS OF May, as
+-- known on 6 November and after. The filter is in the view every as-of reader
+-- already reads, rather than a predicate each of them would have to remember,
+-- which is this file's edges_current argument a second time.
+create or replace view aiq.edge_periods with (security_invoker = true) as
+    select edge_id, src_id, dst_id, relation, weight, org_id,
+           valid_from, valid_to, provenance
+      from aiq.edge_periods_recorded
+     where withdrawn_at is null;
 comment on view aiq.edge_periods is
     'One row per interval over which an edge was believed. Filter with '
     'aiq.edge_is_current(valid_from, valid_to, t) for the edges that held at t.';
@@ -704,9 +733,21 @@ begin
      where e.id = sh.id and sh.rest is not null;
     get diagnostics v_withdrawn = row_count;
 
-    -- 2. Edges this agent alone asserts: retract, provenance intact.
+    -- 2. Edges this agent alone asserts: retract, provenance intact, and the
+    --    withdrawal recorded beside it. valid_to = now keeps every "now"
+    --    reader right without a second predicate; `withdrawn` says that this
+    --    end is the RECORD's -- from v_now on, the store holds that the fact
+    --    never held -- so aiq.edge_periods leaves the period out and
+    --    aiq.edges_as_of shows it only as known before v_now (REM-1314).
+    --    `at` keeps full precision, because edge_periods_recorded matches it
+    --    against the period's end; `valid_to` is the end the fact had before.
+    --    One record, the latest: a fact withdrawn, revived and withdrawn
+    --    again keeps the last withdrawal, and the earlier period reads as one
+    --    that ended.
     update aiq.edges e
-       set valid_to = v_now
+       set valid_to = v_now,
+           provenance = e.provenance || jsonb_build_object('withdrawn', jsonb_strip_nulls(jsonb_build_object(
+               'agent', p_agent, 'run_id', p_run, 'at', v_now, 'valid_to', e.valid_to)))
      where aiq.edge_is_current(e.valid_from, e.valid_to, v_now)
        and (p_org is null or e.org_id = p_org)
        and (p_relations is null or e.relation = any(p_relations))
@@ -730,7 +771,9 @@ begin
 end $$;
 comment on function aiq.retract_derived(text, uuid, text[], text) is
     'Withdraw one agent''s derived edges: its entries leave shared edges, and '
-    'edges it alone asserts are retracted with provenance intact (REM-60).';
+    'edges it alone asserts end their record time: valid_to and a withdrawn '
+    'record at the same instant, so an as-of read shows them only as known '
+    'before the withdrawal (REM-60, REM-1314).';
 revoke execute on function aiq.retract_derived(text, uuid, text[], text) from public;
 grant  execute on function aiq.retract_derived(text, uuid, text[], text) to worker;
 
