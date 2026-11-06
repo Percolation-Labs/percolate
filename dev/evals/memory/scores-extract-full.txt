@@ -1,0 +1,37 @@
+percolate: extracted with gpt-4o-mini: 59 facts written from 48 memories, 2 memories with none, 0 runs not succeeded
+percolate: told: 11 edges closed from the answer key
+percolate: extracted with gpt-4o-mini: 57 facts written from 48 memories, 2 memories with none, 0 runs not succeeded
+dream: {"since": "-infinity", "until": "2026-11-06T16:03:43.63892+00:00", "superseded": 9, "promoted_exact": 0, "promotion_refused": 0, "queued_for_a_judge": 14, "soft_left_for_a_judge": 62}
+graphiti: graphiti-core 0.31.2, LLM gpt-4o-mini
+graphiti: 46 facts written from 48 episodes
+graphiti: 8 of the 11 replaced facts ended
+graphiti: still current: f07 Maya is working on Project Atlas.
+graphiti: never written as a fact: f03 Maya prefers morning workouts.
+graphiti: still current: f19 Maya is working on Project Meridian.
+graphiti: LLM tokens for the load: 256743 in, 5947 out
+graphiti: told: 10 edges invalidated from the answer key
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+graphiti-valid   all            46    63%    76%         2%     0%
+graphiti-valid   current        14    36%    64%         7%     0%
+graphiti-valid   historical      8    75%    75%         0%     0%
+graphiti-valid   stable         12    75%    92%         0%     0%
+graphiti-valid   change          5    60%    60%         0%     0%
+graphiti-valid   scoped_agent    7    86%    86%         0%     0%
+graphiti-valid-told all            46    67%    78%         0%     0%
+graphiti-valid-told current        14    50%    71%         0%     0%
+graphiti-valid-told historical      8    75%    75%         0%     0%
+graphiti-valid-told stable         12    75%    92%         0%     0%
+graphiti-valid-told change          5    60%    60%         0%     0%
+graphiti-valid-told scoped_agent    7    86%    86%         0%     0%
+percolate-valid  all            46    61%    83%         0%     0%
+percolate-valid  current        14    21%    71%         0%     0%
+percolate-valid  historical      8    75%    75%         0%     0%
+percolate-valid  stable         12    67%   100%         0%     0%
+percolate-valid  change          5   100%    60%         0%     0%
+percolate-valid  scoped_agent    7    86%   100%         0%     0%
+percolate-valid-dream all            46    59%    74%         7%     0%
+percolate-valid-dream current        14    14%    50%        21%     0%
+percolate-valid-dream historical      8    75%    75%         0%     0%
+percolate-valid-dream stable         12    67%   100%         0%     0%
+percolate-valid-dream change          5   100%    60%         0%     0%
+percolate-valid-dream scoped_agent    7    86%    86%         0%     0%

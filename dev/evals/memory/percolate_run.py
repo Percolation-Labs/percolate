@@ -21,6 +21,11 @@ Two read paths, printed as separate systems:
 """
 import json, os, sys
 DREAM = os.environ.get("DREAM") == "1"
+# EXTRACT=<model> (REM-1309): the facts are not written from the fixture's triples. Each memory is registered into a
+# channel whose ingest workflow graph-indexes it with Percolate's own extractor (structure_null) on that model, as an
+# upload is, dated from its said_at; then the runner waits for every run. Needs a stack whose worker can call the
+# model (LLM_API_KEY), not a bare database. Graphiti extracts from the same text (graphiti_run.py).
+EXTRACT = os.environ.get("EXTRACT")
 SINGLE_VALUED = {"lives_in", "works_at", "manager_is", "working_on"}
 import psycopg
 from fastembed import TextEmbedding
@@ -99,14 +104,19 @@ select aiq.register_graph_vocabulary('{json.dumps([dict({"relation": r}, **({"si
 def load():
     as_operator()
     x(SETUP)
+    if EXTRACT:
+        x("set role app_owner")
+        for stmt in filter(str.strip, EXTRACT_SETUP.split(";")):
+            x(stmt, {"m": EXTRACT} if "%(m)s" in stmt else None)
+        x("reset role")
     x("reset role")
     edge_of = {}
     for f in sorted(fixture["facts"], key=lambda f: f["said_at"]):
         sub, org = USERS[f["user"]]
         # 1. add, as the user
         as_user(f["user"])
-        r = x("select content.register_text('memory', %s, %s, null, null, %s, %s)",
-              (f["id"], json.dumps([{"content": f["text"]}]), None if ORGLESS else org,
+        r = x("select content.register_text(%s, %s, %s, null, null, %s, %s)",
+              ("memory-extract" if EXTRACT else "memory", f["id"], json.dumps([{"content": f["text"]}]), None if ORGLESS else org,
                json.dumps({"agent": f["agent"], "run": f["run"], "said_at": f["said_at"],
                            "quote": f["quote"]}))).fetchone()[0]
         rid = r["resource_id"]
@@ -114,6 +124,9 @@ def load():
         # 2. the vector, as the worker that embeds would
         (chunk,) = x("select id from content.resource_chunks where resource_id = %s", (rid,)).fetchone()
         x(f"insert into {EMB} (chunk_id, embedding) values (%s, %s)", (chunk, vec(f["text"])))
+        if EXTRACT:
+            edge_of[f["id"]] = rid
+            continue
         # 3. the fact, as the worker that extracts would
         x("set role worker")
         g = x("select aiq.upsert_graph(%s, %s)", (
@@ -133,11 +146,77 @@ def load():
         if f["supersedes"] and not DREAM:
             x("update aiq.edges set valid_to = %s where id = %s",
               (f["said_at"], edge_of[f["supersedes"]]))
+    if EXTRACT:
+        edge_of = extracted(edge_of)
     if DREAM:
         as_operator()
         (receipt,) = x("select aiq.dream()").fetchone()
         print(f"dream: {json.dumps(receipt)}", file=sys.stderr)
     return edge_of
+
+
+# The upload pipeline's graph branch, as content.install_ingest_workflow(p_graph_index => true) writes it, without
+# its parse step: parse reads a file's bytes, and a memory registered as text with its said_at has chunks and no
+# file ("resource ... has no file"). An upload can carry no said_at, so the shipped pipeline cannot read a dated
+# memory into dated facts; this is the same extractor, windows and lander, started by the channel as an upload is.
+EXTRACT_SETUP = """
+select aiq.install_structure_null(%(m)s);
+select content.install_ingest_workflow(null, 'ingest', 'ingest_file_graph', true, %(m)s);
+select workflow.define_yaml(format($y$
+name: extract_facts
+steps:
+%%s  - id: graph
+    needs: [extractor_format]
+    matrix:
+      rows: {function: windows_to_index, args: ['{{run.resource_id}}']}
+      max_fanout: 200
+      template:
+        queue: http
+        rate_key: structure_extraction
+        rest: %%s
+
+  - id: land_graph
+    needs: [graph]
+    sql: {function: land_graph_windows, args: ['{{steps.graph.result.task_id}}']}
+$y$, aiq.extractor_format_step('structure_null', %(m)s),
+     (aiq.extractor_call_at_run('structure_null', %(m)s, '{{item.content}}'))::text));
+insert into content.channels (name, kind, org_id, visibility, config)
+  values ('memory-extract', 'manual', rbac.shared_org_id(), 'public', '{"ingest_workflow": "extract_facts"}')
+  on conflict do nothing;
+"""
+
+
+def extracted(rid_of):
+    """Wait for every memory's extraction run, report what each wrote, and close replaced facts if told."""
+    import time
+    as_operator()
+    for _ in range(300):
+        (busy,) = x("""select count(*) from workflow.runs where input->>'resource_id' = any(%s)
+                         and status not in ('succeeded', 'failed', 'cancelled')""",
+                    ([str(r) for r in rid_of.values()],)).fetchone()
+        if not busy:
+            break
+        time.sleep(2)
+    (failed,) = x("select count(*) from workflow.runs where input->>'resource_id' = any(%s) and status <> 'succeeded'",
+                  ([str(r) for r in rid_of.values()],)).fetchone()
+    edges = {}
+    for fid, rid in rid_of.items():
+        edges[fid] = [r[0] for r in x("""select distinct e.id from aiq.edges e, jsonb_array_elements(e.provenance->'sources') s
+                                          where s->>'resource_id' = %s""", (str(rid),)).fetchall()]
+        print(f"# added {fid}: {len(edges[fid])} edges", file=sys.stderr)
+    print(f"percolate: extracted with {EXTRACT}: {sum(len(v) for v in edges.values())} facts written from "
+          f"{len(edges)} memories, {sum(1 for v in edges.values() if not v)} memories with none, {failed} runs not succeeded",
+          flush=True)
+    if not DREAM:
+        said = {f["id"]: f["said_at"] for f in fixture["facts"]}
+        n = 0
+        for f in fixture["facts"]:
+            if f.get("supersedes") and f["supersedes"] in edges:
+                for eid in edges[f["supersedes"]]:
+                    n += x("""update aiq.edges set valid_to = %s where id = %s
+                               and (valid_to is null or valid_to > %s)""", (f["said_at"], eid, f["said_at"])).rowcount
+        print(f"percolate: told: {n} edges closed from the answer key", flush=True)
+    return edges
 
 
 CANDIDATES = f"""
