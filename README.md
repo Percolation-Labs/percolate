@@ -20,7 +20,7 @@ out, but the place you define, start, approve, query and inspect everything is o
 4. If you use Zep and want dated memory you can read as of any day, read
    [Percolate for Zep users](TODO-link-percolate-for-zep-users).
 5. If you want to go from a remembered fact to the questions it bears on, read
-   [From a remembered fact to the question it bears on](TODO-link-advanced-memory).
+   [Advanced Percolate Memory](TODO-link-advanced-memory).
 6. If you want every query mode and workflow step in one place, read the
    [P8QL](https://percolation-labs.github.io/get-percolate/grammar-p8ql.html) and
    [workflow](https://percolation-labs.github.io/get-percolate/grammar-workflow.html) references.
