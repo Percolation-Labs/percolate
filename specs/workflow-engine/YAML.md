@@ -148,12 +148,91 @@ statement that made it ready (`start_workflow`, a worker's `complete_task`, the
 tick), and Postgres arms `statement_timeout` only when a top-level statement
 starts, so neither a statement's `timeout_ms` nor a registered function's
 timeout cancels anything (measured on 0.2.38: a 3 s step under `timeout_ms:
-1000` ran its 3 s). The limit a step meets is its **caller's** `statement_timeout`:
+1000` ran its 3 s). Today the limit a step meets is its **caller's** `statement_timeout`:
 when that fires inside a step, `execute_sql_step` fails that step, terminally,
-with the timeout as its reason, and the caller's statement carries on. How a
-step could get a limit of its own (the worker running `sql` steps as it runs
-`http_call`, or a watchdog that cancels an overrunning step) is the design
-question REM-1316 leaves open.
+with the timeout as its reason, and the caller's statement carries on. A step
+gets a limit of its own in `mode: worker`, below.
+
+#### Where a `sql` step runs: `mode: worker` or `mode: inline` (REM-1316; specified, not built)
+
+Sirsh decided REM-1316 on 6 Nov: two modes, and no watchdog.
+
+```yaml
+mode: worker              # the definition's default for its sql steps
+steps:
+  - id: land
+    sql: {function: sec_land_facts, args: ['{{steps.fetch.result}}']}
+    timeout_ms: 20000     # exact in worker mode
+  - id: start
+    sql: "select aiq.walk_start({{run.id}})"
+    mode: inline          # this step needs to finish inside its caller
+```
+
+- **`worker` (preferred).** The step is a unit of its own, as an `http_call`
+  step is. A worker claims it, runs `set local statement_timeout =
+  <timeout_ms>` as a statement of its own, and then runs the step's statement in
+  the same transaction. The limit is armed when that statement starts, so it is
+  exact. A timeout or error fails the task through `fail_task`, and the usual
+  rules decide whether it retries. The step's completion makes its successors
+  ready. It does not run them.
+- **`inline`.** This is today's behaviour, kept for cases where latency
+  matters. The step runs inside the statement that made it ready, so a chain
+  finishes inside one `start_workflow` or `complete_task`. Its only limit is
+  the caller's `statement_timeout` (above). The walk (`aiq.install_walk_workflow`)
+  and the sample bundles' starts depend on this, because their callers read
+  the result in the same call.
+
+**How a step chooses.** A step's `mode:` overrides the definition's, and a
+matrix child takes its template's mode. The YAML compiler writes `mode: worker`
+wherever a definition does not say otherwise, so new workflows default to the
+worker. A stored spec with no `mode` key reads as `inline`. That covers every
+definition stored before this ships, the engine's own, and hand-written JSON in
+tests, so nothing that runs today changes how it executes. A definition that
+installs itself and needs inline (the walk, the bundles) says `inline`
+explicitly.
+
+**What each mode costs.** Measured on 6 Nov with percolate-postgres
+19-0.2.38, percolate-core 0.2.18 (`worker --queue http`, one worker, the
+default 2 s poll) and a local echo endpoint, with the statement log at
+millisecond resolution. Times are in ms, median / p95, over 100 steps each.
+The `http_call` step stands in for a worker-run `sql` step: everything but the
+handler is the same path.
+
+| per step | inline `sql` | worker `http_call`, chained | worker `http_call`, worker idle |
+|---|---|---|---|
+| ready → claimed | 0 (runs in the same statement) | ≈ 1: the next loop claims at once | **1,182 / 1,838** (the poll) |
+| claim transaction | – | 2 / 3 (claim_task 0.43 / 0.73) | 2 / 6 |
+| context + stale-timeout transactions | – | 3 / 4 | 3 / 6 |
+| execute | the statement | 9 / 15 (the http call) | 10 / 15 |
+| complete transaction (successors made ready inside) | ≈ 1.2 (complete_task) | 2 / 4 (complete_task 1.15 / 2.08) | 3 / 5 |
+| **step, ready → completed** | **1.9 / 4.9** in a 100-step chain; 1.7 / 2.1 for a one-step run | **18 / 29** | **1,198 / 1,850** |
+
+The inline cost grows with the length of the chain: steps 1–10 take 0.8 ms
+each and steps 90–100 take 4.5 ms. `check_run_completion` asks `is_success`
+about every task in the run on every step (52,490 calls for 5 × 100 steps).
+
+**Where a worker step's time goes, and the cheapest cuts** (REM-1319):
+
+1. **The poll, almost all of it** whenever a step becomes ready while the
+   worker is idle: a median of 1.18 s out of 1.20 s. The database already sends
+   `pg_notify('task_ready', <queue>)` whenever a task becomes ready
+   (`notify_new_ready` and the dependency cascade; a psql `LISTEN task_ready` saw payload `http` arrive). The worker
+   never `LISTEN`s, so it learns of the step on its next 2 s poll. If the worker
+   listened and kept the poll as a fallback, that wait would be a few ms. This
+   is the largest saving and changes only the worker.
+2. **Four transactions per step**, each a pool `BEGIN` / `set local role` /
+   `COMMIT` / `pg_advisory_unlock_all`: about 7–9 ms of an 18 ms chained step,
+   while the database functions themselves take about 2 ms. If `claim_task`
+   returned the task's context, and the worker cached the queue's stale timeout
+   instead of reading it for every task, two of the four would go: an
+   estimated 3–4 ms a step.
+3. **The http handler** took 9 ms against an echo that answers at once. Where
+   that time goes was not measured. A worker-run `sql` step would not pay it,
+   and would pay its statement's own time instead.
+
+With (1) and (2), a worker-run `sql` step in a chain would cost about 6–8 ms
+on top of its statement, against about 2 ms inline. An idle worker would add
+a few ms instead of about 1.2 s.
 
 #### Whose rows a step sees: the person who started the run
 
