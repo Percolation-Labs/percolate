@@ -6526,6 +6526,22 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- Without this a fan-out with continue_on could never reach 'succeeded' --
 -- it would sit in 'running' forever, which is the stall this whole section
 -- exists to avoid.
+--
+-- THE STATES, NOT EVERY TASK (REM-1323). It asked is_success of every task in
+-- the run, and runs once for every task that finishes, so a run of n steps
+-- made n^2/2 calls: 52,490 for five 100-step chains on 0.2.38, with the last
+-- steps of a chain 6x slower than the first. The non-success states are a
+-- handful of rows in lifecycle_states, and tasks.status is a foreign key to
+-- them, so "a task whose state is not a success" is exactly "a task whose
+-- state is one of these", with no function call per row. Measured with 20k
+-- other tasks: 7 buffers for the check where is_success took 259.
+--
+-- NOT THE WHOLE INLINE SLOWDOWN. A 100-step inline chain still slows from
+-- about 1 ms a step to 6-8: each step runs inside the previous step's
+-- subtransaction (execute_sql_step's block is open while complete_task's
+-- cascade runs the next), so step k holds k subtransactions, and past 64 the
+-- backend's subxid cache overflows (pg_stat_get_backend_subxact: 64, overflowed,
+-- from step 72). That is how steps execute, not this check; REM-1323's report.
 create or replace function workflow.check_run_completion(p_run_id uuid) returns void as $$
     update workflow.runs r
     set status = 'succeeded', completed_at = now()
@@ -6534,7 +6550,8 @@ create or replace function workflow.check_run_completion(p_run_id uuid) returns 
       and not exists (
           select 1 from workflow.tasks t
           where t.run_id = p_run_id
-            and not workflow.is_success(t.status)
+            and t.status = any (array(select s.state from workflow.lifecycle_states s
+                                       where not s.is_success))
             and not (t.status = 'failed' and t.tolerate_failure));
 $$ language sql security definer set search_path = pg_catalog, public;
 
