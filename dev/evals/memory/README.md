@@ -63,6 +63,29 @@ What it says, and what it does not:
 
 ## Graphiti (REM-1018)
 
+**The fair comparison, 6 November 2026** (`scores-fair-directional.txt`; per question, `fair-directional-compare.txt` from `compare.py`, and `fair-directional-postmortem.txt` with each side's top three). The
+rows below gave Percolate the fixture's answer key (which fact replaces which) and let Graphiti infer it, and ran
+Graphiti on gpt-4o-mini rather than its default. This run puts the two on equal terms, twice:
+
+- **Both told:** `TOLD=1` stamps `invalid_at` on every edge drawn from a replaced fact's episode, at the time the
+  replacing fact was said, and asks again as `graphiti-*-told`; `percolate-valid` closes the same facts.
+- **Neither told:** Graphiti's own invalidation (`graphiti-valid`) against `DREAM=1`, where `aiq.dream()` infers
+  supersession from four relations declared single-valued (`percolate-valid-dream`). Dream ended 7 of the 11.
+- **Graphiti's default model** (`LLM_MODEL=default`, gpt-6-luna in 0.31.2; about 106k input and 2.7k output
+  tokens for the load), and a change question is asked with no time filter on both sides, as `percolate_run.py`
+  always did.
+
+It is directional: `fixture-directional.json` holds the 11 replaced facts, the facts that replace them and four
+stable facts (23 facts, 31 questions, Maya only). Right first: both told, Percolate 17 of 31 and Graphiti 12;
+neither told, Percolate 16 and Graphiti 10. The gap is more than two questions both ways, so the full fixture was
+not run. From the postmortem: of Graphiti's nine losses where both were told, seven are questions whose answer's
+episode produced no edge on the default model (it wrote 14 facts from 23 episodes), so fact search cannot return it;
+two are ranking. Its four wins are ranking: each time Percolate had the right fact second. One asymmetry remains:
+Percolate's facts are written from the fixture's triples, as the tutorial's worker writes them, where Graphiti's
+are extracted by its model.
+
+The earlier rows follow, kept as run.
+
 **graphiti-core 0.31.2, 6 November 2026** (`scores-graphiti-0.31.2.txt`, beside Percolate on `19-0.2.38` in
 `scores-0.2.38.txt`, whose rows match 0.2.37's). The runner now names its extraction model (`LLM_MODEL`, default
 gpt-4o-mini, since 0.31.2's own default is gpt-6-luna), waits for Neo4j, and prints what the load built: 47 facts

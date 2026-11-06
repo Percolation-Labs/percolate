@@ -1,0 +1,116 @@
+===== BOTH TOLD graphiti-valid-told vs percolate-valid
+
+q02 current as_of=None :: Who is Maya employed by now?  gold=['f22'] (Graphiti wrote f22:1 edges)
+  graphiti-valid-told    RIGHT: f22 Maya works at Harbour Health. | f20 Maya is allergic to penicillin. | f25 Maya is working on the patient intake app.
+  percolate-valid        wrong: f34 Maya lives in Lisbon. | f22 Maya works at Harbour Health. | f04 Maya is allergic to peanuts.
+
+q10 current as_of=None :: Which city should I use for Maya's local weather forecast?  gold=['f34'] (Graphiti wrote f34:2 edges)
+  graphiti-valid-told    wrong: f23 Maya's manager is Daniel Osei. | f34 Maya lives in Lisbon. | f25 Maya is working on the patient intake app.
+  percolate-valid        RIGHT: f34 Maya lives in Lisbon. | f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin.
+
+q13 current as_of=None :: Would a 6:30am gym slot suit Maya?  gold=['f24'] (Graphiti wrote f24:0 edges)
+  graphiti-valid-told    wrong: f25 Maya is working on the patient intake app. | f09 Maya has a cat named Biscuit. | f34 Maya lives in Lisbon.
+  percolate-valid        RIGHT: f24 Maya prefers evening workouts. | f04 Maya is allergic to peanuts. | f26 Maya follows a pescatarian diet.
+
+q14 current as_of=None :: What's the name of the thing Maya is building at work?  gold=['f25'] (Graphiti wrote f25:1 edges)
+  graphiti-valid-told    RIGHT: f25 Maya is working on the patient intake app. | f22 Maya works at Harbour Health. | f34 Maya lives in Lisbon.
+  percolate-valid        wrong: f22 Maya works at Harbour Health. | f25 Maya is working on the patient intake app. | f09 Maya has a cat named Biscuit.
+
+q17 historical as_of=2026-03-01T00:00:00Z :: Who was Maya's boss back then?  gold=['f06'] (Graphiti wrote f06:1 edges)
+  graphiti-valid-told    RIGHT: f06 Maya's manager is Priya Shah. | f02 Maya works at Northwind Analytics. | f01 Maya lives in Leeds.
+  percolate-valid        wrong: f01 Maya lives in Leeds. | f06 Maya's manager is Priya Shah. | f02 Maya works at Northwind Analytics.
+
+q19 historical as_of=2026-03-01T00:00:00Z :: What was Maya eating then, diet-wise?  gold=['f08'] (Graphiti wrote f08:0 edges)
+  graphiti-valid-told    wrong: f01 Maya lives in Leeds. | f09 Maya has a cat named Biscuit. | f02 Maya works at Northwind Analytics.
+  percolate-valid        RIGHT: f08 Maya follows a vegetarian diet. | f04 Maya is allergic to peanuts. | f01 Maya lives in Leeds.
+
+q22 historical as_of=2026-04-01T00:00:00Z :: When in the day did Maya like to exercise then?  gold=['f03'] (Graphiti wrote f03:0 edges)
+  graphiti-valid-told    wrong: f01 Maya lives in Leeds. | f02 Maya works at Northwind Analytics. | f07 Maya is working on Project Atlas.
+  percolate-valid        RIGHT: f03 Maya prefers morning workouts. | f01 Maya lives in Leeds. | f08 Maya follows a vegetarian diet.
+
+q23 stable as_of=None :: Does Maya have any food allergies?  gold=['f04'] (Graphiti wrote f04:0 edges)
+  graphiti-valid-told    wrong: f20 Maya is allergic to penicillin. | f34 Maya lives in Lisbon. | f22 Maya works at Harbour Health.
+  percolate-valid        RIGHT: f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin. | f34 Maya lives in Lisbon.
+
+q24 stable as_of=None :: Is there any medication Maya reacts badly to?  gold=['f20'] (Graphiti wrote f20:1 edges)
+  graphiti-valid-told    RIGHT: f20 Maya is allergic to penicillin. | f25 Maya is working on the patient intake app. | f29 Maya decided to drop the part-time MBA.
+  percolate-valid        wrong: f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin. | f34 Maya lives in Lisbon.
+
+q26 stable as_of=None :: What kind of seat should I book for Maya on a flight?  gold=['f13'] (Graphiti wrote f13:0 edges)
+  graphiti-valid-told    wrong: f09 Maya has a cat named Biscuit. | f34 Maya lives in Lisbon. | f25 Maya is working on the patient intake app.
+  percolate-valid        RIGHT: f13 Maya prefers window seats on flights. | f34 Maya lives in Lisbon. | f04 Maya is allergic to peanuts.
+
+q31 change as_of=None :: Why did Maya stop being vegetarian?  gold=['f26', 'f08'] (Graphiti wrote f26:0 edges, f08:0 edges)
+  graphiti-valid-told    wrong: f20 Maya is allergic to penicillin. | f01 Maya lives in Leeds. | f18 Maya lives in Manchester.
+  percolate-valid        RIGHT: f08 Maya follows a vegetarian diet. | f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin.
+
+q32 change as_of=None :: When did Maya switch employers, and from where to where?  gold=['f22', 'f02'] (Graphiti wrote f22:1 edges, f02:1 edges)
+  graphiti-valid-told    wrong: f29 Maya decided to drop the part-time MBA. | f20 Maya is allergic to penicillin. | f02 Maya works at Northwind Analytics.
+  percolate-valid        RIGHT: f02 Maya works at Northwind Analytics. | f18 Maya lives in Manchester. | f34 Maya lives in Lisbon.
+
+q35 change as_of=None :: Why did Maya move her training from mornings to evenings?  gold=['f24', 'f03'] (Graphiti wrote f24:0 edges, f03:0 edges)
+  graphiti-valid-told    wrong: f19 Maya is working on Project Meridian. | f20 Maya is allergic to penicillin. | f29 Maya decided to drop the part-time MBA.
+  percolate-valid        RIGHT: f03 Maya prefers morning workouts. | f24 Maya prefers evening workouts. | f18 Maya lives in Manchester.
+
+graphiti-valid-told: 12/31 right first; percolate-valid: 17/31
+
+===== NEITHER TOLD graphiti-valid vs percolate-valid-dream
+
+q01 current as_of=None :: Where is Maya based these days?  gold=['f34'] (Graphiti wrote f34:2 edges)
+  graphiti-valid         wrong: f07 Maya is working on Project Atlas. | f20 Maya is allergic to penicillin. | f19 Maya is working on Project Meridian.
+  percolate-valid-dream  RIGHT: f34 Maya lives in Lisbon. | f04 Maya is allergic to peanuts. | f08 Maya follows a vegetarian diet.
+
+q05 current as_of=None :: What is Maya spending her working days on right now?  gold=['f25'] (Graphiti wrote f25:1 edges)
+  graphiti-valid         wrong: f19 Maya is working on Project Meridian. | f07 Maya is working on Project Atlas. | f25 Maya is working on the patient intake app.
+  percolate-valid-dream  RIGHT: f25 Maya is working on the patient intake app. | f22 Maya works at Harbour Health. | f34 Maya lives in Lisbon.
+
+q07 current as_of=None :: Is Maya still going ahead with the business school course?  gold=['f29'] (Graphiti wrote f29:1 edges)
+  graphiti-valid         RIGHT: f29 Maya decided to drop the part-time MBA. | f25 Maya is working on the patient intake app. | f19 Maya is working on Project Meridian.
+  percolate-valid-dream  wrong: f34 Maya lives in Lisbon. | f12 Maya decided to enrol in a part-time MBA. | f08 Maya follows a vegetarian diet.
+
+q10 current as_of=None :: Which city should I use for Maya's local weather forecast?  gold=['f34'] (Graphiti wrote f34:2 edges)
+  graphiti-valid         wrong: f23 Maya's manager is Daniel Osei. | f02 Maya works at Northwind Analytics. | f07 Maya is working on Project Atlas.
+  percolate-valid-dream  RIGHT: f34 Maya lives in Lisbon. | f03 Maya prefers morning workouts. | f04 Maya is allergic to peanuts.
+
+q14 current as_of=None :: What's the name of the thing Maya is building at work?  gold=['f25'] (Graphiti wrote f25:1 edges)
+  graphiti-valid         RIGHT: f25 Maya is working on the patient intake app. | f07 Maya is working on Project Atlas. | f19 Maya is working on Project Meridian.
+  percolate-valid-dream  wrong: f22 Maya works at Harbour Health. | f25 Maya is working on the patient intake app. | f09 Maya has a cat named Biscuit.
+
+q17 historical as_of=2026-03-01T00:00:00Z :: Who was Maya's boss back then?  gold=['f06'] (Graphiti wrote f06:1 edges)
+  graphiti-valid         RIGHT: f06 Maya's manager is Priya Shah. | f02 Maya works at Northwind Analytics. | f01 Maya lives in Leeds.
+  percolate-valid-dream  wrong: f01 Maya lives in Leeds. | f06 Maya's manager is Priya Shah. | f02 Maya works at Northwind Analytics.
+
+q19 historical as_of=2026-03-01T00:00:00Z :: What was Maya eating then, diet-wise?  gold=['f08'] (Graphiti wrote f08:0 edges)
+  graphiti-valid         wrong: f01 Maya lives in Leeds. | f09 Maya has a cat named Biscuit. | f02 Maya works at Northwind Analytics.
+  percolate-valid-dream  RIGHT: f08 Maya follows a vegetarian diet. | f04 Maya is allergic to peanuts. | f01 Maya lives in Leeds.
+
+q22 historical as_of=2026-04-01T00:00:00Z :: When in the day did Maya like to exercise then?  gold=['f03'] (Graphiti wrote f03:0 edges)
+  graphiti-valid         wrong: f01 Maya lives in Leeds. | f02 Maya works at Northwind Analytics. | f07 Maya is working on Project Atlas.
+  percolate-valid-dream  RIGHT: f03 Maya prefers morning workouts. | f01 Maya lives in Leeds. | f08 Maya follows a vegetarian diet.
+
+q23 stable as_of=None :: Does Maya have any food allergies?  gold=['f04'] (Graphiti wrote f04:0 edges)
+  graphiti-valid         wrong: f20 Maya is allergic to penicillin. | f34 Maya lives in Lisbon. | f09 Maya has a cat named Biscuit.
+  percolate-valid-dream  RIGHT: f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin. | f08 Maya follows a vegetarian diet.
+
+q24 stable as_of=None :: Is there any medication Maya reacts badly to?  gold=['f20'] (Graphiti wrote f20:1 edges)
+  graphiti-valid         RIGHT: f20 Maya is allergic to penicillin. | f25 Maya is working on the patient intake app. | f29 Maya decided to drop the part-time MBA.
+  percolate-valid-dream  wrong: f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin. | f34 Maya lives in Lisbon.
+
+q26 stable as_of=None :: What kind of seat should I book for Maya on a flight?  gold=['f13'] (Graphiti wrote f13:0 edges)
+  graphiti-valid         wrong: f34 Maya lives in Lisbon. | f09 Maya has a cat named Biscuit. | f07 Maya is working on Project Atlas.
+  percolate-valid-dream  RIGHT: f13 Maya prefers window seats on flights. | f34 Maya lives in Lisbon. | f03 Maya prefers morning workouts.
+
+q31 change as_of=None :: Why did Maya stop being vegetarian?  gold=['f26', 'f08'] (Graphiti wrote f26:0 edges, f08:0 edges)
+  graphiti-valid         wrong: f20 Maya is allergic to penicillin. | f01 Maya lives in Leeds. | f18 Maya lives in Manchester.
+  percolate-valid-dream  RIGHT: f08 Maya follows a vegetarian diet. | f04 Maya is allergic to peanuts. | f20 Maya is allergic to penicillin.
+
+q32 change as_of=None :: When did Maya switch employers, and from where to where?  gold=['f22', 'f02'] (Graphiti wrote f22:1 edges, f02:1 edges)
+  graphiti-valid         wrong: f29 Maya decided to drop the part-time MBA. | f20 Maya is allergic to penicillin. | f02 Maya works at Northwind Analytics.
+  percolate-valid-dream  RIGHT: f02 Maya works at Northwind Analytics. | f18 Maya lives in Manchester. | f34 Maya lives in Lisbon.
+
+q35 change as_of=None :: Why did Maya move her training from mornings to evenings?  gold=['f24', 'f03'] (Graphiti wrote f24:0 edges, f03:0 edges)
+  graphiti-valid         wrong: f19 Maya is working on Project Meridian. | f20 Maya is allergic to penicillin. | f29 Maya decided to drop the part-time MBA.
+  percolate-valid-dream  RIGHT: f03 Maya prefers morning workouts. | f24 Maya prefers evening workouts. | f18 Maya lives in Manchester.
+
+graphiti-valid: 10/31 right first; percolate-valid-dream: 16/31
+
