@@ -1,0 +1,4 @@
+why = "aiq.lexical_match is what TEXT matches, as one tsquery: aiq.lexical matches through it, and the MCP count probe counts with it, so the probe agrees with TEXT without ranking every match (REM-1315). Nothing held it: the rule was inline in aiq.lexical, and the probe kept its own copy, which went stale when TEXT moved to any word. Counting over aiq.lexical instead cost 4.6x on 300,000 chunks."
+
+[added]
+functions = ["aiq.lexical_match"]
