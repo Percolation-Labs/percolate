@@ -4280,7 +4280,10 @@ comment on function workflow.run_sql(text, boolean, int, jsonb) is
 $c$Execute a workflow step's own SQL statement.
 Read-only unless p_write is true, enforced by transaction_read_only rather than
 by inspecting the statement, and refused entirely when percolate.sql_policy is
-'registered'.$c$;
+'registered'. p_timeout_ms does NOT bound this statement: a statement_timeout set
+inside a running statement is never armed for it. The limit a step meets is its
+caller's statement_timeout, and execute_sql_step fails the step running when it
+fires (REM-1316, which leaves open how a step gets a limit of its own).$c$;
 
 -- Executes one ready `sql` task. Returns true if it did something.
 -- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
@@ -4375,7 +4378,38 @@ begin
         perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         return true;
-    exception when others then
+    -- A CANCEL FAILS THE STEP THAT WAS RUNNING, NOT THE CALLER (REM-1316).
+    -- `when others` does not catch query_canceled (57014), so a statement
+    -- timeout that fired inside a step used to abort the caller's whole
+    -- statement: on 5801 a walk start inside the worker's complete_task cascade
+    -- took the write-back with it, and q retried from the top. The timeout that
+    -- fires is the CALLER's statement_timeout, not the step's timeout_ms: a
+    -- limit set inside a statement is never armed for it (see run_sql), so
+    -- this is where a running step meets a limit at all. Terminal, because
+    -- the timer fires once per statement: a retry would rerun at once, in the
+    -- same statement, with no limit left. The caller's statement goes on
+    -- unbounded after this. Whether a step gets a limit of its own is the
+    -- design question REM-1316 leaves open.
+    --
+    -- ONLY A TIMEOUT. 57014 is also a person's cancel (pg_cancel_backend, a
+    -- client's Ctrl-C), and that one must still stop the caller, so anything
+    -- but the timeout is raised again. The two share a SQLSTATE and differ
+    -- only in the message; under an lc_messages other than English the match
+    -- fails and the cancel is re-raised, which is the pre-REM-1316 behaviour.
+    exception when query_canceled then
+        if sqlerrm is distinct from 'canceling statement due to statement timeout' then
+            raise;
+        end if;
+        perform set_config('workflow.current_task_id', v_prev_task, true);
+        perform set_config('workflow.current_run_id', v_prev, true);
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate,
+                'reason', 'the caller''s statement_timeout ('
+                          || current_setting('statement_timeout')
+                          || ') ran out while this step was running'),
+            true);
+        return true;
+    when others then
         perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         perform workflow.fail_task(p_task_id,
@@ -20335,6 +20369,17 @@ $$ language plpgsql;
 
 -- TEXT mode. Deliberately returns the same (id, score) shape as
 -- aiq.semantic_in() so the two can be fused without reshaping either.
+-- WHAT TEXT MATCHES, AS ONE TSQUERY (REM-1315): any of the query's words. aiq.lexical matches through it, and so
+-- does anything that has to agree with TEXT without ranking, such as the MCP probe counting how many rows a full
+-- TEXT result left out. That probe counted with plainto_tsquery, every word, and fell behind when TEXT moved to any
+-- word (REM-1145): 1 counted where TEXT returned 40. Counting over aiq.lexical itself agreed, but ranked every
+-- match first: 150,302 matches of 300,000 chunks took 188 ms as the owner against 41 for the count, and this
+-- predicate counts them in 30. NULL for a query with no indexable word, which matches nothing.
+create or replace function aiq.lexical_match(p_regconfig regconfig, p_query text) returns tsquery
+language sql immutable parallel safe as $$
+    select nullif(replace(plainto_tsquery(p_regconfig, p_query)::text, ' & ', ' | '), '')::tsquery
+$$;
+
 drop function if exists aiq.lexical(text, text, int);
 create or replace function aiq.lexical(
     p_source text, p_query text, p_limit int default 10, p_scope jsonb default null
@@ -20355,7 +20400,7 @@ begin
     -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
     -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
     return query execute format(
-        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
+        'with q as (select aiq.lexical_match(%L::regconfig, $1) as t)
          select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
            from %s c, q where c.search_tsv @@ q.t
           order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
@@ -22018,6 +22063,7 @@ grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authen
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+grant execute on function aiq.lexical_match(regconfig, text) to authenticated;
 -- Both halves build their scoped relation through it as the caller (REM-965).
 grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
