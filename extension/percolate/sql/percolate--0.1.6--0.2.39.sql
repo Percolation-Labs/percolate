@@ -31388,6 +31388,10 @@ declare
     v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int; v_res uuid;
     v_key text; v_type text; v_same_org boolean; v_same_owner boolean; v_name jsonb;
     v_moved_keys jsonb := '[]'::jsonb;
+    -- The symmetric relations, whose edge the catalogue trigger stores in
+    -- uuid order whatever endpoint was written first (graph-identity.md).
+    v_sym text[] := array(select relation from aiq.relation_types
+                           group by relation having bool_or(coalesce(is_symmetric, false)));
 begin
     -- No default for either: a promotion attributed to nobody reads as evidence that
     -- somebody checked. tier is the column the audit groups by (graph-identity.md D11).
@@ -31428,12 +31432,26 @@ begin
     -- envelope reads a gap between the two periods as belief, the same
     -- one-row-per-triple limit the upsert's revival comment names, and a
     -- revival here is recorded in aiq.edge_retractions by the same trigger.
+    --
+    -- A SYMMETRIC EDGE'S TWIN MAY BE STORED THE OTHER WAY ROUND (REM-1318).
+    -- The catalogue trigger stores a symmetric edge in uuid order, so the
+    -- moved edge (target, x) is written as (x, target) when x sorts first --
+    -- and the target's own copy of the fact sits in that orientation. Asked
+    -- in one orientation only, the not-exists below let the move through and
+    -- the unique index refused it, failing the whole promotion: binding "A.
+    -- Costa" onto "Ana Costa", both affiliated_with one company, raised on
+    -- 19-0.2.38 when the company's uuid fell between theirs. So, for a
+    -- symmetric relation, the move and the merge each ask both orientations.
+    -- Normalising before the write instead would duplicate the trigger's rule
+    -- here; the trigger stays the one place that rule is written.
     with moved as (
         update aiq.edges e set src_id = p_target_node_id
         where e.src_id = v_cand
           and not exists (select 1 from aiq.edges x
-                          where x.src_id = p_target_node_id and x.dst_id = e.dst_id
-                            and x.relation = e.relation)
+                          where x.relation = e.relation
+                            and ((x.src_id = p_target_node_id and x.dst_id = e.dst_id)
+                                 or (e.relation = any(v_sym)
+                                     and x.src_id = e.dst_id and x.dst_id = p_target_node_id)))
         returning 1)
     select count(*) into v_c from moved;  v_moved := v_moved + v_c;
 
@@ -31447,8 +31465,9 @@ begin
                valid_to   = case when x.valid_to is null or e.valid_to is null then null
                                  else greatest(x.valid_to, e.valid_to) end
           from aiq.edges e
-         where e.src_id = v_cand and x.src_id = p_target_node_id
-           and x.dst_id = e.dst_id and x.relation = e.relation
+         where e.src_id = v_cand and x.relation = e.relation
+           and ((x.src_id = p_target_node_id and x.dst_id = e.dst_id)
+                or (e.relation = any(v_sym) and x.src_id = e.dst_id and x.dst_id = p_target_node_id))
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
     -- DELETED, not retracted, and the distinction matters now that
@@ -31465,8 +31484,10 @@ begin
         update aiq.edges e set dst_id = p_target_node_id
         where e.dst_id = v_cand
           and not exists (select 1 from aiq.edges x
-                          where x.dst_id = p_target_node_id and x.src_id = e.src_id
-                            and x.relation = e.relation)
+                          where x.relation = e.relation
+                            and ((x.dst_id = p_target_node_id and x.src_id = e.src_id)
+                                 or (e.relation = any(v_sym)
+                                     and x.dst_id = e.src_id and x.src_id = p_target_node_id)))
         returning 1)
     select count(*) into v_c from moved;  v_moved := v_moved + v_c;
 
@@ -31480,8 +31501,9 @@ begin
                valid_to   = case when x.valid_to is null or e.valid_to is null then null
                                  else greatest(x.valid_to, e.valid_to) end
           from aiq.edges e
-         where e.dst_id = v_cand and x.dst_id = p_target_node_id
-           and x.src_id = e.src_id and x.relation = e.relation
+         where e.dst_id = v_cand and x.relation = e.relation
+           and ((x.dst_id = p_target_node_id and x.src_id = e.src_id)
+                or (e.relation = any(v_sym) and x.dst_id = e.src_id and x.src_id = p_target_node_id))
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
     delete from aiq.edges where dst_id = v_cand;
