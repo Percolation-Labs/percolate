@@ -184,4 +184,32 @@ begin
     assert (select count(*) from workflow.definitions where name = 'link_facts_rem996') = 1, 'the workflow is defined';
 end $$;
 
+-- 6. What was said, and since when (REM-1325). A decider offered only "Postgres rem996 prefers DuckDB tool rem996"
+-- cannot tell what the fact rests on or whether it is current, so each candidate carries the sentence behind it
+-- and when it began to hold, read as the caller: Maya sees the sentence in her notes, Leo is offered nothing.
+insert into content.resource_chunks (resource_id, ordinal, content) values
+    ('00000000-0000-4000-8000-0000000996d1', 0, 'Maya, 3 March: Postgres rem996 should hand the scans to DuckDB tool rem996.');
+insert into aiq."emb_rem996_3d" (chunk_id, embedding) values ((select v from ids where k = 'priv2'), '[1,0,0.1]');
+:as_maya
+do $$
+declare r record;
+begin
+    select * into r from claims.facts_to_link('rem996-3d') where edge_id = (select v from ids where k = 'priv2');
+    assert r.edge_id is not null, 'Maya''s unlinked fact is offered to her';
+    assert r.said @> '[{"title": "Maya''s notes", "said": "Maya, 3 March: Postgres rem996 should hand the scans to DuckDB tool rem996."}]',
+        'the candidate carries the sentence behind the fact and where it was said: ' || coalesce(r.said::text, 'null');
+    assert r.valid_from = (select valid_from from aiq.edges where id = r.edge_id) and r.valid_from is not null,
+        'and when the fact began to hold';
+    assert r.body->'state'->'said' ? 'Maya, 3 March: Postgres rem996 should hand the scans to DuckDB tool rem996.'
+           and r.body->'state' ? 'since', 'the decider''s request carries both: ' || (r.body->'state')::text;
+end $$;
+:as_leo
+do $$
+begin
+    assert not exists (select 1 from claims.facts_to_link('rem996-3d') where edge_id = (select v from ids where k = 'priv2')),
+        'Leo is not offered Maya''s fact';
+    assert claims.fact_said((select v from ids where k = 'priv2')) = '[]'::jsonb, 'nor told what her notes said';
+end $$;
+reset role;
+
 rollback;
