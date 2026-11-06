@@ -31947,21 +31947,37 @@ begin
     -- THE TWIN SETTLES WITH IT (jack, 20 Oct). A pair of aliases is queued
     -- from both sides -- "A. Costa, candidate Ana Costa" and "Ana Costa,
     -- candidate A. Costa" -- and binding one evicts the node the other
-    -- proposed. So the bound node leaves every open item's candidates, and an
+    -- proposed. So the bound node leaves every live item's candidates, and an
     -- item left with none is moot, naming the judgement that settled it,
     -- rather than open with nothing a judge could do but close it by hand.
+    --
+    -- EVERY LIVE STATUS, NOT ONLY OPEN (REM-1313). Settling only an open twin
+    -- left two kinds live with nothing to bind, on the tutorials' runs of
+    -- 6 Nov: one CLAIMED by the reader's agent, which then closed it as none,
+    -- and one passed TO_HUMAN, which Ana then had to close by hand. Neither
+    -- holds anything a decision could still do. Its one candidate is the node
+    -- this bind evicted, so a bind to it is refused (the guard's candidate must
+    -- exist), a distinct records nothing (complete_judgement records distinct
+    -- against candidates that exist), and none says what moot says. So a
+    -- claimed twin is mooted under its holder, its claim ended, and the
+    -- holder's decision is answered by complete_judgement as already settled
+    -- (one racing the bind finds its claim gone, and the guard refuses it).
+    -- Removing the evicted node from a claimed item's evidence is not the
+    -- refresh enqueue_soft_judgements spares a claimed item: that one can add
+    -- candidates under a judge reading the list; this only takes away one no
+    -- verdict can name.
     if new.verdict->>'decision' = 'bind' then
         update aiq.judgements j
            set evidence = j.evidence || jsonb_build_object('candidates', coalesce(
                    (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
                      where c->>'node_id' <> new.subject_node_id::text), '[]'::jsonb))
-         where j.id <> new.id and j.status in ('open','to_human')
+         where j.id <> new.id and j.status in ('open','claimed','to_human')
            and j.evidence->'candidates' @> jsonb_build_array(jsonb_build_object('node_id', new.subject_node_id::text));
         update aiq.judgements j
-           set status = 'moot',
+           set status = 'moot', claimed_by = null, claimed_from = null, lease_until = null,
                evidence = j.evidence || jsonb_build_object('settled_by', jsonb_build_object(
                    'judgement', new.id, 'bound', new.subject_node_id, 'onto', new.verdict->>'target'))
-         where j.id <> new.id and j.status = 'open'
+         where j.id <> new.id and j.status in ('open','claimed','to_human')
            and jsonb_array_length(coalesce(j.evidence->'candidates', '[]'::jsonb)) = 0
            and j.evidence ? 'candidates'
            and exists (select 1 from aiq.nodes n where n.id = j.subject_node_id)
@@ -32106,6 +32122,10 @@ begin
          order by queued_at
          for update skip locked limit 1;
         if v_id is null then
+            if p_id is not null and exists (select 1 from aiq.judgements where id = p_id and status = 'moot') then
+                raise exception 'judgement % is moot: it was settled without a decision, and there is nothing left to claim', p_id
+                    using hint = 'evidence.settled_by names the judgement whose bind settled it, when one did';
+            end if;
             if p_id is not null then
                 raise exception 'judgement % is not open to you: it does not exist, you cannot see it, or someone holds it', p_id;
             end if;
@@ -32150,6 +32170,15 @@ begin
     select * into j from aiq.judgements where id = p_id;
     if not found then
         raise exception 'no judgement % you can see', p_id;
+    end if;
+    -- A MOOT ITEM IS ALREADY SETTLED (REM-1313): its twin's bind took the
+    -- only candidate it had, possibly while this caller held it. Nothing is
+    -- decided or written, and the answer says what settled it, so a judge
+    -- that claimed it before the bind moves on instead of retrying.
+    if j.status = 'moot' then
+        return jsonb_strip_nulls(jsonb_build_object('id', j.id, 'status', j.status, 'already', true,
+            'settled_by', j.evidence->'settled_by',
+            'note', 'nothing was decided: this item was already settled, and there is nothing left to bind'));
     end if;
     if j.status = 'decided' then
         if j.verdict - 'seen' = p_verdict
