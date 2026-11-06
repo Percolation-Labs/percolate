@@ -1834,6 +1834,62 @@ grant execute on function claims.propose_bears_on(uuid, uuid, real, text),
 revoke all on function claims.edge_readable(uuid) from public;
 grant execute on function claims.edge_readable(uuid) to authenticated;
 
+-- A LINK FOR THE PERSON'S OWN AGENT TO DECIDE (REM-1324). The reader's agent, connected over MCP, could read
+-- claims.facts_to_link through the read-only query tool and had no way to write what it chose, so a tutorial's
+-- shell wrote its picks. A link is now a judgement, kind 'link', in the queue that agent already works: its subject
+-- is the fact (an aiq.edges id) and its candidates the questions nearest it. claim_judgement shows the fact, what was
+-- said behind it and the candidates, read as the judge; decide_judgement with {"decision":"link","target":<question
+-- id>,"confidence":p} proposes it through claims.propose_bears_on, as the judge. No table and no tool are added.
+--
+-- READ THROUGH THE FACT, NOT ITS NODES. A link case shows a fact, and a fact is private when its memory is, even
+-- between two public nodes (research/38's priv2), so the subject-node rule the other kinds use would show a private
+-- fact's case to anyone who can read the tool it names. A link case is readable, and decidable, by whoever may read
+-- the fact (claims.edge_readable, aiq.edges' own policy asked as the caller).
+drop policy if exists judgements_link_via_fact on aiq.judgements;
+create policy judgements_link_via_fact on aiq.judgements for select
+  using (aiq.judgements.kind = 'link' and claims.edge_readable(aiq.judgements.subject_node_id));
+drop policy if exists judgements_link_moves on aiq.judgements;
+create policy judgements_link_moves on aiq.judgements for update
+  using (aiq.judgements.kind = 'link' and claims.edge_readable(aiq.judgements.subject_node_id));
+
+-- Queue a link case for each current fact the caller may read that has no link, no live case and no case already
+-- decided none, with its nearest questions the caller may read in one model's space. Returns how many it queued.
+-- SECURITY DEFINER because the queue takes no inserts from callers; it queues only what edge_readable and
+-- question_readable say the caller may read, and stores no sentence: what was said is read at claim time, as the
+-- judge.
+create or replace function claims.queue_link_judgements(p_model text, p_k int default 5)
+returns int language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_uid uuid := rbac.current_user_id();
+    n int;
+begin
+    if v_uid is null then
+        raise exception 'queue_link_judgements needs a signed-in caller: a link case is somebody''s to decide';
+    end if;
+    insert into aiq.judgements (kind, subject_node_id, evidence, queued_by)
+    select 'link', f.edge_id,
+           jsonb_build_object('fact', f.fact, 'label', f.fact, 'model', p_model,
+                              'valid_from', f.valid_from,
+                              'candidates', (select coalesce(jsonb_agg(jsonb_build_object(
+                                                 'key', c.key, 'question_id', c.value->>'id', 'text', c.value->>'text')
+                                                 order by c.key), '[]'::jsonb)
+                                               from jsonb_each(f.candidates) c
+                                              where claims.question_readable((c.value->>'id')::uuid))),
+           'claims.queue_link_judgements:' || v_uid
+      from claims.facts_to_link(p_model, 'jev', p_k) f
+     where claims.edge_readable(f.edge_id)
+       and not exists (select 1 from aiq.judgements j
+                        where j.kind = 'link' and j.subject_node_id = f.edge_id
+                          and (j.status in ('open', 'claimed', 'to_human')
+                               or (j.status = 'decided' and j.verdict->>'decision' = 'none')))
+    on conflict do nothing;
+    get diagnostics n = row_count;
+    return n;
+end;
+$$;
+revoke all on function claims.queue_link_judgements(text, int) from public;
+grant execute on function claims.queue_link_judgements(text, int) to authenticated;
+
 -- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
 --      by claims.study_key -- the application's REM-430 key, moved here -- so two packages that read one study
