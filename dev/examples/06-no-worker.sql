@@ -2,11 +2,14 @@
 --
 -- Both steps are in-database kinds, so the run finishes before
 -- start_workflow returns. There is no queue to poll and no process to deploy.
+-- Both documents say `mode: inline`, because one that says nothing hands
+-- its sql steps to a worker (REM-1316).
 set local role app_owner;
 set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 select workflow.define_yaml($$
 name: fleet_brief
+mode: inline
 steps:
   - id: operator
     p8ql: 'LOOKUP "MERI"'
@@ -41,6 +44,7 @@ where t.run_id = :'run_id'::uuid and t.step_key = 'fleet';
 \echo '-- goes done, carrying a note instead of rows:'
 select workflow.define_yaml($$
 name: plain_sql_step
+mode: inline
 steps:
   - id: count
     p8ql: 'select count(*) from harbour.vessels'

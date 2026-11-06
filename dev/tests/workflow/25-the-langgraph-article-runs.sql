@@ -37,6 +37,10 @@
 -- in and defines start, show and waiting. Its .env heredoc is unquoted, so the key comes from OPENAI_API_KEY in the
 -- reader's shell and the block runs without an edit.
 --
+-- Every document says `mode: inline` (REM-1316): the compiler now writes `mode: worker` for one that says nothing,
+-- and these sections assert what finishes inside start_workflow or the worker's complete_task, which is inline. The
+-- article's copies need the same line, or its §2 claim that query steps finish inside start_workflow is not true.
+--
 -- One transaction, rolled back.
 
 \set ON_ERROR_STOP on
@@ -352,6 +356,7 @@ select pg_temp.check((select count(*) from agentic.agents where name in ('joker'
 -- block: joke
 select workflow.define_yaml($y$
 name: joke
+mode: inline
 steps:
   - id: generate
     agent: joker
@@ -396,6 +401,7 @@ end $$;
 -- §2's prose: a chain of query steps has finished by the time start_workflow returns.
 select workflow.define_yaml($y$
 name: query_chain
+mode: inline
 steps:
   - {id: a, sql: "select 1 as n"}
   - {id: b, needs: [a], sql: "select {{steps.a.result.0.n}} + 1 as n"}
@@ -414,6 +420,7 @@ end $$;
 -- block: compare
 select workflow.define_yaml($y$
 name: compare
+mode: inline
 steps:
   - {id: joke,  agent: writer, input: 'A joke about {{run.topic}}'}
   - {id: story, agent: writer, input: 'A story about {{run.topic}}'}
@@ -550,6 +557,7 @@ from workflow.register_step_function('land_extractions', 'public.land_extraction
 -- block: extract_reports
 select workflow.define_yaml($y$
 name: extract_reports
+mode: inline
 steps:
   - id: extract
     matrix:
@@ -585,6 +593,7 @@ end $$;
 -- block: write_report
 select workflow.define_yaml($y$
 name: write_report
+mode: inline
 steps:
   - id: plan
     agent: planner
@@ -623,6 +632,7 @@ end $$;
 -- block: joke_until_funny
 select workflow.define_yaml($y$
 name: joke_until_funny
+mode: inline
 steps:
   - id: refine
     repeat:
@@ -671,6 +681,7 @@ end $$;
 -- block: triage_then_research
 select workflow.define_yaml($y$
 name: triage_then_research
+mode: inline
 steps:
   - {id: triage,    agent: classifier, session_group: analysis, input: 'Classify: {{run.report}}'}
   - {id: deep_dive, agent: researcher, session_group: analysis, needs: [triage],
@@ -732,6 +743,7 @@ end $$;
 -- block: release_vessel
 select workflow.define_yaml($y$
 name: release_vessel
+mode: inline
 steps:
   - id: notice
     sql: "select 'detention notice served' as notice"
@@ -814,6 +826,7 @@ select pg_temp.check((select status from workflow.runs where id = current_settin
 -- The same defect one function along: a run whose last step is a timer stayed `running` once it fired.
 select workflow.define_yaml($y$
 name: wait_then_stop
+mode: inline
 steps:
   - {id: wait, timer: 60}
 $y$);
@@ -838,6 +851,7 @@ grant select, insert, delete on berth_holds, pilot_bookings to authenticated;
 -- block: booking
 select workflow.define_yaml($y$
 name: booking
+mode: inline
 steps:
   - id: reserve_berth
     sql: {statement: "insert into berth_holds values ('{{run.$id}}'::uuid, 'Rotterdam')", write: true}
@@ -891,6 +905,7 @@ from workflow.register_step_function('check_coverage', 'public.check_coverage', 
 -- block: insurance_claim
 select workflow.define_yaml($y$
 name: insurance_claim
+mode: inline
 steps:
   - id: fraud
     agent: fraud_scorer

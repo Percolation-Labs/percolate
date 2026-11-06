@@ -64,6 +64,7 @@ select pg_temp.check((workflow.compiler_capabilities()->'accepts'->>'repeat')::b
 -- 2 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: repeat_count
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: loop
     repeat:
@@ -112,6 +113,7 @@ end $$;
 -- 4 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: repeat_pair
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: seed
     sql: "select 'draft' as text"
@@ -148,6 +150,7 @@ end $$;
 -- 5 ------------------------------------------------------------------------------------------------------------
 select workflow.define_yaml($y$
 name: repeat_own_when
+mode: inline  # REM-1316: asserted to run inside the call that makes it ready
 steps:
   - id: loop
     repeat:

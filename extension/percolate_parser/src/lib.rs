@@ -821,12 +821,15 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
         "document": {
             "name": "required -- the workflow's name",
             "version": "optional int, default 1",
+            "mode": "optional, `worker` (the default) or `inline`: where this definition's sql steps run -- see the step key",
             "steps": "required, non-empty. Each step: id, optional needs[], optional queue, and EXACTLY ONE action (or a matrix)."
         },
         "step_keys": {
             "id": "required, unique within the document; becomes the task's step_key",
             "needs": "list of step ids this one waits for -- an AND-join",
-            "queue": "which worker pool claims it; in-database kinds ignore it",
+            "queue": "which worker pool claims it; in-database kinds ignore it, and a worker-mode sql step defaults to http",
+            "mode": "a sql or p8ql step only: `worker` makes it a task a worker claims and runs under its own timeout_ms, set as statement_timeout before its statement; `inline` runs it inside the statement that made it ready (start_workflow, complete_task), bounded only by that caller's statement_timeout. Overrides the document's mode; on a matrix, write it on the template",
+            "timeout_ms": "a sql or p8ql step only: its statement's limit, exact in worker mode",
             "rate_key": "a shared throttle this task consumes before being claimed -- workflow.queue_config holds the rate; two steps naming the same key share one budget",
             "compensate_with": "step id to run in reverse order if a saga member fails",
             "saga_group": "groups tasks compensated together",
@@ -834,9 +837,9 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             "when": "a SQL predicate over {{run.x}} and earlier results ({{steps.<id>.result...}}, each a bound value; a step it names must be in needs). Asked once, when the step's needs are done: false or null marks the step skipped, which counts as done for the steps after it, so a step after a skipped one runs unless it has a when of its own"
         },
         "actions": [
-            {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
-             "purpose": "A dialect query as a step. No process, no queue wait. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls. In LAKE mode it compiles to a `work` step on the lake queue, because Postgres cannot reach object storage."},
-            {"key": "sql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
+            {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "inside Postgres, where its mode puts it -- see sql",
+             "purpose": "A dialect query as a step, a sql step underneath, so `mode:` applies. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls. In LAKE mode it compiles to a `work` step on the lake queue, because Postgres cannot reach object storage."},
+            {"key": "sql", "compiles_to": "kind: sql", "runs_on": "inside Postgres: claimed by the shipped worker in mode: worker (the default), or in the statement that made it ready in mode: inline",
              "purpose": "Run SQL. `sql: \"select ...\"` runs the statement you wrote, read-only unless the step declares `write: true`; `sql: {function, args}` calls a name from workflow.step_functions, which keeps a per-function timeout and a description. A statement's {{templates}} are substituted as quoted LITERALS, so a table name cannot be templated. A deployment running percolate.sql_policy = 'registered' accepts only the second form.",
              "example": "sql: \"select fy, val from sec.facts where cik = '{{run.cik}}'\""},
             {"key": "rest", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
@@ -1257,6 +1260,12 @@ struct WfDoc {
     name: String,
     #[serde(default)]
     version: Option<i32>,
+    // Where this definition's `sql` steps run (REM-1316): `worker` or
+    // `inline`. Written into the spec whether or not the author wrote it, as
+    // `worker` when they did not, so a new workflow defaults to the worker and
+    // a stored spec says which it meant. See YAML.md, "Where a `sql` step runs".
+    #[serde(default)]
+    mode: Option<String>,
     steps: Vec<WfStep>,
 }
 
@@ -1280,6 +1289,16 @@ struct WfStep {
     // obvious document.
     #[serde(default)]
     rate_key: Option<String>,
+    // A `sql` step's own `mode:`, which overrides the definition's (REM-1316).
+    // Refused on any other kind: only a sql step has a choice of where it runs.
+    #[serde(default)]
+    mode: Option<String>,
+    // A `sql` step's limit, written beside the action as YAML.md spells it
+    // (`sql: {function: ...}` then `timeout_ms: 20000`). It lands in the task
+    // input, where `sql: {statement, timeout_ms}` already puts it; exact in
+    // `mode: worker`, where the worker arms it as statement_timeout.
+    #[serde(default)]
+    timeout_ms: Option<i64>,
 
     // exactly one of these
     #[serde(default)]
@@ -1619,6 +1638,10 @@ struct WfTemplate {
     jsonpath: Option<String>,
     #[serde(default)]
     rate_key: Option<String>,
+    // A matrix child takes its template's mode (REM-1316); unset, the
+    // definition's. Refused on a template that is not a sql step.
+    #[serde(default)]
+    mode: Option<String>,
     // Rejected, not ignored. serde drops unknown keys, so without this field a
     // nested matrix compiles to "template has no action" -- a true statement
     // that tells the author nothing about what they actually wrote.
@@ -2005,6 +2028,14 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
     if let Some(rk) = &m.template.rate_key {
         input["template"]["rate_key"] = serde_json::json!(rk);
     }
+    if let Some(md) = parse_mode(&format!("the matrix template of step '{id}'"), &m.template.mode)? {
+        if tkind != "sql" {
+            return Err(format!(
+                "the matrix template of step '{id}' declares mode: {md}, which applies only to \
+                 a `sql:` or `p8ql:` template."));
+        }
+        input["template"]["mode"] = serde_json::json!(md);
+    }
     if let Some(r) = &m.rows {
         input["rows"] = parse_sql(&format!("matrix step '{id}'"), r)?;
     } else {
@@ -2300,6 +2331,19 @@ fn expand_repeats(mut doc: serde_yaml::Value) -> Result<serde_yaml::Value, Strin
     Ok(doc)
 }
 
+// `mode:` takes two words, and anything else is refused by name rather than
+// stored for the engine to read as neither.
+fn parse_mode(what: &str, m: &Option<String>) -> Result<Option<String>, String> {
+    match m.as_deref() {
+        None => Ok(None),
+        Some(v @ ("worker" | "inline")) => Ok(Some(v.to_string())),
+        Some(other) => Err(format!(
+            "{what} has mode: '{other}'. A sql step runs in `worker` mode (a task a worker \
+             claims, under its own timeout_ms) or `inline` (inside the statement that made it \
+             ready).")),
+    }
+}
+
 pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
     let raw: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
     let repeats = raw.get("steps").and_then(|s| s.as_sequence())
@@ -2312,6 +2356,10 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
     if doc.steps.is_empty() {
         return Err("workflow has no steps".into());
     }
+    // WORKER UNLESS THE DOCUMENT SAYS OTHERWISE (REM-1316). The engine reads a
+    // spec with no `mode` as inline, which keeps every definition stored before
+    // this as it was; a document compiled from here on says which it means.
+    let doc_mode = parse_mode("the workflow", &doc.mode)?.unwrap_or_else(|| "worker".into());
 
     let ids: Vec<&str> = doc.steps.iter().map(|s| s.id.as_str()).collect();
     let mut steps = Vec::new();
@@ -2401,6 +2449,34 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
         let mut step = serde_json::json!({
             "key": s.id, "kind": kind, "queue": queue, "input": input
         });
+        // ONLY A `sql` STEP HAS A MODE, and a matrix's goes on its template:
+        // the matrix itself expands in-database whatever its children do.
+        if let Some(m) = parse_mode(&format!("step '{}'", s.id), &s.mode)? {
+            if kind != "sql" {
+                return Err(format!(
+                    "step '{}' declares mode: {}, which applies only to a `sql:` or `p8ql:` step{}.",
+                    s.id, m,
+                    if kind == "matrix" { " -- put it on the matrix's template" } else { "" }));
+            }
+            step["mode"] = serde_json::json!(m);
+        }
+        if let Some(t) = s.timeout_ms {
+            if kind != "sql" {
+                return Err(format!(
+                    "step '{}' declares timeout_ms, which applies only to a `sql:` or `p8ql:` \
+                     step. A `rest:` step's goes inside its rest block.", s.id));
+            }
+            if t < 1 {
+                return Err(format!(
+                    "step '{}' has timeout_ms {t}, which gives the statement no time to run", s.id));
+            }
+            if step["input"].get("timeout_ms").is_some() {
+                return Err(format!(
+                    "step '{}' gives timeout_ms twice, beside the step and inside `sql:`. \
+                     Keep one.", s.id));
+            }
+            step["input"]["timeout_ms"] = serde_json::json!(t);
+        }
         if let Some(rk) = &s.rate_key {
             step["rate_key"] = serde_json::json!(rk);
         }
@@ -2473,7 +2549,7 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "name": doc.name,
         "version": doc.version.unwrap_or(1),
-        "spec": {"steps": steps}
+        "spec": {"mode": doc_mode, "steps": steps}
     }))
 }
 

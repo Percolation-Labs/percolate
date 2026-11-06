@@ -1938,7 +1938,7 @@ $q$, v_model);
     if p_waves not between 1 and 20 then
         raise invalid_parameter_value using message = 'a walk has 1 to 20 waves (repeat''s bound)';
     end if;
-    perform workflow.define_yaml(format($y$
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
 name: %1$s
 steps:%6$s
   - id: start

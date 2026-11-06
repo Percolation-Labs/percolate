@@ -19,7 +19,11 @@ set role app_owner;
 -- network. This is the honest smallest example of the claim that a
 -- declarative pipeline needs no user code.
 -- ------------------------------------------------------------
-select workflow.define_yaml($$
+-- Inline, as it ran before REM-1316: a system pass with nobody waiting on a
+-- worker. Through workflow.inline_mode_line() rather than a literal `mode:`,
+-- because this file also runs on the published image, whose compiler may
+-- predate the key and refuse it.
+select workflow.define_yaml(workflow.inline_mode_line() || $$
 name: content_reconcile
 steps:
   - id: drift
