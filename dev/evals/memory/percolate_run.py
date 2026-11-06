@@ -38,7 +38,19 @@ NAMES = {"maya": "Maya Okafor", "leo": "Leo Brandt"}
 embedder = TextEmbedding("BAAI/bge-small-en-v1.5")
 vec = lambda t: "[" + ",".join(f"{x:.6f}" for x in next(iter(embedder.embed([t])))) + "]"
 
-db = psycopg.connect(DSN, autocommit=True)
+# A container started a moment ago is still installing the extension at first start: wait for it, up to two minutes.
+import time
+for _ in range(60):
+    try:
+        db = psycopg.connect(DSN, autocommit=True)
+        if db.execute("select 1 from pg_extension where extname = 'percolate'").fetchone():
+            break
+        db.close()
+    except psycopg.OperationalError:
+        pass
+    time.sleep(2)
+else:
+    sys.exit(f"no percolate extension at {DSN} after two minutes")
 x = db.execute
 
 
