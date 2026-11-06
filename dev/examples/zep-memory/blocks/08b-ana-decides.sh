@@ -6,9 +6,3 @@ for J in $(mcp list_judgements '{"status": "to_human"}' | jq -r '.result[] | sel
        p_tier: "human", p_reason: "That is me: I sign my email A. Costa, Logistics."}')" \
     | jq -c '{label: "A. Costa", status, verdict: .verdict.decision, tier}'
 done
-for J in $(mcp list_judgements '{"status": "to_human"}' | jq -r '.result[] | select(.label == "Ana Costa") | .id'); do
-  aiq claim_judgement "{\"p_id\": \"$J\"}" > /dev/null
-  aiq complete_judgement "$(jq -cn --arg j "$J" '{p_id: $j, p_verdict: {decision: "none"},
-       p_tier: "human", p_reason: "Settled when I bound A. Costa to me."}')" \
-    | jq -c '{label: "Ana Costa", status, verdict: .verdict.decision, tier}'
-done
