@@ -5,6 +5,7 @@
 -- questions within 50 reads, and aiq.search's hybrid quietly returned its semantic half alone. It now matches any
 -- of the words and ranks by how many and how densely. This holds that on the corpus sample, and holds the two
 -- things the old form got right: a chunk sharing no word is not matched, and a query of stop words matches nothing.
+-- aiq.search's words half matches all words instead (REM-1312), held at the end and by query/67.
 
 \set ON_ERROR_STOP on
 
@@ -34,11 +35,19 @@ begin
     select count(*) into n from aiq.lexical('chunks', 'is it the of to', 10);
     if n <> 0 then raise exception 'a query of stop words matched % chunk(s)', n; end if;
 
-    -- The hybrid's lexical half is present for the question again.
-    if not exists (select 1 from aiq.search('chunks', 'Is the R7 arm going to be recalled under sustained load?',
+    -- The hybrid's words half is NOT this function (REM-1312): it matches all of the query's words, because RRF
+    -- gives every matching row a rank and a word shared by many rows then outvotes meaning. The question above
+    -- shares only some words with the R7 notice, so SEARCH ranks it by meaning alone; a query whose every word the
+    -- notice holds still gets its words rank.
+    if exists (select 1 from aiq.search('chunks', 'Is the R7 arm going to be recalled under sustained load?',
+                                        '[1,0,0,0]', 'demo-quad-a', 10)
+                where chunk_id = '33330000-0000-0000-0000-000000000001' and lexical_rank is not null) then
+        raise exception 'aiq.search ranked by words a chunk holding only some of the question''s words';
+    end if;
+    if not exists (select 1 from aiq.search('chunks', 'R7 arm recalled under sustained load',
                                             '[1,0,0,0]', 'demo-quad-a', 10)
                     where chunk_id = '33330000-0000-0000-0000-000000000001' and lexical_rank is not null) then
-        raise exception 'aiq.search has no lexical rank for the chunk the question shares most words with';
+        raise exception 'aiq.search has no words rank for the chunk holding every word of the query';
     end if;
     raise notice 'query/29: a question finds the chunk sharing most of its words, and nothing sharing none';
 end $$;
