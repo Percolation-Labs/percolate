@@ -1,0 +1,32 @@
+percolate: extracted with gpt-4o-mini: 25 facts written from 23 memories, 0 memories with none, 0 runs not succeeded
+percolate: told: 12 edges closed from the answer key
+percolate: extracted with gpt-4o-mini: 23 facts written from 23 memories, 1 memories with none, 0 runs not succeeded
+dream: {"since": "-infinity", "until": "2026-11-06T15:27:22.906043+00:00", "superseded": 7, "promoted_exact": 0, "promotion_refused": 0, "queued_for_a_judge": 8, "soft_left_for_a_judge": 24}
+graphiti: graphiti-core 0.31.2, LLM gpt-4o-mini
+graphiti: 22 facts written from 23 episodes
+graphiti: 9 of the 11 replaced facts ended
+graphiti: still current: f07 Maya is working on Project Atlas.
+graphiti: still current: f19 Maya is working on Project Meridian.
+graphiti: LLM tokens for the load: 125570 in, 2965 out
+graphiti: told: 11 edges invalidated from the answer key
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+graphiti-valid   all            31    52%    81%         3%     0%
+graphiti-valid   current        14    29%    79%         7%     0%
+graphiti-valid   historical      8    75%    88%         0%     0%
+graphiti-valid   stable          4    50%    75%         0%     0%
+graphiti-valid   change          5    80%    80%         0%     0%
+graphiti-valid-told all            31    58%    84%         0%     0%
+graphiti-valid-told current        14    43%    86%         0%     0%
+graphiti-valid-told historical      8    75%    88%         0%     0%
+graphiti-valid-told stable          4    50%    75%         0%     0%
+graphiti-valid-told change          5    80%    80%         0%     0%
+percolate-valid  all            31    55%    77%         0%     0%
+percolate-valid  current        14    29%    71%         0%     0%
+percolate-valid  historical      8    75%    88%         0%     0%
+percolate-valid  stable          4    50%   100%         0%     0%
+percolate-valid  change          5   100%    60%         0%     0%
+percolate-valid-dream all            31    48%    77%        10%     0%
+percolate-valid-dream current        14    21%    79%        21%     0%
+percolate-valid-dream historical      8    62%    75%         0%     0%
+percolate-valid-dream stable          4    50%   100%         0%     0%
+percolate-valid-dream change          5   100%    60%         0%     0%

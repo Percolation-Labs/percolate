@@ -83,9 +83,9 @@ async def main(path):
     if model != "default":
         kw["llm_client"] = OpenAIClient(config=LLMConfig(model=model, small_model=model))
     print(f"graphiti: graphiti-core {version('graphiti-core')}, LLM {model}", flush=True)
-    # A Neo4j container started a moment ago takes a while to accept a login: wait for it, up to two minutes.
+    # A Neo4j container started a moment ago takes a while to accept a login: wait for it, up to five minutes.
     from neo4j import GraphDatabase
-    for _ in range(60):
+    for _ in range(150):
         try:
             with GraphDatabase.driver(os.environ["NEO4J_URI"],
                                       auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"])) as d:
@@ -94,7 +94,7 @@ async def main(path):
         except Exception:
             await asyncio.sleep(2)
     else:
-        sys.exit(f"no Neo4j at {os.environ['NEO4J_URI']} after two minutes")
+        sys.exit(f"no Neo4j at {os.environ['NEO4J_URI']} after five minutes")
     g = Graphiti(os.environ["NEO4J_URI"], os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"], **kw)
     await g.build_indices_and_constraints()
 

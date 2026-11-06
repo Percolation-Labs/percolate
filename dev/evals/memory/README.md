@@ -63,6 +63,31 @@ What it says, and what it does not:
 
 ## Graphiti (REM-1018)
 
+**Extraction on equal terms, 6 November 2026** (`run-extract.sh`; `scores-extract-full.txt`,
+`extract-full-compare.txt`; the directional slice first, `scores-extract-directional.txt`,
+`extract-directional-compare.txt`). The fair comparison below still gave Percolate its facts from the fixture's
+triples while Graphiti extracted its own. Here `EXTRACT=<model>` registers each memory, with its `said_at`, into a
+channel whose workflow runs Percolate's own extractor (`structure_null`), windows and lander, so both systems read
+the same raw text. Two gaps had to be worked around, and both are findings:
+
+- **Percolate's extractor cannot call gpt-6-luna,** Graphiti 0.31.2's default: it sends `temperature: 0`, which
+  that model refuses (HTTP 400, "Only the default (1) value is supported"). So both run on gpt-4o-mini.
+- **The shipped pipeline cannot read a dated memory into dated facts.** `POST /files` carries no `said_at`, and
+  `install_ingest_workflow(p_graph_index => true)` starts with a parse step that needs a file ("resource ... has no
+  file"), so a memory registered as text never reaches the extractor. The runner defines the same graph branch
+  without the parse step.
+
+On the directional slice the two came within one question both ways (both told, Graphiti 18 of 31 and Percolate
+17; neither told, 16 and 15), so the full fixture was run. Full fixture, 46 questions, right first: both told,
+Graphiti 31 and Percolate 28; neither told, Graphiti 29 and Percolate 27. Graphiti wrote 46 facts from 48 episodes
+and ended 8 of the 11 replaced facts itself; Percolate's extractor wrote 59 facts (57 on the dream load) and left 2
+memories with none. By `compare.py`'s causes, where both were told Percolate lost 8 questions on ranking and 1 on
+extraction, and Graphiti 4 on ranking and 2 on extraction: most of Percolate's ranking losses put "Maya lives in
+Lisbon" or another short Maya memory first, mostly on questions about the present (21% against Graphiti's 50%).
+Spend for the extraction runs: Graphiti 256,743 input and 5,947 output gpt-4o-mini tokens on the full load, about
+four US cents, and the slice about two.
+
+
 **The fair comparison, 6 November 2026** (`scores-fair-directional.txt`; per question, `fair-directional-compare.txt` from `compare.py`, and `fair-directional-postmortem.txt` with each side's top three). The
 rows below gave Percolate the fixture's answer key (which fact replaces which) and let Graphiti infer it, and ran
 Graphiti on gpt-4o-mini rather than its default. This run puts the two on equal terms, twice:
