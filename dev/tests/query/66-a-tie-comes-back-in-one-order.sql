@@ -28,9 +28,11 @@ insert into content.channels (name, kind, visibility) values ('query66', 'manual
 -- semantic side's first, ahead of it.
 select content.register_text('query66', 'query66:' || k, jsonb_build_array(jsonb_build_object('content', t)), k,
                              'query66:' || k, null, '{}')
-  from (values ('late',  'Maya worked at Northwind, at that point'),         -- words 1st, meaning 3rd
-               ('mid',   'Maya worked at the harbour'),                     -- words 2nd, meaning 2nd
-               ('early', 'Maya once mentioned the weather')                -- words 3rd, meaning 1st
+  -- Each holds every word of the question, so each has a words rank (aiq.search matches all of them), ordered by
+  -- how often it repeats them.
+  from (values ('late',  'Maya worked at Northwind. Maya liked the work at Northwind'),  -- words 1st, meaning 3rd
+               ('mid',   'Maya worked at Northwind and liked the work'),                 -- words 2nd, meaning 2nd
+               ('early', 'Maya worked at Northwind')                                     -- words 3rd, meaning 1st
        ) v(k, t);
 select content.register_text('query66', 'query66:same' || n, '[{"content": "an identical note about tea"}]',
                              'same ' || n, 'query66:same' || n, null, '{}')
@@ -50,7 +52,7 @@ declare
                     where r.uri = 'query66:early');
     same uuid[] := array(select c.id from content.resource_chunks c join content.resources r on r.id = c.resource_id
                           where r.uri like 'query66:same%' order by c.id);
-    q text := 'Where did Maya work at that point?';
+    q text := 'Where did Maya work, Northwind?';
     a record; b record; got uuid[]; plan text;
     plans text[] := array['default', 'no merge join', 'no merge or hash join'];
 begin
