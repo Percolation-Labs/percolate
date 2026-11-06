@@ -143,6 +143,18 @@ same text a bound tool takes into a model's context — so `step_functions`
 remains the answer to "what can a workflow cause to run" for the operations a
 deployment wants blessed. What it is no longer is *mandatory*.
 
+**A step's `timeout_ms` does not bound the step.** A `sql` step runs inside the
+statement that made it ready (`start_workflow`, a worker's `complete_task`, the
+tick), and Postgres arms `statement_timeout` only when a top-level statement
+starts, so neither a statement's `timeout_ms` nor a registered function's
+timeout cancels anything (measured on 0.2.38: a 3 s step under `timeout_ms:
+1000` ran its 3 s). The limit a step meets is its **caller's** `statement_timeout`:
+when that fires inside a step, `execute_sql_step` fails that step, terminally,
+with the timeout as its reason, and the caller's statement carries on. How a
+step could get a limit of its own (the worker running `sql` steps as it runs
+`http_call`, or a watchdog that cancels an overrunning step) is the design
+question REM-1316 leaves open.
+
 #### Whose rows a step sees: the person who started the run
 
 A step's statement, every `p8ql:` query (SEARCH, TEXT, LOOKUP and GRAPH as much

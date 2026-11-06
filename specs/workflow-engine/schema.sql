@@ -3352,7 +3352,10 @@ comment on function workflow.run_sql(text, boolean, int, jsonb) is
 $c$Execute a workflow step's own SQL statement.
 Read-only unless p_write is true, enforced by transaction_read_only rather than
 by inspecting the statement, and refused entirely when percolate.sql_policy is
-'registered'.$c$;
+'registered'. p_timeout_ms does NOT bound this statement: a statement_timeout set
+inside a running statement is never armed for it. The limit a step meets is its
+caller's statement_timeout, and execute_sql_step fails the step running when it
+fires (REM-1316, which leaves open how a step gets a limit of its own).$c$;
 
 -- Executes one ready `sql` task. Returns true if it did something.
 -- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
@@ -3447,7 +3450,38 @@ begin
         perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         return true;
-    exception when others then
+    -- A CANCEL FAILS THE STEP THAT WAS RUNNING, NOT THE CALLER (REM-1316).
+    -- `when others` does not catch query_canceled (57014), so a statement
+    -- timeout that fired inside a step used to abort the caller's whole
+    -- statement: on 5801 a walk start inside the worker's complete_task cascade
+    -- took the write-back with it, and q retried from the top. The timeout that
+    -- fires is the CALLER's statement_timeout, not the step's timeout_ms: a
+    -- limit set inside a statement is never armed for it (see run_sql), so
+    -- this is where a running step meets a limit at all. Terminal, because
+    -- the timer fires once per statement: a retry would rerun at once, in the
+    -- same statement, with no limit left. The caller's statement goes on
+    -- unbounded after this. Whether a step gets a limit of its own is the
+    -- design question REM-1316 leaves open.
+    --
+    -- ONLY A TIMEOUT. 57014 is also a person's cancel (pg_cancel_backend, a
+    -- client's Ctrl-C), and that one must still stop the caller, so anything
+    -- but the timeout is raised again. The two share a SQLSTATE and differ
+    -- only in the message; under an lc_messages other than English the match
+    -- fails and the cancel is re-raised, which is the pre-REM-1316 behaviour.
+    exception when query_canceled then
+        if sqlerrm is distinct from 'canceling statement due to statement timeout' then
+            raise;
+        end if;
+        perform set_config('workflow.current_task_id', v_prev_task, true);
+        perform set_config('workflow.current_run_id', v_prev, true);
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate,
+                'reason', 'the caller''s statement_timeout ('
+                          || current_setting('statement_timeout')
+                          || ') ran out while this step was running'),
+            true);
+        return true;
+    when others then
         perform set_config('workflow.current_task_id', v_prev_task, true);
         perform set_config('workflow.current_run_id', v_prev, true);
         perform workflow.fail_task(p_task_id,
