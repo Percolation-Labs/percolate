@@ -511,6 +511,17 @@ select set_config('request.jwt.claims', '', false);
 -- curl -s -X POST $AGENT/tools/p8-agents/sync \
 --   -H "Authorization: Bearer $TOKEN"; echo
 -- /live
+-- One router turn, as you: the router is offered its allowlist cut to the agents its caller may read, hands the
+-- request to one writer, and the jq filter prints which.
+-- live: router_turn
+-- curl -sN $AGENT/chat \
+--   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+--   -d '{"model": "router", "stream": true,
+--        "messages": [{"role": "user", "content": "A joke about tugboats, please."}]}' |
+--   sed -n 's/^data: //p' |
+--   jq -rj 'if .type == "TOOL_CALL_START" then "routed to \(.tool_name)\n" elif .type == "TEXT_MESSAGE_CONTENT" then .delta else empty end'
+-- echo
+-- /live
 
 
 select pg_temp.check((select tools from agentic.agents where name = 'router')
