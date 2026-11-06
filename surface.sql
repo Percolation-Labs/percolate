@@ -878,6 +878,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','function','claims.facts_on_question','uuid,timestamptz','specs/claims/schema.sql §10a3: from a question, the facts that bear on it, as words (REM-996)'),
 ('claims','function','claims.facts_to_link','text,text,integer,integer','specs/claims/schema.sql §10a3: each unlinked fact with its nearest questions, shaped as the decider''s request (REM-996)'),
 ('claims','function','claims.fact_said','uuid,integer','specs/claims/schema.sql §10a3: the sentences behind a fact, as the caller may read them, for a judge of what it bears on (REM-1325)'),
+('claims','function','claims.queue_link_judgements','text,integer','specs/claims/schema.sql §10a3: queue a link case per unlinked fact the caller may read, for the person''s agent to decide through the judgement tools (REM-1324)'),
 ('claims','function','claims.facts_to_embed','text,integer','specs/claims/schema.sql §10a3: the current facts a model''s space has no vector for, as an embed matrix''s rows (REM-996)'),
 ('claims','function','claims.edge_readable','uuid','specs/claims/schema.sql §10a3: whether the caller may read a fact, stated for definers in the terms of aiq.edges'' own policy; research/38 compares the two (REM-996)'),
 ('claims','table','claims.deciders',null,'specs/claims/schema.sql §10a3: the typed-decision services the claims graph may ask, readable so a workflow author can name one (REM-996)'),

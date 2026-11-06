@@ -31931,7 +31931,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- client renders them when a rule starts leaving them.
 create table if not exists aiq.judgements (
     id              uuid primary key default uuidv7(),
-    kind            text not null check (kind in ('bind','merge','withdraw','challenge')),
+    kind            text not null check (kind in ('bind','merge','withdraw','challenge','link')),
     -- The soft node's registry node, for a bind. No foreign key: promotion
     -- evicts that node, and the decided row is the record of why.
     subject_node_id uuid not null,
@@ -31987,7 +31987,7 @@ comment on column aiq.judgements.settling_xact is
 create index if not exists idx_judgements_settling on aiq.judgements (settling_xact) where settling_xact is not null;
 alter table aiq.judgements drop constraint if exists judgements_kind_check;
 alter table aiq.judgements add constraint judgements_kind_check
-    check (kind in ('bind','merge','withdraw','challenge'));
+    check (kind in ('bind','merge','withdraw','challenge','link'));
 alter table aiq.judgements drop constraint if exists judgements_challenge_addressed;
 alter table aiq.judgements add constraint judgements_challenge_addressed
     check ((kind = 'challenge') = (addressee is not null));
@@ -31999,14 +31999,14 @@ alter table aiq.judgements enable row level security;
 -- whose subject is a claim and which has its own policy below.
 drop policy if exists judgements_via_subject on aiq.judgements;
 create policy judgements_via_subject on aiq.judgements for select
-  using (aiq.judgements.kind <> 'challenge'
+  using (aiq.judgements.kind not in ('challenge', 'link')
      and (exists (select 1 from aiq.nodes n where n.id = aiq.judgements.subject_node_id)
       or (aiq.judgements.verdict->>'decision' = 'bind'
           and exists (select 1 from aiq.nodes n
                        where n.id::text = aiq.judgements.verdict->>'target'))));
 drop policy if exists judgements_judge_moves on aiq.judgements;
 create policy judgements_judge_moves on aiq.judgements for update
-  using (aiq.judgements.kind <> 'challenge'
+  using (aiq.judgements.kind not in ('challenge', 'link')
      and exists (select 1 from aiq.nodes n where n.id = aiq.judgements.subject_node_id));
 -- A challenge is its addressee's, to read and to decide.
 drop policy if exists judgements_challenge_addressee on aiq.judgements;
@@ -32190,6 +32190,11 @@ begin
             raise exception 'a challenge is decided relate or none, not %', coalesce(v_dec, 'missing')
                 using hint = 'relate names the candidate and the relation; none says no candidate bears on the claim';
         end if;
+    elsif old.kind = 'link' then
+        if v_dec is null or v_dec not in ('link','none') then
+            raise exception 'a link is decided link or none, not %', coalesce(v_dec, 'missing')
+                using hint = 'link names the question the fact bears on; none says it bears on none of them';
+        end if;
     elsif v_dec is null or v_dec not in ('bind','distinct','none') then
         raise exception 'decision must be bind, distinct or none, not %', coalesce(v_dec, 'missing');
     end if;
@@ -32236,6 +32241,17 @@ begin
                 using hint = 'decide it with aiq.complete_judgement, which asserts each relation as you';
         end if;
     end if;
+    -- A LINK IS A PROPOSAL THAT EXISTS (REM-1324). complete_judgement proposes it as the judge, through
+    -- claims.propose_bears_on, and writes its id into the verdict; a verdict written straight onto the row names a
+    -- link nobody proposed, and is refused here.
+    if old.kind = 'link' and v_dec = 'link' and not exists (
+            select 1 from claims.bears_on b
+             where pg_input_is_valid(new.verdict->>'bears_on_id', 'bigint')
+               and b.id = (new.verdict->>'bears_on_id')::bigint and b.edge_id = old.subject_node_id
+               and b.question_id::text = new.verdict->>'target') then
+        raise exception 'a link names the proposal complete_judgement made for it'
+            using hint = 'decide it with aiq.complete_judgement, which proposes the link as you';
+    end if;
     if v_dec = 'bind' and not exists (
             select 1 from jsonb_array_elements(old.evidence->'candidates') c
               join aiq.nodes n on n.id::text = c->>'node_id'
@@ -32265,6 +32281,14 @@ declare
 begin
     -- A challenge's verdict was carried out by the judge, as the judge
     -- (complete_judgement asserted each relation); what it wrote is recorded.
+    -- A link's proposal was made by the judge, as the judge (complete_judgement); what it wrote is recorded.
+    if new.kind = 'link' then
+        update aiq.judgements
+           set result = jsonb_build_object('bears_on_ids', case when new.verdict ? 'bears_on_id'
+                   then jsonb_build_array((new.verdict->>'bears_on_id')::bigint) else '[]'::jsonb end)
+         where id = new.id;
+        return null;
+    end if;
     if new.kind = 'challenge' then
         update aiq.judgements
            set result = jsonb_build_object('relation_ids', coalesce(
@@ -32412,6 +32436,31 @@ begin
                 'Not sure: release_judgement (aiq.release_judgement(%L)) gives it back with nothing recorded. Your claim ends at %s.',
                 j.evidence->>'claim_key', j.evidence->>'text',
                 coalesce(v_ids, 'none you can still read (decide none)'), j.id, j.id, j.lease_until));
+    end if;
+    -- A LINK (REM-1324): a remembered fact and the questions nearest it. What was said behind the fact is read
+    -- now, as the judge (claims.fact_said); a question the judge may not read leaves the candidates.
+    if j.kind = 'link' then
+        v_ev := j.evidence || jsonb_build_object(
+            'said', claims.fact_said(j.subject_node_id),
+            'candidates', coalesce(
+            (select jsonb_agg(c) from jsonb_array_elements(j.evidence->'candidates') c
+              where claims.question_readable((c->>'question_id')::uuid)), '[]'::jsonb));
+        select string_agg(c->>'question_id' || ' (' || (c->>'text') || ')', ', ')
+          into v_ids from jsonb_array_elements(v_ev->'candidates') c;
+        return jsonb_build_object(
+            'id', j.id, 'kind', j.kind, 'status', j.status, 'lease_until', j.lease_until,
+            'evidence', v_ev,
+            'how_to_decide', format(
+                'Decide which question the fact %L bears on, as evidence somebody answering it would want, or none. '
+                'What was said behind the fact, and where, is in evidence.said, and when it began to hold in evidence.valid_from: quote it in your reason. '
+                'Then decide it -- the decide_judgement tool over MCP, or aiq.complete_judgement(%L, verdict, reason) in SQL -- with verdict one of: '
+                '{"decision":"link","target":"<question_id>","confidence":<0 to 1>} where target is one of %s, '
+                'which proposes the link as you, with your confidence and reason, for a person to confirm or dispute; '
+                '{"decision":"none"} if it bears on none of them; '
+                '{"decision":"human"} to pass it to a person. '
+                'Not sure: release_judgement (aiq.release_judgement(%L)) gives it back with nothing recorded. Your claim ends at %s.',
+                j.evidence->>'fact', j.id,
+                coalesce(v_ids, 'none you can read (decide none)'), j.id, j.lease_until));
     end if;
     v_ev := j.evidence || jsonb_build_object(
         'said', aiq.judgement_said(j.subject_node_id),
@@ -32572,6 +32621,28 @@ begin
         if v_tier = 'agent' then
             v_mode := claims.settle_challenge(p_id, p_verdict);
         end if;
+    end if;
+    -- A LINK IS PROPOSED HERE, AS THE JUDGE (REM-1324): claims.propose_bears_on, with the judge's confidence as p and
+    -- its reason, so the link is the judge's proposal, never a stance, and the guard then checks its id.
+    if j.kind = 'link' and p_verdict->>'decision' = 'link' then
+        if not (j.status = 'claimed' and j.claimed_by = rbac.current_user_id()
+                and j.lease_until > clock_timestamp()) then
+            raise exception 'you do not hold a live claim on judgement %', p_id
+                using hint = 'aiq.claim_judgement(p_id => ...) first; a lapsed lease must be claimed again';
+        end if;
+        if not exists (select 1 from jsonb_array_elements(j.evidence->'candidates') c
+                        where c->>'question_id' = p_verdict->>'target'
+                          and claims.question_readable((c->>'question_id')::uuid)) then
+            raise exception 'a link names one of the candidate questions you can read as target; % is not one',
+                coalesce(p_verdict->>'target', 'missing')
+                using hint = 'claim_judgement lists them in evidence.candidates; if none fits, decide none';
+        end if;
+        if p_verdict ? 'confidence' and not (jsonb_typeof(p_verdict->'confidence') = 'number'
+                                             and (p_verdict->>'confidence')::float8 between 0 and 1) then
+            raise exception 'confidence is a number from 0 to 1, not %', p_verdict->'confidence';
+        end if;
+        v_verdict := p_verdict || jsonb_build_object('bears_on_id', claims.propose_bears_on(
+            j.subject_node_id, (p_verdict->>'target')::uuid, (p_verdict->>'confidence')::real, p_reason));
     end if;
     if j.kind = 'challenge' and p_verdict->>'decision' = 'none' and v_tier = 'agent' then
         v_mode := claims.settle_challenge(p_id, p_verdict);
@@ -39729,6 +39800,62 @@ grant execute on function claims.propose_bears_on(uuid, uuid, real, text),
     to authenticated;
 revoke all on function claims.edge_readable(uuid) from public;
 grant execute on function claims.edge_readable(uuid) to authenticated;
+
+-- A LINK FOR THE PERSON'S OWN AGENT TO DECIDE (REM-1324). The reader's agent, connected over MCP, could read
+-- claims.facts_to_link through the read-only query tool and had no way to write what it chose, so a tutorial's
+-- shell wrote its picks. A link is now a judgement, kind 'link', in the queue that agent already works: its subject
+-- is the fact (an aiq.edges id) and its candidates the questions nearest it. claim_judgement shows the fact, what was
+-- said behind it and the candidates, read as the judge; decide_judgement with {"decision":"link","target":<question
+-- id>,"confidence":p} proposes it through claims.propose_bears_on, as the judge. No table and no tool are added.
+--
+-- READ THROUGH THE FACT, NOT ITS NODES. A link case shows a fact, and a fact is private when its memory is, even
+-- between two public nodes (research/38's priv2), so the subject-node rule the other kinds use would show a private
+-- fact's case to anyone who can read the tool it names. A link case is readable, and decidable, by whoever may read
+-- the fact (claims.edge_readable, aiq.edges' own policy asked as the caller).
+drop policy if exists judgements_link_via_fact on aiq.judgements;
+create policy judgements_link_via_fact on aiq.judgements for select
+  using (aiq.judgements.kind = 'link' and claims.edge_readable(aiq.judgements.subject_node_id));
+drop policy if exists judgements_link_moves on aiq.judgements;
+create policy judgements_link_moves on aiq.judgements for update
+  using (aiq.judgements.kind = 'link' and claims.edge_readable(aiq.judgements.subject_node_id));
+
+-- Queue a link case for each current fact the caller may read that has no link, no live case and no case already
+-- decided none, with its nearest questions the caller may read in one model's space. Returns how many it queued.
+-- SECURITY DEFINER because the queue takes no inserts from callers; it queues only what edge_readable and
+-- question_readable say the caller may read, and stores no sentence: what was said is read at claim time, as the
+-- judge.
+create or replace function claims.queue_link_judgements(p_model text, p_k int default 5)
+returns int language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_uid uuid := rbac.current_user_id();
+    n int;
+begin
+    if v_uid is null then
+        raise exception 'queue_link_judgements needs a signed-in caller: a link case is somebody''s to decide';
+    end if;
+    insert into aiq.judgements (kind, subject_node_id, evidence, queued_by)
+    select 'link', f.edge_id,
+           jsonb_build_object('fact', f.fact, 'label', f.fact, 'model', p_model,
+                              'valid_from', f.valid_from,
+                              'candidates', (select coalesce(jsonb_agg(jsonb_build_object(
+                                                 'key', c.key, 'question_id', c.value->>'id', 'text', c.value->>'text')
+                                                 order by c.key), '[]'::jsonb)
+                                               from jsonb_each(f.candidates) c
+                                              where claims.question_readable((c.value->>'id')::uuid))),
+           'claims.queue_link_judgements:' || v_uid
+      from claims.facts_to_link(p_model, 'jev', p_k) f
+     where claims.edge_readable(f.edge_id)
+       and not exists (select 1 from aiq.judgements j
+                        where j.kind = 'link' and j.subject_node_id = f.edge_id
+                          and (j.status in ('open', 'claimed', 'to_human')
+                               or (j.status = 'decided' and j.verdict->>'decision' = 'none')))
+    on conflict do nothing;
+    get diagnostics n = row_count;
+    return n;
+end;
+$$;
+revoke all on function claims.queue_link_judgements(text, int) from public;
+grant execute on function claims.queue_link_judgements(text, int) to authenticated;
 
 -- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed

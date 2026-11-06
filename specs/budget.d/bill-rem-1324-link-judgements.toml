@@ -1,0 +1,3 @@
+why = "A fact-to-question link becomes a judgement kind, so the person's agent proposes it through the queue and tools it already has: no table and no tool. claims.queue_link_judgements is the one way a link case enters the queue, since callers may not insert judgements; nothing existing queues a fact."
+[added]
+functions = ["claims.queue_link_judgements"]
