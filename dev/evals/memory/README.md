@@ -82,8 +82,8 @@ On the directional slice the two came within one question both ways (both told, 
 Graphiti 31 and Percolate 28; neither told, Graphiti 29 and Percolate 27. Graphiti wrote 46 facts from 48 episodes
 and ended 8 of the 11 replaced facts itself; Percolate's extractor wrote 59 facts (57 on the dream load) and left 2
 memories with none. By `compare.py`'s causes, where both were told Percolate lost 8 questions on ranking and 1 on
-extraction, and Graphiti 4 on ranking and 2 on extraction: most of Percolate's ranking losses put "Maya lives in
-Lisbon" or another short Maya memory first, mostly on questions about the present (21% against Graphiti's 50%).
+extraction, and Graphiti 4 on ranking and 2 on extraction. Five of Percolate's ranking losses are questions about the present (21% against Graphiti's 50%), and three
+of the eight put "Maya lives in Lisbon" first.
 Spend for the extraction runs: Graphiti 256,743 input and 5,947 output gpt-4o-mini tokens on the full load, about
 four US cents, and the slice about two.
 
