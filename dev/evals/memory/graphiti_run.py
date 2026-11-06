@@ -135,10 +135,36 @@ async def main(path):
             state = "still current" if by_fact.get(fid) else "never written as a fact"
             print(f"graphiti: {state}: {fid} {text}", flush=True)
 
+    usage = g.llm_client.token_tracker.get_total_usage()
+    print(f"graphiti: LLM tokens for the load: {usage.input_tokens} in, {usage.output_tokens} out", flush=True)
+
+    await ask(g, fixture, episode_fact, SUFFIX, episodes=True)
+    if os.environ.get("TOLD") == "1":
+        # TOLD=1 gives Graphiti what the Percolate runner is given: the fixture's answer key. Every edge drawn from
+        # a replaced fact's episode is invalidated at the moment the replacing fact was said, as Graphiti's own
+        # invalidation would stamp it, and the questions are asked again as graphiti-*-told.
+        said = {f["id"]: when(f["said_at"]) for f in fixture["facts"]}
+        uuid_of = {v: k for k, v in episode_fact.items()}
+        n = 0
+        for f in fixture["facts"]:
+            if f.get("supersedes") and f["supersedes"] in uuid_of:
+                records, _, _ = await g.driver.execute_query(
+                    "MATCH ()-[r:RELATES_TO]->() WHERE $ep IN r.episodes "
+                    "SET r.invalid_at = $t RETURN count(r) AS n",
+                    ep=uuid_of[f["supersedes"]], t=said[f["id"]])
+                n += records[0]["n"]
+        print(f"graphiti: told: {n} edges invalidated from the answer key", flush=True)
+        await ask(g, fixture, episode_fact, SUFFIX + "-told", episodes=False)
+    await g.close()
+
+
+async def ask(g, fixture, episode_fact, suffix, episodes):
     now = datetime.now(timezone.utc)
     for q in fixture["questions"]:
         t = when(q["as_of"]) if q.get("as_of") else now
-        for system, flt in (("graphiti-search", None), ("graphiti-valid", held_at(t))):
+        # As percolate_run.py does: a change question asks about both sides of a change, so no time filter applies.
+        valid = None if q["kind"] == "change" else held_at(t)
+        for system, flt in (("graphiti-search", None), ("graphiti-valid", valid)):
             edges = await g.search(q["ask"], group_ids=[q["user"]], num_results=10, search_filter=flt)
             ranked = []
             for e in edges:
@@ -146,13 +172,14 @@ async def main(path):
                     fid = episode_fact.get(ep)
                     if fid and fid not in ranked:
                         ranked.append(fid)
-            print(json.dumps({"system": system + SUFFIX, "q": q["id"], "ranked": ranked[:10]}), flush=True)
+            print(json.dumps({"system": system + suffix, "q": q["id"], "ranked": ranked[:10]}), flush=True)
+        if not episodes:
+            continue
         cfg = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
         cfg.limit = 10
         res = await g.search_(q["ask"], config=cfg, group_ids=[q["user"]])
         ranked = [episode_fact[e.uuid] for e in res.episodes if e.uuid in episode_fact][:10]
-        print(json.dumps({"system": "graphiti-episodes" + SUFFIX, "q": q["id"], "ranked": ranked}), flush=True)
-    await g.close()
+        print(json.dumps({"system": "graphiti-episodes" + suffix, "q": q["id"], "ranked": ranked}), flush=True)
 
 
 asyncio.run(main(sys.argv[1]))

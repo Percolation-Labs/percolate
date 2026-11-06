@@ -1,0 +1,43 @@
+graph reach: maya reads 23 of Maya's facts and 0 of Leo's
+graph reach: leo reads 0 of Maya's facts and 0 of Leo's
+dream: {"since": "-infinity", "until": "2026-11-06T14:45:44.167782+00:00", "superseded": 7, "promoted_exact": 0, "promotion_refused": 0, "queued_for_a_judge": 24, "soft_left_for_a_judge": 24}
+graph reach: maya reads 23 of Maya's facts and 0 of Leo's
+graph reach: leo reads 0 of Maya's facts and 0 of Leo's
+graphiti: graphiti-core 0.31.2, LLM default
+graphiti: 14 facts written from 23 episodes
+graphiti: 4 of the 11 replaced facts ended
+graphiti: still current: f07 Maya is working on Project Atlas.
+graphiti: still current: f02 Maya works at Northwind Analytics.
+graphiti: never written as a fact: f03 Maya prefers morning workouts.
+graphiti: still current: f19 Maya is working on Project Meridian.
+graphiti: never written as a fact: f08 Maya follows a vegetarian diet.
+graphiti: never written as a fact: f12 Maya decided to enrol in a part-time MBA.
+graphiti: never written as a fact: f05 Maya's goal is to run a half marathon.
+graphiti: LLM tokens for the load: 105987 in, 2718 out
+graphiti: told: 7 edges invalidated from the answer key
+system           kind            n  hit@1  rec@5 stale>gold leak@5
+graphiti-episodes all            31    26%    48%        26%     0%
+graphiti-episodes current        14     7%    36%        36%     0%
+graphiti-episodes historical      8    38%    75%        38%     0%
+graphiti-episodes stable          4    25%    50%         0%     0%
+graphiti-episodes change          5    60%    40%         0%     0%
+graphiti-valid   all            31    32%    45%        10%     0%
+graphiti-valid   current        14    14%    43%        21%     0%
+graphiti-valid   historical      8    62%    62%         0%     0%
+graphiti-valid   stable          4    25%    50%         0%     0%
+graphiti-valid   change          5    40%    20%         0%     0%
+graphiti-valid-told all            31    39%    55%         0%     0%
+graphiti-valid-told current        14    29%    57%         0%     0%
+graphiti-valid-told historical      8    62%    75%         0%     0%
+graphiti-valid-told stable          4    25%    50%         0%     0%
+graphiti-valid-told change          5    40%    20%         0%     0%
+percolate-valid  all            31    55%    81%         0%     0%
+percolate-valid  current        14    29%    79%         0%     0%
+percolate-valid  historical      8    75%    88%         0%     0%
+percolate-valid  stable          4    50%   100%         0%     0%
+percolate-valid  change          5   100%    60%         0%     0%
+percolate-valid-dream all            31    52%    74%        16%     0%
+percolate-valid-dream current        14    21%    64%        36%     0%
+percolate-valid-dream historical      8    75%    88%         0%     0%
+percolate-valid-dream stable          4    50%   100%         0%     0%
+percolate-valid-dream change          5   100%    60%         0%     0%
