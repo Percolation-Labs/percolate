@@ -1,0 +1,85 @@
+graphiti-valid-told against percolate-valid: the questions where one put a right answer first and the other did not
+q02 current    right: Maya works at Harbour Health. (facts written: f22 1)
+    graphiti-valid-told    right: Maya works at Harbour Health.
+    percolate-valid        wrong: Maya lives in Lisbon.
+q10 current    right: Maya lives in Lisbon. (facts written: f34 2)
+    graphiti-valid-told    wrong: Maya's manager is Daniel Osei.
+    percolate-valid        right: Maya lives in Lisbon.
+q13 current    right: Maya prefers evening workouts. (facts written: f24 0)
+    graphiti-valid-told    wrong: Maya is working on the patient intake app.
+    percolate-valid        right: Maya prefers evening workouts.
+q14 current    right: Maya is working on the patient intake app. (facts written: f25 1)
+    graphiti-valid-told    right: Maya is working on the patient intake app.
+    percolate-valid        wrong: Maya works at Harbour Health.
+q17 historical right: Maya's manager is Priya Shah. (facts written: f06 1)
+    graphiti-valid-told    right: Maya's manager is Priya Shah.
+    percolate-valid        wrong: Maya lives in Leeds.
+q19 historical right: Maya follows a vegetarian diet. (facts written: f08 0)
+    graphiti-valid-told    wrong: Maya lives in Leeds.
+    percolate-valid        right: Maya follows a vegetarian diet.
+q22 historical right: Maya prefers morning workouts. (facts written: f03 0)
+    graphiti-valid-told    wrong: Maya lives in Leeds.
+    percolate-valid        right: Maya prefers morning workouts.
+q23 stable     right: Maya is allergic to peanuts. (facts written: f04 0)
+    graphiti-valid-told    wrong: Maya is allergic to penicillin.
+    percolate-valid        right: Maya is allergic to peanuts.
+q24 stable     right: Maya is allergic to penicillin. (facts written: f20 1)
+    graphiti-valid-told    right: Maya is allergic to penicillin.
+    percolate-valid        wrong: Maya is allergic to peanuts.
+q26 stable     right: Maya prefers window seats on flights. (facts written: f13 0)
+    graphiti-valid-told    wrong: Maya has a cat named Biscuit.
+    percolate-valid        right: Maya prefers window seats on flights.
+q31 change     right: Maya follows a pescatarian diet. / Maya follows a vegetarian diet. (facts written: f26 0, f08 0)
+    graphiti-valid-told    wrong: Maya is allergic to penicillin.
+    percolate-valid        right: Maya follows a vegetarian diet.
+q32 change     right: Maya works at Harbour Health. / Maya works at Northwind Analytics. (facts written: f22 1, f02 1)
+    graphiti-valid-told    wrong: Maya decided to drop the part-time MBA.
+    percolate-valid        right: Maya works at Northwind Analytics.
+q35 change     right: Maya prefers evening workouts. / Maya prefers morning workouts. (facts written: f24 0, f03 0)
+    graphiti-valid-told    wrong: Maya is working on Project Meridian.
+    percolate-valid        right: Maya prefers morning workouts.
+right first, of 31: graphiti-valid-told 12, percolate-valid 17
+graphiti-valid against percolate-valid-dream: the questions where one put a right answer first and the other did not
+q01 current    right: Maya lives in Lisbon. (facts written: f34 2)
+    graphiti-valid         wrong: Maya is working on Project Atlas.
+    percolate-valid-dream  right: Maya lives in Lisbon.
+q05 current    right: Maya is working on the patient intake app. (facts written: f25 1)
+    graphiti-valid         wrong: Maya is working on Project Meridian.
+    percolate-valid-dream  right: Maya is working on the patient intake app.
+q07 current    right: Maya decided to drop the part-time MBA. (facts written: f29 1)
+    graphiti-valid         right: Maya decided to drop the part-time MBA.
+    percolate-valid-dream  wrong: Maya lives in Lisbon.
+q10 current    right: Maya lives in Lisbon. (facts written: f34 2)
+    graphiti-valid         wrong: Maya's manager is Daniel Osei.
+    percolate-valid-dream  right: Maya lives in Lisbon.
+q14 current    right: Maya is working on the patient intake app. (facts written: f25 1)
+    graphiti-valid         right: Maya is working on the patient intake app.
+    percolate-valid-dream  wrong: Maya works at Harbour Health.
+q17 historical right: Maya's manager is Priya Shah. (facts written: f06 1)
+    graphiti-valid         right: Maya's manager is Priya Shah.
+    percolate-valid-dream  wrong: Maya lives in Leeds.
+q19 historical right: Maya follows a vegetarian diet. (facts written: f08 0)
+    graphiti-valid         wrong: Maya lives in Leeds.
+    percolate-valid-dream  right: Maya follows a vegetarian diet.
+q22 historical right: Maya prefers morning workouts. (facts written: f03 0)
+    graphiti-valid         wrong: Maya lives in Leeds.
+    percolate-valid-dream  right: Maya prefers morning workouts.
+q23 stable     right: Maya is allergic to peanuts. (facts written: f04 0)
+    graphiti-valid         wrong: Maya is allergic to penicillin.
+    percolate-valid-dream  right: Maya is allergic to peanuts.
+q24 stable     right: Maya is allergic to penicillin. (facts written: f20 1)
+    graphiti-valid         right: Maya is allergic to penicillin.
+    percolate-valid-dream  wrong: Maya is allergic to peanuts.
+q26 stable     right: Maya prefers window seats on flights. (facts written: f13 0)
+    graphiti-valid         wrong: Maya lives in Lisbon.
+    percolate-valid-dream  right: Maya prefers window seats on flights.
+q31 change     right: Maya follows a pescatarian diet. / Maya follows a vegetarian diet. (facts written: f26 0, f08 0)
+    graphiti-valid         wrong: Maya is allergic to penicillin.
+    percolate-valid-dream  right: Maya follows a vegetarian diet.
+q32 change     right: Maya works at Harbour Health. / Maya works at Northwind Analytics. (facts written: f22 1, f02 1)
+    graphiti-valid         wrong: Maya decided to drop the part-time MBA.
+    percolate-valid-dream  right: Maya works at Northwind Analytics.
+q35 change     right: Maya prefers evening workouts. / Maya prefers morning workouts. (facts written: f24 0, f03 0)
+    graphiti-valid         wrong: Maya is working on Project Meridian.
+    percolate-valid-dream  right: Maya prefers morning workouts.
+right first, of 31: graphiti-valid 10, percolate-valid-dream 16

@@ -63,7 +63,7 @@ What it says, and what it does not:
 
 ## Graphiti (REM-1018)
 
-**The fair comparison, 6 November 2026** (`scores-fair-directional.txt`, `fair-directional-postmortem.txt`). The
+**The fair comparison, 6 November 2026** (`scores-fair-directional.txt`; per question, `fair-directional-compare.txt` from `compare.py`, and `fair-directional-postmortem.txt` with each side's top three). The
 rows below gave Percolate the fixture's answer key (which fact replaces which) and let Graphiti infer it, and ran
 Graphiti on gpt-4o-mini rather than its default. This run puts the two on equal terms, twice:
 
