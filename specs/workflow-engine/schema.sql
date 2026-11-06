@@ -3447,7 +3447,8 @@ by inspecting the statement, and refused entirely when percolate.sql_policy is
 'registered'. p_timeout_ms does NOT bound this statement: a statement_timeout set
 inside a running statement is never armed for it. The limit a step meets is its
 caller's statement_timeout, and execute_sql_step fails the step running when it
-fires (REM-1316, which leaves open how a step gets a limit of its own).$c$;
+fires. A step in mode worker gets a limit of its own: the worker sets
+statement_timeout before execute_worker_sql_step (REM-1316, §17b).$c$;
 
 -- What a `sql` step's statement returns, one place for both modes.
 --
@@ -3589,8 +3590,8 @@ begin
     -- this is where a running step meets a limit at all. Terminal, because
     -- the timer fires once per statement: a retry would rerun at once, in the
     -- same statement, with no limit left. The caller's statement goes on
-    -- unbounded after this. Whether a step gets a limit of its own is the
-    -- design question REM-1316 leaves open.
+    -- unbounded after this. A step that needs a limit of its own runs in
+    -- mode worker (§17b), where the worker arms one before its statement.
     --
     -- ONLY A TIMEOUT. 57014 is also a person's cancel (pg_cancel_backend, a
     -- client's Ctrl-C), and that one must still stop the caller, so anything
