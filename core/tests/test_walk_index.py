@@ -153,6 +153,37 @@ class Edges(unittest.TestCase):
         self.assertEqual(I.term_edges(three, df_floor=2, df_share=0.0), {})
         self.assertEqual(len(I.term_edges(three, df_floor=3, df_share=0.0)), 6)
 
+    def test_a_term_past_the_walks_cap_writes_no_edge(self):
+        # REM-1274: a walk offers a term only when at most walk.cap documents hold it, so its pairs cost space and
+        # nothing else. "ladder" is in three documents, "budget" in two.
+        d = docs("ladder. budget", "ladder. budget", "ladder")
+        e = I.term_edges(d, pair_cap=2)
+        self.assertEqual(set(e), {("n0", "n1"), ("n1", "n0")})
+        self.assertEqual([t["term"] for t in e[("n0", "n1")]["terms"]], ["budget"])
+        self.assertEqual(len(I.term_edges(d, pair_cap=3)), 6)
+        self.assertEqual(I.term_edges(d), I.term_edges(d, pair_cap=None))
+
+    def test_the_stream_is_the_dict_in_another_order(self):
+        d = docs("ladder budget drill", "ladder budget", "ladder drill", "drill budget", "plank")
+        self.assertEqual(dict(I.term_pairs(d)), I.term_edges(d))
+        pairs = [k for k, _ in I.term_pairs(d)]
+        self.assertEqual(len(pairs), len(set(pairs)))
+
+    def test_the_stream_holds_one_document_at_a_time(self):
+        # Σdf² large enough that the whole map dwarfs one document's edges: 400 documents sharing 40 terms each.
+        import tracemalloc
+        d = docs(*[" ".join(f"w{(i + j) % 60}x" for j in range(40)) for i in range(400)])
+        tracemalloc.start()
+        for _ in I.term_pairs(d, df_floor=400, df_share=1.0):
+            pass
+        stream = tracemalloc.get_traced_memory()[1]
+        tracemalloc.reset_peak()
+        whole = I.term_edges(d, df_floor=400, df_share=1.0)
+        full = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        self.assertGreater(len(whole), 100_000)
+        self.assertLess(stream * 5, full)
+
     def test_next_follows_position_within_a_sitting(self):
         meta = {0: {"sitting": 1, "position": 2}, 1: {"sitting": 1, "position": 1},
                 2: {"sitting": 2, "position": 1}, 3: {}}
@@ -227,7 +258,11 @@ class KeepGraph(unittest.TestCase):
         async def no_nearest(conn, docs, k):
             return {}
 
-        with mock.patch.multiple(I, parameters=no_params, documents=docs, nearest_edges=no_nearest, write=write):
+        async def no_cap(conn):
+            return None
+
+        with mock.patch.multiple(I, parameters=no_params, documents=docs, nearest_edges=no_nearest, write=write,
+                                 walk_cap=no_cap):
             report = asyncio.run(I.index(Conn(True), "beam-1m22"))
         self.assertEqual(report["graph"], "walk-graph:abc:def")
         self.assertEqual(events, ["begin", "walk_term", "walk_next", "walk_nearest", "commit", "walk_index"])

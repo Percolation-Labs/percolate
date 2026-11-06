@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 from . import terms as T
 
@@ -90,27 +90,44 @@ async def documents(conn: Any, channel: str) -> list[dict[str, Any]]:
     return out
 
 
-def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR, df_share: float = T.DF_SHARE,
-               strategies: tuple[str, ...] = ("frequency",), limits: dict[str, dict[str, Any]] | None = None
-               ) -> dict[tuple, dict]:
-    """walk_term edges from the strategies named. df_floor and df_share are the frequency strategy's cap; `limits`
-    (terms.limits_from) carries every strategy's, and wins."""
+def term_pairs(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR, df_share: float = T.DF_SHARE,
+               strategies: tuple[str, ...] = ("frequency",), limits: dict[str, dict[str, Any]] | None = None,
+               pair_cap: int | None = None) -> Iterator[tuple[tuple, dict]]:
+    """walk_term edges from the strategies named, one source document at a time, so only one document's edges are in
+    memory at once (REM-1274). df_floor and df_share are the frequency strategy's cap; `limits` (terms.limits_from)
+    carries every strategy's, and wins.
+
+    pair_cap: a term held by more documents than this writes no edge. A walk offers a term as a lead only when at most
+    walk.cap documents hold it, and it counts the holders from these edges, so a term past the walk's cap can never be
+    a lead and its edges only cost space: Σ df² of them, 23.3 million rows for QASPER's 13,547 paragraphs at the fit
+    cap of 271, against 7.2 million below 100. None keeps every term the fit allows."""
     lim = {"frequency": {"df_floor": df_floor, "df_share": df_share}}
     for s, v in (limits or {}).items():
         lim[s] = {**lim.get(s, {}), **v}
     tags = T.tag([d["text"] for d in docs], strategies, lim)
-    postings = {t: v["docs"] for t, v in tags.items()}
+    postings = {t: v["docs"] for t, v in tags.items() if pair_cap is None or len(v["docs"]) <= pair_cap}
     rank = {i: {t: r for r, t in enumerate(ts)} for i, ts in T.terms_of(postings).items()}
-    out: dict[tuple, dict] = {}
+    held: dict[int, list[str]] = {}
     for t, ix in postings.items():
         for a in ix:
+            held.setdefault(a, []).append(t)
+    for a in sorted(held):
+        out: dict[Any, list[dict[str, Any]]] = {}
+        for t in held[a]:
+            ix = postings[t]
+            entry = {"term": t, "n": len(ix), "rank": rank[a][t], "by": tags[t]["by"]}
             for b in ix:
-                if a != b:
-                    e = out.setdefault((docs[a]["node"], docs[b]["node"]), {"terms": []})
-                    e["terms"].append({"term": t, "n": len(ix), "rank": rank[a][t], "by": tags[t]["by"]})
-    for e in out.values():
-        e["terms"].sort(key=lambda x: x["rank"])
-    return out
+                if b != a:
+                    out.setdefault(docs[b]["node"], []).append(entry)
+        for b, ts in out.items():
+            yield (docs[a]["node"], b), {"terms": sorted(ts, key=lambda x: x["rank"])}
+
+
+def term_edges(docs: list[dict[str, Any]], df_floor: int = T.DF_FLOOR, df_share: float = T.DF_SHARE,
+               strategies: tuple[str, ...] = ("frequency",), limits: dict[str, dict[str, Any]] | None = None,
+               pair_cap: int | None = None) -> dict[tuple, dict]:
+    """term_pairs, all in memory: for tests and small channels."""
+    return dict(term_pairs(docs, df_floor, df_share, strategies, limits, pair_cap))
 
 
 def next_edges(docs: list[dict[str, Any]]) -> dict[tuple, dict]:
@@ -166,13 +183,25 @@ async def nearest_edges(conn: Any, docs: list[dict[str, Any]], k: int = NEAREST)
             for r in rows}
 
 
-async def write(conn: Any, relation: str, edges: dict[tuple, dict], nodes: list[Any]) -> dict[str, int]:
-    """Upsert one relation's edges among these nodes, and retract the ones no longer derived."""
+BATCH = 50_000
+
+
+async def write(conn: Any, relation: str, edges: dict[tuple, dict] | Iterable[tuple[tuple, dict]],
+                nodes: list[Any]) -> dict[str, int]:
+    """Upsert one relation's edges among these nodes, and retract the ones no longer derived. edges is a dict or a
+    stream of (pair, provenance); a stream is copied in batches, so its size does not bound memory (REM-1274)."""
     await conn.execute(
         "create temp table if not exists walk_index_edges (src uuid, dst uuid, provenance jsonb) on commit drop")
     await conn.execute("truncate walk_index_edges")
-    await conn.copy_records_to_table(
-        "walk_index_edges", records=[(a, b, json.dumps(p)) for (a, b), p in edges.items()])
+    derived, batch = 0, []
+    for (a, b), p in (edges.items() if isinstance(edges, dict) else edges):
+        batch.append((a, b, json.dumps(p)))
+        if len(batch) >= BATCH:
+            await conn.copy_records_to_table("walk_index_edges", records=batch)
+            derived, batch = derived + len(batch), []
+    if batch:
+        await conn.copy_records_to_table("walk_index_edges", records=batch)
+        derived += len(batch)
     written = await conn.fetchval(
         """
         with up as (
@@ -199,7 +228,7 @@ async def write(conn: Any, relation: str, edges: dict[tuple, dict], nodes: list[
         """,
         relation, nodes,
     )
-    return {"derived": len(edges), "written": written, "retracted": retracted}
+    return {"derived": derived, "written": written, "retracted": retracted}
 
 
 async def parameters(conn: Any) -> dict[str, Any]:
@@ -208,6 +237,15 @@ async def parameters(conn: Any) -> dict[str, Any]:
         return {}
     p = await conn.fetchval("select aiq.parameters_of('index')")
     return json.loads(p) if isinstance(p, str) else (p or {})
+
+
+async def walk_cap(conn: Any) -> int | None:
+    """The stack's walk.cap: the most documents a term may have and still be offered as a lead. None on a database
+    without it, which keeps every term."""
+    if not await conn.fetchval("select to_regclass('aiq.parameters') is not null"):
+        return None
+    v = await conn.fetchval("select aiq.parameters_of('walk')->>'cap'")
+    return int(v) if v is not None else None
 
 
 async def keep_graph(conn: Any, channel: str) -> str | None:
@@ -231,6 +269,7 @@ async def index(conn: Any, channel: str, k: int | None = None) -> dict[str, Any]
     k = int(p.get("nearest", NEAREST)) if k is None else k
     df_floor, df_share = int(p.get("df_floor", T.DF_FLOOR)), float(p.get("df_share", T.DF_SHARE))
     strategies = T.strategies_from(p.get("strategies"))
+    pair_cap = await walk_cap(conn)
     docs = await documents(conn, channel)
     if not docs:
         raise RuntimeError(f"channel {channel!r} has no ingested documents -- load them, wait for ingestion, then index")
@@ -243,12 +282,12 @@ async def index(conn: Any, channel: str, k: int | None = None) -> dict[str, Any]
                 " on conflict (src_type, relation, dst_type) do update set description = excluded.description",
                 relation, description)
         built = {
-            "walk_term": term_edges(docs, df_floor, df_share, strategies, limits := T.limits_from(p)),
+            "walk_term": term_pairs(docs, df_floor, df_share, strategies, limits := T.limits_from(p), pair_cap),
             "walk_next": next_edges(docs),
             "walk_nearest": await nearest_edges(conn, docs, k),
         }
         report = {"documents": len(docs), "nearest": k, "strategies": list(strategies), "df_floor": df_floor,
-                  "df_share": df_share}
+                  "df_share": df_share, "pair_cap": pair_cap}
         if (made_by := T.provenance(strategies, limits)) is not None:
             report["spacy"] = made_by
         for relation, edges in built.items():
