@@ -20269,6 +20269,17 @@ $$ language plpgsql;
 
 -- TEXT mode. Deliberately returns the same (id, score) shape as
 -- aiq.semantic_in() so the two can be fused without reshaping either.
+-- WHAT TEXT MATCHES, AS ONE TSQUERY (REM-1315): any of the query's words. aiq.lexical matches through it, and so
+-- does anything that has to agree with TEXT without ranking, such as the MCP probe counting how many rows a full
+-- TEXT result left out. That probe counted with plainto_tsquery, every word, and fell behind when TEXT moved to any
+-- word (REM-1145): 1 counted where TEXT returned 40. Counting over aiq.lexical itself agreed, but ranked every
+-- match first: 150,302 matches of 300,000 chunks took 188 ms as the owner against 41 for the count, and this
+-- predicate counts them in 30. NULL for a query with no indexable word, which matches nothing.
+create or replace function aiq.lexical_match(p_regconfig regconfig, p_query text) returns tsquery
+language sql immutable parallel safe as $$
+    select nullif(replace(plainto_tsquery(p_regconfig, p_query)::text, ' & ', ' | '), '')::tsquery
+$$;
+
 drop function if exists aiq.lexical(text, text, int);
 create or replace function aiq.lexical(
     p_source text, p_query text, p_limit int default 10, p_scope jsonb default null
@@ -20289,7 +20300,7 @@ begin
     -- 42 development questions over five other rankings: 0.903 recall@5 there, and 0.791 on the held-out 39.
     -- A query with no indexable word (all stop words) is a NULL tsquery and matches nothing, as it did before.
     return query execute format(
-        'with q as (select nullif(replace(plainto_tsquery(%L, $1)::text, '' & '', '' | ''), '''')::tsquery as t)
+        'with q as (select aiq.lexical_match(%L::regconfig, $1) as t)
          select c.id, c.%I::text, ts_rank(c.search_tsv, q.t, 1)::real
            from %s c, q where c.search_tsv @@ q.t
           order by ts_rank(c.search_tsv, q.t, 1) desc, c.id limit $2',
@@ -21928,6 +21939,7 @@ grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authen
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+grant execute on function aiq.lexical_match(regconfig, text) to authenticated;
 -- Both halves build their scoped relation through it as the caller (REM-965).
 grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
