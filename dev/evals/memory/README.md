@@ -63,6 +63,14 @@ What it says, and what it does not:
 
 ## Graphiti (REM-1018)
 
+**graphiti-core 0.31.2, 6 November 2026** (`scores-graphiti-0.31.2.txt`, beside Percolate on `19-0.2.38` in
+`scores-0.2.38.txt`, whose rows match 0.2.37's). The runner now names its extraction model (`LLM_MODEL`, default
+gpt-4o-mini, since 0.31.2's own default is gpt-6-luna), waits for Neo4j, and prints what the load built: 47 facts
+from 48 episodes, and 7 of the 11 replaced facts ended by Graphiti's own judgement. graphiti-valid put the right
+answer first on 59% (percolate-valid 63%), and graphiti-search on 59%; the 0.31.1 rows below were 30% and 24%.
+A second load the same day gave 46 facts, 7 of 11 ended, graphiti-valid 59% and graphiti-search 52%. The article
+"Percolate for Zep users" runs this pair as its appendix block. The rest of this section is the 0.31.1 run.
+
 `graphiti_run.py` loads the same facts into Graphiti 0.31.1, the open-source engine behind Zep, on Neo4j 5.26,
 each fact one episode with its `said_at` as the reference time. Graphiti's own LLM (gpt-4o-mini, its default)
 extracts the facts and decides which earlier ones a new episode invalidates. Unlike the rows above, nothing tells
@@ -112,7 +120,7 @@ The images 0.2.23, 0.2.27, 0.2.28, 0.2.29 and
 Graphiti, with the OpenAI key in the environment (this sends the fixture's text to OpenAI):
 
 ```bash
-uv pip install -p env graphiti-core==0.31.1
+uv pip install -p env graphiti-core==0.31.2
 docker run -d --name memory-bench-neo4j -e NEO4J_AUTH=neo4j/<password> -p 57687:7687 neo4j:5.26
 NEO4J_URI=bolt://localhost:57687 NEO4J_USER=neo4j NEO4J_PASSWORD=<password> \
   env/bin/python -I graphiti_run.py fixture.json > graphiti.jsonl

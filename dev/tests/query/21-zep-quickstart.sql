@@ -151,35 +151,52 @@ select pg_temp.check(pg_temp.ana_graph() =
     '§3: after dream, Ana ships via the Felixstowe row only, and is based in Porto: ' || pg_temp.ana_graph());
 :as_operator
 
--- §4 Ana's agent decides what dream queued, as Ana. Each pair is queued from both sides; binding one side settles
--- its twin, which goes moot naming the judgement that bound it (from 0.2.27; on 0.2.26 the agent closed it with none).
+-- §4 Ana's agent decides what dream queued, as Ana, and Ana decides what it passes to her. Each pair is queued from
+-- both sides; binding one side settles an open twin, which goes moot naming the judgement that bound it.
 :as_ana
-create function pg_temp.decide(p_key text, p_kind text, p_bind boolean, p_reason text) returns text
+create function pg_temp.decide(p_key text, p_kind text, p_bind boolean, p_reason text, p_tier text default 'agent',
+                                p_status text default 'open') returns text
 language plpgsql as $$
 declare j uuid; t uuid;
 begin
     select id into j from aiq.judgements
-     where status = 'open' and evidence ->> 'key' = p_key and evidence ->> 'claimed_kind' = p_kind;
-    if j is null then raise exception 'zep quickstart article: §4: nothing queued for % (%)', p_key, p_kind; end if;
+     where status = p_status and evidence ->> 'key' = p_key and evidence ->> 'claimed_kind' = p_kind;
+    if j is null then raise exception 'zep quickstart article: §4: nothing % for % (%)', p_status, p_key, p_kind; end if;
     perform aiq.claim_judgement(null, j);
     if p_bind then
         select (c ->> 'node_id')::uuid into t
           from aiq.judgements q, jsonb_array_elements(q.evidence -> 'candidates') c where q.id = j limit 1;
-        return aiq.complete_judgement(j, jsonb_build_object('decision', 'bind', 'target', t), p_reason) ->> 'status';
+        return aiq.complete_judgement(j, jsonb_build_object('decision', 'bind', 'target', t), p_reason, p_tier) ->> 'status';
     end if;
-    return aiq.complete_judgement(j, '{"decision": "none"}', p_reason) ->> 'status';
+    return aiq.complete_judgement(j, '{"decision": "none"}', p_reason, p_tier) ->> 'status';
 end $$;
 select pg_temp.check((select count(*) from aiq.judgements where status = 'open') = 4,
     '§4: the four queued items wait for Ana''s agent');
-select pg_temp.decide('a. costa', 'person', true,
-    'Same surname and initial, a person both times; each is linked to a Tagus Ceramics, and nothing either says conflicts.');
+-- On the article's run her Claude bound the company and passed the alias to her (decision human); Ana binds it
+-- herself, as a person, at tier human.
 select pg_temp.decide('tagus ceramics', 'organization', true,
     'Same name, Tagus Ceramics; the only difference is the kind each was written as, and nothing either says conflicts.');
 select pg_temp.check((select count(*) from aiq.judgements
                        where status = 'moot' and evidence ? 'settled_by'
-                         and (evidence ->> 'key', evidence ->> 'claimed_kind')
-                             in (('ana costa', 'person'), ('tagus ceramics', 'company'))) = 2,
-    '§4: each twin settled with its pair: moot, naming the judgement that bound it');
+                         and (evidence ->> 'key', evidence ->> 'claimed_kind') = ('tagus ceramics', 'company')) = 1,
+    '§4: the company''s twin settled with its pair: moot, naming the judgement that bound it');
+select aiq.claim_judgement(null, id) is not null from aiq.judgements where status = 'open' and evidence ->> 'key' = 'a. costa';
+select aiq.complete_judgement(id, '{"decision": "human"}', 'Costa is a common surname; Ana should say.') ->> 'status'
+  from aiq.judgements where status = 'claimed' and evidence ->> 'key' = 'a. costa';
+select aiq.claim_judgement(null, id) is not null from aiq.judgements where status = 'open' and evidence ->> 'key' = 'ana costa';
+select aiq.complete_judgement(id, '{"decision": "human"}', 'Costa is a common surname; Ana should say.') ->> 'status'
+  from aiq.judgements where status = 'claimed' and evidence ->> 'key' = 'ana costa';
+select pg_temp.decide('a. costa', 'person', true, 'That is me: I sign my email A. Costa, Logistics.', 'human', 'to_human');
+select pg_temp.check((select tier = 'human' and decided_by = 'user:' || :ana from aiq.judgements
+                       where evidence ->> 'key' = 'a. costa'),
+    '§4: Ana''s own decision is recorded at tier human, by user:<Ana>');
+-- A twin passed to a person does not settle with its pair: it stays to_human with no candidates left, and the
+-- article's block closes it with none. This assertion records the gap; when a bind settles a to_human twin too,
+-- it fails, and the block's second loop and this go.
+select pg_temp.check((select status = 'to_human' and jsonb_array_length(evidence -> 'candidates') = 0
+                        from aiq.judgements where evidence ->> 'key' = 'ana costa'),
+    '§4: the alias''s to_human twin is left waiting with nothing to bind');
+select pg_temp.decide('ana costa', 'person', false, 'Settled when I bound A. Costa to me.', 'human', 'to_human');
 :as_operator
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%' and pg_temp.ana_graph() like '%prefers mode/road%'
@@ -195,7 +212,8 @@ select pg_temp.check(pg_temp.ana_graph() not like '%mode/road%', '§4: road is g
 
 -- §5 Why, as of, and her bookings beside her memory.
 select pg_temp.check((select count(*) filter (where r.tier = 'registry' and r.decided_by = 'dream') = 2
-                            and count(*) filter (where r.tier = 'agent' and r.decided_by = 'agent:' || :ana) = 2
+                            and count(*) filter (where r.tier = 'agent' and r.decided_by = 'agent:' || :ana) = 1
+                            and count(*) filter (where r.tier = 'human' and r.decided_by = 'user:' || :ana) = 1
                         from aiq.node_resolutions r join aiq.soft_nodes s on s.id = (r.evidence ->> 'soft_id')::uuid
                        where s.key in ('rotterdam', 'felixstowe', 'a. costa', 'tagus ceramics')),
     '§5: four bindings, each with who made it');
