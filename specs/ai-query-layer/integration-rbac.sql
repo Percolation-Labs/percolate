@@ -260,6 +260,7 @@ grant execute on function aiq.semantic_ranks_exactly(text, jsonb, int) to authen
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
 grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int, jsonb) to authenticated;
+grant execute on function aiq.lexical_match(regconfig, text) to authenticated;
 -- Both halves build their scoped relation through it as the caller (REM-965).
 grant execute on function aiq.scoped_source(text, jsonb) to authenticated;
 -- aiq.query raises result exceptions through it as the caller (REM-948).
