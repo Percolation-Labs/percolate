@@ -152,7 +152,7 @@ select pg_temp.check(pg_temp.ana_graph() =
 :as_operator
 
 -- §4 Ana's agent decides what dream queued, as Ana, and Ana decides what it passes to her. Each pair is queued from
--- both sides; binding one side settles an open twin, which goes moot naming the judgement that bound it.
+-- both sides; binding one side settles its twin, open or not, which goes moot naming the judgement that bound it.
 :as_ana
 create function pg_temp.decide(p_key text, p_kind text, p_bind boolean, p_reason text, p_tier text default 'agent',
                                 p_status text default 'open') returns text
@@ -190,13 +190,13 @@ select pg_temp.decide('a. costa', 'person', true, 'That is me: I sign my email A
 select pg_temp.check((select tier = 'human' and decided_by = 'user:' || :ana from aiq.judgements
                        where evidence ->> 'key' = 'a. costa'),
     '§4: Ana''s own decision is recorded at tier human, by user:<Ana>');
--- A twin passed to a person does not settle with its pair: it stays to_human with no candidates left, and the
--- article's block closes it with none. This assertion records the gap; when a bind settles a to_human twin too,
--- it fails, and the block's second loop and this go.
-select pg_temp.check((select status = 'to_human' and jsonb_array_length(evidence -> 'candidates') = 0
+-- A twin passed to a person settles with its pair as an open one does (REM-1313): Ana's bind leaves it nothing to
+-- bind, so it goes moot naming her judgement, and she has nothing left to close by hand.
+select pg_temp.check((select status = 'moot' and jsonb_array_length(evidence -> 'candidates') = 0
+                             and evidence -> 'settled_by' ->> 'judgement' =
+                                 (select id::text from aiq.judgements where evidence ->> 'key' = 'a. costa')
                         from aiq.judgements where evidence ->> 'key' = 'ana costa'),
-    '§4: the alias''s to_human twin is left waiting with nothing to bind');
-select pg_temp.decide('ana costa', 'person', false, 'Settled when I bound A. Costa to me.', 'human', 'to_human');
+    '§4: the alias''s to_human twin settled with its pair: moot, naming Ana''s judgement');
 :as_operator
 :as_ana
 select pg_temp.check(pg_temp.ana_graph() like '%prefers mode/rail%' and pg_temp.ana_graph() like '%prefers mode/road%'
