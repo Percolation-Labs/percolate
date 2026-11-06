@@ -25,34 +25,34 @@ declare
     r jsonb; got text[];
 begin
     insert into aiq.relation_types (src_type, relation, dst_type, description)
-    values ('q66_fact', 'q66_prefers', 'q66_fact', 'query/66 fixture') on conflict do nothing;
+    values ('q70_fact', 'q70_prefers', 'q70_fact', 'query/70 fixture') on conflict do nothing;
     insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
-    values ('q66_fact', gen_random_uuid(), org, 'public', 'Ana') returning id into ana;
+    values ('q70_fact', gen_random_uuid(), org, 'public', 'Ana') returning id into ana;
     insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
-    values ('q66_fact', gen_random_uuid(), org, 'public', 'road') returning id into road;
+    values ('q70_fact', gen_random_uuid(), org, 'public', 'road') returning id into road;
     insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
-    values ('q66_fact', gen_random_uuid(), org, 'public', 'rail') returning id into rail;
+    values ('q70_fact', gen_random_uuid(), org, 'public', 'rail') returning id into rail;
     insert into aiq.nodes (entity_type, entity_id, org_id, visibility, summary)
-    values ('q66_fact', gen_random_uuid(), org, 'public', 'sea') returning id into sea;
+    values ('q70_fact', gen_random_uuid(), org, 'public', 'sea') returning id into sea;
 
-    -- road: a misreading, said by q66-reader alone, held from March.
+    -- road: a misreading, said by q70-reader alone, held from March.
     insert into aiq.edges (src_id, dst_id, relation, org_id, valid_from, created_at, provenance)
-    values (ana, road, 'q66_prefers', org, '2026-03-09T16:00:00Z', k0,
-            '{"sources": [{"agent": "q66-reader", "run_id": "r1"}]}') returning id into e_road;
+    values (ana, road, 'q70_prefers', org, '2026-03-09T16:00:00Z', k0,
+            '{"sources": [{"agent": "q70-reader", "run_id": "r1"}]}') returning id into e_road;
     -- sea: said by another reader, held from January, and ENDED in June (the control).
     insert into aiq.edges (src_id, dst_id, relation, org_id, valid_from, created_at, provenance)
-    values (ana, sea, 'q66_prefers', org, '2026-01-14T09:30:00Z', k0,
-            '{"sources": [{"agent": "q66-other", "run_id": "r1"}]}') returning id into e_sea;
+    values (ana, sea, 'q70_prefers', org, '2026-01-14T09:30:00Z', k0,
+            '{"sources": [{"agent": "q70-other", "run_id": "r1"}]}') returning id into e_sea;
     perform aiq.close_edge(jsonb_build_object('edge_id', e_sea), '2026-06-01T00:00:00Z');
     update aiq.edges set provenance = jsonb_set(provenance, '{closed,at}', to_jsonb(k0)) where id = e_sea;
     -- rail: said by a derivation that withdraws and re-derives at one instant, so it held throughout.
     insert into aiq.edges (src_id, dst_id, relation, org_id, valid_from, created_at, provenance)
-    values (ana, rail, 'q66_prefers', org, '2026-03-09T16:00:00Z', k0,
-            '{"agent": "q66-rederive"}') returning id into e_rail;
+    values (ana, rail, 'q70_prefers', org, '2026-03-09T16:00:00Z', k0,
+            '{"agent": "q70-rederive"}') returning id into e_rail;
 
-    r := aiq.retract_derived('q66-reader');
-    if (r->>'retracted')::int <> 1 then raise exception 'retract_derived(q66-reader) retracted %, not 1', r; end if;
-    perform aiq.retract_derived('q66-rederive');
+    r := aiq.retract_derived('q70-reader');
+    if (r->>'retracted')::int <> 1 then raise exception 'retract_derived(q70-reader) retracted %, not 1', r; end if;
+    perform aiq.retract_derived('q70-rederive');
     update aiq.edges set valid_to = null where id = e_rail;   -- the derivation's own insert revives it, same now()
 
     -- 1. As of May, as known before the withdrawal: road was believed then.
@@ -83,14 +83,14 @@ begin
 
     -- 5. GRAPH ... AS OF reads the periods as known now, through graph_neighbors.
     select array_agg(g.summary order by g.summary) into got
-      from aiq.graph_neighbors(ana, 'q66_prefers', 100, may) g where g.direction = 'out';
+      from aiq.graph_neighbors(ana, 'q70_prefers', 100, may) g where g.direction = 'out';
     if got is distinct from array['rail', 'sea'] then
         raise exception 'graph_neighbors as of May: % (want rail, sea)', got;
     end if;
 
     -- 6. The withdrawal is on record: who, when, and the end it replaced.
     if not exists (select 1 from aiq.edges e
-                    where e.id = e_road and e.provenance->'withdrawn'->>'agent' = 'q66-reader'
+                    where e.id = e_road and e.provenance->'withdrawn'->>'agent' = 'q70-reader'
                       and (e.provenance->'withdrawn'->>'at')::timestamptz = now() and e.valid_to = now()
                       and not e.provenance->'withdrawn' ? 'valid_to') then
         raise exception 'the withdrawal is not recorded on the road edge: %',
@@ -100,7 +100,7 @@ begin
        or exists (select 1 from aiq.edge_periods where edge_id = e_road) then
         raise exception 'edge_periods_recorded should hold the withdrawn period and edge_periods should not';
     end if;
-    raise notice 'query/66: a withdrawn fact reads as held only as known before the withdrawal';
+    raise notice 'query/70: a withdrawn fact reads as held only as known before the withdrawal';
 end $$;
 
 rollback;

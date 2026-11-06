@@ -3745,6 +3745,7 @@ returns jsonb as $$
 declare
     v_out   jsonb;
     v_count bigint;
+    v_prev_timeout text;
     v_pol   text := workflow.sql_policy();
     -- Only bind when there is something to bind: EXECUTE refuses USING against
     -- a statement with no placeholders ("too many parameters specified").
@@ -3769,6 +3770,19 @@ begin
         raise exception 'this sql step carries an empty statement';
     end if;
 
+    -- THE STEP'S TIMEOUT ENDS WITH THE STEP (REM-1262). set_config(..., true)
+    -- is transaction-local, so left alone it outlived this call and bound every
+    -- later statement in the CALLER's transaction: on 29 Oct a bundle that ran
+    -- 18 walk starts as one transaction had its next long walk cancelled at
+    -- 30 s, and every start rolled back. So the caller's value is put back on
+    -- each return below. A raise needs no restore: it aborts the subtransaction
+    -- or transaction this setting was made in, and that rolls the GUC back.
+    --
+    -- What it does NOT do, measured on 0.2.38: a timeout set mid-statement is
+    -- not armed for the statement already running, so `select
+    -- workflow.run_sql('select pg_sleep(3)', false, 1000)` runs its 3 s. The
+    -- step's own limit is not enforced here; this only stops it leaking.
+    v_prev_timeout := current_setting('statement_timeout');
     perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
 
     if p_write then
@@ -3779,13 +3793,16 @@ begin
         -- review, and every reader of a definition deserves to see which steps
         -- change the database.
         if v_for is not null then
-            return workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+            v_out := workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+        else
+            if v_bind then execute p_statement using p_params;
+            else           execute p_statement;
+            end if;
+            get diagnostics v_count = row_count;
+            v_out := jsonb_build_object('rows_affected', v_count);
         end if;
-        if v_bind then execute p_statement using p_params;
-        else           execute p_statement;
-        end if;
-        get diagnostics v_count = row_count;
-        return jsonb_build_object('rows_affected', v_count);
+        perform set_config('statement_timeout', v_prev_timeout, true);
+        return v_out;
     end if;
 
     -- The courtesy check: unambiguous, cheap, and it turns an abort into a
@@ -3837,6 +3854,7 @@ begin
         end if;
     end;
 
+    perform set_config('statement_timeout', v_prev_timeout, true);
     return coalesce(v_out, '[]'::jsonb);
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
@@ -5394,6 +5412,7 @@ declare
     v_args jsonb;
     v_sql  text;
     v_out  jsonb;
+    v_prev text;
 begin
     select * into f from workflow.step_functions where name = p_name;
     if not found then
@@ -5405,6 +5424,9 @@ begin
             p_name;
     end if;
 
+    -- Put back on return, as run_sql does: transaction-local, it would
+    -- otherwise bind the caller's later statements (REM-1262).
+    v_prev := current_setting('statement_timeout');
     perform set_config('statement_timeout', f.timeout_ms::text, true);
 
     -- Arguments are passed as parameters, never interpolated: a step's args
@@ -5431,6 +5453,7 @@ begin
         execute v_sql into v_out using v_args;
     end if;
 
+    perform set_config('statement_timeout', v_prev, true);
     return v_out;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -20123,6 +20146,12 @@ begin
     if not found then
         raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_lexical_source;
     end if;
+    -- The words half reads the source itself (below), so it refuses what aiq.lexical refuses (REM-519).
+    if src.search_with is not null then
+        raise exception 'lexical source % is searched with %, not aiq.search', p_lexical_source, src.search_with
+            using errcode = 'feature_not_supported',
+                  hint = 'as the caller, its row security reads every row before the text index (REM-519)';
+    end if;
 
     -- THE KEY TIER (REM-1273): a node the query names exactly comes first, ahead
     -- of the fusion. Lexical and semantic are statistical, and RRF over them
@@ -20161,15 +20190,28 @@ begin
         $k$, src.node_type, aiq.scoped_source(src.source_table, p_scope), src.node_col) end;
 
     return query execute format($q$
+    -- THE WORDS HALF MATCHES ALL OF THE QUERY'S WORDS, NOT ANY (REM-1312). aiq.lexical matches any of them since
+    -- REM-1145, which is right for TEXT and for the lexical arm alone (LongMemEval S held-out recall@5 0.077 -> 0.791)
+    -- and wrong here. RRF uses only rank, so every row that matches gets one, however little its words weigh: a
+    -- memory's owner is named in every one of their memories, and "Which language is Maya trying to pick up?"
+    -- matched all 40 of Maya's facts, ranked shortest first, and outvoted the meaning half. Measured with only this
+    -- half changed: Mem0 fixture percolate-valid hit@1 63 percent (any) against 76 (all); LongMemEval S held-out
+    -- hybrid recall@5 0.887 against 0.936. Users get this function, so its own number decides, not the lexical
+    -- arm's. When no row holds every word the half is empty and the meaning half ranks alone, as before REM-1145.
+    -- No percent sign in these comments: they are inside a format() template.
     with lex as (
-        select l.chunk_id, row_number() over (order by l.score desc)::int as rnk
-        from aiq.lexical($1, $2, $4 * 4, $7) l
+        select c.id as chunk_id,
+               row_number() over (order by ts_rank(c.search_tsv, plainto_tsquery(%4$L, $2)) desc, c.id)::int as rnk
+          from %5$s c
+         where c.search_tsv @@ plainto_tsquery(%4$L, $2)
+         order by 2
+         limit $4 * 4
     ),
     sem as (
         -- The SAME source name feeds both halves, so `SEARCH "..." FROM x`
         -- means one corpus and not two. It must therefore be registered in
         -- both registries; the semantic branch says so by name if it is not.
-        select s.chunk_id, row_number() over (order by s.distance asc)::int as rnk
+        select s.chunk_id, row_number() over (order by s.distance asc, s.chunk_id)::int as rnk
         from aiq.semantic_in($1, $3, $6, $4 * 4, $7) s
     )
     -- Content is fetched by id AFTER the fusion, not carried through the
@@ -20203,9 +20245,14 @@ begin
     select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank, f.key
     from ranked f
     cross join lateral (select c.%1$I from %2$s c where c.id = f.chunk_id limit 1) c
-    order by f.key is null, f.rrf desc
+    -- A TIE IS BROKEN BY ID, ALWAYS (REM-1312). RRF ties are common, not rare: ranks 1 and 3 on one side and 3 and 1
+    -- on the other sum to the same score, and equal ts_rank scores are equal ranks. Unbroken, tied rows came back in
+    -- the order of the join the planner chose (id order under a merge join, the semantic side's under a hash join),
+    -- so the Mem0 fixture's q21 put a different memory first between runs and the benchmark moved by a question.
+    -- Each rank above and this order end on the chunk id. No percent sign in here: this is a format() template.
+    order by f.key is null, f.rrf desc, f.chunk_id
     limit $4
-    $q$, src.content_col, src.source_table, v_keyed)
+    $q$, src.content_col, src.source_table, v_keyed, src.regconfig, aiq.scoped_source(src.source_table, p_scope))
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model, p_scope;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
