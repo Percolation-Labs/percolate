@@ -4,7 +4,7 @@
 #
 #     OPENAI_API_KEY=... dev/examples/mem0-memory/run.sh [workdir]
 #
-# blocks/00-setup.sh is the article's setup block: it starts get-percolate's compose stack (whatever main pins), installs
+# blocks/00-setup.sh is the article's setup block: it starts get-percolate's compose stack at the release tag it names, installs
 # the CLI and signs in. PROJECT renames its compose project and directory, PORT_BASE moves its seven ports to
 # PORT_BASE..PORT_BASE+6, and IMG pins the database image, so a run can sit beside other stacks; otherwise it runs as
 # written. The SQL blocks that need no model are asserted by dev/tests/content/13-mem0-agent.sql. This runs the rest:

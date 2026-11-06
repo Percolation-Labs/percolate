@@ -1,5 +1,5 @@
 mkdir mem0-tour && cd mem0-tour
-curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/main/compose/docker-compose.yml \
+curl -fsSL https://raw.githubusercontent.com/Percolation-Labs/get-percolate/v0.2.37/compose/docker-compose.yml \
   -o docker-compose.yml
 cat > .env <<ENV
 COMPOSE_PROJECT_NAME=mem0-tour
