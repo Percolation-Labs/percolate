@@ -171,7 +171,11 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
              patch("percolate_core.worker.loop.offload", AsyncMock(side_effect=lambda conn, task, out: out)):
             self.assertTrue(await run_once("briefs", "brief-worker"))
         conn.fetchval.assert_any_await("select workflow.task_owner($1, $2)", str(task), "brief-worker")
-        conn.execute.assert_awaited_once_with("select workflow.complete_task($1, $2::jsonb, $3)", str(task), {"result":"brief"}, "brief-worker")
+        # The claim's savepoint around get_task_context (REM-1319) also goes through execute(); complete_task is
+        # still awaited exactly once, with the output and the worker id.
+        completes = [c for c in conn.execute.await_args_list if "complete_task" in c.args[0]]
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(completes[0].args, ("select workflow.complete_task($1, $2::jsonb, $3)", str(task), {"result":"brief"}, "brief-worker"))
 
     async def test_refused_owner_never_dispatches_or_retries(self):
         for error in (asyncpg.InsufficientPrivilegeError("agent execution requires a run owner"), asyncpg.UndefinedFunctionError("missing task_owner")):

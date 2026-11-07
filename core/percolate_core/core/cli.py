@@ -27,6 +27,7 @@ why a sample is a directory of authored documents rather than a SQL dump.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 from typing import Any
 
@@ -70,6 +71,13 @@ def _admin_dsn(dsn: str | None) -> str:
             "postgres://p8:p8@localhost:5432/percolate."
         )
     return chosen
+
+
+# The signing secret the compose stack runs with when its .env names none (get-percolate's docker-compose.yml). It is
+# published, so a token signed with it is a local stack's: anyone can mint one, and a short expiry protects nothing.
+DEV_JWT_SECRET = "change-me-a-long-random-string-at-least-32-chars"
+LOCAL_TTL = 8 * 3600
+ISSUER_TTL = 3600
 
 
 def _jwt_secret(secret: str | None) -> str:
@@ -192,7 +200,8 @@ def token(
     sub: str | None = typer.Option(None, help="Or give the user id directly."),
     role: str = typer.Option("authenticated", help="Postgres role claim, which PostgREST switches to."),
     orgs: str | None = typer.Option(None, help="Comma-separated org ids for the `orgs` claim."),
-    ttl: int = typer.Option(3600, help="Lifetime in seconds."),
+    ttl: int | None = typer.Option(
+        None, help="Lifetime in seconds. Default: 8 h signed with the compose stack's published default secret, else 1 h."),
     dsn: str | None = typer.Option(None, help="Only needed with --email."),
     secret: str | None = typer.Option(None, help="Signing secret. Default: P8_JWT_SECRET."),
 ) -> None:
@@ -237,8 +246,20 @@ def token(
             )
             raise typer.Exit(1)
 
+    # THE LIFETIME FOLLOWS THE ISSUER. A local stack's token lasted the same hour as a deployment's, and a reader
+    # working through a tutorial met a 401 halfway (REM-1326). The published default secret says the issuer is a
+    # local stack; any other secret may be a real deployment, which keeps the hour.
+    if ttl is None:
+        ttl = LOCAL_TTL if signing == DEV_JWT_SECRET else ISSUER_TTL
+        why = "the stack's published default secret, so a local issuer" if ttl == LOCAL_TTL else "the default"
+    else:
+        why = "--ttl"
     extra = {"orgs": [o.strip() for o in orgs.split(",") if o.strip()]} if orgs else None
     typer.echo(mint_jwt(resolved, signing, role=role, ttl_seconds=ttl, extra=extra))
+    # To stderr, so `TOKEN=$(percolate auth token ...)` captures the token alone.
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=ttl)
+    hours = f"{ttl / 3600:g} h" if ttl % 360 == 0 else f"{ttl} s"
+    typer.echo(f"expires {expires:%Y-%m-%dT%H:%MZ} ({hours}: {why}; --ttl changes it)", err=True)
 
 
 # ---------------------------------------------------------------------------

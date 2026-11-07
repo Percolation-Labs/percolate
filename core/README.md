@@ -173,7 +173,7 @@ Most steps need no worker from you:
 
 | kind | who runs it |
 |---|---|
-| `sql` / `p8ql` | **nobody** — executes inside Postgres |
+| `sql` / `p8ql` | Postgres. In `mode: worker`, the YAML default since percolate 0.2.39, the built-in worker claims the step and runs it under its own `statement_timeout`; in `mode: inline` nobody claims it |
 | `http_call` | the built-in handler |
 | `timer` / `signal` / `decision` / `sub_workflow` | the engine |
 | `work` | **you** |
@@ -326,10 +326,10 @@ images would be separate builds of the same base and separate tags to keep in
 step. `ENTRYPOINT ["percolate"]`, and the command selects the service:
 
 ```yaml
-content: { image: percolationlabs/percolate-core:0.2.18, command: ["content","serve"] }
-agent:   { image: percolationlabs/percolate-core:0.2.18, command: ["agent","serve"] }
-gateway: { image: percolationlabs/percolate-core:0.2.18, command: ["agent","gateway"] }
-worker:  { image: percolationlabs/percolate-core:0.2.18, command: ["worker","--queue","http"] }
+content: { image: percolationlabs/percolate-core:0.2.19, command: ["content","serve"] }
+agent:   { image: percolationlabs/percolate-core:0.2.19, command: ["agent","serve"] }
+gateway: { image: percolationlabs/percolate-core:0.2.19, command: ["agent","gateway"] }
+worker:  { image: percolationlabs/percolate-core:0.2.19, command: ["worker","--queue","http"] }
 ```
 
 Neither delegation nor scheduled runs need the gateway. `agent serve` answers

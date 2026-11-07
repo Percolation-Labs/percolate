@@ -102,6 +102,10 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_reads.py
 
+      - name: A local stack's token lasts eight hours and says when it expires (REM-1326)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_token_lifetime.py
+
       - name: Recorded evidence files are opt-in and loopback-only
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_ui_evidence.py
@@ -226,6 +230,17 @@ jobs:
       - name: A long task is heartbeated, so it finishes once
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_worker_heartbeat.py
+      # The worker LISTENs on task_ready and claims on a notify, re-listens and sweeps after losing its connection,
+      # and reads a task's context in the claim's transaction (REM-1319).
+      - name: A notify wakes the worker, and the poll is only the fallback
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_notify_wakes_the_worker.py
+      # A sql step in `mode: worker` is a task this worker runs as a top-level statement under its own
+      # statement_timeout, and completes in the same transaction (REM-1316). The live half needs a percolate
+      # database and is skipped here; percolate's dev/tests/workflow/39 drives the database half.
+      - name: A worker-mode sql step runs under its own limit
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m unittest discover -s tests -p test_a_worker_sql_step_has_its_own_limit.py
 
       # A token's claims reach the database whole and before the role switch
       # (REM-44, REM-48), and a credential reaches only the origin it is bound
@@ -522,6 +537,13 @@ jobs:
       - name: percolate query mcp keeps its three properties, and sample load syncs it
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m unittest discover -s tests -p test_query_mcp.py
+
+      - name: Canvas views preserve caller permissions and validate renderer mappings
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          for t in test_canvas_app.py test_canvas_renderers.py test_canvas_sql.py test_connector_auth.py; do
+            python -m unittest discover -s tests -p "$t" || exit 1
+          done
 
       # The person's own agent reads a conversation and lands what it learned,
       # and claims and decides queued judgements, through the same server as

@@ -31,7 +31,11 @@ Three properties the port keeps, and ``tests/test_query_mcp.py`` checks each:
     different sources advertises different ones and nothing here restates the
     grammar.
 
-3.  **Identity is the caller's.** The ``Authorization`` header on the MCP
+3.  **Identity is the caller's.** In optional connector-key mode, a verified
+    per-user key is exchanged for a short-lived JWT carrying its key id; every
+    request checks revocation and scopes. Otherwise headers pass through.
+
+    **Pass-through mode:** The ``Authorization`` header on the MCP
     request goes to PostgREST verbatim. This process holds no credential and
     reads nothing on its own behalf, so row-level security applies to the tool
     call exactly as it would to the person asking. It only receives that header
@@ -67,13 +71,15 @@ import asyncio
 import json
 import os
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from . import memory_tools
+from . import memory_tools, canvas_tool, canvas_app
+from .connector_auth import ConnectorAuth, ConnectorAuthError
 
 # The protocol revision this speaks. A client asking for a different one is
 # answered with this one rather than an error, which is what the spec asks for.
@@ -336,11 +342,21 @@ def count_matches(up: "Upstream", doc: dict, authorization: str | None) -> int |
     A ranked result shows its top k and says nothing of the rest, so "these
     are all of them" and "these are ten of four hundred" look the same to the
     caller. When a TEXT or SEARCH result fills its LIMIT, the store counts the
-    rows its lexical predicate matches -- the same plainto_tsquery TEXT ranks
-    by, from the registry's table and text-search config -- through the
-    read-only passthrough as the caller. It reads no content and returns one
-    number. None when the result did not fill its limit, the mode has no
-    lexical half, or anything about the registry is unexpected."""
+    rows the mode's own lexical match takes, through the read-only passthrough
+    as the caller, and returns one number. None when the result did not fill
+    its limit, the mode has no lexical half, or anything about the registry is
+    unexpected.
+
+    TEXT is counted with aiq.lexical_match, the tsquery aiq.lexical matches
+    through, so the count and the rows come from one matching rule
+    (REM-1315). This counted with plainto_tsquery, every word, and TEXT has
+    matched ANY word since REM-1145: "Lucy's garlic" counted the rows holding
+    both words while TEXT returned the rows holding either. A copy of the rule
+    here is what went stale, so there is no copy. A database older than
+    aiq.lexical_match is counted over aiq.lexical itself: the same rule, but
+    it ranks every match first (4.6x the count on 300,000 chunks).
+    SEARCH's words half matches every word (percolate REM-1312), which is
+    what plainto_tsquery over the table says."""
     plan = doc.get("plan") or {}
     rows, limit = doc.get("rows") or [], plan.get("limit")
     if (plan.get("mode") not in ("TEXT", "SEARCH") or not plan.get("source")
@@ -356,9 +372,18 @@ def count_matches(up: "Upstream", doc: dict, authorization: str | None) -> int |
     if not all(_IDENT.match(x) for x in (schema, table, cfg)):
         return None
     arg = plan["arg"].replace("'", "''")
-    found, err = up.rpc("sql_passthrough", {"p_statement":
-        f'select count(*) as n from "{schema}"."{table}" '
-        f"where search_tsv @@ plainto_tsquery('{cfg}', '{arg}')"}, authorization)
+    if plan["mode"] == "TEXT":
+        found, err = up.rpc("sql_passthrough", {"p_statement":
+            f'select count(*) as n from "{schema}"."{table}" '
+            f"where search_tsv @@ aiq.lexical_match('{cfg}', '{arg}')"}, authorization)
+        if err:  # a database from before aiq.lexical_match
+            source = plan["source"].replace("'", "''")
+            found, err = up.rpc("sql_passthrough", {"p_statement":
+                f"select count(*) as n from aiq.lexical('{source}', '{arg}', 2147483647)"}, authorization)
+    else:
+        found, err = up.rpc("sql_passthrough", {"p_statement":
+            f'select count(*) as n from "{schema}"."{table}" '
+            f"where search_tsv @@ plainto_tsquery('{cfg}', '{arg}')"}, authorization)
     if err or not isinstance(found, list) or not found:
         return None
     n = found[0].get("n") if isinstance(found[0], dict) else None
@@ -626,11 +651,18 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if code == 401:
+            self.send_header('WWW-Authenticate', 'Bearer realm="percolate"')
         self.end_headers()
         if body:
             self.wfile.write(body)
 
     def _result(self, rid: Any, result: dict[str, Any]) -> None:
+        if getattr(self, '_canvas_touches', False) and not result.get('isError'):
+            canvas, error = self.upstream.rpc('canvas', {'p_action':'consume','p_body':{}}, self.headers.get('Authorization'), 'workflow')
+            if not error and isinstance(canvas, dict) and canvas.get('session'):
+                result = {**result, 'content': [*result.get('content', []), {'type':'text','text':json.dumps({'canvas':canvas.get('since_last_call',[])})}],
+                          'structuredContent': {**(result['structuredContent'] if isinstance(result.get('structuredContent'), dict) else {'result':result.get('structuredContent')}), 'canvas':{'session':canvas['session'], 'since_last_call':canvas.get('since_last_call',[])}}}
         self._send(200, {"jsonrpc": "2.0", "id": rid, "result": result})
 
     def _error(self, rid: Any, code: int, message: str) -> None:
@@ -641,15 +673,40 @@ class Handler(BaseHTTPRequestHandler):
         # stream. Nothing here ever pushes.
         self._send(405, {"error": "this server does not initiate messages"})
 
+    connector_auth = None
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(35)
+
     def do_POST(self) -> None:
+        self.connection.settimeout(35)
+        if self.connector_auth and self.path != '/mcp':
+            return self._send(404, {'error': 'not found'})
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if self.connector_auth and (self.headers.get('Transfer-Encoding') or not 0 < n <= 131072):
+                return self._send(413, {'error': 'MCP request must be at most 128KB.'})
             msg = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return self._error(None, -32700, "parse error")
 
+        if not isinstance(msg, dict) or not isinstance(msg.get('method'), str) or not isinstance(msg.get('params', {}), dict):
+            return self._error(None, -32600, 'Invalid request')
         rid, method = msg.get("id"), msg.get("method")
         auth = self.headers.get("Authorization")
+        principal = None
+        if self.connector_auth:
+            try:
+                principal = self.connector_auth.authenticate(auth)
+            except ConnectorAuthError as exc:
+                return self._send(exc.status, {'error': exc.message})
+            if not principal.allows(method, msg.get('params') or {}):
+                return self._send(403, {'error': 'Connector key does not grant this operation.'})
+            auth = principal.authorization
+            self.headers.replace_header('Authorization', auth)
+        canvas_enabled = os.environ.get('P8_CANVAS_ENABLED') == '1'
+        self._canvas_touches = canvas_enabled and method == 'tools/call' and (msg.get('params') or {}).get('name') not in ('canvas', 'canvas_ui')
         up = self.upstream
         assert up is not None, "Handler.upstream is set by serve()"
 
@@ -660,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "initialize":
             return self._result(rid, {
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {"tools": {"listChanged": False}, **({"resources": {"listChanged": False}, "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": [canvas_app.MIME]}}} if canvas_enabled else {})},
                 "serverInfo": {"name": "p8-query", "version": "0.1.0"},
                 "instructions": "Ask the knowledge base with query, in p8ql, and read the returned "
                                 "plan to confirm the query was understood. To build memory from a "
@@ -674,11 +731,30 @@ class Handler(BaseHTTPRequestHandler):
         if method == "tools/list":
             # The person's own agent reads conversations and judges with these
             # (REM-1056); each is a pass-through to its SQL, as the caller.
-            return self._result(rid, {"tools": [describe_query_tool(up, auth, self.exceptions),
-                                                *memory_tools.describe()]})
+            catalogue = []
+            if principal is None or 'mcp:query' in principal.scopes:
+                catalogue.append(describe_query_tool(up, auth, self.exceptions))
+            if principal is None:
+                catalogue.extend(memory_tools.describe())
+            if canvas_enabled and (principal is None or 'canvas:read' in principal.scopes):
+                catalogue.extend([canvas_tool.TOOL, canvas_app.TOOL])
+            return self._result(rid, {'tools': catalogue})
+
+        if canvas_enabled and method == "resources/list":
+            return self._result(rid, {"resources": [canvas_app.RESOURCE]})
+        if canvas_enabled and method == "resources/templates/list":
+            return self._result(rid, {"resourceTemplates": []})
+        if canvas_enabled and method == "resources/read":
+            if (msg.get("params") or {}).get("uri") != canvas_app.URI:
+                return self._error(rid, -32602, "Unknown canvas resource")
+            return self._result(rid, canvas_app.resource())
 
         if method == "tools/call":
             params = msg.get("params") or {}
+            if canvas_enabled and params.get('name') == 'canvas_ui':
+                return self._result(rid, canvas_app.call(up, params.get('arguments') or {}, auth))
+            if canvas_enabled and params.get('name') == 'canvas':
+                return self._result(rid, canvas_tool.call(up, params.get('arguments') or {}, auth))
             if params.get("name") in memory_tools.TOOLS:
                 args = params.get("arguments") or {}
                 return self._result(rid, memory_tools.call(
@@ -798,13 +874,45 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(rid, -32601, f"unknown method: {method!r}")
 
 
+class ConnectorHTTPServer(ThreadingHTTPServer):
+    """Bound concurrent public requests, including clients stalled in headers."""
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(32)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 def build_server(host: str, port: int, postgrest: str,
                  exceptions: Exceptions | None = None,
-                 embedder: QueryEmbedder | None = None) -> ThreadingHTTPServer:
+                 embedder: QueryEmbedder | None = None,
+                 signing_key_file: str | None = None,
+                 access_ttl: int = 300) -> ThreadingHTTPServer:
     """A server bound and ready to ``serve_forever``; ``port=0`` picks a free one."""
     up, sx = Upstream(postgrest), exceptions or Exceptions()
     if isinstance(sx.log, PercolateLog) and sx.log.upstream is None:
         sx.log.upstream = up
     handler = type("QueryHandler", (Handler,), {"upstream": up, "exceptions": sx,
-                                                "embedder": embedder or QueryEmbedder()})
-    return ThreadingHTTPServer((host, port), handler)
+                                                "embedder": embedder or QueryEmbedder(),
+                                                "connector_auth": ConnectorAuth(up, signing_key_file, access_ttl) if signing_key_file else None})
+    server_type = ConnectorHTTPServer if signing_key_file else ThreadingHTTPServer
+    return server_type((host, port), handler)

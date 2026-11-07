@@ -228,7 +228,9 @@ class TheDocumentedStepIsSent(unittest.IsolatedAsyncioTestCase):
              patch.dict("percolate_core.worker.loop.HANDLERS",
                         {"http_call": AsyncMock(return_value=returned)}):
             await run_once("http", "w1")
-        return [c.args[0] for c in conn.execute.await_args_list]
+        # Less the savepoint the claim takes around get_task_context (REM-1319): these tests are about the
+        # terminal statements.
+        return [c.args[0] for c in conn.execute.await_args_list if "savepoint" not in c.args[0]]
 
     async def hold(self, beats, wait_seconds=5.0):
         conn, service = self.database(beats)

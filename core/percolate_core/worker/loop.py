@@ -9,11 +9,13 @@
     run(queue="media")
 
 WHAT NEEDS A PROCESS AT ALL
-Only two step kinds. `http_call` performs network I/O; `work` runs code we do
+Two step kinds. `http_call` performs network I/O; `work` runs code we do
 not have. Everything else -- indexing, projection, a query, a rollup -- is
-`kind = 'sql'` and executes inside Postgres with nothing running anywhere
-(workflow-engine/schema.sql §17). Reaching for a worker is usually a sign the
-step should have been `sql`.
+`kind = 'sql'` and executes inside Postgres (workflow-engine/schema.sql §17).
+A `sql` step in `mode: worker` (REM-1316) is still executed by Postgres; the
+worker claims it only so the statement is a top-level one, under its own
+statement_timeout -- see worker/sql.py. Reaching for a `work` step is usually
+a sign the step should have been `sql`.
 
 The worker holds NO table grants. Every interaction is a SECURITY DEFINER
 function call -- claim_task, get_task_context, complete_task, fail_task --
@@ -32,9 +34,10 @@ from typing import Any
 
 import asyncpg
 
-from ..core import as_service
+from ..core import as_service, pool
 from .artifacts import offload
 from .http import Dispatched, http_call
+from .sql import Completed, sql_step
 from .agent_auth import uses_run_identity
 from .templates import TerminalError, resolve_task
 
@@ -60,7 +63,9 @@ was busy", which is the case the retry budget was bought for.
 """
 
 Handler = Callable[[dict, dict], Awaitable[Any]]
-HANDLERS: dict[str, Handler] = {"http_call": http_call}
+HANDLERS: dict[str, Handler] = {"http_call": http_call, "sql": sql_step}
+"""Kind -> handler. `sql` is here for a step in `mode: worker` (REM-1316): the engine leaves only those on a queue,
+and runs an inline one inside the statement that made it ready, so a worker never sees it."""
 
 HEARTBEAT_FRACTION = 3
 """Heartbeat this many times per stale timeout (REM-109).
@@ -72,6 +77,37 @@ leave the workers pacing to the old one. Three rather than two so a single
 dropped beat -- one slow round trip, one restarted connection -- does not cost
 the lease.
 """
+
+
+STALE_CACHE_SECONDS = 60.0
+"""How long a queue's stale timeout is reused before it is asked again (REM-1319).
+
+It was asked for every task: a pooled transaction of its own, 2-3 ms of a step
+that does 2 ms of work in the database. Asked once a minute instead, so a
+raised `stale_timeout` still reaches the workers within a minute -- the property
+HEARTBEAT_FRACTION is written for -- without a round trip per task.
+"""
+
+_STALE_PERIODS: dict[str, tuple[float, float]] = {}
+"""queue -> (heartbeat period, when it was read), on the event loop's clock."""
+
+
+async def _heartbeat_period(queue: str) -> float:
+    """The heartbeat period for `queue`, from the cache or the database.
+
+    A failure is not cached: it raises, the caller falls back for this task,
+    and the next task asks again.
+    """
+    now = asyncio.get_running_loop().time()
+    hit = _STALE_PERIODS.get(queue)
+    if hit is not None and now - hit[1] < STALE_CACHE_SECONDS:
+        return hit[0]
+    async with as_service() as conn:
+        stale = await conn.fetchval(
+            "select extract(epoch from workflow.queue_stale_timeout($1))", queue)
+    period = max(float(stale) / HEARTBEAT_FRACTION, 1.0)
+    _STALE_PERIODS[queue] = (period, now)
+    return period
 
 
 async def _heartbeat_until_done(task_id: str, worker_id: str, period: float) -> None:
@@ -237,13 +273,31 @@ async def run_once(queue: str, worker_id: str) -> bool:
         else:
             row = await conn.fetchval(
                 "select (workflow.claim_task($1, $2)).id", queue, worker_id)
+        # THE CONTEXT IN THE CLAIM'S TRANSACTION (REM-1319). It was a pooled
+        # transaction of its own -- BEGIN, set role, the call, COMMIT, the
+        # reset -- and each of those is a round trip; four per step came to
+        # 7-9 ms of an 18 ms chained step on 0.2.38, against about 2 ms of work
+        # in the database. Behind a SAVEPOINT, because before this a context
+        # that failed left the claim committed, and that is kept: rolled back
+        # with the claim, the task would be ready again at once and this loop
+        # would claim and fail it as fast as it could go.
+        ctx_text: str | None = None
+        ctx_error: BaseException | None = None
+        if row:
+            await conn.execute("savepoint task_context")
+            try:
+                ctx_text = await conn.fetchval(
+                    "select workflow.get_task_context($1, $2)::text", str(row), worker_id)
+                await conn.execute("release savepoint task_context")
+            except Exception as e:  # noqa: BLE001 -- raised again below, once the claim commits
+                await conn.execute("rollback to savepoint task_context")
+                ctx_error = e
     if not row:
         return False
     task_id = str(row)
-
-    async with as_service() as conn:
-        ctx = json.loads(await conn.fetchval(
-            "select workflow.get_task_context($1, $2)::text", task_id, worker_id))
+    if ctx_error is not None:
+        raise ctx_error
+    ctx = json.loads(ctx_text)
 
     kind = ctx["kind"]
     fn = HANDLERS.get(kind)
@@ -313,10 +367,7 @@ async def run_once(queue: str, worker_id: str) -> bool:
         # period comes from the database rather than from a constant here --
         # see HEARTBEAT_FRACTION.
         try:
-            async with as_service() as conn:
-                stale = await conn.fetchval(
-                    "select extract(epoch from workflow.queue_stale_timeout($1))", queue)
-            period = max(float(stale) / HEARTBEAT_FRACTION, 1.0)
+            period = await _heartbeat_period(queue)
         except Exception as e:  # noqa: BLE001
             # An older database with no queue_stale_timeout, or a blip. Fall
             # back to the default the schema ships (2 minutes) rather than
@@ -347,6 +398,13 @@ async def run_once(queue: str, worker_id: str) -> bool:
             print(f"[{worker_id}]   dispatched (HTTP {out['status']}) -- holding "
                   f"until the callee completes it, at most {out.wait_seconds:g}s", flush=True)
             await _hold_until_released(task_id, worker_id, period, out.wait_seconds)
+            return True
+        if isinstance(out, Completed):
+            # A worker-mode sql step completes in its own transaction, with the
+            # statement whose output it records (worker/sql.py), so its writes
+            # and its completion commit together. Completing it again here
+            # would be refused by the lease fence, as a finished task.
+            print(f"[{worker_id}]   ok", flush=True)
             return True
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step
@@ -419,23 +477,113 @@ async def run_once(queue: str, worker_id: str) -> bool:
     return True
 
 
+READY_CHANNEL = "task_ready"
+"""The channel the engine notifies when a task becomes ready, with its queue as
+the payload (workflow-engine `notify_new_ready` and the dependency cascade)."""
+
+RECONNECT_SECONDS = 1.0
+"""How long the listener waits before opening a new connection after losing one."""
+
+PROBE_SECONDS = 30.0
+"""How often an idle listening connection is asked `select 1`, so a connection
+that died without closing is found rather than listened on forever."""
+
+
+async def _listen(queue: str, worker_id: str, wake: asyncio.Event) -> None:
+    """Hold a LISTEN on `task_ready`, and wake the loop for this queue's tasks.
+
+    WHY (REM-1319). The engine has notified `task_ready` for as long as it has
+    had the channel, and the worker never listened: it learned of a ready task on
+    its next poll. Measured on 0.2.38 with the default 2 s poll, a step that
+    became ready while the worker was idle waited a median 1.18 s of its 1.20 s
+    for that poll. Woken by the notify, it waits a few ms.
+
+    The poll stays, at its interval, as the fallback. A notify can be missed:
+    one sent while this connection was down is gone. So every time the LISTEN
+    is (re)established the loop is woken once, which is a full claim sweep,
+    because the loop claims until the queue is empty. A notify is a hint to look
+    now, never the record of what is ready; claim_task is that.
+
+    Never raises (short of cancellation): if the database cannot be reached, it
+    says so and tries again, and the poll carries the worker meanwhile.
+    """
+    def on_notify(_conn: Any, _pid: int, _channel: str, payload: str) -> None:
+        if payload == queue:
+            wake.set()
+
+    first = True
+    while True:
+        conn = None
+        lost = asyncio.Event()
+        p = None
+        try:
+            p = await pool()
+            conn = await p.acquire()
+            conn.add_termination_listener(lambda _c: lost.set())
+            await conn.add_listener(READY_CHANNEL, on_notify)
+            if not first:
+                print(f"[{worker_id}] listening on {READY_CHANNEL} again -- sweeping '{queue}'", flush=True)
+            first = False
+            wake.set()
+            while not lost.is_set():
+                try:
+                    await asyncio.wait_for(lost.wait(), PROBE_SECONDS)
+                except asyncio.TimeoutError:
+                    await conn.execute("select 1")
+            print(f"[{worker_id}] lost the {READY_CHANNEL} connection; polling until it is back", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 -- see the docstring
+            print(f"[{worker_id}] cannot listen on {READY_CHANNEL} ({type(e).__name__}: {e}); "
+                  f"polling until it can", flush=True)
+        finally:
+            if conn is not None and p is not None:
+                try:
+                    await p.release(conn)
+                except Exception:  # noqa: BLE001 -- a dead connection; the pool replaces it
+                    pass
+        await asyncio.sleep(RECONNECT_SECONDS)
+
+
+async def _wait(wake: asyncio.Event, seconds: float) -> None:
+    """Until a notify for this queue, or `seconds`, whichever comes first."""
+    try:
+        await asyncio.wait_for(wake.wait(), seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def serve(queue: str | None = None, worker_id: str | None = None,
                 poll_seconds: float | None = None) -> None:
     queue = queue or os.environ.get("P8_QUEUE", "default")
     worker_id = worker_id or os.environ.get("P8_WORKER_ID", f"worker-{os.getpid()}")
     poll = poll_seconds or float(os.environ.get("P8_POLL_SECONDS", "2"))
     print(f"[{worker_id}] queue '{queue}', handlers: {sorted(HANDLERS)}", flush=True)
-    while True:
-        try:
-            if not await run_once(queue, worker_id):
+    wake = asyncio.Event()
+    listener = asyncio.create_task(_listen(queue, worker_id, wake))
+    try:
+        while True:
+            try:
+                # Cleared BEFORE the claim, so a notify that lands while
+                # run_once is looking is not lost: it leaves the event set,
+                # and the wait below returns at once.
+                wake.clear()
+                if not await run_once(queue, worker_id):
+                    await _wait(wake, poll)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                # One bad task must never kill the loop -- a crashlooping worker
+                # stops draining the whole queue. A plain sleep, not _wait: a
+                # notify must not turn a failing database into a hot loop.
+                print(f"[{worker_id}] loop error: {e}", file=sys.stderr, flush=True)
                 await asyncio.sleep(poll)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            # One bad task must never kill the loop -- a crashlooping worker
-            # stops draining the whole queue.
-            print(f"[{worker_id}] loop error: {e}", file=sys.stderr, flush=True)
-            await asyncio.sleep(poll)
+    finally:
+        listener.cancel()
+        try:
+            await listener
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
 
 def run(queue: str | None = None, **kw: Any) -> None:

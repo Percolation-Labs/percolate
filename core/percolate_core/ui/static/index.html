@@ -10,6 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="evidence.css">
+<link rel="stylesheet" href="result-canvas.css">
 <style>
   /* theme.css is shared verbatim with the mockups, which have no router. The
      outlet is this app's own object: it has to stretch, or `.page.flush` --
@@ -20,10 +21,21 @@
 </style>
 <script>
   try { if (localStorage.getItem("p8-rail") === "shut") document.documentElement.dataset.rail = "shut"; } catch (e) {}
+  function railIsCollapsed() {
+    return document.documentElement.dataset.rail === "shut" ||
+      (matchMedia('(max-width: 760px)').matches && document.documentElement.dataset.rail !== "open");
+  }
+  function setRail(open) {
+    document.documentElement.dataset.rail = open ? "open" : "shut";
+    var button = document.querySelector('.rail-toggle');
+    if (button) {
+      button.setAttribute('aria-label', open ? 'Collapse the sidebar' : 'Expand the sidebar');
+      button.title = button.getAttribute('aria-label') + '  [';
+    }
+    try { localStorage.setItem("p8-rail", open ? "open" : "shut"); } catch (e) {}
+  }
   function toggleRail() {
-    var d = document.documentElement, shut = d.dataset.rail === "shut";
-    if (shut) delete d.dataset.rail; else d.dataset.rail = "shut";
-    try { localStorage.setItem("p8-rail", shut ? "open" : "shut"); } catch (e) {}
+    setRail(railIsCollapsed());
   }
   addEventListener("keydown", function (e) {
     if (e.key === "[" && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) toggleRail();
@@ -67,6 +79,7 @@
 import { h, ICONS, icon as iconEl } from "./ui.js";
 import * as W from "./views.js";
 import * as A from "./access.js";
+import { canvas } from "./canvas.js";
 import { query } from "./workbench.js";
 import { files } from "./files.js";
 import { sources } from "./sources.js";
@@ -77,21 +90,14 @@ import { token, setToken, claims, config, setEndpoint, loadConfig, sessionState,
 /* Top-level navigation also registers its screens. Child screens are added
    to ROUTES below without creating another sidebar entry. */
 const NAV = [
-  ["", [["", "Overview", "home", W.overview], ["chat", "Chat", "chat", A.chat], ["help", "Help", "book", A.help]]],
-  ["Work", [["workflows", "Workflows", "flow", W.workflows],
-            ["runs", "Runs", "runs", W.runs],
-            ["schedules", "Schedules", "clock", W.schedules],
-            ["query", "Query", "grid", query], ["sources", "Data Sources", "flow", sources], ["files", "Files", "book", files],
-            ["walks", "Walks", "flow", WK.walks], ["evidence", "Evidence", "grid", evidence]]],
-  ["Fleet", [["queues", "Queues & pools", "pools", W.queues],
-             ["scale", "Load & limits", "scale", W.scale],
-             ["events", "Events", "events", W.events]]],
-  ["Access", [["agents", "Agents & Plugins", "agents", A.agents],
-              ["users", "Users", "users", A.users],
-              ["roles", "Roles", "roles", A.roles],
-              ["keys", "Keys & sessions", "keys", A.keys],
-              ["settings", "Settings", "settings", A.settings],
-              ["surface", "Surface", "grid", A.surface]]],
+  ["", [["", "Overview", "home", W.overview], ["canvas", "Canvas", "grid", canvas],
+        ["chat", "Chat", "chat", A.chat], ["runs", "Runs", "runs", W.runs], ["workflows", "Workflows", "flow", W.workflows]]],
+  ["Data", [["query", "Query", "grid", query], ["sources", "Sources", "flow", sources], ["files", "Files", "book", files], ["evidence", "Evidence", "grid", evidence]]],
+  ["Operations", [["schedules", "Schedules", "clock", W.schedules], ["walks", "Investigations", "flow", WK.walks],
+    ["queues", "Queues & pools", "pools", W.queues], ["scale", "Load & limits", "scale", W.scale], ["events", "Events", "events", W.events]]],
+  ["Administration", [["agents", "Agents & plugins", "agents", A.agents], ["users", "Users", "users", A.users],
+    ["roles", "Roles", "roles", A.roles], ["keys", "Keys & sessions", "keys", A.keys], ["surface", "Capabilities", "grid", A.surface]]],
+  ["", [["help", "Help", "book", A.help], ["settings", "Settings", "settings", A.settings]]],
 ];
 const ROUTES = new Map(NAV.flatMap(([, items]) => items.map((i) => [i[0], i])));
 ROUTES.set("draft", ["draft", "Draft", "book", W.draft]);
@@ -99,23 +105,32 @@ ROUTES.set("walk", ["walk", "Investigation", "flow", WK.walk]);
 const ALIAS = { run: "runs", draft: "workflows", walk: "walks" };
 
 
+const openNavGroups=new Set();
+const GROUP_ICONS={Data:'database',Operations:'pools',Administration:'roles'};
+document.getElementById('nav').addEventListener('click',event=>{
+  if(event.target.closest('a')&&matchMedia('(max-width: 760px)').matches)setRail(false);
+});
 function drawNav(active) {
-  document.getElementById("nav").replaceChildren(...NAV.map(([group, items]) =>
-    h("div", { class: "nav-group" },
-      group ? h("h6", {}, group) : null,
-      items.filter(([slug]) => slug !== "evidence" || config().evidenceExample).flatMap(([slug, label, ic]) => {
-        const item = h("a", { class: "nav-item", href: "#/" + slug, title: label,
-                              "aria-current": slug === active ? "page" : null },
-          iconEl(ic), h("span", { class: "lbl" }, label));
-        /* The chat sessions live HERE, under the Chat item, rather than in a
-           column of their own. A list of session titles is navigation, and
-           navigation already has a home -- giving it a second one cost the
-           conversation 244px of measure for something the rail was already
-           shaped to hold. The view fills it; the router empties it. */
-        return slug === "chat" && active === "chat"
-          ? [item, h("div", { class: "rail-sessions", id: "rail-sessions" })]
-          : [item];
-      }))));
+  document.getElementById('nav').replaceChildren(...NAV.map(([group,items])=>{
+    const links=items.filter(([slug])=>slug!=='evidence'||config().evidenceExample).flatMap(([slug,label,ic])=>{
+      const item=h('a',{class:'nav-item',href:'#/'+slug,title:label,'aria-current':slug===active?'page':null},iconEl(ic),h('span',{class:'lbl'},label));
+      return slug==='chat'&&active==='chat'?[item,h('div',{class:'rail-sessions',id:'rail-sessions'})]:[item];
+    });
+    const content=h('div',{class:'nav-group'},links);
+    if(!group)return content;
+    const expanded=openNavGroups.has(group)||items.some(([slug])=>slug===active);
+    const summary=h('summary',{title:group,'aria-label':group},iconEl(GROUP_ICONS[group]),h('span',{class:'lbl'},group));
+    const section=h('details',{class:'nav-section',open:expanded},summary,content);
+    summary.addEventListener('click',event=>{
+      if(!railIsCollapsed())return;
+      event.preventDefault();
+      setRail(true);
+      section.open=true;
+      openNavGroups.add(group);
+    });
+    section.addEventListener('toggle',()=>{section.open?openNavGroups.add(group):openNavGroups.delete(group);});
+    return section;
+  }));
 }
 
 let authRequired = false;

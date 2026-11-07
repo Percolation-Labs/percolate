@@ -436,11 +436,47 @@ class CountProbe(unittest.TestCase):
         return {"plan": {"mode": mode, "source": "dracula", "arg": "Lucy's garlic", "limit": limit},
                 "rows": [{"chunk_id": str(i)} for i in range(rows)]}
 
-    def test_a_full_result_is_counted_with_the_same_predicate_text_ranks_by(self):
+    def test_a_full_text_result_is_counted_with_what_text_matches(self):
+        """REM-1315: TEXT reads aiq.lexical, which matches any of the query's
+        words. The count used to restate the match as plainto_tsquery, every
+        word, so "Lucy's garlic" counted the rows holding both while TEXT
+        returned the rows holding either. aiq.lexical_match is the tsquery
+        aiq.lexical matches through, so no second copy of the rule is kept."""
         up = self.Up()
         self.assertEqual(count_matches(up, self.doc(), "Bearer t"), 412)
+        self.assertEqual(up.sql, ['select count(*) as n from "sx"."passages" '
+                                  "where search_tsv @@ aiq.lexical_match('english', 'Lucy''s garlic')"])
+        self.assertNotIn("plainto_tsquery", up.sql[0])
+
+    def test_a_database_without_lexical_match_is_counted_over_aiq_lexical(self):
+        """Before the extension ships aiq.lexical_match, the same rule is read
+        from aiq.lexical itself: slower, since it ranks, but still TEXT's."""
+        class Old(self.Up):
+            def rpc(self, fn, payload, authorization=None, profile="aiq"):
+                self.sql.append(payload["p_statement"])
+                if "lexical_match" in payload["p_statement"]:
+                    return None, {"kind": "upstream", "status": 404}
+                return [{"n": 40}], None
+        up = Old()
+        self.assertEqual(count_matches(up, self.doc(), None), 40)
+        self.assertEqual(up.sql[1],
+                         "select count(*) as n from aiq.lexical('dracula', 'Lucy''s garlic', 2147483647)")
+
+    def test_a_full_search_result_is_counted_with_every_word(self):
+        """SEARCH's words half matches every word of the query (percolate
+        REM-1312), so its count is the table's plainto_tsquery match."""
+        up = self.Up()
+        self.assertEqual(count_matches(up, self.doc(mode="SEARCH"), "Bearer t"), 412)
         self.assertIn("""plainto_tsquery('english', 'Lucy''s garlic')""", up.sql[0])
         self.assertIn('from "sx"."passages"', up.sql[0])
+
+    def test_the_query_is_quoted_into_the_count(self):
+        up = self.Up()
+        doc = self.doc()
+        doc["plan"]["source"] = "o'brien"
+        doc["plan"]["arg"] = "o'clock"
+        count_matches(up, doc, None)
+        self.assertIn("aiq.lexical_match('english', 'o''clock')", up.sql[0])
 
     def test_a_result_short_of_its_limit_is_not_counted(self):
         up = self.Up()

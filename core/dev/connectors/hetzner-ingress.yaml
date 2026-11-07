@@ -1,0 +1,62 @@
+# Dedicated local-development relay; no application/database workloads here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: percolate-local-dev
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-mcp
+  namespace: percolate-local-dev
+spec:
+  ports:
+    - name: http
+      port: 8142
+      targetPort: 18142
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: local-mcp-relay
+  namespace: percolate-local-dev
+  labels:
+    kubernetes.io/service-name: local-mcp
+    endpointslice.kubernetes.io/managed-by: percolate-local-dev
+addressType: IPv4
+ports:
+  - name: http
+    protocol: TCP
+    port: 18142
+endpoints:
+  - addresses: ["10.42.0.1"]
+    conditions:
+      ready: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: local-mcp
+  namespace: percolate-local-dev
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "128k"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [mcp-dev.percolationlabs.ai]
+      secretName: local-mcp-tls
+  rules:
+    - host: mcp-dev.percolationlabs.ai
+      http:
+        paths:
+          - path: /mcp
+            pathType: Exact
+            backend:
+              service:
+                name: local-mcp
+                port:
+                  name: http

@@ -13,6 +13,7 @@ the rules live in the SQL the calls reach.
   land_message_facts  agentic.land_message_facts   one message's facts, landed as agent:<you>
   list_judgements     aiq.list_judgements           what waits for a judge
   claim_judgement     aiq.claim_judgement           one item, its evidence and how to decide it
+                                                    (a bind, merge, withdraw, challenge or link)
   decide_judgement    aiq.complete_judgement        a verdict with its reason, tier agent
   release_judgement   aiq.release_judgement         give a claimed item back undecided
 """
@@ -63,12 +64,13 @@ TOOLS: dict[str, _Spec] = {
         "Claim one judgement to decide: it is held for you for a while, and comes with its evidence (the name, "
         "what was said about it, the candidates it might be, with summaries) and how_to_decide, which names the "
         "verdicts you may give and the candidate ids a bind may name. A challenge is one of the person's own "
-        "claims, just saved, with the claims already in the graph nearest it that they may read. Give an id to "
-        "claim that one; otherwise the next open item. Answers {\"empty\": true} when nothing waits.",
+        "claims, just saved, with the claims already in the graph nearest it that they may read. A link is one of their remembered facts, "
+        "with what was said behind it and the questions nearest it. Give an id to claim that one; otherwise the next open item. Answers {\"empty\": true} when nothing waits.",
         {"type": "object",
          "properties": {"id": {"type": "string", "description": "a judgement id from list_judgements"},
                         "kinds": {"type": "array", "items": {"type": "string",
-                                                             "enum": ["bind", "merge", "withdraw", "challenge"]}}}},
+                                                             "enum": ["bind", "merge", "withdraw", "challenge",
+                                                                      "link"]}}}},
         "aiq", "claim_judgement",
         lambda a: {"p_id": a.get("id"), "p_kinds": a.get("kinds")},
     ),
@@ -80,14 +82,16 @@ TOOLS: dict[str, _Spec] = {
         "\"spans\":{...}}]} -- each relation asserted as you -- or none. Give a challenge a confidence, 0 to 1: "
         "where the deployment lets the writer's agent settle what it is sure of, an answer at or above its setting "
         "settles the challenge and the person is not asked, and one below it goes to the person with your answer "
-        "as the suggestion; otherwise a relation lands proposed until the person confirms it. Recorded as decided "
+        "as the suggestion; otherwise a relation lands proposed until the person confirms it. A link is decided "
+        "{\"decision\":\"link\",\"target\":\"<candidate question id>\",\"confidence\":<0 to 1>}, which proposes the "
+        "link as you for a person to confirm or dispute, or none. Recorded as decided "
         "by your agent, with the reason, and undoable. Refused once your hold has lapsed: claim it again.",
         {"type": "object", "required": ["id", "verdict", "reason"],
          "properties": {"id": {"type": "string"},
                         "verdict": {"type": "object", "required": ["decision"],
                                     "properties": {"decision": {"type": "string",
                                                                 "enum": ["bind", "distinct", "none", "human",
-                                                                         "relate"]},
+                                                                         "relate", "link"]},
                                                    "target": {"type": "string"},
                                                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                                                    "relations": {"type": "array", "items": {
