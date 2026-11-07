@@ -16169,7 +16169,7 @@ declare
     s workflow.runs%rowtype;
     v jsonb; result jsonb; rows jsonb; cols jsonb; event jsonb; selected jsonb; events jsonb;
     who uuid; turn uuid; def uuid; n bigint; ver bigint; t double precision := extract(epoch from clock_timestamp()) * 1000;
-    q text; x text; y text; form text; samples jsonb;
+    q text; x text; y text; form text; samples jsonb; created boolean := false;
 begin
     who := rbac.require('canvas', case when p_action='read' then 'read' else 'write' end);
     p_user := who::text;
@@ -16185,6 +16185,7 @@ begin
         and (case when p_body ? 'session' then r.id::text=p_body->>'session' else r.status='running' end)
       order by r.created_at desc limit 1;
     if p_action='open' and (s.id is null or s.status<>'running') then
+        created := true;
         select id into def from workflow.definitions where name='workspace-canvas-session' and version=1;
         insert into workflow.runs(workflow_def_id,owner_id,input,context)
           values(def,who,jsonb_build_object('user_id',p_user),'{"version":0,"touches":[],"cursor":0,"window_ms":15000,"lag_samples":[]}')
@@ -16202,6 +16203,7 @@ begin
         return jsonb_build_object('session',s.id,'version',ver,'unchanged',true,'status',s.status);
     end if;
     if p_action in ('query','present') then
+        s.context := s.context - 'selection';
         q := p_body->>'query';
         if p_action='present' then
             -- The caller submits a result read separately under its own role. Never
@@ -16324,6 +16326,7 @@ begin
     elsif p_action='consume' then
         select coalesce(jsonb_agg(e order by (e->>'seq')::bigint),'[]') into events from (
           select e from jsonb_array_elements(s.context->'touches') e where (e->>'seq')::bigint>coalesce((s.context->>'cursor')::bigint,0)
+            and (e->>'kind'<>'selection' or e->>'result_set'=v->'result'->>'id')
           order by (e->>'seq')::bigint desc limit 20) a;
         samples:=coalesce(s.context->'lag_samples','[]');
         select e into event from jsonb_array_elements(events) e where e->>'kind'='mark' order by (e->>'seq')::bigint desc limit 1;
@@ -16340,15 +16343,27 @@ begin
         update workflow.runs set status='succeeded',completed_at=now() where id=s.id;
         s.status:='succeeded';
     end if;
-    if p_action in ('query','present','view') then s.context:=jsonb_set(s.context,'{view}',v); end if;
+    if p_action in ('query','present','view') then
+        s.context:=jsonb_set(s.context,'{view}',v);
+        if s.context->'selection'->>'result_set' is distinct from v->'result'->>'id' then
+            s.context := s.context - 'selection';
+        end if;
+    end if;
     if p_action in ('query','present','view','touch','close') or (p_action='consume' and event is not null) then
         ver:=ver+1;
         s.context:=jsonb_set(s.context,'{version}',to_jsonb(ver));
     end if;
     if p_action not in ('read','open') then update workflow.runs set context=s.context where id=s.id; end if;
+    -- Apply an explicitly requested view within this RPC transaction. A rejected
+    -- axis/control rolls back the new result and preserves the previous canvas.
+    if p_action in ('query','present') and p_body ? 'control' then
+        return workflow.canvas('view',jsonb_build_object('session',s.id,'result_set',result->>'id',
+            'control',p_body->'control','options',coalesce(p_body->'options','{}'::jsonb)));
+    end if;
     return jsonb_build_object('session',s.id,'status',s.status,'version',ver,'view',v,
-      'selection',s.context->'selection','since_last_call',coalesce(events,'[]'::jsonb),
-      'window_ms',s.context->'window_ms','lag_samples',s.context->'lag_samples','server_at',t);
+      'selection',case when s.context->'selection'->>'result_set'=v->'result'->>'id' then s.context->'selection' else null end,'since_last_call',coalesce(events,'[]'::jsonb),
+      'window_ms',s.context->'window_ms','lag_samples',s.context->'lag_samples','server_at',t)
+      || case when p_action='open' then jsonb_build_object('session_action',case when created then 'created' else 'resumed' end) else '{}'::jsonb end;
 end;
 $$;
 revoke all on function workflow.canvas(text,jsonb) from public;
