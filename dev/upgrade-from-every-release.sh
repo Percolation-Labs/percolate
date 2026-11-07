@@ -78,13 +78,17 @@ for old in $TAGS; do
         echo "  $old: its own release no longer installs on the $PREV image:"
         echo "$out" | grep -m1 ERROR; failed=1; continue
     fi
-    # A FINISHED run, which is what the status rename has to carry across.
-    q "$db" -c "select workflow.define_yaml(\$y\$
-name: upg
+    # A FINISHED run, which is what the status rename has to carry across. From 0.2.39 a sql step runs on a worker
+    # unless its workflow says mode inline (REM-1316), and this container has no worker, so the run would wait
+    # forever and nothing finished would cross the upgrade: a release that has inline_mode_line says inline.
+    q "$db" -c "do \$d\$ declare m text := ''; begin
+  if to_regprocedure('workflow.inline_mode_line()') is not null then execute 'select workflow.inline_mode_line()' into m; end if;
+  perform workflow.define_yaml(m || E'\\n' || \$y\$name: upg
 steps:
   - id: now
     sql: {function: p8ql, args: ['SELECT now()']}
-\$y\$)" -c "select workflow.start_workflow('upg','{}'::jsonb)" >/dev/null
+\$y\$);
+end \$d\$" -c "select workflow.start_workflow('upg','{}'::jsonb)" >/dev/null
     if out=$(q "$db" -c "set client_min_messages = warning" -c "set role app_owner" \
                  -c "alter extension percolate update to '$V'" 2>&1); then
         got=$(q "$db" -tAc "select extversion from pg_extension where extname='percolate'")
