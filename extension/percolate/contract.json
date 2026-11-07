@@ -1504,7 +1504,7 @@
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.2.39",
+  "extension": "0.2.40",
   "types": [
     {
       "consumed_by": [
