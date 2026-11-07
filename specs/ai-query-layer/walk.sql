@@ -411,8 +411,8 @@ language sql immutable set search_path = pg_catalog, public as $$
     select coalesce(string_agg(t.sign, ' | ' order by t.h), '(none)')
       from (select md5(p_key || ':' || (d.value #>> '{}')) as h,
                    coalesce((select string_agg(x.term, ', ' order by x.n, x.term)
-                               from (select tm.value as term, jsonb_array_length(coalesce(p_graph->'post'->tm.value, '[]'::jsonb)) as n
-                                       from jsonb_array_elements_text(coalesce(p_graph->'terms'->(d.value #>> '{}'), '[]'::jsonb)) tm
+                               from (select tm.value as term, jsonb_array_length(coalesce(p_graph #> array['post', tm.value], '[]'::jsonb)) as n
+                                       from jsonb_array_elements_text(coalesce(p_graph #> array['terms', d.value #>> '{}'], '[]'::jsonb)) tm
                                       order by 2, 1 limit 8) x), '(none)') as sign
               from jsonb_array_elements(p_targets) d
              order by 1 limit 3) t
@@ -504,7 +504,7 @@ begin
     end if;
     if p_kind = 'term' then
         return format('the term ''%s'', held by %s message(s) in all, %s of them unread. What the user said in them: %s',
-                      p_x, jsonb_array_length(coalesce(p_graph->'post'->p_x, '[]'::jsonb)), n, coalesce(lines, '(none)'));
+                      p_x, jsonb_array_length(coalesce(p_graph #> array['post', p_x], '[]'::jsonb)), n, coalesce(lines, '(none)'));
     end if;
     return format('%s unread message(s) %s. What the user said in them: %s', n, side, coalesce(lines, '(none)'));
 end;
@@ -928,12 +928,16 @@ declare
     board    jsonb;
     lp       jsonb;
     serves   jsonb;
+    off      boolean;
 begin
     select * into r from aiq.walk_run(p_run);
     if not found then
         raise no_data_found using message = format('no run %s that you may read', p_run);
     end if;
     inp := r.input;
+    -- An offline walk asks nobody, and a lead already judged is not asked again, so neither needs its description.
+    -- Describing every lead the last wave raised was 4.2 s of a QASPER walk's 4.7 s state, on every step.
+    off := coalesce((inp->>'offline')::boolean, false);
     s := aiq.walk_run_settings(p_run);
     q := inp->'question';
     g := aiq.walk_run_graph(p_run);
@@ -997,7 +1001,7 @@ begin
         wn := (w->>'wave')::int;
         -- Only the last wave's clues are still to be judged, and a clue's text is only read by its judge.
         last := wn = (logs->-1->>'wave')::int;
-        txt := case when last then aiq.walk_texts(inp, array(select value->>'doc' from jsonb_array_elements(w->'reads')
+        txt := case when last and not off then aiq.walk_texts(inp, array(select value->>'doc' from jsonb_array_elements(w->'reads')
                                                               where (value->>'expanded')::boolean)) end;
         -- The clues this wave's round judged: raised by the previous wave's expanded reads.
         if wn > 0 then
@@ -1024,22 +1028,22 @@ begin
              where (value->>'expanded')::boolean
         ), term as (
             select t, min(o) as o, count(*) as n
-              from ex, jsonb_array_elements_text(coalesce(g->'terms'->src, '[]'::jsonb)) t
-             where jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) <= (s->>'cap')::int
+              from ex, jsonb_array_elements_text(coalesce(g #> array['terms', src], '[]'::jsonb)) t
+             where jsonb_array_length(coalesce(g #> array['post', t], '[]'::jsonb)) <= (s->>'cap')::int
                and not clues ? ('term:' || t)
              group by t
         ), term_clue as (
             select 'term:' || term.t as k, term.t, ex.src,
                    -- a term raised by two reads had its targets re-aggregated distinct; kept so the record is unchanged
-                   case when term.n > 1 then (select jsonb_agg(distinct value) from jsonb_array_elements(g->'post'->term.t)
+                   case when term.n > 1 then (select jsonb_agg(distinct value) from jsonb_array_elements(g #> array['post', term.t])
                                                where not reached ? (value #>> '{}'))
-                        else (select jsonb_agg(value order by value #>> '{}') from jsonb_array_elements(g->'post'->term.t)
+                        else (select jsonb_agg(value order by value #>> '{}') from jsonb_array_elements(g #> array['post', term.t])
                                where not reached ? (value #>> '{}')) end as tg
               from term join ex on ex.o = term.o
         ), side_clue as (
             select kind || ':' || ex.src as k, kind, ex.src,
                    (select jsonb_agg(distinct value)
-                      from jsonb_array_elements(coalesce(g->(case kind when 'next' then 'beside' else 'near' end)->ex.src,
+                      from jsonb_array_elements(coalesce(g #> array[case kind when 'next' then 'beside' else 'near' end, ex.src],
                                                          '[]'::jsonb))
                      where not reached ? (value #>> '{}') and value #>> '{}' <> ex.src) as tg
               from ex, unnest(array['next', 'near']) kind
@@ -1048,13 +1052,13 @@ begin
         select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) into nxt from (
             select k, jsonb_build_object(
                        'kind', 'term', 'x', t, 'source', src, 'targets', tg,
-                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, 'term', t, src, tg,
+                       'text', case when last and not off and not pmap ? k then aiq.walk_describe_clue(inp, g, s->>'describe', k, 'term', t, src, tg,
                                                                           txt->>src) end) as c
               from term_clue where tg is not null
             union all
             select distinct on (k) k, jsonb_build_object(
                        'kind', kind, 'x', src, 'source', src, 'targets', tg,
-                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, kind, src, src, tg,
+                       'text', case when last and not off and not pmap ? k then aiq.walk_describe_clue(inp, g, s->>'describe', k, kind, src, src, tg,
                                                                           txt->>src) end)
               from side_clue where tg is not null
         ) z;
@@ -1113,6 +1117,7 @@ declare
     -- 30 s statement_timeout (timmy, REM-1249)
     guri  text;
     rguri text;
+    v     jsonb;
 begin
     select * into r from aiq.walk_run(p_run);
     inp := r.input;
@@ -1124,8 +1129,13 @@ begin
             hint = 'start it with {"question": {"node_id": ..., "text": ...}}; pass any labels to the evaluation functions';
     end if;
     s := aiq.walk_settings(inp);
-    g := aiq.walk_graph(inp, r.created_at);
-    guri := aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)));
+    -- the version once: it reads every link in scope (6 to 8 s over QASPER's 7.3 million), and walk_graph read it again
+    v := aiq.walk_graph_version(aiq.walk_keys(inp));
+    guri := aiq.walk_graph_uri(inp, v);
+    select res.metadata->'walk_graph' into g from content.resources res where res.uri = guri order by res.updated_at desc limit 1;
+    if g is null or r.created_at < (v->>'as_of')::timestamptz then
+        g := aiq.walk_graph_build(inp, r.created_at);
+    end if;
     -- A replay walks the graph it was recorded on when this database holds it (REM-1246): a replay document names its
     -- kept graph, and the walk takes its graph from that document. Otherwise it rebuilds from today's links, which on
     -- another install are the same edges under another uri (the uri hashes install-local ids). walk_summary's decider
