@@ -67,12 +67,16 @@ select rbac.create_user_with_password('upgrade@ci','a long passphrase');
 -- marks a role `grants_all` and grants it every pair declared AT THAT MOMENT;
 -- everything the next release declares is what goes missing.
 select rbac.bootstrap_admin('upgrade@ci', 'ci_admin');
-select workflow.define_yaml($$
-name: ci_upgrade
+-- From 0.2.39 a sql step runs on a worker unless its workflow says mode inline (REM-1316), and this container has
+-- no worker: the run would wait forever and the finished-run assertion below would fail on the gate, not the upgrade.
+do $d$ declare m text := ''; begin
+  if to_regprocedure('workflow.inline_mode_line()') is not null then execute 'select workflow.inline_mode_line()' into m; end if;
+  perform workflow.define_yaml(m || E'\n' || $y$name: ci_upgrade
 steps:
   - id: now
     sql: {function: p8ql, args: ['SELECT now()']}
-$$);
+$y$);
+end $d$;
 select workflow.start_workflow('ci_upgrade','{}'::jsonb);
 
 -- AN APPLICATION'S ROLE AS EARLIER UPGRADES LEFT IT (REM-193). The 0.1.10
