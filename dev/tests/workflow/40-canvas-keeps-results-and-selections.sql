@@ -10,7 +10,11 @@ select set_config('request.jwt.claims','{"sub":"13290000-0000-0000-0000-00000000
 do $$
 declare s jsonb; q jsonb; v jsonb; c jsonb; n int; i int;
 begin
- s:=workflow.canvas('open');q:=workflow.canvas('query','{"query":"workflow_runs"}');
+ s:=workflow.canvas('open');
+ if s->>'session_action' is distinct from 'created' then raise exception 'New session not identified';end if;
+ c:=workflow.canvas('open');
+ if c->>'session_action' is distinct from 'resumed' or c->>'session' is distinct from s->>'session' then raise exception 'Resume not identified';end if;
+ q:=workflow.canvas('query','{"query":"workflow_runs"}');
  if q->'view'->'result'->'rows'  is distinct from  '[{"status":"succeeded","runs":1}]'::jsonb then raise exception 'Report escaped caller ownership';end if;
  perform workflow.canvas('touch',jsonb_build_object('kind','selection','result_set',q->'view'->'result'->>'id','columns',jsonb_build_array('status','runs'),'rows',jsonb_build_array(0)));
  select count(*) into n from workflow.tasks where step_key='query';
@@ -25,6 +29,32 @@ begin
  end loop;
  if jsonb_array_length(c->'lag_samples') is distinct from 10 or (c->>'window_ms')::int<1000 then raise exception 'Timing calibration missing';end if;
  if (select jsonb_array_length(context->'touches') from workflow.runs where id=(s->>'session')::uuid) is distinct from 11 then raise exception 'Consume removed audit';end if;
+ q:=workflow.canvas('present','{"statement":"select visible_edges","columns":["source","target"],"rows":[{"source":"a","target":"b"}]}');
+ v:=workflow.canvas('view','{"control":"graph","options":{"source":"source","target":"target"}}');
+ if v->'view'->'result' is distinct from q->'view'->'result' then raise exception 'Graph changed result';end if;
+ perform workflow.canvas('touch',jsonb_build_object('kind','selection','result_set',q->'view'->'result'->>'id','columns',jsonb_build_array('source','target'),'rows',jsonb_build_array(0),'nodes',jsonb_build_array('a')));
+ c:=workflow.canvas('consume');
+ if c->'since_last_call'->0->'nodes' is distinct from '["a"]'::jsonb then raise exception 'Node selection lost';end if;
+ begin
+  perform workflow.canvas('touch',jsonb_build_object('kind','selection','result_set',q->'view'->'result'->>'id','columns','[]'::jsonb,'rows','[]'::jsonb,'nodes',jsonb_build_array('missing')));
+  raise exception 'Unknown node admitted';
+ exception when raise_exception then if sqlerrm is distinct from 'Unknown selected node' then raise;end if;end;
+ -- A new query applies its view atomically and does not leak historical selection.
+ perform workflow.canvas('touch',jsonb_build_object('kind','selection','result_set',q->'view'->'result'->>'id','columns',jsonb_build_array('source','target'),'rows',jsonb_build_array(0),'nodes',jsonb_build_array('a')));
+ c:=workflow.canvas('read');
+ begin
+  perform workflow.canvas('query','{"query":"workflow_runs","control":"graph"}');
+  raise exception 'Invalid requested graph admitted';
+ exception when raise_exception then if sqlerrm is distinct from 'Graph needs source and target columns' then raise;end if;end;
+ v:=workflow.canvas('read');
+ if v->'view' is distinct from c->'view' or v->'selection' is distinct from c->'selection' or v->'version' is distinct from c->'version' then raise exception 'Failed query view changed canvas';end if;
+ v:=workflow.canvas('query','{"query":"workflow_runs","control":"cards"}');
+ if v->'view'->>'control' is distinct from 'cards' then raise exception 'Query ignored cards';end if;
+ if v->'selection' is distinct from 'null'::jsonb then raise exception 'Query retained stale selection';end if;
+ c:=workflow.canvas('consume');
+ if c->'since_last_call' is distinct from '[]'::jsonb then raise exception 'Consume returned stale selection';end if;
+ v:=workflow.canvas('present','{"columns":["name","amount"],"rows":[{"name":"a","amount":2}],"control":"plot","options":{"x":"name","y":"amount","form":"bar"}}');
+ if v->'view'->>'control' is distinct from 'plot' or v->'view'->'options'->>'y' is distinct from 'amount' then raise exception 'Presented result ignored requested plot';end if;
  perform set_config('request.jwt.claims','{"sub":"13290000-0000-0000-0000-000000000011","role":"authenticated","actor":"person"}',true);
  begin
   perform workflow.canvas('read',jsonb_build_object('session',s->>'session'));
