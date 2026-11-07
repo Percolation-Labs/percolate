@@ -33,6 +33,7 @@ from typing import Any
 import asyncpg
 
 from ..core import as_service
+from ..core.config import dsn as config_dsn
 from .artifacts import offload
 from .http import Dispatched, http_call
 from .agent_auth import uses_run_identity
@@ -419,23 +420,71 @@ async def run_once(queue: str, worker_id: str) -> bool:
     return True
 
 
+async def _listen(queue: str, worker_id: str, wake: asyncio.Event, poll: float) -> None:
+    """Wake the loop when a task on ``queue`` becomes ready, instead of at the next poll.
+
+    workflow.notify_new_ready (and every path that readies a task) sends
+    ``pg_notify('task_ready', <queue>)``, and nothing listened: an idle worker
+    found a new task only at its next poll, so a walk's question embedding waited
+    0.75 to 1.9 s to be claimed and ran in 25 to 50 ms (7 Nov 2026, Sirsh: a walk
+    stands in for an LLM iteration and has seconds). The poll stays as the floor,
+    for a notification lost while this connection is down: notifications are not
+    queued for a listener that is not there.
+
+    Its own connection, outside the pool: a listener holds its connection for the
+    life of the process, and the pool's are counted for turns (``acquired``).
+    """
+    while True:
+        conn = None
+        try:
+            conn = await asyncpg.connect(config_dsn())
+
+            def ready(_conn: Any, _pid: int, _channel: str, payload: str) -> None:
+                if payload == queue:
+                    wake.set()
+
+            await conn.add_listener("task_ready", ready)
+            wake.set()  # anything readied while we were not listening
+            while not conn.is_closed():
+                await asyncio.sleep(poll)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[{worker_id}] listen error, polling every {poll}s until it reconnects: {e}",
+                  file=sys.stderr, flush=True)
+        finally:
+            if conn is not None and not conn.is_closed():
+                await conn.close()
+        await asyncio.sleep(poll)
+
+
 async def serve(queue: str | None = None, worker_id: str | None = None,
                 poll_seconds: float | None = None) -> None:
     queue = queue or os.environ.get("P8_QUEUE", "default")
     worker_id = worker_id or os.environ.get("P8_WORKER_ID", f"worker-{os.getpid()}")
     poll = poll_seconds or float(os.environ.get("P8_POLL_SECONDS", "2"))
     print(f"[{worker_id}] queue '{queue}', handlers: {sorted(HANDLERS)}", flush=True)
-    while True:
-        try:
-            if not await run_once(queue, worker_id):
+    wake = asyncio.Event()
+    listener = asyncio.create_task(_listen(queue, worker_id, wake, poll))
+    try:
+        while True:
+            try:
+                wake.clear()
+                if not await run_once(queue, worker_id):
+                    # the next poll, or sooner when a task on this queue is readied
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=poll)
+                    except asyncio.TimeoutError:
+                        pass
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                # One bad task must never kill the loop -- a crashlooping worker
+                # stops draining the whole queue.
+                print(f"[{worker_id}] loop error: {e}", file=sys.stderr, flush=True)
                 await asyncio.sleep(poll)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            # One bad task must never kill the loop -- a crashlooping worker
-            # stops draining the whole queue.
-            print(f"[{worker_id}] loop error: {e}", file=sys.stderr, flush=True)
-            await asyncio.sleep(poll)
+    finally:
+        listener.cancel()
 
 
 def run(queue: str | None = None, **kw: Any) -> None:
