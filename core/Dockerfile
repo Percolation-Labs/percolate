@@ -31,7 +31,10 @@
 # image only copies that directory in. amd64 and arm64 wheels exist for
 # everything in [all], which is what `--only-binary=:all:` insists on.
 FROM --platform=$BUILDPLATFORM python:3.11-slim AS spec
-COPY --from=ghcr.io/astral-sh/uv:0.10.3 /uv /usr/local/bin/uv
+# uv from Docker Hub, the registry this build logs in to: the release runner's GHCR credential is stale and GHCR
+# refused the pull (7 Nov 2026, runs 42419498083 and 42419813505), though the image is public. The same image,
+# by the digest both registries serve.
+COPY --from=astral/uv:0.10.3@sha256:7a88d4c4e6f44200575000638453a5a381db0ae31ad5c3a51b14f8687c9d93a3 /uv /usr/local/bin/uv
 WORKDIR /spec
 COPY pyproject.toml uv.lock ./
 RUN uv export --locked --no-dev --no-emit-project --extra all -o requirements.txt && \

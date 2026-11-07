@@ -150,6 +150,24 @@ class ThePersonsAgentReadsAndJudges(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["body"], {"p_id": JUDGEMENT, "p_verdict": RELATE,
                                         "p_reason": "B1 says what A1 says.", "p_tier": "agent"})
 
+    async def test_a_link_is_claimed_and_decided_with_the_same_tools(self):
+        # REM-1324: a fact-to-question link is a judgement kind, so the agent proposes one with the tools it has --
+        # no new tool. The schemas must say so, or a client that follows them could never claim or send one.
+        tools = {t.name: t for t in await McpProvider().list_tools(self.start()[1])}
+        self.assertEqual(len(tools), 7, "a link adds no tool")
+        self.assertIn("link", tools["claim_judgement"].input_schema["properties"]["kinds"]["items"]["enum"])
+        self.assertIn("link", tools["decide_judgement"].input_schema["properties"]["verdict"]["properties"]
+                      ["decision"]["enum"])
+        self.assertIn("link", tools["decide_judgement"].description)
+        link = {"decision": "link", "target": NODE, "confidence": 0.8}
+        pg, server = self.start()
+        result = await self.call(server, "decide_judgement",
+                                 {"id": JUDGEMENT, "verdict": link, "reason": "Her notes say so."})
+        self.assertFalse(result.is_error, result)
+        (seen,) = pg.calls()
+        self.assertEqual(seen["body"], {"p_id": JUDGEMENT, "p_verdict": link,
+                                        "p_reason": "Her notes say so.", "p_tier": "agent"})
+
     async def test_each_tool_reaches_its_sql_as_the_caller(self):
         for name, args, profile, fn, body in CASES:
             with self.subTest(tool=name):

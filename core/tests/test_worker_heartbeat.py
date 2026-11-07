@@ -73,6 +73,9 @@ def _service(log, stale=STALE_SECONDS):
 class WorkerHeartbeatTests(unittest.TestCase):
     def _run(self, handler_seconds: float, stale=STALE_SECONDS) -> list:
         log: list = []
+        # Each run asks the queue afresh: the period is cached per queue for a minute (REM-1319), and these runs
+        # give one queue different timeouts.
+        loop_module._STALE_PERIODS.clear()
 
         async def slow(spec, ctx):
             await asyncio.sleep(handler_seconds)

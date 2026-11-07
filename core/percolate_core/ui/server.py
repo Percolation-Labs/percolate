@@ -39,7 +39,7 @@ from .. import __version__
 # A module missing from this tuple 404s and takes the whole page down with it,
 # so `tests/test_ui_reads.py` asserts that every module the UI imports is here
 # rather than leaving it to whoever adds the next one to remember.
-ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js", "evidence.js", "evidence.css",
+ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "canvas.js", "compact-menu.js", "network-view.js", "result-canvas.js", "renderers.js", "result-canvas.css", "md.js", "reads.js", "views.js", "evidence.js", "evidence.css",
           "access.js", "chat-stream.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
           "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "walks.js", "theme.css", "favicon.svg")
 

@@ -144,6 +144,7 @@ export const short = (id) => (id || "").slice(-12);
  * screen import the same map and a new icon is added once.
  */
 export const ICONS = {
+  database: '<ellipse cx="7.5" cy="3" rx="5" ry="1.8"/><path d="M2.5 3v9c0 1 2.2 1.8 5 1.8s5-.8 5-1.8V3M2.5 7.5c0 1 2.2 1.8 5 1.8s5-.8 5-1.8"/>',
   home: '<path d="M2 7l5.5-4.5L13 7v6H2z"/>',
   chat: '<path d="M2 3h11v8H7l-3 3v-3H2z"/>',
   flow: '<path d="M2 3h4v3H2zM9 3h4v3H9zM5.5 10h4v3h-4z"/><path d="M4 6v2h7V6M7.5 8v2"/>',

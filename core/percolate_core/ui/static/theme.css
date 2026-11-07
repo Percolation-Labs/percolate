@@ -194,6 +194,7 @@ body {
    what it is. */
 :root[data-rail="shut"] .wordmark,
 :root[data-rail="shut"] .nav-item .lbl,
+:root[data-rail="shut"] .nav-section summary .lbl,
 :root[data-rail="shut"] .nav-count,
 :root[data-rail="shut"] .nav-group h6,
 :root[data-rail="shut"] .org-switch .two-line { display: none; }
@@ -1338,3 +1339,26 @@ table.data tr.walk-future td { color: var(--faint); }
 .walk-graph polyline.walk-curve-oracle { fill: none; stroke: var(--green); stroke-width: 2; stroke-dasharray: 4 3; }
 .walk-graph circle.walk-curve-oracle { fill: var(--green); }
 .legend i.walk-curve-bear { background: var(--accent); } .legend i.walk-curve-oracle { background: var(--green); }
+
+/* Workspace navigation keeps occasional tools behind named groups. */
+.nav-section summary{display:flex;align-items:center;gap:.7rem;padding:.65rem .8rem;cursor:pointer;color:var(--muted);font-size:.8rem;list-style:none;border-radius:5px}
+.nav-section summary::-webkit-details-marker{display:none}
+.nav-section summary:hover,.nav-section summary:focus-visible{background:var(--sunk);color:var(--ink)}
+.nav-section summary::after{content:'›';margin-left:auto;transition:transform .15s}
+.nav-section[open]>summary::after{transform:rotate(90deg)}
+.nav-section summary svg{width:17px;height:17px;flex:0 0 17px}
+.nav-section>.nav-group{margin-left:.6rem;border-left:1px solid var(--rule)}
+:root[data-rail="shut"] .nav-section summary{justify-content:center;padding:.7rem 0;gap:0}
+:root[data-rail="shut"] .nav-section summary::after{display:none}
+:root[data-rail="shut"] .nav-section>.nav-group{display:none}
+@media(max-width:760px){
+  :root:not([data-rail="open"]) .nav-section>.nav-group{display:none}
+  :root:not([data-rail="open"]) .nav-section summary{padding:.7rem 0;justify-content:center;gap:0}
+  :root:not([data-rail="open"]) .nav-section summary::after{display:none}
+  :root[data-rail="open"] .rail{position:fixed;inset:0 auto 0 0;width:234px;z-index:100;box-shadow:4px 0 20px #0002;padding:1rem .7rem}
+  :root[data-rail="open"] .main{margin-left:52px}
+  :root[data-rail="open"] .rail .lbl,:root[data-rail="open"] .rail .wordmark{display:inline}
+  :root[data-rail="open"] .rail-head{flex-direction:row}
+  :root[data-rail="open"] .rail a.nav-item{justify-content:flex-start;gap:.7rem;padding:.65rem .8rem}
+}
+.rail nav{gap:.55rem}

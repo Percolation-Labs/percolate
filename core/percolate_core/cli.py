@@ -148,6 +148,8 @@ from .core.cli import sample_app as _sample_app
 from .core.cli import package_app as _package_app
 
 app.add_typer(_auth_app, name="auth", help="Bootstrap the first identity, and sign tokens")
+from .core.connector_cli import app as _connector_app
+_auth_app.add_typer(_connector_app, name="connector")
 app.add_typer(_sample_app, name="sample", help="Load a sample dataset")
 app.add_typer(_package_app, name="package", help="Install a package")
 

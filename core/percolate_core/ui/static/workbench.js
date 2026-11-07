@@ -1,3 +1,4 @@
+import {resultCanvas} from "./result-canvas.js";
 import {splitWorkspace,contextualHelp} from "./workspace.js";
 import { rpc, read } from "./api.js";
 import { READS } from "./reads.js";
@@ -134,7 +135,7 @@ export async function query() {
       out.replaceChildren(h("div", {class:"query-results"},
         h("p", {}, records ? records.length + (records.length === 1 ? " row returned" : " rows returned") + (records.length > 100 ? " · showing the first 100; download contains all returned rows" : "") : "Query completed"),
         h("details", {class:"executed-query"}, h("summary", {}, "Executed query"), h("pre", {class:"code suggestion-code"}, statement)),
-        columns.length ? h("div", {style:"overflow:auto"}, table(columns, records.slice(0,100), r => h("tr", {}, columns.map(c => h("td", {}, h("div", {class:"query-cell"}, typeof r[c] === "object" ? JSON.stringify(r[c]) : r[c])))))) : null,
+        columns.length ? resultCanvas({rows:records.slice(0,100), columns, title:"Query result"}) : null,
         h("details", {open: !columns.length}, h("summary", {}, "Full response and query plan"), h("pre", {class:"code", style:"max-height:36rem;overflow:auto"}, JSON.stringify(rows,null,2)))));
     } catch (e) { result = null; out.replaceChildren(h("div", {class:"note rose"}, requestRevision === queryRevision ? e.message : "The earlier request failed. Your newer query is still in the editor; run it to try again.")); }
     finally { execute.disabled = false; }
