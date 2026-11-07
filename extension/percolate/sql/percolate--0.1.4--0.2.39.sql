@@ -43151,9 +43151,11 @@ $$;
 -- without reading the links. A start that finds another value reads the links as before, so a write to some other
 -- scope's links costs time, never a wrong graph.
 create sequence if not exists aiq.walk_links_epoch;
+-- read by any walk, as the caller; only the trigger below moves it
+grant select on sequence aiq.walk_links_epoch to authenticated, worker;
 
 create or replace function aiq.walk_links_epoch_now() returns bigint
-language sql stable security definer set search_path = pg_catalog, public as $$
+language sql stable security invoker set search_path = pg_catalog, public as $$
     select case when is_called then last_value else 0 end from aiq.walk_links_epoch
 $$;
 
@@ -43177,6 +43179,9 @@ begin
     return null;
 end;
 $$;
+-- A trigger function, run by the trigger as its owner (nextval on a sequence the writer holds no grant on) and
+-- called by nobody: no one may execute it.
+revoke all on function aiq.walk_links_bump() from public;
 create or replace trigger walk_links_inserted after insert on aiq.edges
     referencing new table as new_rows for each statement execute function aiq.walk_links_bump();
 create or replace trigger walk_links_updated after update on aiq.edges
@@ -43224,13 +43229,16 @@ declare
     v    jsonb;
     kept_uri text;
     kept jsonb;
+    epoch text;
 begin
     -- built at the links counter as it stands: nothing has written a walk link since, so no need to read them
+    -- computed once, out of the scan filter (REM-1249)
+    kept_uri := split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 1) || ':'
+                || split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 2) || ':%';
+    epoch := aiq.walk_links_epoch_now()::text;
     select res.metadata->'walk_graph', res.metadata->'version' into kept, v
       from content.resources res
-     where res.uri like split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 1) || ':'
-                        || split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 2) || ':%'
-       and res.metadata->>'epoch' = aiq.walk_links_epoch_now()::text and res.metadata ? 'walk_graph'
+     where res.uri like kept_uri and res.metadata->>'epoch' = epoch and res.metadata ? 'walk_graph'
      order by res.updated_at desc limit 1;
     if kept is not null and v_at >= (v->>'as_of')::timestamptz then
         return kept;
@@ -43518,9 +43526,10 @@ begin
         raise no_data_found using message = format('no run %s that you may read', p_run);
     end if;
     inp := r.input;
-    -- An offline walk asks nobody, and a lead already judged is not asked again, so neither needs its description.
-    -- Describing every lead the last wave raised was 4.2 s of a QASPER walk's 4.7 s state, on every step.
-    off := coalesce((inp->>'offline')::boolean, false);
+    -- A lead already judged is not asked again, so it needs no description: describing every lead the last wave
+    -- raised was 4.2 s of a QASPER walk's 4.7 s state, on every step. (An offline walk's unjudged leads keep theirs:
+    -- they are what the walk would have asked, and query/42 reads them.)
+    off := false;
     s := aiq.walk_run_settings(p_run);
     q := inp->'question';
     g := aiq.walk_run_graph(p_run);
@@ -43701,6 +43710,7 @@ declare
     guri  text;
     rguri text;
     v     jsonb;
+    epoch text;
 begin
     select * into r from aiq.walk_run(p_run);
     inp := r.input;
@@ -43715,11 +43725,14 @@ begin
     -- The scope's kept graph, when it was built at the links counter as it stands: no walk link has been written
     -- since, so it is the links as they are, and nothing reads them. Otherwise the version, once: a pass over every
     -- link in scope (6 to 8 s over QASPER's 7.3 million).
+    -- the scope's uri prefix and the counter, each computed once: in the scan filter a STABLE call runs per row
+    -- (REM-1249, query/49)
+    guri := split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 1) || ':'
+            || split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 2) || ':%';
+    epoch := aiq.walk_links_epoch_now()::text;
     select res.uri, res.metadata->'walk_graph', res.metadata->'version' into guri, g, v
       from content.resources res
-     where res.uri like split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 1) || ':'
-                        || split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 2) || ':%'
-       and res.metadata->>'epoch' = aiq.walk_links_epoch_now()::text and res.metadata ? 'walk_graph'
+     where res.uri like guri and res.metadata->>'epoch' = epoch and res.metadata ? 'walk_graph'
      order by res.updated_at desc limit 1;
     if g is null or r.created_at < (v->>'as_of')::timestamptz then
         v := aiq.walk_graph_version(aiq.walk_keys(inp));

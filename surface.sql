@@ -352,6 +352,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_texts','jsonb, text[]','walk.sql: the text of the few documents a round''s snippets need (REM-1199)'),
 ('ai-query-layer','function','aiq.walk_graph_version','jsonb','walk.sql: the state of a scope''s walk links, which a kept graph must match (REM-1199)'),
 ('ai-query-layer','function','aiq.walk_graph_uri','jsonb, jsonb','walk.sql: where a scope''s graph is kept, by scope, settings and link version (REM-1199)'),
+('ai-query-layer','function','aiq.walk_links_epoch_now','','walk.sql: the walk links counter a kept graph is checked against, read by a walk''s start as its caller (7 Nov 2026)'),
 ('ai-query-layer','function','aiq.walk_graph_build','jsonb, timestamptz','walk.sql: a scope''s graph built from its links, as of a time (REM-1199)'),
 ('ai-query-layer','function','aiq.walk_index','jsonb, text','walk.sql: keep a scope''s graph as a document every walk over it reads (REM-1199)'),
 ('ai-query-layer','function','aiq.use_edge_named','text, text','walk.sql: whether a paragraph names a term as a name, every word capitalised or a digit (edges from use)'),
