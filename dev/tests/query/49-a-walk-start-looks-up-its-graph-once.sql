@@ -87,6 +87,9 @@ declare
         'replay', (select id from content.resources where uri = 'walk-fixture:replay'), 'offline', true,
         'settings', jsonb_build_object('stack', false, 'describe', 'source', 'order', 'p', 'wave', 4, 'seeds', 1, 'per_wave', 1, 'expand_all', false));
     fn     oid := 'aiq.walk_graph_version(jsonb)'::regprocedure;
+    -- since 7 Nov 2026 a start that finds its graph kept at the links counter reads the counter instead of the
+    -- version: either lookup counts, and either per row is the defect
+    fn2    oid := 'aiq.walk_links_epoch_now()'::regprocedure;
     r      uuid;
     before bigint;
     calls  bigint;
@@ -95,16 +98,16 @@ begin
     perform aiq.walk_index(inp);
     -- the start step runs as soon as its task is ready (autorun_sql_steps, the cascade the worker's write-back
     -- takes), so it may already have run inside start_workflow: count from before it
-    before := coalesce(pg_stat_get_xact_function_calls(fn), 0);
+    before := coalesce(pg_stat_get_xact_function_calls(fn), 0) + coalesce(pg_stat_get_xact_function_calls(fn2), 0);
     r := workflow.start_workflow('walk_fixture_run', inp);
     perform workflow.drain_sql_steps(r);
-    calls := coalesce(pg_stat_get_xact_function_calls(fn), 0) - before;
+    calls := coalesce(pg_stat_get_xact_function_calls(fn), 0) + coalesce(pg_stat_get_xact_function_calls(fn2), 0) - before;
     if (select status from workflow.tasks where run_id = r and step_key = 'start') is distinct from 'succeeded' then
         raise exception 'the fixture walk''s start step did not succeed: %',
             (select error from workflow.tasks where run_id = r and step_key = 'start');
     end if;
     if calls = 0 then
-        raise exception 'walk_graph_version was never counted, so this test cannot see the lookup (track_functions?)';
+        raise exception 'neither walk_graph_version nor walk_links_epoch_now was counted, so this test cannot see the lookup (track_functions?)';
     end if;
     if calls > 5 then
         raise exception 'the start step ran walk_graph_version % times beside % resources: the kept graph''s uri is '
