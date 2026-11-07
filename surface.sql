@@ -341,6 +341,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.walk_doc_vectors','text, text[]','walk.sql: each document''s mean bge-small vector for a channel or a list, none where the space does not exist (REM-1245)'),
 ('workflow-engine','function','workflow.readable_run','uuid','integration-rbac.sql: a run''s whole row for a caller workflow.may_access_run admits; aiq.walk_run reads through it (REM-1245)'),
 ('workflow-engine','function','workflow.readable_run_tasks','uuid','integration-rbac.sql: a run''s task rows for a caller who may read the run (REM-1245)'),
+('workflow-engine','function','workflow.canvas','text,jsonb','Caller-owned shared canvas; scoped read/write capability, durable selections and saved results (REM-1329)'),
 ('workflow-engine','function','workflow.readable_runs','','integration-rbac.sql: every run the caller may read (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_cost','uuid, text[]','walk-stack.sql: what a walk cost, from its own request rows at the price as of its start: total, by wave, move and question, and a cost-against-discovery curve (REM-1245)'),
 ('ai-query-layer','function','aiq.walk_cost_curve','uuid[], jsonb, int[]','walk-stack.sql: cost against discovery for a set of runs at read budgets, beside search and the oracle (REM-1245)'),

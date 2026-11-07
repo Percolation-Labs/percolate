@@ -373,6 +373,8 @@ insert into t14_declared (fn, mechanism, why) values
  'a run''s whole row for a caller who may read it, with rbac.is_operator() as the leading arm, in plan_status''s shape: a run the caller may not read returns no row, never an error naming it. Definer only because authenticated holds no SELECT on workflow.runs, and runs_api is a view whose rows are not workflow.runs rows, which the walk''s readers return (REM-1245); aiq.walk_run is the INVOKER wrapper'),
 ('workflow.readable_run_tasks(uuid)', 'workflow.may_access_run',
  'a run''s task rows for a caller who may read the run, the same predicate as readable_run. Whole rows because tasks_api leaves out input and matrix_parent_id, which a walk''s reader needs to say which request each step sent and what it cost (REM-1245)'),
+('workflow.canvas(text,jsonb)', 'rbac.require',
+ 'Requires scoped canvas read/write; all sessions and report rows belong to the derived caller, never a supplied identity.'),
 ('workflow.readable_runs()', 'workflow.may_access_run',
  'every run the caller may read, each row through the same predicate as readable_run; aiq.walk_runs_visible narrows it to walks (REM-1245)'),
 ('workflow.plan_status(text,uuid)', 'workflow.may_access_run',

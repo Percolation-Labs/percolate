@@ -1954,3 +1954,165 @@ revoke execute on function workflow.approve_run(uuid), workflow.raise_budget(uui
     from public;
 grant execute on function workflow.approve_run(uuid), workflow.raise_budget(uuid, jsonb), workflow.run_cost(uuid)
     to authenticated;
+
+-- REM-1329: a caller-owned shared workspace canvas, independent of any application.
+-- Both HTTP and conversational clients use this RPC. Permission checks include
+-- credential scopes; no caller-provided identity or arbitrary SQL is accepted.
+insert into rbac.permission_kinds(resource,action,checked_by,every_person)
+values ('canvas','read','workflow.canvas',true),('canvas','write','workflow.canvas',true)
+on conflict(resource,action) do nothing;
+
+insert into workflow.definitions (name, version, spec)
+values ('workspace-canvas-session', 1, '{"steps":[{"key":"session","kind":"work","queue":"workspace-canvas"}]}'),
+       ('workspace-canvas-turn', 1, '{"steps":[{"key":"intent","kind":"work","queue":"workspace-canvas"},{"key":"query","kind":"work","queue":"workspace-canvas"},{"key":"view","kind":"work","queue":"workspace-canvas"}]}')
+on conflict (name, version) do nothing;
+
+create or replace function workflow.canvas(p_action text, p_body jsonb default '{}') returns jsonb
+language plpgsql security definer set search_path = pg_catalog set statement_timeout = '5s' as $$
+declare
+    p_user text;
+    s workflow.runs%rowtype;
+    v jsonb; result jsonb; rows jsonb; cols jsonb; event jsonb; selected jsonb; events jsonb;
+    who uuid; turn uuid; def uuid; n bigint; ver bigint; t double precision := extract(epoch from clock_timestamp()) * 1000;
+    q text; x text; y text; form text; samples jsonb;
+begin
+    who := rbac.require('canvas', case when p_action='read' then 'read' else 'write' end);
+    p_user := who::text;
+    if p_action not in ('open','read','query','view','touch','consume','close') then
+        raise exception 'Unknown canvas action';
+    end if;
+    -- Serialize open as well as updates; one active session per account, even across two processes.
+    if p_action <> 'read' then
+        perform pg_advisory_xact_lock(hashtextextended('workspace-canvas:' || p_user, 0));
+    end if;
+    select r.* into s from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id
+      where d.name='workspace-canvas-session' and r.owner_id=who and r.input->>'user_id'=p_user
+        and (case when p_body ? 'session' then r.id::text=p_body->>'session' else r.status='running' end)
+      order by r.created_at desc limit 1;
+    if p_action='open' and (s.id is null or s.status<>'running') then
+        select id into def from workflow.definitions where name='workspace-canvas-session' and version=1;
+        insert into workflow.runs(workflow_def_id,owner_id,input,context)
+          values(def,who,jsonb_build_object('user_id',p_user),'{"version":0,"touches":[],"cursor":0,"window_ms":15000,"lag_samples":[]}')
+          returning * into s;
+    end if;
+    if s.id is null then
+        if p_action in ('read','consume') and not p_body ? 'session' then return jsonb_build_object('session',null); end if;
+        raise exception 'Canvas session not found';
+    end if;
+    if p_action not in ('read','open') and s.status<>'running' then raise exception 'Canvas session is closed'; end if;
+    v := s.context->'view';
+    ver := coalesce((s.context->>'version')::bigint,0);
+    if p_action='read' and p_body ? 'after' and (p_body->>'after')::bigint=ver
+       and (not p_body ? 'known_session' or p_body->>'known_session'=s.id::text) then
+        return jsonb_build_object('session',s.id,'version',ver,'unchanged',true,'status',s.status);
+    end if;
+    if p_action='query' then
+        q := p_body->>'query';
+        if q='workflow_runs' then
+            cols := '["status","runs"]';
+            select coalesce(jsonb_agg(to_jsonb(a)), '[]') into rows from (
+                select r.status,count(*) as runs from workflow.runs r
+                join workflow.definitions d on d.id=r.workflow_def_id
+                where r.owner_id=who and d.name not like 'workspace-canvas-%'
+                group by r.status order by r.status limit 500) a;
+        elsif q='workflow_steps' then
+            cols := '["step","status","tasks"]';
+            select coalesce(jsonb_agg(to_jsonb(a)), '[]') into rows from (
+                select a.step_key as step,a.status,count(*) as tasks from workflow.tasks a
+                join workflow.runs r on r.id=a.run_id
+                where r.owner_id=who and a.queue<>'workspace-canvas'
+                group by a.step_key,a.status order by tasks desc,a.step_key,a.status limit 500) a;
+        else raise exception 'Choose workflow_runs or workflow_steps';
+        end if;
+        select id into def from workflow.definitions where name='workspace-canvas-turn' and version=1;
+        insert into workflow.runs(workflow_def_id,owner_id,input,status,completed_at)
+          values(def,who,jsonb_build_object('user_id',p_user,'session',s.id,'query',q),'succeeded',now()) returning id into turn;
+        result := jsonb_build_object('id',turn,'columns',cols,'rows',rows,'query',q,'created_at',t);
+        insert into workflow.tasks(run_id,step_key,queue,status,output,completed_at) values
+          (turn,'intent','workspace-canvas','succeeded',jsonb_build_object('caption',left(coalesce(p_body->>'caption',q),300)),now()),
+          (turn,'query','workspace-canvas','succeeded',result,now()),
+          (turn,'view','workspace-canvas','succeeded',jsonb_build_object('control','table'),now());
+        v := jsonb_build_object('result',result,'control','table','caption',left(coalesce(p_body->>'caption',q),300),'options','{}'::jsonb);
+    elsif p_action='view' then
+        select a.output into result from workflow.tasks a join workflow.runs r on r.id=a.run_id
+          join workflow.definitions d on d.id=r.workflow_def_id
+          where d.name='workspace-canvas-turn' and r.owner_id=who and r.input->>'user_id'=p_user and r.input->>'session'=s.id::text
+            and a.step_key='query' and a.run_id::text=coalesce(p_body->>'result_set',v->'result'->>'id');
+        if result is null then raise exception 'Result set not found in this session'; end if;
+        if p_body->>'control' not in ('table','cards','plot') or p_body->>'control' is null then raise exception 'Choose table, cards or plot'; end if;
+        select e into selected from jsonb_array_elements(s.context->'touches') e
+          where e->>'kind'='selection' and e->>'result_set'=result->>'id'
+          order by (e->>'seq')::bigint desc limit 1;
+        if selected is not null and (selected->>'at')::double precision < t-(s.context->>'window_ms')::int then selected:=null; end if;
+        x := coalesce(p_body->'options'->>'x',selected->'columns'->>0);
+        y := coalesce(p_body->'options'->>'y',selected->'columns'->>1);
+        if p_body->>'control'='plot' then
+            if x is null or y is null or x=y or not result->'columns' ? x or not result->'columns' ? y then
+                raise exception 'Select two columns again, or name x and y explicitly';
+            end if;
+            if exists(select 1 from jsonb_array_elements(result->'rows') r where r->y<>'null'::jsonb and jsonb_typeof(r->y)<>'number') then
+                raise exception 'The y column must be numeric';
+            end if;
+            form := coalesce(p_body->'options'->>'form',case when not exists(
+                select 1 from jsonb_array_elements(result->'rows') r where jsonb_typeof(r->x)<>'number') then 'scatter' else 'bar' end);
+            if form not in ('bar','line','scatter') then raise exception 'Choose bar, line or scatter'; end if;
+            if form='scatter' and exists(select 1 from jsonb_array_elements(result->'rows') r where jsonb_typeof(r->x)<>'number') then
+                raise exception 'Scatter needs a numeric x column';
+            end if;
+        end if;
+        select id into def from workflow.definitions where name='workspace-canvas-turn' and version=1;
+        insert into workflow.runs(workflow_def_id,owner_id,input,status,completed_at)
+          values(def,who,jsonb_build_object('user_id',p_user,'session',s.id,'result_set',result->>'id'),'succeeded',now()) returning id into turn;
+        v := jsonb_build_object('result',result,'control',p_body->>'control','caption',coalesce(p_body->>'caption',v->>'caption',result->>'query'),
+          'options',jsonb_build_object('x',x,'y',y,'form',form,'rows',coalesce(selected->'rows','[]'::jsonb)),
+          'selection_used',selected,'turn',turn);
+        insert into workflow.tasks(run_id,step_key,queue,status,output,completed_at) values
+          (turn,'intent','workspace-canvas','succeeded',jsonb_build_object('caption',v->>'caption'),now()),
+          (turn,'view','workspace-canvas','succeeded',v-'result',now());
+    elsif p_action='touch' then
+        if p_body->>'kind' not in ('selection','mark') or p_body->>'kind' is null then raise exception 'Unknown touch kind'; end if;
+        if p_body->>'kind'='selection' then
+            if v is null or p_body->>'result_set' is distinct from v->'result'->>'id' then raise exception 'This selection belongs to an old result; select again'; end if;
+            if jsonb_typeof(p_body->'columns') is distinct from 'array' or jsonb_typeof(p_body->'rows') is distinct from 'array' then raise exception 'Selection needs columns and rows'; end if;
+            if jsonb_array_length(p_body->'columns')>50 or jsonb_array_length(p_body->'rows')>500 then raise exception 'Selection too large'; end if;
+            if exists(select 1 from jsonb_array_elements_text(p_body->'columns') c where not v->'result'->'columns' ? c) then raise exception 'Unknown column'; end if;
+            if exists(select 1 from jsonb_array_elements_text(p_body->'rows') r where r !~ '^[0-9]+$' or length(r)>3) then raise exception 'Invalid row'; end if;
+            if exists(select 1 from jsonb_array_elements_text(p_body->'rows') r where r::int>=jsonb_array_length(v->'result'->'rows')) then raise exception 'Unknown row'; end if;
+        end if;
+        n := jsonb_array_length(s.context->'touches')+1;
+        event := jsonb_build_object('seq',n,'at',t,'kind',p_body->>'kind','result_set',v->'result'->>'id',
+          'columns',coalesce(p_body->'columns','[]'::jsonb),'rows',coalesce(p_body->'rows','[]'::jsonb));
+        s.context := jsonb_set(s.context,'{touches}',(s.context->'touches') || jsonb_build_array(event));
+        if p_body->>'kind'='selection' then s.context:=jsonb_set(s.context,'{selection}',event); end if;
+    elsif p_action='consume' then
+        select coalesce(jsonb_agg(e order by (e->>'seq')::bigint),'[]') into events from (
+          select e from jsonb_array_elements(s.context->'touches') e where (e->>'seq')::bigint>coalesce((s.context->>'cursor')::bigint,0)
+          order by (e->>'seq')::bigint desc limit 20) a;
+        samples:=coalesce(s.context->'lag_samples','[]');
+        select e into event from jsonb_array_elements(events) e where e->>'kind'='mark' order by (e->>'seq')::bigint desc limit 1;
+        if event is not null then
+            samples := samples || jsonb_build_array(round((t-(event->>'at')::double precision)::numeric));
+            s.context := jsonb_set(s.context,'{lag_samples}',samples);
+            if jsonb_array_length(samples)>=10 then
+                select max(value::text::numeric)+1000 into n from jsonb_array_elements(samples);
+                s.context:=jsonb_set(s.context,'{window_ms}',to_jsonb(n));
+            end if;
+        end if;
+        s.context:=jsonb_set(s.context,'{cursor}',to_jsonb(jsonb_array_length(s.context->'touches')));
+    elsif p_action='close' then
+        update workflow.runs set status='succeeded',completed_at=now() where id=s.id;
+        s.status:='succeeded';
+    end if;
+    if p_action in ('query','view') then s.context:=jsonb_set(s.context,'{view}',v); end if;
+    if p_action in ('query','view','touch','close') or (p_action='consume' and event is not null) then
+        ver:=ver+1;
+        s.context:=jsonb_set(s.context,'{version}',to_jsonb(ver));
+    end if;
+    if p_action not in ('read','open') then update workflow.runs set context=s.context where id=s.id; end if;
+    return jsonb_build_object('session',s.id,'status',s.status,'version',ver,'view',v,
+      'selection',s.context->'selection','since_last_call',coalesce(events,'[]'::jsonb),
+      'window_ms',s.context->'window_ms','lag_samples',s.context->'lag_samples','server_at',t);
+end;
+$$;
+revoke all on function workflow.canvas(text,jsonb) from public;
+grant execute on function workflow.canvas(text,jsonb) to authenticated;
