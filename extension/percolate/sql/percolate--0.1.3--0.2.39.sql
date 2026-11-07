@@ -43052,8 +43052,8 @@ language sql immutable set search_path = pg_catalog, public as $$
     select coalesce(string_agg(t.sign, ' | ' order by t.h), '(none)')
       from (select md5(p_key || ':' || (d.value #>> '{}')) as h,
                    coalesce((select string_agg(x.term, ', ' order by x.n, x.term)
-                               from (select tm.value as term, jsonb_array_length(coalesce(p_graph->'post'->tm.value, '[]'::jsonb)) as n
-                                       from jsonb_array_elements_text(coalesce(p_graph->'terms'->(d.value #>> '{}'), '[]'::jsonb)) tm
+                               from (select tm.value as term, jsonb_array_length(coalesce(p_graph #> array['post', tm.value], '[]'::jsonb)) as n
+                                       from jsonb_array_elements_text(coalesce(p_graph #> array['terms', d.value #>> '{}'], '[]'::jsonb)) tm
                                       order by 2, 1 limit 8) x), '(none)') as sign
               from jsonb_array_elements(p_targets) d
              order by 1 limit 3) t
@@ -43145,7 +43145,7 @@ begin
     end if;
     if p_kind = 'term' then
         return format('the term ''%s'', held by %s message(s) in all, %s of them unread. What the user said in them: %s',
-                      p_x, jsonb_array_length(coalesce(p_graph->'post'->p_x, '[]'::jsonb)), n, coalesce(lines, '(none)'));
+                      p_x, jsonb_array_length(coalesce(p_graph #> array['post', p_x], '[]'::jsonb)), n, coalesce(lines, '(none)'));
     end if;
     return format('%s unread message(s) %s. What the user said in them: %s', n, side, coalesce(lines, '(none)'));
 end;
@@ -43261,6 +43261,46 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     ) d
 $$;
 
+-- The counter a kept graph is checked against (Sirsh, 7 Nov 2026: a walk stands in for an LLM iteration, so it has
+-- seconds, not minutes). Reading every link in scope to see whether the kept graph is current was 6 to 8 s of a QASPER
+-- walk's start (7.3 million links; counting them alone takes 2.2 s). Every statement that writes a walk link moves the
+-- counter; a kept graph records the value it was built at, and a start that finds the same value reads the kept graph
+-- without reading the links. A start that finds another value reads the links as before, so a write to some other
+-- scope's links costs time, never a wrong graph.
+create sequence if not exists aiq.walk_links_epoch;
+
+create or replace function aiq.walk_links_epoch_now() returns bigint
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select case when is_called then last_value else 0 end from aiq.walk_links_epoch
+$$;
+
+-- One trigger per kind of statement, since a transition table belongs to one event. A statement that touches no walk
+-- link (a fact, a tag on a resource) leaves the counter alone, so writing facts does not slow the next walk.
+create or replace function aiq.walk_links_bump() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    if tg_op = 'INSERT' then
+        if exists (select 1 from new_rows where relation in ('walk_term', 'walk_tagged', 'walk_next', 'walk_nearest')) then
+            perform nextval('aiq.walk_links_epoch');
+        end if;
+    elsif tg_op = 'UPDATE' then
+        if exists (select 1 from new_rows where relation in ('walk_term', 'walk_tagged', 'walk_next', 'walk_nearest'))
+           or exists (select 1 from old_rows where relation in ('walk_term', 'walk_tagged', 'walk_next', 'walk_nearest')) then
+            perform nextval('aiq.walk_links_epoch');
+        end if;
+    elsif exists (select 1 from old_rows where relation in ('walk_term', 'walk_tagged', 'walk_next', 'walk_nearest')) then
+        perform nextval('aiq.walk_links_epoch');
+    end if;
+    return null;
+end;
+$$;
+create or replace trigger walk_links_inserted after insert on aiq.edges
+    referencing new table as new_rows for each statement execute function aiq.walk_links_bump();
+create or replace trigger walk_links_updated after update on aiq.edges
+    referencing old table as old_rows new table as new_rows for each statement execute function aiq.walk_links_bump();
+create or replace trigger walk_links_deleted after delete on aiq.edges
+    referencing old table as old_rows for each statement execute function aiq.walk_links_bump();
+
 -- What a scope's graph is built from: its documents and the walk links out of them, each link by its ends, relation,
 -- provenance and validity. Any change to one, a close backdated or a new row, moves a sum; as_of is the time after
 -- which the graph no longer depends on the moment it is read. (48 ms on a BEAM channel, against 200 ms to build.)
@@ -43298,11 +43338,23 @@ returns jsonb
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
     v_at timestamptz := coalesce(p_at, now());
-    v    jsonb := aiq.walk_graph_version(aiq.walk_keys(p_input));
-    -- computed once: as a predicate it is evaluated for every row, and content.resources has no index on uri
-    kept_uri text := aiq.walk_graph_uri(p_input, v);
+    v    jsonb;
+    kept_uri text;
     kept jsonb;
 begin
+    -- built at the links counter as it stands: nothing has written a walk link since, so no need to read them
+    select res.metadata->'walk_graph', res.metadata->'version' into kept, v
+      from content.resources res
+     where res.uri like split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 1) || ':'
+                        || split_part(aiq.walk_graph_uri(p_input, '{}'::jsonb), ':', 2) || ':%'
+       and res.metadata->>'epoch' = aiq.walk_links_epoch_now()::text and res.metadata ? 'walk_graph'
+     order by res.updated_at desc limit 1;
+    if kept is not null and v_at >= (v->>'as_of')::timestamptz then
+        return kept;
+    end if;
+    v := aiq.walk_graph_version(aiq.walk_keys(p_input));
+    -- computed once: as a predicate it is evaluated for every row, and content.resources has no index on uri
+    kept_uri := aiq.walk_graph_uri(p_input, v);
     select res.metadata->'walk_graph' into kept
       from content.resources res
      where res.uri = kept_uri
@@ -43324,9 +43376,12 @@ create or replace function aiq.walk_index(p_input jsonb, p_channel text default 
 returns jsonb
 language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
 declare
+    -- the counter first: a link written while this builds moves it, and the graph kept here is then never trusted
+    e   bigint := aiq.walk_links_epoch_now();
     v   jsonb := aiq.walk_graph_version(aiq.walk_keys(p_input));
     uri text := aiq.walk_graph_uri(p_input, v);
     g   jsonb;
+    res jsonb;
 begin
     -- the channel is made on first use, in the shared org where register_text looks for a channel a caller with no
     -- org names, so the first index on a fresh stack (percolate walk index keeps its graph) does not fail on it
@@ -43335,10 +43390,14 @@ begin
         values (p_channel, 'manual', rbac.shared_org_id(), 'public');
     end if;
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
-    return content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
+    res := content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline')::text, uri,
-               null, jsonb_build_object('walk_graph', g, 'version', v))
-           || jsonb_build_object('uri', uri, 'version', v);
+               null, jsonb_build_object('walk_graph', g, 'version', v, 'epoch', e));
+    -- re-indexing links that have not changed finds the document already kept, and register_text keeps a resource's
+    -- first metadata: give it this counter, or every later start would read the links again
+    update content.resources set metadata = metadata || jsonb_build_object('epoch', e)
+     where content.resources.uri = aiq.walk_graph_uri(p_input, v) and metadata->>'epoch' is distinct from e::text;
+    return res || jsonb_build_object('uri', uri, 'version', v, 'epoch', e);
 end;
 $$;
 
@@ -43569,12 +43628,16 @@ declare
     board    jsonb;
     lp       jsonb;
     serves   jsonb;
+    off      boolean;
 begin
     select * into r from aiq.walk_run(p_run);
     if not found then
         raise no_data_found using message = format('no run %s that you may read', p_run);
     end if;
     inp := r.input;
+    -- An offline walk asks nobody, and a lead already judged is not asked again, so neither needs its description.
+    -- Describing every lead the last wave raised was 4.2 s of a QASPER walk's 4.7 s state, on every step.
+    off := coalesce((inp->>'offline')::boolean, false);
     s := aiq.walk_run_settings(p_run);
     q := inp->'question';
     g := aiq.walk_run_graph(p_run);
@@ -43638,7 +43701,7 @@ begin
         wn := (w->>'wave')::int;
         -- Only the last wave's clues are still to be judged, and a clue's text is only read by its judge.
         last := wn = (logs->-1->>'wave')::int;
-        txt := case when last then aiq.walk_texts(inp, array(select value->>'doc' from jsonb_array_elements(w->'reads')
+        txt := case when last and not off then aiq.walk_texts(inp, array(select value->>'doc' from jsonb_array_elements(w->'reads')
                                                               where (value->>'expanded')::boolean)) end;
         -- The clues this wave's round judged: raised by the previous wave's expanded reads.
         if wn > 0 then
@@ -43665,22 +43728,22 @@ begin
              where (value->>'expanded')::boolean
         ), term as (
             select t, min(o) as o, count(*) as n
-              from ex, jsonb_array_elements_text(coalesce(g->'terms'->src, '[]'::jsonb)) t
-             where jsonb_array_length(coalesce(g->'post'->t, '[]'::jsonb)) <= (s->>'cap')::int
+              from ex, jsonb_array_elements_text(coalesce(g #> array['terms', src], '[]'::jsonb)) t
+             where jsonb_array_length(coalesce(g #> array['post', t], '[]'::jsonb)) <= (s->>'cap')::int
                and not clues ? ('term:' || t)
              group by t
         ), term_clue as (
             select 'term:' || term.t as k, term.t, ex.src,
                    -- a term raised by two reads had its targets re-aggregated distinct; kept so the record is unchanged
-                   case when term.n > 1 then (select jsonb_agg(distinct value) from jsonb_array_elements(g->'post'->term.t)
+                   case when term.n > 1 then (select jsonb_agg(distinct value) from jsonb_array_elements(g #> array['post', term.t])
                                                where not reached ? (value #>> '{}'))
-                        else (select jsonb_agg(value order by value #>> '{}') from jsonb_array_elements(g->'post'->term.t)
+                        else (select jsonb_agg(value order by value #>> '{}') from jsonb_array_elements(g #> array['post', term.t])
                                where not reached ? (value #>> '{}')) end as tg
               from term join ex on ex.o = term.o
         ), side_clue as (
             select kind || ':' || ex.src as k, kind, ex.src,
                    (select jsonb_agg(distinct value)
-                      from jsonb_array_elements(coalesce(g->(case kind when 'next' then 'beside' else 'near' end)->ex.src,
+                      from jsonb_array_elements(coalesce(g #> array[case kind when 'next' then 'beside' else 'near' end, ex.src],
                                                          '[]'::jsonb))
                      where not reached ? (value #>> '{}') and value #>> '{}' <> ex.src) as tg
               from ex, unnest(array['next', 'near']) kind
@@ -43689,13 +43752,13 @@ begin
         select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) into nxt from (
             select k, jsonb_build_object(
                        'kind', 'term', 'x', t, 'source', src, 'targets', tg,
-                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, 'term', t, src, tg,
+                       'text', case when last and not off and not pmap ? k then aiq.walk_describe_clue(inp, g, s->>'describe', k, 'term', t, src, tg,
                                                                           txt->>src) end) as c
               from term_clue where tg is not null
             union all
             select distinct on (k) k, jsonb_build_object(
                        'kind', kind, 'x', src, 'source', src, 'targets', tg,
-                       'text', case when last then aiq.walk_describe_clue(inp, g, s->>'describe', k, kind, src, src, tg,
+                       'text', case when last and not off and not pmap ? k then aiq.walk_describe_clue(inp, g, s->>'describe', k, kind, src, src, tg,
                                                                           txt->>src) end)
               from side_clue where tg is not null
         ) z;
@@ -43754,6 +43817,7 @@ declare
     -- 30 s statement_timeout (timmy, REM-1249)
     guri  text;
     rguri text;
+    v     jsonb;
 begin
     select * into r from aiq.walk_run(p_run);
     inp := r.input;
@@ -43765,8 +43829,23 @@ begin
             hint = 'start it with {"question": {"node_id": ..., "text": ...}}; pass any labels to the evaluation functions';
     end if;
     s := aiq.walk_settings(inp);
-    g := aiq.walk_graph(inp, r.created_at);
-    guri := aiq.walk_graph_uri(inp, aiq.walk_graph_version(aiq.walk_keys(inp)));
+    -- The scope's kept graph, when it was built at the links counter as it stands: no walk link has been written
+    -- since, so it is the links as they are, and nothing reads them. Otherwise the version, once: a pass over every
+    -- link in scope (6 to 8 s over QASPER's 7.3 million).
+    select res.uri, res.metadata->'walk_graph', res.metadata->'version' into guri, g, v
+      from content.resources res
+     where res.uri like split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 1) || ':'
+                        || split_part(aiq.walk_graph_uri(inp, '{}'::jsonb), ':', 2) || ':%'
+       and res.metadata->>'epoch' = aiq.walk_links_epoch_now()::text and res.metadata ? 'walk_graph'
+     order by res.updated_at desc limit 1;
+    if g is null or r.created_at < (v->>'as_of')::timestamptz then
+        v := aiq.walk_graph_version(aiq.walk_keys(inp));
+        guri := aiq.walk_graph_uri(inp, v);
+        select res.metadata->'walk_graph' into g from content.resources res where res.uri = guri order by res.updated_at desc limit 1;
+        if g is null or r.created_at < (v->>'as_of')::timestamptz then
+            g := aiq.walk_graph_build(inp, r.created_at);
+        end if;
+    end if;
     -- A replay walks the graph it was recorded on when this database holds it (REM-1246): a replay document names its
     -- kept graph, and the walk takes its graph from that document. Otherwise it rebuilds from today's links, which on
     -- another install are the same edges under another uri (the uri hashes install-local ids). walk_summary's decider
@@ -44269,11 +44348,16 @@ begin
             n := n + 1;
         end if;
     end loop;
+    -- walk.waves is the walk's rounds: the last one's read stops the walk. The workflow repeats up to the waves it was
+    -- installed with, and nothing read the setting, so a run asked for two rounds judged and read all ten (on QASPER,
+    -- 150 s of a 160 s walk went to rounds the run had not asked for). `dry` is what the workflow stops on.
     return jsonb_build_object('wave', wn, 'si', si, 'reads', reads, 'travels', travels, 'pending', pending,
                               'judged', (select count(*) from jsonb_each(st->'next') x where (st->'p') ? x.key),
                               'unjudged', (select count(*) from jsonb_each(st->'next') x where not (st->'p') ? x.key),
-                              'dry', n = 0,
-                              'stop', case when n = 0 then jsonb_build_object('reason', 'dry', 'wave', wn) end);
+                              'dry', n = 0 or wn >= coalesce((s->>'waves')::int, 10),
+                              'stop', case when n = 0 then jsonb_build_object('reason', 'dry', 'wave', wn)
+                                           when wn >= coalesce((s->>'waves')::int, 10)
+                                           then jsonb_build_object('reason', 'waves', 'wave', wn) end);
 end;
 $$;
 
@@ -44657,6 +44741,7 @@ $$;
 grant execute on function aiq.walk_task(text, timestamptz), aiq.walk_settings(jsonb, timestamptz), aiq.walk_needs_vector(uuid), aiq.walk_graph(jsonb, timestamptz),
                           aiq.walk_keys(jsonb), aiq.walk_texts(jsonb, text[]), aiq.walk_graph_version(jsonb),
                           aiq.walk_graph_uri(jsonb, jsonb), aiq.walk_graph_build(jsonb, timestamptz), aiq.walk_index(jsonb, text),
+                          aiq.walk_links_epoch_now(),
                           aiq.walk_answers(uuid), aiq.walk_kept(uuid, timestamptz, text), aiq.walk_keep(uuid, text),
                           aiq.walk_signs(jsonb, text, jsonb),
                           aiq.walk_snippet(text, text), aiq.walk_state(uuid), aiq.walk_start(uuid, vector),
