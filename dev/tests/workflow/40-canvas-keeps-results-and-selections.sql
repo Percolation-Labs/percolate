@@ -18,12 +18,26 @@ begin
  if q->'view'->'result'->'rows'  is distinct from  '[{"status":"succeeded","runs":1}]'::jsonb then raise exception 'Report escaped caller ownership';end if;
  perform workflow.canvas('touch',jsonb_build_object('kind','selection','result_set',q->'view'->'result'->>'id','columns',jsonb_build_array('status','runs'),'rows',jsonb_build_array(0)));
  select count(*) into n from workflow.tasks where step_key='query';
- v:=workflow.canvas('view','{"control":"plot"}');
+ v:=workflow.canvas('view','{"control":"plot","options":{"x":"status","y":"runs","form":"bar"}}');
  if v->'view'->'result'  is distinct from  q->'view'->'result' then raise exception 'View queried again';end if;
- perform workflow.canvas('view','{"control":"cards"}');
+ perform workflow.canvas('view','{"control":"cards","options":{"card_title":"status","card_fields":["runs"]}}');
  if (select count(*) from workflow.tasks where step_key='query') is distinct from n then raise exception 'View made query task';end if;
  c:=workflow.canvas('consume');if jsonb_array_length(c->'since_last_call') is distinct from 1 then raise exception 'Missing touch';end if;
  c:=workflow.canvas('consume');if c->'since_last_call' is distinct from '[]'::jsonb then raise exception 'Replayed touch';end if;
+ c:=workflow.canvas('read');
+ begin
+  perform workflow.canvas('view','{"control":"cards"}');raise exception 'Unmapped cards admitted';
+ exception when others then if sqlerrm not like 'Cards need an explicit card_title%' then raise;end if;end;
+ begin
+  perform workflow.canvas('view','{"control":"plot"}');raise exception 'Unmapped plot admitted';
+ exception when others then if sqlerrm not like 'Plot needs explicit%' then raise;end if;end;
+ begin
+  perform workflow.canvas('view','{"control":"cards","options":{"card_title":"status","card_fields":["missing"]}}');raise exception 'Unknown card field admitted';
+ exception when others then if sqlerrm not like 'Unknown card detail field%' then raise;end if;end;
+ if workflow.canvas('read')->'view' is distinct from c->'view' then raise exception 'Invalid renderer replaced saved view';end if;
+ v:=workflow.canvas('view','{"control":"table","options":{"card_title":"status","card_fields":["runs"],"x":"status","y":"runs","form":"bar"}}');
+ if v->'view'->'options'->'card_fields' is distinct from '["runs"]'::jsonb then raise exception 'Card layout lost in table view';end if;
+
  for i in 1..10 loop
   perform workflow.canvas('touch','{"kind":"mark"}');c:=workflow.canvas('consume');
  end loop;
@@ -48,7 +62,7 @@ begin
  exception when raise_exception then if sqlerrm is distinct from 'Graph needs source and target columns' then raise;end if;end;
  v:=workflow.canvas('read');
  if v->'view' is distinct from c->'view' or v->'selection' is distinct from c->'selection' or v->'version' is distinct from c->'version' then raise exception 'Failed query view changed canvas';end if;
- v:=workflow.canvas('query','{"query":"workflow_runs","control":"cards"}');
+ v:=workflow.canvas('query','{"query":"workflow_runs","control":"cards","options":{"card_title":"status","card_fields":["runs"]}}');
  if v->'view'->>'control' is distinct from 'cards' then raise exception 'Query ignored cards';end if;
  if v->'selection' is distinct from 'null'::jsonb then raise exception 'Query retained stale selection';end if;
  c:=workflow.canvas('consume');

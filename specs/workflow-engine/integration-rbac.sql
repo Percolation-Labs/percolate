@@ -2065,11 +2065,11 @@ begin
           where e->>'kind'='selection' and e->>'result_set'=result->>'id'
           order by (e->>'seq')::bigint desc limit 1;
         if selected is not null and (selected->>'at')::double precision < t-(s.context->>'window_ms')::int then selected:=null; end if;
-        x := coalesce(p_body->'options'->>'x',selected->'columns'->>0);
-        y := coalesce(p_body->'options'->>'y',selected->'columns'->>1);
+        x := p_body->'options'->>'x';
+        y := p_body->'options'->>'y';
         if p_body->>'control'='plot' then
             if x is null or y is null or x=y or not result->'columns' ? x or not result->'columns' ? y then
-                raise exception 'Select two columns again, or name x and y explicitly';
+                raise exception 'Plot needs explicit, distinct x and y fields';
             end if;
             if exists(select 1 from jsonb_array_elements(result->'rows') r where r->y<>'null'::jsonb and jsonb_typeof(r->y)<>'number') then
                 raise exception 'The y column must be numeric';
@@ -2081,9 +2081,24 @@ begin
                 raise exception 'Scatter needs a numeric x column';
             end if;
         end if;
+        if p_body->>'control'='cards' then
+            if coalesce(p_body->'options'->>'card_title','')='' or not result->'columns' ? (p_body->'options'->>'card_title') then
+                raise exception 'Cards need an explicit card_title field';
+            end if;
+            if exists(select 1 from jsonb_array_elements(result->'rows') r where jsonb_typeof(r->(p_body->'options'->>'card_title')) in ('object','array')) then
+                raise exception 'Card titles must be scalar values';
+            end if;
+            if jsonb_typeof(p_body->'options'->'card_fields') is distinct from 'array' then
+                raise exception 'Cards need an explicit card_fields array';
+            end if;
+            if jsonb_array_length(p_body->'options'->'card_fields')>6 then raise exception 'Cards support at most six detail fields'; end if;
+            if exists(select 1 from jsonb_array_elements(p_body->'options'->'card_fields') f where jsonb_typeof(f)<>'string' or not result->'columns' ? (f#>>'{}')) then
+                raise exception 'Unknown card detail field';
+            end if;
+        end if;
         if p_body->>'control'='graph' then
-            x := coalesce(p_body->'options'->>'source',case when result->'columns' ? 'source' then 'source' end);
-            y := coalesce(p_body->'options'->>'target',case when result->'columns' ? 'target' then 'target' end);
+            x := p_body->'options'->>'source';
+            y := p_body->'options'->>'target';
             if x is null or y is null or x=y or not result->'columns' ? x or not result->'columns' ? y then
                 raise exception 'Graph needs source and target columns';
             end if;
@@ -2097,8 +2112,11 @@ begin
         insert into workflow.runs(workflow_def_id,owner_id,input,status,completed_at)
           values(def,who,jsonb_build_object('user_id',p_user,'session',s.id,'result_set',result->>'id'),'succeeded',now()) returning id into turn;
         v := jsonb_build_object('result',result,'control',p_body->>'control','caption',coalesce(p_body->>'caption',v->>'caption',result->>'query'),
-          'options',jsonb_build_object('x',x,'y',y,'form',form,'source',case when p_body->>'control'='graph' then x end,
-            'target',case when p_body->>'control'='graph' then y end,'relation',p_body->'options'->>'relation','rows',coalesce(selected->'rows','[]'::jsonb)),
+          'options',jsonb_build_object('x',p_body->'options'->'x','y',p_body->'options'->'y',
+            'form',coalesce(to_jsonb(form),p_body->'options'->'form'),'source',p_body->'options'->'source',
+            'target',p_body->'options'->'target','relation',p_body->'options'->'relation',
+            'card_title',p_body->'options'->'card_title','card_fields',p_body->'options'->'card_fields',
+            'rows',coalesce(selected->'rows','[]'::jsonb)),
           'selection_used',selected,'turn',turn);
         insert into workflow.tasks(run_id,step_key,queue,status,output,completed_at) values
           (turn,'intent','workspace-canvas','succeeded',jsonb_build_object('caption',v->>'caption'),now()),
