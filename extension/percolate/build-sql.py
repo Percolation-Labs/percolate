@@ -221,6 +221,10 @@ def check_raise_format(path, text):
 # cannot see is DML inside a DO block or a function a top-level SELECT calls;
 # those are named in the reason where they exist.
 REPLAYED_DML = {
+    ("workflow-engine/integration-rbac.sql", "insert rbac.permission_kinds"):
+        (1, "shipped canvas capabilities; do nothing preserves deployment policy"),
+    ("workflow-engine/integration-rbac.sql", "insert workflow.definitions"):
+        (1, "shipped canvas record definitions; idempotent and never replaces existing definitions"),
     ("ai-query-layer/walk.sql", "insert aiq.parameters"):
         (1, "the walk's shipped parameters (Sirsh, M-20261027-213302-a399); do update only where set_by is still "
             "'spec', so a value a deployment tuned survives and a corrected default or reason reaches the rest"),
