@@ -1,0 +1,15 @@
+# The model the stack's worker runs, and the one harness/history_fetch.py embeds with.
+embedding_models:
+  - name: bge-small-en-v1.5
+    dim: 384
+    provider: fastembed
+    endpoint: BAAI/bge-small-en-v1.5
+    credential_ref: null
+    is_default: true
+
+# One channel for the history. The vectors arrive with the text, so it names no workflow.
+channels:
+  - name: history
+    kind: manual
+    visibility: public
+    config: {description: "a git repository's commits, one document per commit"}

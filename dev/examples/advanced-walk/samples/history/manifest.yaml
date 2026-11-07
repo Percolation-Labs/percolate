@@ -1,0 +1,13 @@
+# A git repository's history for tutorial four (Advanced Percolate Memory): one document per commit.
+#
+#     python3 harness/history_fetch.py ../../.. samples/history 053c8869   # this repository's history, vectors made here
+#     percolate sample load samples/history
+#     percolate walk index --source history
+name: advanced-walk-history
+version: 1.0.0
+description: |-
+  A git repository's commit messages, one document per commit, dated by the commit. Written by
+  harness/history_fetch.py from a repository you choose; nothing is committed here.
+load:
+  - sources: sources.yaml
+  - texts: texts.jsonl
