@@ -1978,7 +1978,7 @@ declare
 begin
     who := rbac.require('canvas', case when p_action='read' then 'read' else 'write' end);
     p_user := who::text;
-    if p_action not in ('open','read','query','view','touch','consume','close') then
+    if p_action not in ('open','read','query','present','view','touch','consume','close') then
         raise exception 'Unknown canvas action';
     end if;
     -- Serialize open as well as updates; one active session per account, even across two processes.
@@ -2006,9 +2006,26 @@ begin
        and (not p_body ? 'known_session' or p_body->>'known_session'=s.id::text) then
         return jsonb_build_object('session',s.id,'version',ver,'unchanged',true,'status',s.status);
     end if;
-    if p_action='query' then
+    if p_action in ('query','present') then
         q := p_body->>'query';
-        if q='workflow_runs' then
+        if p_action='present' then
+            -- The caller submits a result read separately under its own role. Never
+            -- execute caller SQL inside this SECURITY DEFINER function.
+            rows := p_body->'rows'; cols := p_body->'columns'; q := 'sql';
+            if jsonb_typeof(rows) is distinct from 'array' or jsonb_typeof(cols) is distinct from 'array' then
+                raise exception 'A result needs rows and columns arrays';
+            end if;
+            if jsonb_array_length(rows)>500 or jsonb_array_length(cols)>50 or octet_length(p_body::text)>48000 then
+                raise exception 'Canvas result exceeds 500 rows, 50 columns or 48KB; narrow the query';
+            end if;
+            if exists(select 1 from jsonb_array_elements(cols) c where jsonb_typeof(c)<>'string')
+               or exists(select 1 from jsonb_array_elements(rows) r where jsonb_typeof(r)<>'object') then
+                raise exception 'Columns must be names and rows must be objects';
+            end if;
+            if exists(select 1 from jsonb_array_elements(rows) r, lateral jsonb_object_keys(r) k where not cols ? k) then
+                raise exception 'A row contains an undeclared column';
+            end if;
+        elsif q='workflow_runs' then
             cols := '["status","runs"]';
             select coalesce(jsonb_agg(to_jsonb(a)), '[]') into rows from (
                 select r.status,count(*) as runs from workflow.runs r
@@ -2028,6 +2045,8 @@ begin
         insert into workflow.runs(workflow_def_id,owner_id,input,status,completed_at)
           values(def,who,jsonb_build_object('user_id',p_user,'session',s.id,'query',q),'succeeded',now()) returning id into turn;
         result := jsonb_build_object('id',turn,'columns',cols,'rows',rows,'query',q,'created_at',t);
+        if p_action='present' then result := result || jsonb_build_object('source',jsonb_build_object(
+          'kind','caller_supplied_result','statement',left(p_body->>'statement',12000),'received_at',t)); end if;
         insert into workflow.tasks(run_id,step_key,queue,status,output,completed_at) values
           (turn,'intent','workspace-canvas','succeeded',jsonb_build_object('caption',left(coalesce(p_body->>'caption',q),300)),now()),
           (turn,'query','workspace-canvas','succeeded',result,now()),
@@ -2039,7 +2058,7 @@ begin
           where d.name='workspace-canvas-turn' and r.owner_id=who and r.input->>'user_id'=p_user and r.input->>'session'=s.id::text
             and a.step_key='query' and a.run_id::text=coalesce(p_body->>'result_set',v->'result'->>'id');
         if result is null then raise exception 'Result set not found in this session'; end if;
-        if p_body->>'control' not in ('table','cards','plot') or p_body->>'control' is null then raise exception 'Choose table, cards or plot'; end if;
+        if p_body->>'control' not in ('table','cards','plot','graph') or p_body->>'control' is null then raise exception 'Choose table, cards, plot or graph'; end if;
         select e into selected from jsonb_array_elements(s.context->'touches') e
           where e->>'kind'='selection' and e->>'result_set'=result->>'id'
           order by (e->>'seq')::bigint desc limit 1;
@@ -2060,11 +2079,24 @@ begin
                 raise exception 'Scatter needs a numeric x column';
             end if;
         end if;
+        if p_body->>'control'='graph' then
+            x := coalesce(p_body->'options'->>'source',case when result->'columns' ? 'source' then 'source' end);
+            y := coalesce(p_body->'options'->>'target',case when result->'columns' ? 'target' then 'target' end);
+            if x is null or y is null or x=y or not result->'columns' ? x or not result->'columns' ? y then
+                raise exception 'Graph needs source and target columns';
+            end if;
+            if exists(select 1 from jsonb_array_elements(result->'rows') r where
+              jsonb_typeof(r->x) not in ('string','number') or jsonb_typeof(r->y) not in ('string','number')
+              or r->x is null or r->y is null) then raise exception 'Graph endpoints must be non-null names or numbers';end if;
+            if p_body->'options'->>'relation' is not null and not result->'columns' ? (p_body->'options'->>'relation') then
+              raise exception 'Unknown relationship column';end if;
+        end if;
         select id into def from workflow.definitions where name='workspace-canvas-turn' and version=1;
         insert into workflow.runs(workflow_def_id,owner_id,input,status,completed_at)
           values(def,who,jsonb_build_object('user_id',p_user,'session',s.id,'result_set',result->>'id'),'succeeded',now()) returning id into turn;
         v := jsonb_build_object('result',result,'control',p_body->>'control','caption',coalesce(p_body->>'caption',v->>'caption',result->>'query'),
-          'options',jsonb_build_object('x',x,'y',y,'form',form,'rows',coalesce(selected->'rows','[]'::jsonb)),
+          'options',jsonb_build_object('x',x,'y',y,'form',form,'source',case when p_body->>'control'='graph' then x end,
+            'target',case when p_body->>'control'='graph' then y end,'relation',p_body->'options'->>'relation','rows',coalesce(selected->'rows','[]'::jsonb)),
           'selection_used',selected,'turn',turn);
         insert into workflow.tasks(run_id,step_key,queue,status,output,completed_at) values
           (turn,'intent','workspace-canvas','succeeded',jsonb_build_object('caption',v->>'caption'),now()),
@@ -2079,9 +2111,19 @@ begin
             if exists(select 1 from jsonb_array_elements_text(p_body->'rows') r where r !~ '^[0-9]+$' or length(r)>3) then raise exception 'Invalid row'; end if;
             if exists(select 1 from jsonb_array_elements_text(p_body->'rows') r where r::int>=jsonb_array_length(v->'result'->'rows')) then raise exception 'Unknown row'; end if;
         end if;
+        if p_body ? 'nodes' then
+            if jsonb_typeof(p_body->'nodes') is distinct from 'array' then raise exception 'Nodes must be an array';end if;
+            if jsonb_array_length(p_body->'nodes')>150 then raise exception 'Too many selected nodes';end if;
+            x:=coalesce(v->'options'->>'source','source');y:=coalesce(v->'options'->>'target','target');
+            if exists(select 1 from jsonb_array_elements(p_body->'nodes') node_value where jsonb_typeof(node_value)<>'string')
+               or exists(select 1 from jsonb_array_elements_text(p_body->'nodes') node_value where not exists(
+                 select 1 from jsonb_array_elements(v->'result'->'rows') r where r->>x=node_value or r->>y=node_value)) then
+                raise exception 'Unknown selected node';
+            end if;
+        end if;
         n := jsonb_array_length(s.context->'touches')+1;
         event := jsonb_build_object('seq',n,'at',t,'kind',p_body->>'kind','result_set',v->'result'->>'id',
-          'columns',coalesce(p_body->'columns','[]'::jsonb),'rows',coalesce(p_body->'rows','[]'::jsonb));
+          'columns',coalesce(p_body->'columns','[]'::jsonb),'rows',coalesce(p_body->'rows','[]'::jsonb),'nodes',coalesce(p_body->'nodes','[]'::jsonb));
         s.context := jsonb_set(s.context,'{touches}',(s.context->'touches') || jsonb_build_array(event));
         if p_body->>'kind'='selection' then s.context:=jsonb_set(s.context,'{selection}',event); end if;
     elsif p_action='consume' then
@@ -2103,8 +2145,8 @@ begin
         update workflow.runs set status='succeeded',completed_at=now() where id=s.id;
         s.status:='succeeded';
     end if;
-    if p_action in ('query','view') then s.context:=jsonb_set(s.context,'{view}',v); end if;
-    if p_action in ('query','view','touch','close') or (p_action='consume' and event is not null) then
+    if p_action in ('query','present','view') then s.context:=jsonb_set(s.context,'{view}',v); end if;
+    if p_action in ('query','present','view','touch','close') or (p_action='consume' and event is not null) then
         ver:=ver+1;
         s.context:=jsonb_set(s.context,'{version}',to_jsonb(ver));
     end if;
