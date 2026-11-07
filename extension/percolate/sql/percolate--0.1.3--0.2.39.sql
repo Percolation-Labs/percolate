@@ -16444,7 +16444,7 @@ begin
         q := p_body->>'query';
         if p_action='present' then
             -- The caller submits a result read separately under its own role. Never
-            -- execute caller SQL inside this SECURITY DEFINER function.
+            -- run caller SQL inside this SECURITY DEFINER function.
             rows := p_body->'rows'; cols := p_body->'columns'; q := 'sql';
             if jsonb_typeof(rows) is distinct from 'array' or jsonb_typeof(cols) is distinct from 'array' then
                 raise exception 'A result needs rows and columns arrays';
