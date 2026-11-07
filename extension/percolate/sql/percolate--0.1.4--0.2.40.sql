@@ -43842,12 +43842,16 @@ create or replace function aiq.walk_requests(p_run uuid, p_decider text default 
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    st  jsonb := aiq.walk_state(p_run);
+    st  jsonb;
     d   claims.deciders;
 begin
-    if (st->>'offline')::boolean then
+    -- offline from the run's input, before the state: an offline walk's judge step asks nothing, and building the
+    -- state first was a quarter of a second of every QASPER round (walk_target_requests and walk_stack_requests
+    -- already ask first)
+    if coalesce(((select input from aiq.walk_run(p_run))->>'offline')::boolean, false) then
         return;
     end if;
+    st := aiq.walk_state(p_run);
     select * into d from claims.deciders where name = p_decider;
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
