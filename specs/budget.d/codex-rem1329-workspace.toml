@@ -1,3 +1,0 @@
-why = "One caller-scoped canvas RPC shares saved results, views and selection audit through existing workflow rows; replaces proprietary application dependency without adding tables."
-[added]
-functions = ["workflow.canvas"]
