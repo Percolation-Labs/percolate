@@ -886,6 +886,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('claims','function','claims.facts_to_embed','text,integer','specs/claims/schema.sql §10a3: the current facts a model''s space has no vector for, as an embed matrix''s rows (REM-996)'),
 ('claims','function','claims.edge_readable','uuid','specs/claims/schema.sql §10a3: whether the caller may read a fact, stated for definers in the terms of aiq.edges'' own policy; research/38 compares the two (REM-996)'),
 ('claims','table','claims.deciders',null,'specs/claims/schema.sql §10a3: the typed-decision services the claims graph may ask, readable so a workflow author can name one (REM-996)'),
+('claims','function','claims.default_decider','','specs/claims/schema.sql §10a3: the decider this deployment decides with, from the percolate.decider setting (P8_DECIDER), else jev; readable so a workflow author can name it'),
+('claims','function','aiq.judgements_for_decider','text,integer','specs/claims/schema.sql §10a'': the open bind cases the caller may see, as the decider''s requests; a judge_with_<decider> run reads it as its owner (P8_DECIDER)'),
 ('claims','view','claims.fact_texts',null,'specs/claims/schema.sql §10a3: a remembered fact as words, read through aiq.edges'' own policy (REM-996)'),
 ('claims','function','claims.rests_on','uuid,timestamptz','specs/claims/graph.md §6: what a claim depends on through confirmed supports and motivates, as paths (REM-475)'),
 ('claims','function','claims.challenged_through','uuid,timestamptz','specs/claims/graph.md §6: challenges aimed at what a claim rests on, as paths, never as a challenge to the claim (REM-475)'),
