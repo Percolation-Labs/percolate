@@ -1,3 +1,0 @@
-why = "A walk's start trusts a kept graph built at the current links counter instead of reading every link in scope to check it (6 to 8 s over QASPER's 7.3 million links; Sirsh, 7 Nov 2026: a walk stands in for an LLM iteration and has seconds). aiq.walk_links_epoch_now reads the counter, a sequence; aiq.walk_links_bump is the statement trigger on aiq.edges that moves it when a statement writes a walk link. Nothing held when a scope's links last changed short of reading them all: walk_graph_version is that read, and stays as the fallback."
-[added]
-functions = ["aiq.walk_links_epoch_now", "aiq.walk_links_bump"]
