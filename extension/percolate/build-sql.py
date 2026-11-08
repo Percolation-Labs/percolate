@@ -232,8 +232,8 @@ REPLAYED_DML = {
         (1, "the three shipped relations a resource's tag and question links and a tag's duals are edges under "
             "(REM-1144); do update on conflict, so a corrected description reaches every deployment"),
     ("claims/schema.sql", "insert claims.deciders"):
-        (1, "the shipped Jev decider row (REM-996), do nothing on conflict, so a deployment's own endpoint "
-            "or credential name is never overwritten"),
+        (1, "the shipped decider rows, Jev (REM-996) and the local stand-in (P8_DECIDER), do nothing on "
+            "conflict, so a deployment's own endpoint or credential name is never overwritten"),
     ("world-model-ingestion/integration.sql", "update aiq.lexical_sources"):
         (1, "the shipped chunks source's owning node (REM-1273): chunks belong to their resource's document, "
             "a fact of this extension's own schema that no deployment sets otherwise"),

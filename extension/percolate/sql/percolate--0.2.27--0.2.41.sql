@@ -32105,6 +32105,17 @@ begin
         'promotion_refused', v_refused,
         'soft_left_for_a_judge', v_left,
         'queued_for_a_judge', v_queued);
+    -- 4. THE CONFIGURED DECIDER TAKES WHAT IT CAN (P8_DECIDER). When the
+    --    deployment names one, each person with open cases gets a run that asks
+    --    it and decides as them, through the judge's own calls; what it is not
+    --    sure of goes to the person. Never fatal: dream's own work is done.
+    if nullif(btrim(current_setting('percolate.decider', true)), '') is not null then
+        begin
+            v_receipt := v_receipt || jsonb_build_object('decider', aiq.judge_with_decider());
+        exception when others then
+            v_receipt := v_receipt || jsonb_build_object('decider', jsonb_build_object('error', sqlerrm));
+        end;
+    end if;
     -- Only when something was refused, so a clean run's receipt is unchanged.
     if v_refused > 0 then
         v_receipt := v_receipt || jsonb_build_object('refusals', v_why);
@@ -32128,7 +32139,10 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- model into aiq.promote_soft_node. Percolate runs on the person's own AI, so
 -- the case waits HERE, the way a review request waits for a connected agent,
 -- and nothing decides it until a judge does. A configured model is a judge
--- behind the same calls (tier 'llm' or 'decision_model'), not a default.
+-- behind the same calls (tier 'llm' or 'decision_model'), not a default: it
+-- judges only when the deployment names one (percolate.decider, P8_DECIDER),
+-- as each person, seeing what they may see, and what it is not sure of it
+-- passes to them (aiq.judge_with_decider, specs/claims/schema.sql).
 --
 -- `evidence` is what a judge needs that it could not otherwise ask for: the
 -- name, the kind it claimed, and up to five candidates a trigram match
@@ -32351,8 +32365,12 @@ $$;
 
 -- THE GUARD: the moves a judge may make by UPDATE, and nothing else. Runs as
 -- the caller, so "the target is a candidate you can see" is the caller's own
--- policy answering. The engine (any role but authenticated) is not guarded:
--- dream and the apply trigger below write as the owner.
+-- policy answering. The engine is not guarded: dream and the apply trigger
+-- below write as the owner. api_viewer IS guarded (P8_DECIDER): it is the role
+-- a workflow step becomes when it acts for a person, and it holds what a
+-- signed-in person holds, so a step could otherwise move a judgement past every
+-- rule here. aiq.land_decider_judgements decides through that role, as the run's
+-- owner, and is held to the same rules as the person's own agent.
 --
 -- Leases are clock time, not transaction time: now() stands still for a whole
 -- transaction, so a lease measured by it could not lapse inside one.
@@ -32361,7 +32379,7 @@ returns trigger language plpgsql set search_path = pg_catalog, public as $$
 declare
     v_uid uuid := rbac.current_user_id(); v_live boolean; v_dec text;
 begin
-    if current_user <> 'authenticated' then
+    if current_user not in ('authenticated', 'api_viewer') then
         return new;
     end if;
     if v_uid is null then
@@ -39815,15 +39833,38 @@ $$;
 -- decider's model from claims.deciders, so the workflow carries no model of its own to disagree with.
 create table if not exists claims.deciders (
     name           text primary key,
-    endpoint       text not null check (endpoint ~ '^https://'),
+    endpoint       text not null,
     model          text not null,
     credential_ref text not null
 );
 comment on table claims.deciders is
     'A typed-decision service the claims graph may ask to choose among options. A row is the configuration; the key is the worker''s, by name.';
+-- HTTPS, OR PLAIN HTTP TO THIS MACHINE (P8_DECIDER). A stand-in decision model runs on the reader's own machine, where
+-- there is no certificate to present, and the worker reaches it as host.docker.internal or localhost. Only those three
+-- names: a decider anywhere else is reached over https. The row alone sends nothing: the worker refuses an address on
+-- its own network unless the operator names the endpoint in P8_TEMPLATE_ENV, and sends the credential only where
+-- P8_CREDENTIAL_ORIGINS binds it, so a production deployment that names neither stays https-only.
+alter table claims.deciders drop constraint if exists deciders_endpoint_check;
+alter table claims.deciders add constraint deciders_endpoint_check
+    check (endpoint ~ '^https://' or endpoint ~ '^http://(localhost|127\.0\.0\.1|host\.docker\.internal)(:[0-9]+)?/');
+-- Two deciders ship. Jev, and the stand-in: any service on this machine that answers Jev's request (a state and typed
+-- questions) with probabilities, as get-percolate's standin/standin.py does with Claude or an OpenAI-compatible model.
 insert into claims.deciders (name, endpoint, model, credential_ref)
-values ('jev', 'https://api.typesafe.ai/v1/systemone', 'jev-1.13.0', 'JEV_API_KEY')
+values ('jev', 'https://api.typesafe.ai/v1/systemone', 'jev-1.13.0', 'JEV_API_KEY'),
+       ('standin', 'http://host.docker.internal:8790/v1/decide', 'standin', 'STANDIN_API_KEY')
 on conflict (name) do nothing;
+
+-- WHICH DECIDER, SAID ONCE (P8_DECIDER). The database setting percolate.decider names the claims.deciders row this
+-- deployment decides with: get-percolate's compose sets it from P8_DECIDER in .env, as `-c percolate.decider=...` on
+-- the server, and any other deployment says `alter database ... set percolate.decider = 'standin'`. Every install
+-- function that binds a workflow to a decider defaults to it, and when it is set, aiq.dream hands the judgement queue
+-- to it (aiq.judge_with_decider). Unset, the install functions default to jev, as they always did, and the queue
+-- waits for an agent or a person.
+create or replace function claims.default_decider() returns text
+language sql stable set search_path = pg_catalog, public as $$
+    select coalesce(nullif(btrim(current_setting('percolate.decider', true)), ''), 'jev');
+$$;
+grant execute on function claims.default_decider() to authenticated;
 -- Configuration every caller may read (it names services and a credential's name, never a secret), under a
 -- policy that says so, because a readable table with none is refused (rbac/05).
 alter table claims.deciders enable row level security;
@@ -39862,7 +39903,7 @@ grant execute on function claims.fact_said(uuid, int) to authenticated;
 
 -- The return type grew valid_from and said (REM-1325), which create or replace cannot change.
 drop function if exists claims.facts_to_link(text, text, int, int);
-create or replace function claims.facts_to_link(p_model text, p_decider text default 'jev', p_k int default 5,
+create or replace function claims.facts_to_link(p_model text, p_decider text default claims.default_decider(), p_k int default 5,
                                                 p_limit int default 100)
 returns table (edge_id uuid, fact text, valid_from timestamptz, said jsonb, candidates jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
@@ -39959,7 +40000,7 @@ revoke execute on function claims.land_bears_on(uuid) from public;
 
 -- The proposal step as a workflow: embed what the space lacks (questions and facts), offer each unlinked fact its
 -- nearest questions, ask the decider, and land what it chose. Refused, by name, when the decider is not configured.
-create or replace function claims.install_fact_question_workflow(p_model text, p_decider text default 'jev',
+create or replace function claims.install_fact_question_workflow(p_model text, p_decider text default claims.default_decider(),
                                                                  p_name text default 'link_facts_to_questions')
 returns text
 language plpgsql set search_path = pg_catalog, public as $$
@@ -40072,7 +40113,7 @@ begin
                                                from jsonb_each(f.candidates) c
                                               where claims.question_readable((c.value->>'id')::uuid))),
            'claims.queue_link_judgements:' || v_uid
-      from claims.facts_to_link(p_model, 'jev', p_k) f
+      from claims.facts_to_link(p_model, claims.default_decider(), p_k) f
      where claims.edge_readable(f.edge_id)
        and not exists (select 1 from aiq.judgements j
                         where j.kind = 'link' and j.subject_node_id = f.edge_id
@@ -40085,6 +40126,263 @@ end;
 $$;
 revoke all on function claims.queue_link_judgements(text, int) from public;
 grant execute on function claims.queue_link_judgements(text, int) to authenticated;
+
+-- ------------------------------------------------------------
+-- 10a'. THE CONFIGURED DECIDER AS A JUDGE (P8_DECIDER). Percolate decides with a decision model wherever one can
+--       decide, in the data tier: the walk's leads, a fact's question, and now the judgement queue dream leaves. A
+--       bind case is put to the decider named by percolate.decider as one Jev request, and what it answers is
+--       decided through the judge's own calls -- aiq.claim_judgement and aiq.complete_judgement, tier
+--       decision_model -- as the person whose case it is, under their row policy and the guard their own agent
+--       meets. What it is sure of it decides; what it is not sure of goes to the person (to_human); what it did not
+--       answer (a refusal, an account with no credit, a service that is down) stays open, with nothing written, for
+--       the next run or for an agent. No table: the request and the answer are the run's tasks.
+--
+--       WHO IT DECIDES AS. A case is seen through its subject node, so each run is its subject's owner's: the
+--       platform starts it on their behalf (workflow.claims_as, actor platform), and the model sees exactly what
+--       they could see. Only the platform records a decision_model verdict (judgements_guard, REM-1123), so the
+--       landing refuses a run the platform did not start, and an answer from anywhere but the decider's endpoint.
+--       A case whose subject has no owner -- a shared node -- is left for a person.
+-- ------------------------------------------------------------
+
+-- Each open bind case the caller can see, as the decider's request: the name, the kind it was claimed as, what was
+-- said about it and about each candidate (aiq.judgement_for_judge, read as the caller), and one choice -- which
+-- candidate it is, none of them, or cannot tell from what was said. SECURITY INVOKER: a run's matrix reads it as the
+-- run's owner.
+create or replace function aiq.judgements_for_decider(p_decider text default claims.default_decider(),
+                                                      p_limit int default 50)
+returns table (judgement_id uuid, label text, candidates jsonb, body jsonb)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+    d claims.deciders;
+begin
+    select * into d from claims.deciders where name = p_decider;
+    if not found then
+        raise no_data_found using message = format('no decider named %s is configured', coalesce(p_decider, '(none)')),
+            hint = 'insert a row into claims.deciders: its endpoint, model and the worker credential it calls with';
+    end if;
+    return query
+    select j.id, coalesce(ev->>'label', ev->>'key'), c.candidates,
+           jsonb_build_object(
+               'model', d.model,
+               'state', jsonb_build_object(
+                   'name', coalesce(ev->>'label', ev->>'key'),
+                   'named_as', ev->>'claimed_kind',
+                   'said', (select coalesce(jsonb_agg(concat_ws(': ', x->>'relation' || ' ' || (x->>'other'), x->>'said')),
+                                            '[]'::jsonb)
+                              from jsonb_array_elements(coalesce(ev->'said', '[]'::jsonb)) x),
+                   'candidates', c.shown),
+               'questions', jsonb_build_object('same', jsonb_build_object(
+                   'type', 'choice',
+                   'instructions', 'Is `name`, named as a `named_as`, the same real-world thing as one of `candidates`? '
+                                   '`said` is what was said about it, and each candidate''s `said` what was said about '
+                                   'that one. Answer from what was said, not from the names alone.',
+                   'criteria', c.options || jsonb_build_object(
+                       'none_of_these', 'A different thing from every candidate.',
+                       'cannot_tell', 'What was said is not enough to tell.'))))
+      from aiq.judgements j
+      cross join lateral (select aiq.judgement_for_judge(j.id)->'evidence' as ev) e
+      cross join lateral (
+          select jsonb_object_agg(k.key, jsonb_build_object('node_id', k.c->>'node_id', 'summary', k.c->>'summary'))
+                     as candidates,
+                 jsonb_object_agg(k.key, jsonb_build_object(
+                     'name', coalesce(k.c->>'summary', k.c->>'key'),
+                     -- a soft candidate's kind is the one its extractor claimed: its own, or the case's
+                     'kind', case when k.c->>'entity_type' = 'soft'
+                                  then coalesce(substring(k.c->>'candidate' from 'claimed as (.*)$'), ev->>'claimed_kind')
+                                  else k.c->>'entity_type' end,
+                     'said', (select coalesce(jsonb_agg(concat_ws(': ', x->>'relation' || ' ' || (x->>'other'), x->>'said')),
+                                              '[]'::jsonb)
+                                from jsonb_array_elements(coalesce(k.c->'said', '[]'::jsonb)) x))) as shown,
+                 jsonb_object_agg(k.key, format('The same thing as candidate %s, %s.', k.key,
+                                                coalesce(k.c->>'summary', k.c->>'key'))) as options
+            from (select 'c' || o.n as key, o.c
+                    from jsonb_array_elements(coalesce(ev->'candidates', '[]'::jsonb)) with ordinality o(c, n)) k) c
+     where j.kind = 'bind' and j.status = 'open' and c.candidates is not null
+     order by j.queued_at
+     limit least(greatest(coalesce(p_limit, 50), 1), 200);
+end;
+$$;
+grant execute on function aiq.judgements_for_decider(text, int) to authenticated;
+
+-- The landing: each answered case decided through the judge's calls, as the run's owner and as the platform, one
+-- savepoint each, so a case somebody else holds or has decided is passed over and the rest still land. The bar is
+-- the step's: a bind merges two things' facts, so it lands only at or above it, as does a none of these, which is
+-- recorded against every candidate; anything below it, or cannot tell, goes to the person. 0.85 by default, and it
+-- is NOT a calibration: on the Zep tour's four cases (8 November) the Claude stand-in gave the two company and
+-- organization twins 0.85 and 0.88 and the two A. Costa twins 0.72 and 0.80, and a bind is the costlier mistake.
+-- Measure it per decider and per wording before relying on it, as decide.py says of Jev's thresholds.
+create or replace function aiq.land_decider_judgements(p_matrix_task uuid, p_decider text, p_bar real)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_run    uuid := workflow.assert_task_in_current_run(p_matrix_task);
+    r        workflow.runs;
+    d        claims.deciders;
+    v_was    text;
+    c        record;
+    v_key    text;
+    v_p      real;
+    v_dec    jsonb;
+    v_reason text;
+    v_got    jsonb;
+    v_cases  jsonb := '[]'::jsonb;
+    n_dec    int := 0;
+    n_human  int := 0;
+    n_open   int := 0;
+    n_passed int := 0;
+begin
+    select * into r from workflow.runs where id = v_run;
+    select * into d from claims.deciders where name = p_decider;
+    if not found then
+        raise no_data_found using message = format('no decider named %s is configured', coalesce(p_decider, '(none)'));
+    end if;
+    if r.owner_id is null or r.started_actor is distinct from 'platform' then
+        raise insufficient_privilege using
+            message = 'a decider''s verdicts land only in a run the platform started for the person whose cases they are',
+            hint = 'aiq.judge_with_decider starts one; a person or their agent decides with aiq.complete_judgement';
+    end if;
+    if p_bar is null or p_bar <= 0.5 or p_bar > 1 then
+        raise invalid_parameter_value using message = format('the bar is above 0.5 and at most 1, not %s', p_bar);
+    end if;
+    v_was := workflow.claims_as(r.owner_id, 'platform', null);
+    for c in
+        select ch.status, ch.input->'item' as item, ch.input->>'url' as url,
+               ch.output->'result'->'answers'->'same' as answer, ch.output->'result'->>'model' as model,
+               left(coalesce(ch.error->>'error', ch.output->>'error'), 200) as error
+          from workflow.tasks ch
+         where ch.matrix_parent_id = p_matrix_task
+         order by ch.created_at
+    loop
+        if c.status <> 'succeeded' or c.answer is null then
+            n_open := n_open + 1;
+            v_cases := v_cases || jsonb_build_object('judgement', c.item->>'judgement_id', 'label', c.item->>'label',
+                                                     'left', 'open', 'because', coalesce(c.error, c.status));
+            continue;
+        end if;
+        if c.url is distinct from d.endpoint then
+            raise insufficient_privilege using
+                message = format('an answer from %s is not %s''s: only the decider''s endpoint decides', c.url, p_decider);
+        end if;
+        select k, v::real into v_key, v_p
+          from jsonb_each_text(coalesce(c.answer->'probabilities', '{}'::jsonb)) x(k, v)
+         order by v::real desc, k limit 1;
+        v_reason := format('%s chose %s with P %s (%s)', coalesce(c.model, d.model),
+                           coalesce(c.item->'candidates'->v_key->>'summary', v_key), round(coalesce(v_p, 0)::numeric, 2),
+                           (select string_agg(format('%s %s', x.key, round(x.value::numeric, 2)), ', ' order by x.value::numeric desc)
+                              from jsonb_each_text(coalesce(c.answer->'probabilities', '{}'::jsonb)) x));
+        v_dec := case
+            when v_p >= p_bar and c.item->'candidates' ? v_key
+                then jsonb_build_object('decision', 'bind', 'target', c.item->'candidates'->v_key->>'node_id')
+            when v_p >= p_bar and v_key = 'none_of_these' then jsonb_build_object('decision', 'distinct')
+            else jsonb_build_object('decision', 'human') end;
+        begin
+            perform workflow.execute_as_viewer(
+                'select aiq.claim_judgement(p_id => ($1->>''id'')::uuid, p_lease => interval ''5 minutes'') as c',
+                false, jsonb_build_object('id', c.item->>'judgement_id'));
+            v_got := workflow.execute_as_viewer(
+                'select aiq.complete_judgement(($1->>''id'')::uuid, $1->''verdict'', $1->>''reason'', ''decision_model'') as r',
+                false, jsonb_build_object('id', c.item->>'judgement_id', 'verdict', v_dec, 'reason', v_reason))->0->'r';
+            if v_got->>'status' = 'to_human' then
+                n_human := n_human + 1;
+            else
+                n_dec := n_dec + 1;
+            end if;
+            v_cases := v_cases || jsonb_build_object('judgement', c.item->>'judgement_id', 'label', c.item->>'label',
+                                                     'decision', v_dec->>'decision', 'status', v_got->>'status',
+                                                     'reason', v_reason);
+        exception when others then
+            n_passed := n_passed + 1;
+            v_cases := v_cases || jsonb_build_object('judgement', c.item->>'judgement_id', 'label', c.item->>'label',
+                                                     'passed_over', sqlerrm);
+        end;
+    end loop;
+    perform set_config('request.jwt.claims', v_was, true);
+    return jsonb_build_object('decider', p_decider, 'model', d.model, 'bar', p_bar, 'decided', n_dec,
+                              'to_human', n_human, 'left_open', n_open, 'passed_over', n_passed, 'cases', v_cases);
+end;
+$$;
+select workflow.register_step_function(
+    'land_decider_judgements', 'aiq.land_decider_judgements', array['uuid', 'text', 'real'], 120000,
+    'Decide the judgements a matrix of decider answers settles, as the run''s owner; pass the rest to them');
+revoke execute on function aiq.land_decider_judgements(uuid, text, real) from public;
+
+-- The judge as a workflow: ask the decider about each open case, then land what it answered. Refused, by name, when
+-- the decider is not configured. Installed by aiq.judge_with_decider on first use; an operator may install it with
+-- another bar.
+create or replace function aiq.install_judge_workflow(p_decider text default claims.default_decider(),
+                                                      p_bar real default 0.85)
+returns text
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    d      claims.deciders;
+    v_name text;
+begin
+    select * into d from claims.deciders where name = p_decider;
+    if not found then
+        raise no_data_found using message = format('no decider named %s is configured', coalesce(p_decider, '(none)')),
+            hint = 'insert a row into claims.deciders: its endpoint, model and the worker credential it calls with';
+    end if;
+    if p_decider !~ '^[a-z0-9_]+$' then
+        raise invalid_parameter_value using message = format('a decider that judges the queue is named in lower case, digits and _, not %s', p_decider);
+    end if;
+    v_name := 'judge_with_' || p_decider;
+    perform workflow.define_yaml(workflow.inline_mode_line() || E'\n' || format($y$
+name: %1$s
+steps:
+  - id: ask
+    matrix:
+      rows: "select judgement_id, label, candidates, body from aiq.judgements_for_decider('%2$s')"
+      max_fanout: 200
+      continue_on: failed
+      template:
+        rest:
+          url: %3$s
+          method: POST
+          credential_ref: %4$s
+          body: '{{item.body}}'
+  - id: land
+    needs: [ask]
+    sql: {function: land_decider_judgements, args: ['{{steps.ask.result.task_id}}', '%2$s', '%5$s']}
+$y$, v_name, p_decider, d.endpoint, d.credential_ref, p_bar));
+    return format('%s: the judgement queue, put to %s, decided at P >= %s', v_name, p_decider, p_bar);
+end;
+$$;
+revoke all on function aiq.install_judge_workflow(text, real) from public;
+
+-- One run per person with open bind cases and no run already asking, each started by the platform as them. dream
+-- calls it when percolate.decider is set; an operator may call it at any time. Returns the runs it started.
+create or replace function aiq.judge_with_decider(p_decider text default claims.default_decider())
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_name  text := 'judge_with_' || p_decider;
+    v_owner uuid;
+    v_was   text;
+    v_runs  jsonb := '[]'::jsonb;
+begin
+    if (workflow.current_definition(v_name)).id is null then
+        perform aiq.install_judge_workflow(p_decider);
+    end if;
+    for v_owner in
+        select distinct n.owner_id
+          from aiq.judgements j join aiq.nodes n on n.id = j.subject_node_id
+         where j.kind = 'bind' and j.status = 'open' and n.owner_id is not null
+           and not exists (select 1 from workflow.runs wr join workflow.definitions wd on wd.id = wr.workflow_def_id
+                            where wd.name = v_name and wr.owner_id = n.owner_id and wr.status in ('pending', 'running'))
+    loop
+        v_was := workflow.claims_as(v_owner, 'platform', null);
+        begin
+            v_runs := v_runs || jsonb_build_object('for', v_owner,
+                                                   'run', workflow.start_workflow(v_name, jsonb_build_object('decider', p_decider)));
+        exception when others then
+            v_runs := v_runs || jsonb_build_object('for', v_owner, 'error', sqlerrm);
+        end;
+        perform set_config('request.jwt.claims', v_was, true);
+    end loop;
+    return jsonb_build_object('name', p_decider, 'runs', v_runs);
+end;
+$$;
+revoke all on function aiq.judge_with_decider(text) from public;
 
 -- ------------------------------------------------------------
 -- 10b. Origins (graph.md §3, REM-477). The study, dataset or document evidence descends from, as an entity keyed
@@ -43716,7 +44014,7 @@ $$;
 -- that the replay lacks. None when offline, or when the replay holds them all.
 -- Under walk.stack, every live lead against every open question it has not been judged against (REM-1245); each wave
 -- first runs the stack's own steps (assess, shape, stack: walk-stack.sql), which do nothing when the walk keeps none.
-create or replace function aiq.walk_requests(p_run uuid, p_decider text default 'jev')
+create or replace function aiq.walk_requests(p_run uuid, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
@@ -43828,7 +44126,7 @@ $$;
 -- The target step's rows (F8, walk.open_whole): each unread target of an accepted lead wider than open_whole, judged
 -- once on its own line against the question the lead serves (the root's words in a walk with no stack), keyed
 -- X|<question>|<message>, for the targets the run holds no verdict on. None when open_whole is off or the walk is offline.
-create or replace function aiq.walk_target_requests(p_run uuid, p_decider text default 'jev')
+create or replace function aiq.walk_target_requests(p_run uuid, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
@@ -44338,7 +44636,7 @@ $$;
 create or replace function aiq.walk_verdicts(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
+    select jsonb_build_object('model', (select model from claims.deciders where name = claims.default_decider()),
                               'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
                               -- the kept graph the verdicts were given on, so a replay can walk that graph (REM-1246)
                               -- search's order as the walk read it, so a replay reads the same documents (REM-1246)
@@ -44434,7 +44732,7 @@ drop function if exists aiq.install_walk_workflow(text, text, int);
 -- model when it has a provider. With none (a database whose vectors are
 -- written directly, as dev/init's demo space is), the workflow has no embed
 -- step, and walks a graph or a channel given its order.
-create or replace function aiq.install_walk_workflow(p_name text default 'walk', p_decider text default 'jev',
+create or replace function aiq.install_walk_workflow(p_name text default 'walk', p_decider text default claims.default_decider(),
                                                      p_waves int default 10, p_model text default null)
 returns text
 language plpgsql set search_path = pg_catalog, public as $$
@@ -45418,7 +45716,7 @@ $$;
 
 -- The assess and shape steps' rows: one Jev request per question (or parent) and 60 options, for the verdicts the run
 -- does not hold. None when the walk keeps no stack, or asks nobody.
-create or replace function aiq.walk_stack_requests(p_run uuid, p_phase text, p_decider text default 'jev')
+create or replace function aiq.walk_stack_requests(p_run uuid, p_phase text, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare

@@ -193,6 +193,17 @@ answer, and recording it as `llm` lost the distinction the column exists to make
 section used to say to add it with its first caller; that caller was an entity-resolution
 run that had to record a decision model's choices as `llm`.
 
+**The judgement queue's model judge records it (P8_DECIDER).** When a deployment names a
+decider in `percolate.decider` (get-percolate's `P8_DECIDER`: `jev`, or `standin` for a
+model on the reader's own machine), `aiq.dream` hands each person's open bind cases to it:
+`aiq.judge_with_decider` starts one run per subject owner, as the platform acting for that
+owner, and `aiq.land_decider_judgements` decides each answer through `claim_judgement` and
+`complete_judgement` at tier `decision_model`, under that person's row policy and the same
+guard their own agent meets. At or above the run's bar (0.85 by default, not calibrated) a
+choice binds or is recorded distinct; below it, or "cannot tell", the case goes to the
+person; a decider that did not answer (Jev's 402 with no credit) leaves it open with nothing
+written. A row's `decided_by` is `decision_model:<owner>`, the model deciding for them.
+
 **"Not the same" is a decision too, and `aiq.node_distinctions` records it.** A resolver
 that judges a candidate against a node and says no is making the commonest decision in
 entity resolution, and until 0.2.20 it had nowhere to put it: the next landing of the same

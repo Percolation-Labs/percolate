@@ -1972,6 +1972,17 @@ begin
         'promotion_refused', v_refused,
         'soft_left_for_a_judge', v_left,
         'queued_for_a_judge', v_queued);
+    -- 4. THE CONFIGURED DECIDER TAKES WHAT IT CAN (P8_DECIDER). When the
+    --    deployment names one, each person with open cases gets a run that asks
+    --    it and decides as them, through the judge's own calls; what it is not
+    --    sure of goes to the person. Never fatal: dream's own work is done.
+    if nullif(btrim(current_setting('percolate.decider', true)), '') is not null then
+        begin
+            v_receipt := v_receipt || jsonb_build_object('decider', aiq.judge_with_decider());
+        exception when others then
+            v_receipt := v_receipt || jsonb_build_object('decider', jsonb_build_object('error', sqlerrm));
+        end;
+    end if;
     -- Only when something was refused, so a clean run's receipt is unchanged.
     if v_refused > 0 then
         v_receipt := v_receipt || jsonb_build_object('refusals', v_why);
@@ -1995,7 +2006,10 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- model into aiq.promote_soft_node. Percolate runs on the person's own AI, so
 -- the case waits HERE, the way a review request waits for a connected agent,
 -- and nothing decides it until a judge does. A configured model is a judge
--- behind the same calls (tier 'llm' or 'decision_model'), not a default.
+-- behind the same calls (tier 'llm' or 'decision_model'), not a default: it
+-- judges only when the deployment names one (percolate.decider, P8_DECIDER),
+-- as each person, seeing what they may see, and what it is not sure of it
+-- passes to them (aiq.judge_with_decider, specs/claims/schema.sql).
 --
 -- `evidence` is what a judge needs that it could not otherwise ask for: the
 -- name, the kind it claimed, and up to five candidates a trigram match
@@ -2218,8 +2232,12 @@ $$;
 
 -- THE GUARD: the moves a judge may make by UPDATE, and nothing else. Runs as
 -- the caller, so "the target is a candidate you can see" is the caller's own
--- policy answering. The engine (any role but authenticated) is not guarded:
--- dream and the apply trigger below write as the owner.
+-- policy answering. The engine is not guarded: dream and the apply trigger
+-- below write as the owner. api_viewer IS guarded (P8_DECIDER): it is the role
+-- a workflow step becomes when it acts for a person, and it holds what a
+-- signed-in person holds, so a step could otherwise move a judgement past every
+-- rule here. aiq.land_decider_judgements decides through that role, as the run's
+-- owner, and is held to the same rules as the person's own agent.
 --
 -- Leases are clock time, not transaction time: now() stands still for a whole
 -- transaction, so a lease measured by it could not lapse inside one.
@@ -2228,7 +2246,7 @@ returns trigger language plpgsql set search_path = pg_catalog, public as $$
 declare
     v_uid uuid := rbac.current_user_id(); v_live boolean; v_dec text;
 begin
-    if current_user <> 'authenticated' then
+    if current_user not in ('authenticated', 'api_viewer') then
         return new;
     end if;
     if v_uid is null then
