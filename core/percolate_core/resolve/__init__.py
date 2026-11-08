@@ -111,6 +111,10 @@ async def resolve(spec: dict, ctx: dict | None = None, jev: Jev | None = None) -
     receipt = {"candidates": 0, "promoted": 0, "distinct": 0, "undecided": 0,
                "ambiguous": 0, "nothing_to_propose": 0, "not_written": 0, "pages": 0}
     own = jev is None
+    # THE DECIDER THE STEP NAMES, as a claims.deciders row (P8_DECIDER): the SQL that writes the step reads the
+    # row, since this worker may read no table. A step that names only a model keeps Jev's endpoint.
+    if jev is None and isinstance(spec.get("decider"), dict):
+        jev = Jev.for_decider(spec["decider"])
     jev = jev or Jev(spec.get("model") or MODEL)
     try:
         after = None

@@ -28,6 +28,16 @@ THE CREDENTIAL IS BOUND, LIKE EVERY OTHER. `JEV_API_KEY` is resolved through
 Passing `api_key=` directly skips that check, for callers that already hold
 the secret.
 
+ANY DECIDER THAT SPEAKS THIS FORMAT, NOT ONLY JEV (P8_DECIDER). The database
+names the deciders a deployment may ask in `claims.deciders` -- an endpoint, a
+model and the name of the credential to send -- and which one it decides with
+in the setting `percolate.decider` (get-percolate's P8_DECIDER). So the
+endpoint, the model and the credential's name are arguments, defaulting to
+Jev's, and `Jev.for_decider(row)` takes them from a row; `await
+Jev.configured(conn)` reads the row the database's setting names.
+get-percolate's standin/standin.py answers this format from Claude or an
+OpenAI-compatible model.
+
     jev = Jev()
     r = await jev.ask({"a": rec_a, "b": rec_b},
                       {"same": Noul("Do `a` and `b` name the same entity?")})
@@ -165,9 +175,9 @@ class Jev:
     """
 
     def __init__(self, model: str = MODEL, *, api_key: str | None = None,
-                 endpoint: str = ENDPOINT, concurrency: int = 16, retries: int = 3,
-                 timeout: float = 60.0, client: httpx.AsyncClient | None = None):
-        self.model, self.endpoint, self.retries = model, endpoint, retries
+                 endpoint: str = ENDPOINT, credential: str = CREDENTIAL, concurrency: int = 16,
+                 retries: int = 3, timeout: float = 60.0, client: httpx.AsyncClient | None = None):
+        self.model, self.endpoint, self.credential, self.retries = model, endpoint, credential, retries
         self._key = api_key
         self._gate = asyncio.Semaphore(concurrency)
         self._client = client
@@ -175,6 +185,30 @@ class Jev:
         # Running totals across every call on this client, for metering: Jev
         # bills input tokens, and a join's cost is its candidate count.
         self.requests = self.input_tokens = self.output_tokens = 0
+
+    @classmethod
+    def for_decider(cls, row: Mapping[str, Any], **kw: Any) -> "Jev":
+        """A client for one `claims.deciders` row: its endpoint, its model and the credential it names."""
+        missing = {"endpoint", "model", "credential_ref"} - set(row)
+        if missing:
+            raise ValueError(f"a decider row has endpoint, model and credential_ref; this one lacks {sorted(missing)}")
+        return cls(row["model"], endpoint=row["endpoint"], credential=row["credential_ref"], **kw)
+
+    @classmethod
+    async def configured(cls, conn: Any, name: str | None = None, **kw: Any) -> "Jev":
+        """The decider `name` names, or else the one the database's `percolate.decider` setting names.
+
+        `conn` is any connection that may read `claims.deciders` (every signed-in caller may). The name is
+        asked of the database rather than of this process's environment, so the one setting that picks the
+        decider for the workflows is the one that picks it here.
+        """
+        row = await conn.fetchrow(
+            "select endpoint, model, credential_ref from claims.deciders"
+            " where name = coalesce($1, claims.default_decider())", name)
+        if row is None:
+            raise TerminalError(f"no decider named {name or 'by percolate.decider'} is configured "
+                                "(claims.deciders)")
+        return cls.for_decider(dict(row), **kw)
 
     async def __aenter__(self) -> "Jev":
         return self
@@ -195,7 +229,7 @@ class Jev:
     async def ask(self, state: Any, questions: Mapping[str, Question]) -> Result:
         if not questions:
             raise ValueError("ask needs at least one question")
-        key = self._key or credential_for(CREDENTIAL, self.endpoint)
+        key = self._key or credential_for(self.credential, self.endpoint)
         body = {"model": self.model, "state": state,
                 "questions": {qid: q.wire() for qid, q in questions.items()}}
         async with self._gate:
