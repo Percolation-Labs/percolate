@@ -40490,7 +40490,7 @@ begin
                left(coalesce(ch.error->>'error', ch.output->>'error'), 200) as error
           from workflow.tasks ch
          where ch.matrix_parent_id = p_matrix_task
-         order by ch.created_at
+         order by nullif(substring(ch.step_key from '\[([0-9]+)\]$'), '')::int, ch.id
     loop
         if c.status <> 'succeeded' or c.answer is null then
             n_open := n_open + 1;
