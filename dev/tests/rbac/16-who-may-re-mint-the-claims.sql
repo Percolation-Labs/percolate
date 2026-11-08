@@ -58,6 +58,16 @@ insert into t16_declared values
  'caller carries no user (a worker completing the parent task), so the child is '
  'theirs and resolves its definition as them (REM-1121). Restored on both exit '
  'paths. Drops orgs, as execute_for does.'),
+('aiq.judge_with_decider(text)', 'sub, role, actor',
+ 'each owner of an open bind case, with actor platform, through workflow.claims_as, for the start of the '
+ 'judge_with_<decider> run alone (P8_DECIDER): the platform starts it on their behalf, so its cases are read '
+ 'as them and the landing may record a decision_model verdict. Restored after each start. Drops orgs, as '
+ 'execute_for does.'),
+('aiq.land_decider_judgements(uuid,text,real)', 'sub, role, actor',
+ 'the run''s owner, with actor platform, through workflow.claims_as, so each decision goes through '
+ 'claim_judgement and complete_judgement as them under their row policy (execute_as_viewer) at tier '
+ 'decision_model. Refused unless the platform started the run. Restored on return; an error fails the step, '
+ 'whose rollback takes the setting with it. Drops orgs, as execute_for does.'),
 ('aiq.render_facet_public(text)', 'role',
  'no user and not an operator: {"role":"web_anon"}, so a captured schema document holds '
  'only what a signed-out reader sees, never an operator''s view of private agents and '

@@ -1,0 +1,3 @@
+why = "P8_DECIDER: one setting names the decider (claims.default_decider), and the judgement queue dream leaves is put to it as a workflow whose rest step the worker already runs: the cases as Jev requests (aiq.judgements_for_decider), the landing through claim_judgement and complete_judgement as the case's owner (aiq.land_decider_judgements), its install (aiq.install_judge_workflow) and the platform's start of one run per owner (aiq.judge_with_decider). No table: a second claims.deciders row, and the run's tasks hold the requests and answers."
+[added]
+functions = ["claims.default_decider", "aiq.judgements_for_decider", "aiq.land_decider_judgements", "aiq.install_judge_workflow", "aiq.judge_with_decider"]

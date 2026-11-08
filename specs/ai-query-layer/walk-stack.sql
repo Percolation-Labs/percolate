@@ -500,7 +500,7 @@ $$;
 
 -- The assess and shape steps' rows: one Jev request per question (or parent) and 60 options, for the verdicts the run
 -- does not hold. None when the walk keeps no stack, or asks nobody.
-create or replace function aiq.walk_stack_requests(p_run uuid, p_phase text, p_decider text default 'jev')
+create or replace function aiq.walk_stack_requests(p_run uuid, p_phase text, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare

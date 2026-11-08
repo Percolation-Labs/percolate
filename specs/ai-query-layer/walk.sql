@@ -1314,7 +1314,7 @@ $$;
 -- that the replay lacks. None when offline, or when the replay holds them all.
 -- Under walk.stack, every live lead against every open question it has not been judged against (REM-1245); each wave
 -- first runs the stack's own steps (assess, shape, stack: walk-stack.sql), which do nothing when the walk keeps none.
-create or replace function aiq.walk_requests(p_run uuid, p_decider text default 'jev')
+create or replace function aiq.walk_requests(p_run uuid, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
@@ -1426,7 +1426,7 @@ $$;
 -- The target step's rows (F8, walk.open_whole): each unread target of an accepted lead wider than open_whole, judged
 -- once on its own line against the question the lead serves (the root's words in a walk with no stack), keyed
 -- X|<question>|<message>, for the targets the run holds no verdict on. None when open_whole is off or the walk is offline.
-create or replace function aiq.walk_target_requests(p_run uuid, p_decider text default 'jev')
+create or replace function aiq.walk_target_requests(p_run uuid, p_decider text default claims.default_decider())
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
@@ -1936,7 +1936,7 @@ $$;
 create or replace function aiq.walk_verdicts(p_run uuid)
 returns jsonb
 language sql stable security invoker set search_path = pg_catalog, public as $$
-    select jsonb_build_object('model', (select model from claims.deciders where name = 'jev'),
+    select jsonb_build_object('model', (select model from claims.deciders where name = claims.default_decider()),
                               'task', aiq.walk_task(st->'settings'->>'describe', (select created_at from aiq.walk_run(p_run))),
                               -- the kept graph the verdicts were given on, so a replay can walk that graph (REM-1246)
                               -- search's order as the walk read it, so a replay reads the same documents (REM-1246)
@@ -2032,7 +2032,7 @@ drop function if exists aiq.install_walk_workflow(text, text, int);
 -- model when it has a provider. With none (a database whose vectors are
 -- written directly, as dev/init's demo space is), the workflow has no embed
 -- step, and walks a graph or a channel given its order.
-create or replace function aiq.install_walk_workflow(p_name text default 'walk', p_decider text default 'jev',
+create or replace function aiq.install_walk_workflow(p_name text default 'walk', p_decider text default claims.default_decider(),
                                                      p_waves int default 10, p_model text default null)
 returns text
 language plpgsql set search_path = pg_catalog, public as $$
