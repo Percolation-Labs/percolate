@@ -36347,6 +36347,33 @@ comment on table research.publication_withdrawals is
     'A publication exposure that ended: the row as it stood, and who ended it when.';
 create index if not exists publication_withdrawals_by_work on research.publication_withdrawals (work_id);
 
+-- A SHARE LINK (REM-1332) lets anybody holding its token read one exact revision of a private work, without
+-- publishing or listing it: a writer shows a draft to one reader. The token is the capability, so it is kept here
+-- and read back only by its owner (the policy below), and it reaches a read as request.share_token, set by the
+-- application for that one transaction. A work has at most one live link. Sharing again moves that link to the
+-- revision named, so the address the reader holds keeps working; revoking ends it, and sharing after that makes a
+-- new token. A revoked row is kept, so who could read what, and until when, stays answerable.
+create table if not exists research.share_links (
+    id          uuid primary key default gen_random_uuid(),
+    work_id     uuid not null references research.works(id) on delete cascade,
+    revision_id uuid not null references research.revisions(id) on delete cascade,
+    owner_id    uuid not null references rbac.users(id) on delete cascade,
+    token       text not null unique check (token ~ '^[A-Za-z0-9_-]{32,}$'),
+    created_at  timestamptz not null default now(),
+    moved_at    timestamptz,
+    revoked_at  timestamptz
+);
+comment on table research.share_links is
+    'A secret link that lets its holder read one exact revision of a private work, until its owner revokes it.';
+create unique index if not exists share_links_one_live on research.share_links (work_id) where revoked_at is null;
+create index if not exists share_links_by_revision on research.share_links (revision_id) where revoked_at is null;
+
+-- The token this transaction presents, or null. Empty is none, so a pooled connection that reset it presents nothing.
+create or replace function research.presented_share() returns text
+language sql stable set search_path = pg_catalog, public as $$
+    select nullif(current_setting('request.share_token', true), '');
+$$;
+
 -- ERASURE IS THE ONE WAY HISTORY LEAVES (a documented privileged lifecycle). The row
 -- outlives the work it names, so it holds no foreign key: what was erased, by whom and why stays when the erased
 -- rows do not. `xact` is the transaction that erased it, and it is what research.refuse_rewrite asks, so the
@@ -36398,7 +36425,8 @@ $$;
 
 -- A revision is readable in full, or when its work is readable and this exact
 -- revision was exposed, or when its owner added this exact revision to a
--- publication (REM-252), which needs no public work, or when the caller holds
+-- publication (REM-252), which needs no public work, or when the caller presents
+-- the live share link to it (REM-1332), or when the caller holds
 -- research:supervise in the org the work is placed in and its owner still
 -- belongs to (REM-1166): a teacher reads a class's drafts, which org visibility
 -- would show every member too. Only the owner places a work (research.place_work),
@@ -36417,6 +36445,11 @@ language sql stable security definer cost 1000 set search_path = pg_catalog, pub
                                 and exists (select 1 from research.exposures e where e.revision_id = r.id))
                             or ((rbac.current_user_id() is null or rbac.may('research', 'select'))
                                 and exists (select 1 from research.publication_exposures pe where pe.revision_id = r.id))
+                            or ((rbac.current_user_id() is null or rbac.may('research', 'select'))
+                                and research.presented_share() is not null
+                                and exists (select 1 from research.share_links s
+                                             where s.revision_id = r.id and s.revoked_at is null
+                                               and s.token = research.presented_share()))
                             or (rbac.current_user_id() is not null and exists (
                                 select 1 from research.works w
                                   join rbac.org_members m on m.user_id = w.owner_id and m.org_id = w.org_id
@@ -36998,6 +37031,64 @@ begin
     return jsonb_build_object('package_id', w.public_id, 'revision', p_revision, 'publication', p_publication,
                               'org_id', v_row.org_id, 'exposed_at', v_row.exposed_at);
 end;
+$$;
+
+-- SHARE AN EXACT REVISION OF YOUR OWN WORK BY LINK (REM-1332). Returns the token, which the owner may read again at
+-- any time. If the work already has a live link it moves to this revision and keeps its token. Only the owner, as
+-- a person or through an agent that may write their research; somebody else's package is not found.
+create or replace function research.share_revision(p_public_id text, p_revision text) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    w      research.works;
+    v_rev  uuid;
+    v_row  research.share_links;
+begin
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    select r.id into v_rev from research.revisions r where r.work_id = w.id and r.label = p_revision;
+    if v_rev is null then
+        raise no_data_found using message = 'Research revision not found';
+    end if;
+    update research.share_links set revision_id = v_rev, moved_at = now()
+     where work_id = w.id and revoked_at is null and revision_id <> v_rev;
+    insert into research.share_links (work_id, revision_id, owner_id, token)
+    values (w.id, v_rev, v_user, translate(encode(gen_random_bytes(24), 'base64'), '+/', '-_'))
+    on conflict (work_id) where revoked_at is null do nothing;
+    select * into v_row from research.share_links where work_id = w.id and revoked_at is null;
+    return jsonb_build_object('package_id', w.public_id, 'revision', p_revision, 'token', v_row.token,
+                              'created_at', v_row.created_at, 'moved_at', v_row.moved_at);
+end;
+$$;
+
+-- End a work's live share link. True when one was live. Whoever held the link reads nothing more.
+create or replace function research.revoke_share(p_public_id text) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.require('research', 'insert');
+    w      research.works;
+begin
+    select * into w from research.works where public_id = p_public_id;
+    if not found or w.owner_id is distinct from v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    update research.share_links set revoked_at = now() where work_id = w.id and revoked_at is null;
+    return found;
+end;
+$$;
+
+-- The revision the presented token opens on this work, or null: a reader holding a link to the work's address
+-- learns which revision to read, and nothing when the token is wrong, revoked or for another work.
+create or replace function research.shared_revision(p_public_id text) returns text
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select r.label from research.share_links s
+      join research.works w on w.id = s.work_id
+      join research.revisions r on r.id = s.revision_id
+     where w.public_id = p_public_id and s.revoked_at is null
+       and research.presented_share() is not null and s.token = research.presented_share()
+       and (rbac.current_user_id() is null or rbac.may('research', 'select'));
 $$;
 
 -- Take an exact revision of your own work out of a publication. The owner, as a
@@ -37815,6 +37906,14 @@ create policy works_access on research.works as restrictive for select
 drop policy if exists works_in_a_publication on research.works;
 create policy works_in_a_publication on research.works for select
     using (exists (select 1 from research.publication_exposures pe where pe.work_id = works.id));
+-- A work with a live share link is visible as a row to the holder of its token (REM-1332), on the same terms: only
+-- the row, so the shared revision can be read joined to it. share_links' own policy shows a row to its token's
+-- holder, and never reads works, so this cannot recurse.
+drop policy if exists works_shared on research.works;
+create policy works_shared on research.works for select
+    using (research.presented_share() is not null and exists (
+        select 1 from research.share_links s
+         where s.work_id = works.id and s.revoked_at is null and s.token = research.presented_share()));
 -- The same guard rbac.add_scope_columns() attaches: 'org' visibility needs a
 -- real org, whichever definer writes the row (rbac/02).
 create or replace trigger trg_works_visibility before insert or update on research.works
@@ -38003,6 +38102,14 @@ alter table research.exposures enable row level security;
 drop policy if exists exposures_readable on research.exposures;
 create policy exposures_readable on research.exposures for select using (research.readable(work_id));
 
+-- The owner reads their links, tokens included; a holder reads only the row their token names.
+alter table research.share_links enable row level security;
+drop policy if exists share_links_readable on research.share_links;
+create policy share_links_readable on research.share_links for select
+    using (owner_id = rbac.current_user_id()
+           or (research.presented_share() is not null and token = research.presented_share()));
+grant select on research.share_links to authenticated;
+
 alter table research.publication_exposures enable row level security;
 drop policy if exists publication_exposures_readable on research.publication_exposures;
 create policy publication_exposures_readable on research.publication_exposures for select
@@ -38123,7 +38230,7 @@ grant execute on function
     research.search_sources(text, int, int),
     research.trust_state(text, timestamptz),
     engagement.revision_signals(uuid), content.resolve_snapshot(uuid), research.endorsements_affected_by(uuid),
-    research.resolve_image(uuid)
+    research.resolve_image(uuid), research.presented_share(), research.shared_revision(text)
 to authenticated;
 
 grant execute on function
@@ -38134,6 +38241,7 @@ grant execute on function
     research.revise_working(text, jsonb, text, text), research.place_work(text, uuid), content.capture_snapshot(uuid),
     research.expose_for_publication(text, text, text, uuid), research.withdraw_publication_exposure(text, text, text),
     research.move_publication_exposure(text, text, text, text, uuid),
+    research.share_revision(text, text), research.revoke_share(text),
     content.register_evidence(text, text, text, text, bigint, text, text),
     content.register_research_image(text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
@@ -47549,6 +47657,8 @@ declare
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         -- Publication exposures (REM-252): which exact revisions their owners added to a publication.
         'research.publication_exposures',
+        -- Share links (REM-1332): which revisions their owners opened to a token's holder.
+        'research.share_links',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).

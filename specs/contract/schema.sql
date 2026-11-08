@@ -513,6 +513,8 @@ declare
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         -- Publication exposures (REM-252): which exact revisions their owners added to a publication.
         'research.publication_exposures',
+        -- Share links (REM-1332): which revisions their owners opened to a token's holder.
+        'research.share_links',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
         -- Checked claims and withdrawal events (REM-154).

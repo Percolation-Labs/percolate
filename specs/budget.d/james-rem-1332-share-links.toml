@@ -1,0 +1,4 @@
+why = "Share links (REM-1332): a writer shows one exact revision of a private work to a reader by a secret link, without publishing or listing it. Nothing holds this today: exposures need a listed work, and publication exposures put the revision in a publication anybody may browse. The token is checked in research.revision_readable, so every nested read narrows with it."
+[added]
+tables = ["research.share_links"]
+functions = ["research.presented_share", "research.share_revision", "research.revoke_share", "research.shared_revision"]
