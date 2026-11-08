@@ -1,3 +1,0 @@
-why = "A withdrawal is a record-time end (REM-1314). aiq.edge_periods_recorded is every belief period on record with withdrawn_at; aiq.edge_periods becomes it less the withdrawn ones, so GRAPH ... AS OF, graph_neighbors, graph_walk and the compiled snapshot leave a withdrawn fact out with no predicate of their own, and aiq.edges_as_of reads the recorded view to show it only as known before the withdrawal. Nothing held the periods with their withdrawal: edge_periods is what every as-of reader reads, so it cannot also be the one that keeps what they must not see."
-[added]
-views = ["aiq.edge_periods_recorded"]
