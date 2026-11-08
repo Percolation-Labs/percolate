@@ -749,6 +749,8 @@ declare
     uri text := aiq.walk_graph_uri(p_input, v);
     g   jsonb;
     res jsonb;
+    other record;
+    now_e bigint;
 begin
     -- the channel is made on first use, in the shared org where register_text looks for a channel a caller with no
     -- org names, so the first index on a fresh stack (percolate walk index keeps its graph) does not fail on it
@@ -759,11 +761,31 @@ begin
     g := aiq.walk_graph_build(p_input, greatest(now(), (v->>'as_of')::timestamptz));
     res := content.register_text(p_channel, uri, '[{"content": "-"}]'::jsonb,
                'walk graph: ' || (p_input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline')::text, uri,
-               null, jsonb_build_object('walk_graph', g, 'version', v, 'epoch', e));
+               null, jsonb_build_object('walk_graph', g, 'version', v, 'epoch', e,
+                                         'scope', p_input - 'question' - 'settings' - 'search' - 'replay' - 'control_of' - 'offline'));
     -- re-indexing links that have not changed finds the document already kept, and register_text keeps a resource's
     -- first metadata: give it this counter, or every later start would read the links again
     update content.resources set metadata = metadata || jsonb_build_object('epoch', e)
      where content.resources.uri = aiq.walk_graph_uri(p_input, v) and metadata->>'epoch' is distinct from e::text;
+    -- The counter is one for every scope, so indexing this scope moved it past every other scope's kept graph, and
+    -- each of their starts read every link again: tutorial four indexes qasper, two BEAM channels and a history, and
+    -- on a fresh 0.2.39 stack every QASPER start took 12.8 s (7 Nov 2026). So each other scope's newest kept graph
+    -- whose links have not changed since it was built is given the counter as it now stands. Its version is read
+    -- here, at index time; a link written to it after that moves the counter past the value given, so it is never
+    -- trusted on a stale read.
+    for other in
+        select distinct on (split_part(r.uri, ':', 2)) r.id, r.metadata->'version' as version,
+               coalesce(r.metadata->'scope', substr(r.title, length('walk graph: ') + 1)::jsonb) as scope
+          from content.resources r join content.channels ch on ch.id = r.channel_id and ch.name = p_channel
+         where r.uri like 'walk-graph:%' and r.uri <> aiq.walk_graph_uri(p_input, v) and r.metadata ? 'walk_graph'
+         order by split_part(r.uri, ':', 2), r.updated_at desc
+    loop
+        now_e := aiq.walk_links_epoch_now();
+        if aiq.walk_graph_version(aiq.walk_keys(other.scope)) = other.version then
+            update content.resources set metadata = metadata || jsonb_build_object('epoch', now_e)
+             where id = other.id and metadata->>'epoch' is distinct from now_e::text;
+        end if;
+    end loop;
     return res || jsonb_build_object('uri', uri, 'version', v, 'epoch', e);
 end;
 $$;
@@ -1296,12 +1318,16 @@ create or replace function aiq.walk_requests(p_run uuid, p_decider text default 
 returns table (chunk int, keys jsonb, body jsonb)
 language plpgsql stable security invoker set search_path = pg_catalog, public as $$
 declare
-    st  jsonb := aiq.walk_state(p_run);
+    st  jsonb;
     d   claims.deciders;
 begin
-    if (st->>'offline')::boolean then
+    -- offline from the run's input, before the state: an offline walk's judge step asks nothing, and building the
+    -- state first was a quarter of a second of every QASPER round (walk_target_requests and walk_stack_requests
+    -- already ask first)
+    if coalesce(((select input from aiq.walk_run(p_run))->>'offline')::boolean, false) then
         return;
     end if;
+    st := aiq.walk_state(p_run);
     select * into d from claims.deciders where name = p_decider;
     if not found then
         raise no_data_found using message = format('no decider named %s is configured', p_decider);
