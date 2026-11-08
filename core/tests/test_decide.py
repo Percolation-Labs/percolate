@@ -113,6 +113,58 @@ class Failures(unittest.TestCase):
                 run(Jev().ask("s", {"q": Noul("q")}))
 
 
+STANDIN = {"name": "standin", "endpoint": "http://host.docker.internal:8790/v1/decide", "model": "standin",
+           "credential_ref": "STANDIN_API_KEY"}
+
+
+class AnyDecider(unittest.TestCase):
+    """P8_DECIDER: the endpoint, the model and the credential's name come from a claims.deciders row."""
+
+    def test_a_decider_row_sets_where_the_request_goes_what_it_names_and_which_key_it_sends(self):
+        seen = []
+
+        def answer(request):
+            seen.append(request)
+            return httpx.Response(200, json={"model": "standin/claude-sonnet",
+                                             "answers": {"q": {"type": "noul", "noul": 0.9}}})
+
+        jev = Jev.for_decider(STANDIN, client=httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+        with patch.dict(os.environ, {"STANDIN_API_KEY": "local", "JEV_API_KEY": "not-this-one",
+                                     "P8_CREDENTIAL_ORIGINS": '{"STANDIN_API_KEY": ["http://host.docker.internal:8790"]}'}):
+            r = run(jev.ask("s", {"q": Noul("q")}))
+        self.assertEqual(str(seen[0].url), STANDIN["endpoint"])
+        self.assertEqual(json.loads(seen[0].content)["model"], "standin")
+        self.assertEqual(seen[0].headers["authorization"], "Bearer local")
+        self.assertEqual((r.model, r["q"].p), ("standin/claude-sonnet", 0.9))
+
+    def test_the_rows_credential_is_bound_like_any_other(self):
+        with patch.dict(os.environ, {"STANDIN_API_KEY": "local",
+                                     "P8_CREDENTIAL_ORIGINS": '{"STANDIN_API_KEY": ["https://elsewhere.example"]}'}):
+            with self.assertRaises(CredentialRefused):
+                run(Jev.for_decider(STANDIN).ask("s", {"q": Noul("q")}))
+
+    def test_a_row_without_its_endpoint_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "endpoint"):
+            Jev.for_decider({"model": "m", "credential_ref": "K"})
+
+    def test_configured_asks_the_database_which_decider(self):
+        class Conn:
+            async def fetchrow(self, sql, name):
+                self.sql, self.name = sql, name
+                return STANDIN | {}
+
+        conn = Conn()
+        jev = run(Jev.configured(conn))
+        self.assertIn("claims.default_decider()", conn.sql)
+        self.assertIsNone(conn.name)
+        self.assertEqual((jev.endpoint, jev.model, jev.credential),
+                         (STANDIN["endpoint"], "standin", "STANDIN_API_KEY"))
+
+    def test_jev_is_still_the_default(self):
+        jev = Jev()
+        self.assertEqual((jev.endpoint, jev.model, jev.credential), (ENDPOINT, MODEL, "JEV_API_KEY"))
+
+
 class Join(unittest.TestCase):
     def test_one_request_per_left_row_and_keys_come_back_unchanged(self):
         def answer(request):
