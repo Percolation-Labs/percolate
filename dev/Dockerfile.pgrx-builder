@@ -8,7 +8,7 @@
 # `--platform linux/amd64` work: the toolchain is installed for whatever
 # platform the build is running as, rather than inherited from whatever was
 # lying around.
-FROM postgres:19beta3-bookworm
+FROM postgres:19.0-bookworm
 
 # THE pgrx PIN COMES IN, from the one place that declares it: `pgrx` in
 # extension/percolate_parser/Cargo.toml. cargo-pgrx (the build tool) and pgrx

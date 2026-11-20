@@ -15,7 +15,7 @@
 # the old single stage unchanged; the runtime stage is the stock base image plus
 # the artefacts, staged through DESTDIR so each project installs wherever it
 # means to and nothing here has to enumerate paths upstream may move.
-FROM postgres:19beta3-bookworm AS builder
+FROM postgres:19.0-bookworm AS builder
 
 # THE HEADERS ARE PINNED TO THE SERVER IN THIS IMAGE, read from it rather than
 # written here. Unpinned, apt installs the newest postgresql-server-dev-19 the
@@ -89,7 +89,7 @@ RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.gi
 # produced — including anything upstream adds later that a hand-written file
 # list would miss (pg_cron's bitcode directory is the current example).
 # ---------------------------------------------------------------------------
-FROM postgres:19beta3-bookworm
+FROM postgres:19.0-bookworm
 
 COPY --from=builder /out/ /
 
