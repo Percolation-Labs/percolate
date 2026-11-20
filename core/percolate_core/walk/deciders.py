@@ -27,18 +27,22 @@ class Refused(RuntimeError):
 
 
 def jev(client: Jev | None = None, task: str = TASK) -> Decide:
-    """Ask Jev, CHUNK clues a request, in key order so a request is the same whoever asks it."""
+    """Ask Jev, CHUNK clues a request, in key order so a request is the same whoever asks it.
+
+    Every request of a wave goes out together through `ask_many`, never one after another.
+    """
     client = client or Jev()
 
     async def decide(question: Mapping[str, Any], clues: Mapping[str, str]) -> dict[str, float]:
         keys = sorted(clues)
+        state = {"question": question["text"], "task": task}
+        parts = [keys[i:i + CHUNK] for i in range(0, len(keys), CHUNK)]
+        got = await client.ask_many([(state, {f"c{x}": Noul(clues[k]) for x, k in enumerate(part)})
+                                     for part in parts])
         out: dict[str, float] = {}
-        for i in range(0, len(keys), CHUNK):
-            part = keys[i:i + CHUNK]
-            got = await client.ask({"question": question["text"], "task": task},
-                                   {f"c{x}": Noul(clues[k]) for x, k in enumerate(part)})
+        for part, r in zip(parts, got):
             for x, k in enumerate(part):
-                out[k] = float(got[f"c{x}"].p)
+                out[k] = float(r[f"c{x}"].p)
         return out
 
     decide.model = client.model  # type: ignore[attr-defined]

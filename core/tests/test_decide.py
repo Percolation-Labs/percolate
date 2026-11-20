@@ -224,3 +224,104 @@ class Live(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def echo(p=0.5, tokens=10):
+    """A transport that answers every question it is sent with `p`, and keeps the requests."""
+    sent = []
+
+    def answer(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        return httpx.Response(200, json={
+            "model": MODEL, "answers": {qid: {"type": "noul", "noul": p} for qid in body["questions"]},
+            "usage": {"input_tokens": tokens, "output_tokens": 1}})
+    return answer, sent
+
+
+def echo_client(**kw):
+    answer, sent = echo()
+    return Jev(api_key="k", client=httpx.AsyncClient(transport=httpx.MockTransport(answer)), **kw), sent
+
+
+class Batching(unittest.TestCase):
+    """Jev is called in batches: a serial loop is refused, a wave is not, and a wave is split at the cap."""
+
+    def test_a_loop_of_single_requests_is_refused_on_the_fourth(self):
+        jev, sent = echo_client()
+
+        async def loop():
+            for i in range(10):
+                await jev.ask({"i": i}, {"q": Noul("q")})
+        with self.assertRaisesRegex(TerminalError, "Jev is called in batches"):
+            run(loop())
+        self.assertEqual(len(sent), 3, "three requests go out one at a time; the fourth is refused before it is sent")
+
+    def test_a_loop_over_ask_many_of_one_is_refused_too(self):
+        jev, _ = echo_client()
+
+        async def loop():
+            for i in range(10):
+                await jev.ask_many([({"i": i}, {"q": Noul("q")})])
+        with self.assertRaisesRegex(TerminalError, "ask_many"):
+            run(loop())
+
+    def test_a_wave_of_a_hundred_requests_never_trips_it_wave_after_wave(self):
+        jev, sent = echo_client()
+
+        async def waves():
+            for w in range(5):
+                got = await jev.ask_many([({"w": w, "i": i}, {"q": Noul("q")}) for i in range(100)])
+                self.assertEqual(len(got), 100)
+        run(waves())
+        self.assertEqual(len(sent), 500)
+
+    def test_serial_ok_lets_a_one_shot_caller_through(self):
+        jev, sent = echo_client(serial_ok=True)
+
+        async def loop():
+            for i in range(6):
+                await jev.ask({"i": i}, {"q": Noul("q")})
+        run(loop())
+        self.assertEqual(len(sent), 6)
+
+    def test_requests_more_than_a_second_apart_are_not_a_loop(self):
+        jev, sent = echo_client()
+        clock = iter(range(0, 1000, 5))  # every reading 5 s after the last
+
+        async def loop():
+            for i in range(6):
+                await jev.ask({"i": i}, {"q": Noul("q")})
+        with patch("percolate_core.decide.time.monotonic", lambda: next(clock)):
+            run(loop())
+        self.assertEqual(len(sent), 6)
+
+    def test_a_wave_is_split_at_sixty_questions_keeping_ids_order_and_tokens(self):
+        jev, sent = echo_client()
+        qs = {f"k{i:03d}": Noul(f"q{i}") for i in range(150)}
+        [r] = run(jev.ask_many([("s", qs)]))
+        self.assertEqual([len(b["questions"]) for b in sent], [60, 60, 30])
+        self.assertEqual([k for b in sent for k in b["questions"]], list(qs))
+        self.assertEqual(list(r.answers), list(qs))
+        self.assertEqual((r.input_tokens, r.output_tokens), (30, 3))
+        self.assertEqual(jev.requests, 3)
+
+    def test_a_wave_is_split_at_the_byte_cap(self):
+        from percolate_core.decide import split
+        qs = {f"k{i}": Noul("x" * 5000) for i in range(10)}
+        parts = split(qs)
+        self.assertTrue(all(len(json.dumps({k: q.wire() for k, q in p.items()})) <= 24_000 + 100 for p in parts))
+        self.assertEqual(len(parts), 3)
+        self.assertEqual([k for p in parts for k in p], list(qs))
+
+    def test_the_walk_decider_sends_the_same_requests_as_before_all_at_once(self):
+        from percolate_core.walk.deciders import jev as walk_jev
+        jev, sent = echo_client()
+        clues = {f"clue{i:03d}": f"text {i}" for i in range(130)}
+        got = run(walk_jev(jev)({"text": "who?"}, clues))
+        self.assertEqual(set(got), set(clues))
+        keys = sorted(clues)
+        before = [{f"c{x}": {"type": "noul", "instructions": clues[k]} for x, k in enumerate(keys[i:i + 60])}
+                  for i in range(0, len(keys), 60)]
+        self.assertEqual([b["questions"] for b in sent], before)
+        self.assertEqual(jev._alone, 0, "a wave of three requests is one call, not three")
