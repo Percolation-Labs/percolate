@@ -41,7 +41,7 @@ parser still builds on pgrx 0.19.2. Measured on arm64 before the release:
 | `dev/check.sh` on a CI-built database | 40 of 40 gates |
 | Memory retrieval (the train's measure: Mem0 twice, LongMemEval S) | equal to 0.2.43 in all seven columns |
 | Production's backup restored with `check-restore.sh` | every table loaded, no errors |
-| The app's 16-step journey check, on a local app over that restored 19.0 core | 16 of 16,, once a restore resets the sequences the extension owns |
+| The app's 16-step journey check, on a local app over that restored 19.0 core | 16 of 16, once a restore resets the sequences the extension owns |
 | The cutover, rehearsed with production's layout and data (beta3 stopped, `pgdata` set aside, dumped from it, 19.0 on a fresh `pgdata`) | all 205 tables' counts identical, the four pg_cron jobs recreated, 15 s from stop to restored |
 
 **A beta3 data directory does not open under 19.0.** The catalog version moved
