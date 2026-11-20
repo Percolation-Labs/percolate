@@ -23,7 +23,16 @@ FROM postgres:19beta3-bookworm AS builder
 # stayed beta3, and the published 19-0.2.20 image's pgvector failed on first
 # boot with "index access method handler function did not return an
 # IndexAmRoutine struct" (get-percolate coldstart run, 1 October).
-RUN apt-get update && v=$(dpkg-query -W -f='${Version}' postgresql-19) && apt-get install -y --no-install-recommends \
+# THE PINNED VERSION OUTLIVES THE LIVE REPOSITORY. PGDG drops a version from
+# bookworm-pgdg when a newer one ships; on 20 November 2026 19.0 replaced
+# beta3 there and this pin found nothing ("Version '19~beta3-1.pgdg12+1' for
+# 'postgresql-server-dev-19' was not found", the 0.2.43 arm64 parser build).
+# apt-archive.postgresql.org keeps every version, under the same key. It
+# serves only https, so ca-certificates comes first.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && echo "deb [ signed-by=/usr/local/share/keyrings/postgres.gpg.asc ] https://apt-archive.postgresql.org/pub/repos/apt bookworm-pgdg-archive main" \
+       > /etc/apt/sources.list.d/pgdg-archive.list \
+    && apt-get update && v=$(dpkg-query -W -f='${Version}' postgresql-19) && apt-get install -y --no-install-recommends \
     build-essential git "postgresql-server-dev-19=$v" ca-certificates \
     curl pkg-config \
     && rm -rf /var/lib/apt/lists/*
