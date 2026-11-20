@@ -44,16 +44,25 @@ async def main() -> None:
         sx = SemanticExceptions(jev, store="Bram Stoker's Dracula as dated journals, letters, "
                                            "telegrams, cuttings and a ship's log.")
         strict = sx.guard(search, strict=True, values=True)
-        for q in QUESTIONS:
-            print(f"\n### {q}")
+
+        async def one(q):
             try:
-                hits, report = await strict(q, limit=5)
-                print(f"{len(hits)} hits, {report.jev_requests} Jev requests, "
-                      f"{report.input_tokens} input tokens")
-                print(report.to_prompt() or "(no exceptions)")
+                return await strict(q, limit=5)
             except SemanticExceptionError as e:
+                return e
+
+        # Every question at once: Jev is called in batches, never one request after another.
+        outcomes = await asyncio.gather(*(one(q) for q in QUESTIONS))
+        for q, got in zip(QUESTIONS, outcomes):
+            print(f"\n### {q}")
+            if isinstance(got, SemanticExceptionError):
                 print("REFUSED before searching:")
-                print(e)
+                print(got)
+                continue
+            hits, report = got
+            print(f"{len(hits)} hits, {report.jev_requests} Jev requests, "
+                  f"{report.input_tokens} input tokens")
+            print(report.to_prompt() or "(no exceptions)")
 
 
 if __name__ == "__main__":

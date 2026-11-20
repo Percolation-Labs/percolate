@@ -48,6 +48,9 @@ class StubJev:
             out[qid] = Ans(v(state, qid) if callable(v) else v)
         return out
 
+    async def ask_many(self, requests):
+        return [await self.ask(s, q) for s, q in requests]
+
 
 class Catalogue(unittest.TestCase):
     def test_every_judged_instruction_names_a_state_key_in_backticks(self):

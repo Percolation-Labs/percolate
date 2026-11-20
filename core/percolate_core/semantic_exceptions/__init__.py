@@ -256,7 +256,7 @@ class SemanticExceptions:
                                                 "question": conflict.instruction},
                                                conflict.yes, conflict.no)
             requests.append(({"question": question, "passage": h[self.text_key]}, qs))
-        results = await asyncio.gather(*(self.jev.ask(s, q) for s, q in requests))
+        results = await self.jev.ask_many(requests)
         rep = Report(actions=self.actions, capabilities=self.capabilities, jev_requests=len(results), stages=["values"],
                      checked=[k.code for k in kinds])
         probs = []

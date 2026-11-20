@@ -22,6 +22,20 @@ calibration, not the judgement, so re-measure the threshold whenever the
 wording changes. Batching is not a factor: a pair asked alone or among its
 siblings differs by 0.003 on average.
 
+CALL JEV IN BATCHES, NEVER ONE REQUEST AT A TIME. Pass a whole wave of
+requests to `ask_many`: it splits any question map past the service's cap
+(60 questions or 24 KB a request) and sends every part at once, under the
+client's `concurrency`. Cost: a request bills its state once, however many
+questions it carries, so many questions to one state is cheaper than one
+each. Speed: a wave is one round trip, not one per request. On 16 November
+2026 a lab walk took 26 s as 135 requests sent one after another, and 1-3 s
+with each wave's requests sent together (p8-subsystems #787). So a loop that
+awaits one request before sending the next is refused: after three requests
+in a row that each went out alone, within a second of the last one
+finishing, the fourth raises TerminalError. `Jev(serial_ok=True)` is for a
+caller that is truly one-shot, such as a CLI asking one question per run;
+it is not a way past the refusal for a loop.
+
 THE CREDENTIAL IS BOUND, LIKE EVERY OTHER. `JEV_API_KEY` is resolved through
 `credential_for`, so it goes nowhere until the operator binds it:
 ``P8_CREDENTIAL_ORIGINS='{"JEV_API_KEY": ["https://api.typesafe.ai"]}'``.
@@ -39,16 +53,18 @@ get-percolate's standin/standin.py answers this format from Claude or an
 OpenAI-compatible model.
 
     jev = Jev()
-    r = await jev.ask({"a": rec_a, "b": rec_b},
-                      {"same": Noul("Do `a` and `b` name the same entity?")})
+    [r] = await jev.ask_many([({"a": rec_a, "b": rec_b},
+                               {"same": Noul("Do `a` and `b` name the same entity?")})])
     r["same"].p  # 0.98
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import httpx
 
@@ -56,11 +72,19 @@ from .core.config import TerminalError
 from .core.credentials import credential_for
 from .core.provider_errors import classify, raise_for
 
-__all__ = ["Answer", "Choice", "Jev", "Noul", "Result", "Score", "ENDPOINT", "MODEL"]
+__all__ = ["Answer", "Choice", "Jev", "Noul", "Result", "Score", "ENDPOINT", "MODEL", "split"]
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-1.13.0"
 CREDENTIAL = "JEV_API_KEY"
+# The service's request cap, as walklab and the worker cut requests: at most this
+# many questions, and this many bytes of question text, in one request.
+MAX_QUESTIONS = 60
+MAX_BYTES = 24_000
+# Serial use: this many requests in a row that each went out alone, within
+# SERIAL_GAP seconds of the previous one finishing, and the next is refused.
+SERIAL_LIMIT = 3
+SERIAL_GAP = 1.0
 
 
 @dataclass(frozen=True)
@@ -161,13 +185,39 @@ class Result:
         return self.answers[question_id]
 
 
+def split(questions: Mapping[str, Question], max_questions: int = MAX_QUESTIONS,
+          max_bytes: int = MAX_BYTES) -> list[dict[str, Question]]:
+    """A question map cut into requests under the service's cap, keeping its order.
+
+    A question's size is its id plus its wire form as JSON. A single question
+    past `max_bytes` still goes alone in its own request: the cap is the
+    service's to refuse, not this client's to drop.
+    """
+    out: list[dict[str, Question]] = []
+    part: dict[str, Question] = {}
+    size = 0
+    for qid, q in questions.items():
+        n = len(qid.encode()) + len(json.dumps(q.wire(), ensure_ascii=False).encode())
+        if part and (len(part) >= max_questions or size + n > max_bytes):
+            out.append(part)
+            part, size = {}, 0
+        part[qid] = q
+        size += n
+    if part:
+        out.append(part)
+    return out
+
+
 class Jev:
     """An async client for the System One endpoint.
 
-    `ask` is one request. `ask_many` is many, bounded by `concurrency`, with
-    results in input order. `join` is the semantic join: each left record is
-    the state, and every candidate for it is one Noul in the same request, so
-    a row with forty candidates is one call, not forty.
+    `ask_many` is the call to use: a whole wave of (state, questions) pairs,
+    each split at the service's cap and all sent at once under `concurrency`,
+    with one Result per pair in input order. `join` is the semantic join: each
+    left record is the state, and every candidate for it is one Noul in the
+    same request, so a row with forty candidates is one call, not forty.
+    `ask` is the single request underneath both; a loop over it is refused
+    (see CALL JEV IN BATCHES above).
 
     Retries: a 429, 408 or 5xx is retried up to `retries` times with backoff,
     honouring Retry-After; anything `provider_errors` calls terminal (a bad
@@ -176,8 +226,13 @@ class Jev:
 
     def __init__(self, model: str = MODEL, *, api_key: str | None = None,
                  endpoint: str = ENDPOINT, credential: str = CREDENTIAL, concurrency: int = 16,
-                 retries: int = 3, timeout: float = 60.0, client: httpx.AsyncClient | None = None):
+                 retries: int = 3, timeout: float = 60.0, client: httpx.AsyncClient | None = None,
+                 serial_ok: bool = False):
         self.model, self.endpoint, self.credential, self.retries = model, endpoint, credential, retries
+        # The serial-use guard: requests in flight, when the last one finished,
+        # and how many requests in a row went out alone just after it.
+        self.serial_ok = serial_ok
+        self._inflight, self._last_done, self._alone = 0, None, 0
         self._key = api_key
         self._gate = asyncio.Semaphore(concurrency)
         self._client = client
@@ -226,9 +281,46 @@ class Jev:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
 
+    def _admit(self, requests: int) -> None:
+        """Count a call that sends one request alone, just after the last call finished; refuse a run of them.
+
+        A call is `ask` or `ask_many`. One that sends two or more requests is a
+        batch and ends any run; so does one made while another is in flight, or
+        more than SERIAL_GAP seconds after the last finished. The count is of
+        calls, not of how the event loop happens to schedule their requests.
+        """
+        alone = (requests == 1 and self._inflight == 0 and self._last_done is not None
+                 and time.monotonic() - self._last_done <= SERIAL_GAP)
+        self._alone = self._alone + 1 if alone else 0
+        if self._alone >= SERIAL_LIMIT and not self.serial_ok:
+            self._alone = 0
+            raise TerminalError(
+                f"Jev is called in batches: {SERIAL_LIMIT + 1} requests in a row went out one at a time. "
+                "Pass the wave to ask_many, which splits it at the service's cap and sends it at once.")
+
+    async def _call(self, sends: list) -> list[Result]:
+        """Admit one call of len(sends) requests, send them all at once, and time its end."""
+        self._admit(len(sends))
+        self._inflight += 1
+        try:
+            return list(await asyncio.gather(*(self._send(s, q) for s, q in sends)))
+        finally:
+            self._inflight -= 1
+            self._last_done = time.monotonic()
+
     async def ask(self, state: Any, questions: Mapping[str, Question]) -> Result:
+        """One request: the primitive under `ask_many` and `join`.
+
+        Call `ask_many` with the whole wave instead of looping over this. A loop
+        that awaits one request before sending the next is refused on the
+        fourth request (CALL JEV IN BATCHES, in the module docstring).
+        """
         if not questions:
             raise ValueError("ask needs at least one question")
+        [r] = await self._call([(state, questions)])
+        return r
+
+    async def _send(self, state: Any, questions: Mapping[str, Question]) -> Result:
         key = self._key or credential_for(self.credential, self.endpoint)
         body = {"model": self.model, "state": state,
                 "questions": {qid: q.wire() for qid, q in questions.items()}}
@@ -263,9 +355,29 @@ class Jev:
                       {qid: Answer.from_wire(a) for qid, a in data["answers"].items()},
                       usage.get("input_tokens", 0), usage.get("output_tokens", 0))
 
-    async def ask_many(self, requests: Sequence[tuple[Any, Mapping[str, Question]]]
+    async def ask_many(self, requests: Iterable[tuple[Any, Mapping[str, Question]]]
                        ) -> list[Result]:
-        return list(await asyncio.gather(*(self.ask(s, q) for s, q in requests)))
+        """The call to use: every (state, questions) pair of a wave, sent at once.
+
+        A question map past the service's cap (MAX_QUESTIONS questions or
+        MAX_BYTES of question text) is cut into parts in its own order, so a
+        caller passes the whole wave and never chunks by hand. Every part of
+        every pair goes out together, bounded by the client's `concurrency`.
+        Returns one Result per pair, in input order, with every question id the
+        pair asked: the parts' answers merged and their token counts summed.
+        """
+        pairs = list(requests)
+        parts = [(i, state, chunk) for i, (state, qs) in enumerate(pairs) for chunk in split(qs)]
+        if any(not qs for _, qs in pairs):
+            raise ValueError("ask_many needs at least one question in every request")
+        got = await self._call([(state, chunk) for _, state, chunk in parts]) if parts else []
+        merged: list[Result | None] = [None] * len(pairs)
+        for (i, _, _), r in zip(parts, got):
+            prev = merged[i]
+            merged[i] = r if prev is None else Result(
+                prev.model, {**prev.answers, **r.answers},
+                prev.input_tokens + r.input_tokens, prev.output_tokens + r.output_tokens)
+        return merged  # type: ignore[return-value]
 
     async def join(self, left: Sequence[Any], candidates: Sequence[Mapping[str, Any]],
                    question: str, *, yes: Any = None, no: Any = None
